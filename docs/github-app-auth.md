@@ -202,9 +202,11 @@ permission beyond `pull_requests: write`; no capability here is a
 review-dismissal or branch-protection capability, and the App requests no
 `Administration` permission.
 
-Automatic approval is the `github.reviews: auto-approve` default and may be
-disabled with `github.reviews: blocking` (publish and enforce, never approve)
-or `github.reviews: advisory` (no ReviewSensei merge gate). The shared finalizer runs after review
+Automatic approval is the `github.reviews: auto-approve` default. A completed
+review in that mode keeps the check successful and uses Changes requested or
+Approve. `github.reviews: blocking` publishes comments and fails the check
+when required fixes remain, and never approves. `github.reviews: advisory`
+publishes comments and never fails the check. The shared finalizer runs after review
 publication and after an AI resolution of a blocking ReviewSensei root. It
 emits `APPROVE` only for an eligible exact head with a complete, qualified
 review and no unresolved ReviewSensei root classified blocking, deciding from

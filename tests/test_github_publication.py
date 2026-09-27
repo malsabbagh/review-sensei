@@ -2548,8 +2548,8 @@ deleted file mode 100644
             result=file_result,
             auto_approve=False,
         )
-        # auto-approve submits Changes requested for a blocking finding. The
-        # check conclusion still fails while required fixes remain.
+        # auto-approve submits Changes requested for a blocking finding and
+        # keeps the ReviewSensei check successful.
         blocking = self.publish(
             [
                 json_response(pr_payload(head_sha=head)),

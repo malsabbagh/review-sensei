@@ -435,12 +435,15 @@ one stable `ReviewSensei` check run bound to the reviewed head and to the App
 that produced it; mark it required in branch protection (an administrator
 action - ReviewSensei requests no Administration permission and never changes
 branch protection, and `doctor` reports the check identity and producing App)
-for it to gate merges. The
-conclusion is `success` for a complete review with no required fixes, `failure`
-when required fixes remain, `action_required` for a partial, incomplete, or
-unpublished review, `neutral` in `advisory` mode, and `cancelled` for a run that
-ended without a conclusion. `auto-approve` also submits `REQUEST_CHANGES`
-when required fixes remain, and the App needs `Checks: write`. A shared
+for it to gate merges in `blocking` mode. A completed `auto-approve` review
+publishes `success` whether or not required fixes remain, and uses Changes
+requested or Approve as the pull request decision. `blocking` publishes
+`success` when a complete review has no required fixes and `failure` when
+required fixes remain, with those findings as comments. `action_required`
+covers a partial, incomplete, or unpublished review in `auto-approve` and
+`blocking`. `advisory` publishes `neutral` and never fails the check.
+`cancelled` is a run that ended without a conclusion. The App needs
+`Checks: write`. A shared
 idempotent finalizer may then emit `APPROVE` once no unresolved ReviewSensei
 root is classified blocking.
 Non-blocking ReviewSensei follow-ups and human threads may remain open. An
@@ -650,8 +653,9 @@ gh api --method POST "repos/OWNER/REPO/pulls/NUMBER/reviews/REVIEW_ID/dismissals
 A dismissal clears the obsolete review decision only. The review, its inline
 threads, its findings, and its dispositions stay, no human review is touched,
 and a later `auto-approve` review submits Changes requested again only when
-required fixes remain. `blocking` and `advisory` reviews stay comments, and
-the `ReviewSensei` check carries the head-bound gate. Human approval requirements are
+required fixes remain. `blocking` posts comments and fails the check while
+required fixes remain. `advisory` posts comments and does not fail the check.
+Human approval requirements are
 unaffected; branch protection still applies exactly as configured.
 
 ### Reconciling required-check state

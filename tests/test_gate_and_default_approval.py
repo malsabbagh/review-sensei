@@ -4,9 +4,9 @@ These regressions capture the real adapter HTTP events for the two acceptance
 matrices of epic #181. Default approval: only eligible auto-approve cases emit
 ``APPROVE``, and every case reads its eligibility from persisted, exact-head
 evidence (or from the finalizer's own live reads), never from a caller-supplied
-approval boolean. One gate: the check-run conclusion is the only imposed merge
-authority, so no case emits a second review-event authority, reaches a merge
-endpoint, or enables auto-merge.
+approval boolean. blocking fails the check when required fixes remain. auto-approve keeps a
+completed review's check successful and uses Changes requested or Approve.
+No case reaches a merge endpoint or enables auto-merge.
 
 The fixtures are local copies on purpose: a shared fixture mutated by another
 suite must not silently change what these acceptance rows exercise.
@@ -401,7 +401,9 @@ class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
         self.assertIn("Optional follow-up.", comment["body"])
         self.assertEqual(checks.conclusions, [None, "success"])
 
-    def test_required_inline_finding_fails_the_gate_and_withholds(self):
+    def test_required_inline_finding_requests_changes_and_keeps_the_check_successful(
+        self,
+    ):
         checks = FakeCheckRuns()
         result, facts = admitted_blocking_result()
         outcome, calls = self.publish(
@@ -419,13 +421,16 @@ class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
         self.assertEqual(outcome.status, "published")
         self.assertEqual(posted_events(calls), ["REQUEST_CHANGES"])
         self.assertEqual(outcome.diagnostic, "required_fixes_open")
-        self.assertEqual(checks.conclusions, [None, "failure"])
+        self.assertEqual(checks.conclusions, [None, "success"])
+        self.assertEqual(checks.writes[1]["output"]["title"], "Changes requested")
         self.assertEqual(review_payloads(calls)[0]["comments"][0]["path"], "src/app.py")
         # The withheld approval costs no reads: the required finding is decided
         # from the same result the review published.
         self.assertEqual(len(non_check_calls(calls)), 5)
 
-    def test_required_body_finding_fails_the_gate_and_withholds(self):
+    def test_required_body_finding_requests_changes_and_keeps_the_check_successful(
+        self,
+    ):
         checks = FakeCheckRuns()
         result, facts = admitted_blocking_result(body_comment=True)
         outcome, calls = self.publish(
@@ -442,13 +447,35 @@ class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
         self.assertEqual(outcome.status, "published")
         self.assertEqual(posted_events(calls), ["REQUEST_CHANGES"])
         self.assertEqual(outcome.diagnostic, "required_fixes_open")
-        self.assertEqual(checks.conclusions, [None, "failure"])
+        self.assertEqual(checks.conclusions, [None, "success"])
         comment = review_payloads(calls)[0]
         self.assertEqual(comment["comments"], [])
         self.assertIn("This file needs a tighter contract.", comment["body"])
         # An unanchored required finding is carried by the body without any
-        # thread read, and it still fails the gate and withholds approval.
+        # thread read. auto-approve still withholds approval and keeps the
+        # check successful.
         self.assertEqual(len(non_check_calls(calls)), 4)
+
+    def test_blocking_required_finding_fails_the_check_and_comments(self):
+        checks = FakeCheckRuns()
+        result, facts = admitted_blocking_result()
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=HEAD)),
+                json_response([]),
+                json_response(pr_payload(head_sha=HEAD)),
+                graphql_review_threads_response(),
+                json_response({"id": 5}),
+            ],
+            checks=checks,
+            result=result,
+            blocker_candidates=(facts,),
+            reviews_policy="blocking",
+        )
+        self.assertEqual(outcome.status, "published")
+        self.assertEqual(posted_events(calls), ["COMMENT"])
+        self.assertEqual(checks.conclusions, [None, "failure"])
+        self.assertEqual(checks.writes[1]["output"]["title"], "Required fixes remain")
 
     def test_partial_coverage_never_approves(self):
         checks = FakeCheckRuns()
@@ -954,6 +981,35 @@ class CheckPublisherContractTests(unittest.TestCase):
     def check_publisher(self, responses):
         http, calls = make_http(list(responses))
         return ReviewCheckPublisher(http=http), calls
+
+    def test_completed_review_conclusion_follows_the_policy(self):
+        requested = review_check_outcome(
+            policy="auto-approve", review_status="complete", required_fixes=True
+        )
+        clean = review_check_outcome(
+            policy="auto-approve", review_status="complete", required_fixes=False
+        )
+        blocked = review_check_outcome(
+            policy="blocking", review_status="complete", required_fixes=True
+        )
+        blocking_clean = review_check_outcome(
+            policy="blocking", review_status="complete", required_fixes=False
+        )
+        advised = review_check_outcome(
+            policy="advisory", review_status="complete", required_fixes=True
+        )
+        unfinished = review_check_outcome(
+            policy="auto-approve", review_status="incomplete", required_fixes=True
+        )
+        self.assertEqual(requested.conclusion, "success")
+        self.assertEqual(requested.title, "Changes requested")
+        self.assertEqual(clean.conclusion, "success")
+        self.assertEqual(clean.title, "No required fixes")
+        self.assertEqual(blocked.conclusion, "failure")
+        self.assertEqual(blocking_clean.conclusion, "success")
+        self.assertEqual(blocking_clean.title, "No required fixes")
+        self.assertEqual(advised.conclusion, "neutral")
+        self.assertEqual(unfinished.conclusion, "action_required")
 
     def test_policy_and_status_vocabulary_fails_closed(self):
         with self.assertRaisesRegex(ReviewInputError, "policy mode"):

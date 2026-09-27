@@ -693,15 +693,16 @@ explicit error rather than allowing a stale or ambiguous review.
 The automatic-review and GitHub-writes caller path defaults to automatic
 approval. Review publication is one exact-head review, and
 enforcement is one stable `ReviewSensei` check run bound to that head and to
-its producing App (ADR 0057). The conclusion is `success` for a complete review
-with no required fixes, `failure` when required fixes remain, `action_required`
-for a partial, incomplete, or unpublished review, `neutral` in `advisory` mode,
-and `cancelled` for a run that ended without a conclusion. `auto-approve`
-submits `REQUEST_CHANGES` when required fixes remain and `COMMENT` otherwise;
-`blocking` and `advisory` stay `COMMENT`. A pending review
+its producing App (ADR 0057). A completed `auto-approve` review publishes
+`success` whether or not required fixes remain, and submits `REQUEST_CHANGES`
+when they remain and `COMMENT` otherwise. `blocking` publishes `failure` when
+required fixes remain and stays `COMMENT`. `advisory` publishes `neutral`,
+stays `COMMENT`, and never fails the check. `action_required` covers a
+partial, incomplete, or unpublished review in `auto-approve` and `blocking`,
+and `cancelled` is a run that ended without a conclusion. A pending review
 first writes `in_progress`, so an earlier conclusion on the same head cannot
 stand for a review that has not finished. A repository administrator must mark the check
-required for it to gate merges; `doctor` reports the check identity and
+required for it to gate merges in `blocking` mode; `doctor` reports the check identity and
 producing App. Checks: write is a scoped broker capability
 (`check_publish`), so a missing permission leaves the check unpublished and
 reports `check_permission`; it does not prevent approval for an otherwise
