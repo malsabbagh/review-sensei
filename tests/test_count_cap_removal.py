@@ -15,7 +15,10 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from review_sensei.convergence import ReviewConvergencePolicy
+from review_sensei.convergence import (
+    DIAGNOSTIC_ROUND_CEILING,
+    ReviewConvergencePolicy,
+)
 from review_sensei.disposition import apply_session_command, parse_maintainer_command
 from review_sensei.errors import ReviewInputError
 from review_sensei.outcomes import PUBLIC_DIAGNOSTICS
@@ -53,6 +56,49 @@ def _reservation(head: str) -> str:
         head_sha=head,
         kind="publish",
     )
+
+
+class DiagnosticCounterSaturationTests(unittest.TestCase):
+    def test_changed_head_rounds_complete_after_the_counter_reaches_its_ceiling(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            ledger = LocalSessionLedger(root)
+            record = SessionRecord.create(
+                IDENTITY,
+                now=FIXED_NOW,
+                completed_initial_reviews=1,
+                completed_verification_rounds=DIAGNOSTIC_ROUND_CEILING,
+            )
+            ledger._write(IDENTITY, record)
+
+            for round_number in (1, 2):
+                # Each new head is handled through a fresh ledger instance,
+                # matching a later hosted job that reloads persisted state.
+                head = _head(100 + round_number)
+                ledger = LocalSessionLedger(root)
+                prepared = prepare_session_round(
+                    ledger,
+                    IDENTITY,
+                    POLICY,
+                    reservation_id=_reservation(head),
+                    now=FIXED_NOW,
+                    head_sha=head,
+                    latest_head_reviewed=True,
+                    coverage_complete=True,
+                    independently_approval_eligible=True,
+                )
+                self.assertTrue(prepared.decision.admit)
+                self.assertFalse(prepared.decision.handoff)
+                complete_session_round(
+                    ledger, IDENTITY, prepared, published=True, now=FIXED_NOW
+                )
+                persisted = LocalSessionLedger(root).load(
+                    IDENTITY, now=FIXED_NOW
+                ).record
+                self.assertEqual(
+                    persisted.completed_verification_rounds,
+                    DIAGNOSTIC_ROUND_CEILING,
+                )
 
 
 class LongSequenceTests(unittest.TestCase):

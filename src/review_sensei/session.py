@@ -1265,13 +1265,19 @@ class SessionLedger(Protocol):
 
 
 def _apply_slot(record: SessionRecord, slot: str) -> dict[str, int]:
+    # Completed-round counts are diagnostic history, so saturate them at the
+    # storage bound instead of letting bookkeeping refuse an admitted round.
     if slot == "initial":
         return {
-            "completed_initial_reviews": record.completed_initial_reviews + 1,
+            "completed_initial_reviews": min(
+                record.completed_initial_reviews + 1, DIAGNOSTIC_ROUND_CEILING
+            ),
         }
     if slot == "verification":
         return {
-            "completed_verification_rounds": record.completed_verification_rounds + 1,
+            "completed_verification_rounds": min(
+                record.completed_verification_rounds + 1, DIAGNOSTIC_ROUND_CEILING
+            ),
         }
     if slot == "failed-attempt":
         return {"failed_attempts": record.failed_attempts + 1}
