@@ -74,6 +74,10 @@ App-authored pull request can never be gated by its own check; ReviewSensei
 withholds approval for those pull requests and reports `app_authored` instead of
 pretending the gate applies.
 
+When a check write is unavailable, the expected identity remains
+`ReviewSensei` from the configured App slug; `doctor` still reports that same
+identity even though no new check run was published for the head.
+
 Do not request organization administration, secrets, or
 unrelated repository permissions, including `Issues: write`, unless a separate
 design explicitly requires them. ReviewSensei does not reply on ordinary

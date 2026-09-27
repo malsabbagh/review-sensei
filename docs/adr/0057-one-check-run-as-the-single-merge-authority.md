@@ -265,6 +265,8 @@ complete exact-head review when review publication is authorized, even when
 `Checks: write` or the broker's `check_publish` capability is unavailable.
 That failure remains reported as `check_permission`, and the ReviewSensei
 merge gate is absent until the permission and capability are restored. The
+expected check identity remains `ReviewSensei` produced by the configured App;
+`doctor` continues to report that identity when no run can be published. The
 `check_published` field remains in persisted eligibility documents for
 diagnostics and compatibility, but no longer participates in approval
 eligibility. Findings, incomplete evidence, unresolved blocking roots,

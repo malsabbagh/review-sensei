@@ -819,6 +819,10 @@ class OneGateAcceptanceTests(GateAcceptanceCase):
         self.assertEqual(outcome.status, "published")
         self.assertEqual(posted_events(calls), ["COMMENT", "APPROVE"])
         self.assertEqual(outcome.diagnostic, "check_permission")
+        self.assertIn(
+            "ReviewSensei merge gate unavailable",
+            review_payloads(calls)[0]["body"],
+        )
         self.assertEqual(checks.writes, [])
 
     def test_pending_gate_state_precedes_its_conclusion_on_the_same_head(self):
