@@ -76,8 +76,10 @@ accepts those conclusions for required checks:
 
 | Mode | Condition | Conclusion |
 | --- | --- | --- |
-| `auto-approve`, `blocking` | complete, no required fixes | `success` |
-| `auto-approve`, `blocking` | complete, required fixes remain | `failure` |
+| `auto-approve` | complete, no required fixes | `success` |
+| `auto-approve` | complete, required fixes remain | `success` |
+| `blocking` | complete, no required fixes | `success` |
+| `blocking` | complete, required fixes remain | `failure` |
 | `auto-approve`, `blocking` | partial, incomplete, or summary-only | `action_required` |
 | `auto-approve`, `blocking` | publication failed | `action_required` |
 | `auto-approve`, `blocking` | run ended without a conclusion | `cancelled` |
@@ -87,19 +89,24 @@ accepts those conclusions for required checks:
 
 The review is one exact-head App review with the summary body and the valid
 inline findings. `github.reviews: auto-approve` publishes that review as
-`REQUEST_CHANGES` when required fixes remain, and as `COMMENT` otherwise.
-`blocking` and `advisory` stay `COMMENT`. A later eligible head is still
-approved by the finalizer, which replaces the App's changes-requested state.
-The `ReviewSensei` check remains the head-bound gate; GitHub's review decision
-is not bound to one commit, so a repository that requires the check still
-enforces the reviewed head rather than the latest review event.
+`REQUEST_CHANGES` when required fixes remain, and as `COMMENT` otherwise, and
+keeps the check `success` for either completed review. The pull request review
+is the decision: Changes requested holds the pull request when the branch
+requires approving reviews, and a later eligible head is approved by the
+finalizer, which replaces the App's changes-requested state. A required
+ReviewSensei check does not stop that pull request, because the check is
+`success`. `blocking` stays `COMMENT` and is the mode whose check fails while
+required fixes remain. `advisory` stays `COMMENT` and `neutral`. GitHub's
+review decision is not bound to one commit. Incomplete reviews stay
+`action_required` in `auto-approve` and `blocking`, so a review that did not
+finish does not look clean.
 
 Approval is emitted only in the default `auto-approve` mode, and only for an
 eligible exact head: trusted complete review evidence for that head, no
 unresolved required finding or incomplete-review obligation, verified provider
-qualification, an eligible pull-request identity, and an authorized write. The
-mode is the single authority - `blocking` enforces through the check and never
-approves, and `advisory` publishes `neutral` and never approves. Eligibility is
+qualification, an eligible pull-request identity, and an authorized write. `blocking` enforces through the check and never
+approves, and `advisory` publishes `neutral` and never approves. `auto-approve`
+does not fail the check for a completed review. Eligibility is
 persisted as a bounded document in the published review body and re-read at
 finalization, so a delayed or recovery finalization decides from durable
 evidence rather than from a caller-supplied boolean. Missing or malformed state
@@ -173,19 +180,20 @@ Tradeoffs:
   `check_permission` diagnostic makes this degraded enforcement state visible.
 - App-authored pull requests can never be gated by their own check, so they are
   reported and never approved rather than silently ungated.
-- `auto-approve` again submits `REQUEST_CHANGES` when required fixes remain.
-  That GitHub review state lasts until a later review from the App replaces
-  it, including across a new head, so the check is still the head-bound gate.
+- `auto-approve` submits `REQUEST_CHANGES` when required fixes remain and
+  keeps the check successful. That GitHub review state lasts until a later
+  review from the App replaces it, including across a new head. A repository
+  that only requires the ReviewSensei check will not stop that pull request.
 
 ## Alternatives Considered
 
 ### Keep `REQUEST_CHANGES` alongside the check
 
-Adopted for `auto-approve` only. A changes-requested review is the visible
-GitHub state when required fixes remain, and a later eligible approval replaces
-it. The review state is still not head-bound, so the check remains the
-authority a repository can require for one reviewed head. `blocking` and
-`advisory` do not submit `REQUEST_CHANGES`.
+Adopted for `auto-approve`, and that mode no longer fails the check when the
+review completed with required fixes. Changes requested and Approve are the
+pull request decision. The review state is still not head-bound. `blocking`
+keeps the failing check and does not submit `REQUEST_CHANGES`. `advisory`
+does not submit `REQUEST_CHANGES` and does not fail the check.
 
 ### Encode non-passing enforcement as `neutral` or `skipped`
 
@@ -286,6 +294,15 @@ The published review body includes the full or concise unavailable-gate warning
 when the summary and complete-body limits allow it. If neither version fits,
 the body keeps its original summary and operators must use the run-level
 `check_permission` diagnostic to identify the missing gate.
+
+## Amendment 2026-09-27: auto-approve does not fail a completed review
+
+`auto-approve` keeps the ReviewSensei check at `success` when a review
+completes with required fixes. Changes requested and Approve are the pull
+request decision. `blocking` still publishes `failure` for that condition and
+posts comments. `advisory` still publishes `neutral` and posts comments.
+A partial, incomplete, summary-only, or unpublished review stays
+`action_required` for `auto-approve` and `blocking`.
 
 ## Links
 
