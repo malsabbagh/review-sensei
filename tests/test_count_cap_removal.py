@@ -182,6 +182,42 @@ class DiagnosticCounterSaturationTests(unittest.TestCase):
             self.assertEqual(first.failed_attempts, MAX_FAILED_ATTEMPTS)
             self.assertEqual(second.failed_attempts, MAX_FAILED_ATTEMPTS)
             self.assertEqual(persisted, second)
+            self.assertEqual(persisted.failed_attempts, MAX_FAILED_ATTEMPTS)
+
+    def test_failed_attempt_cleanup_replay_at_ceiling_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as raw:
+            ledger = LocalSessionLedger(Path(raw))
+            head = _head(106)
+            record = SessionRecord.create(
+                IDENTITY,
+                now=FIXED_NOW,
+                failed_attempts=MAX_FAILED_ATTEMPTS - 1,
+                failed_attempts_head_sha=head,
+            )
+            ledger._write(IDENTITY, record)
+            reservation_id = "c" * 64
+
+            first = record_session_failed_attempt(
+                ledger,
+                IDENTITY,
+                reservation_id=reservation_id,
+                head_sha=head,
+                now=FIXED_NOW,
+            )
+            replayed = record_session_failed_attempt(
+                ledger,
+                IDENTITY,
+                reservation_id=reservation_id,
+                head_sha=head,
+                now=FIXED_NOW,
+            )
+            persisted = (
+                LocalSessionLedger(Path(raw)).load(IDENTITY, now=FIXED_NOW).record
+            )
+
+            self.assertEqual(first.failed_attempts, MAX_FAILED_ATTEMPTS)
+            self.assertEqual(replayed, first)
+            self.assertEqual(persisted, first)
 
     def test_changed_head_rounds_complete_after_the_counter_reaches_its_ceiling(self):
         with tempfile.TemporaryDirectory() as raw:

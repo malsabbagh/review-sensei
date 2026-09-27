@@ -87,6 +87,7 @@ class PublishedScenario:
     events: tuple[str, ...]
     inline: tuple[Mapping[str, object], ...]
     body: str
+    diagnostic: str | None
     calls: list[object]
 
     @property
@@ -237,6 +238,7 @@ def publish_scenario(scenario, *, thread_nodes=()) -> PublishedScenario:
         events=tuple(str(review["event"]) for review in reviews),
         inline=tuple(findings["comments"]),
         body=str(findings["body"]),
+        diagnostic=outcome.diagnostic,
         calls=calls,
     )
 
@@ -333,6 +335,10 @@ class ReviewBodyGoldenTests(unittest.TestCase):
                     outcome.events, tuple(scenario.get("expected_events", ("COMMENT",)))
                 )
                 self.assertEqual(len(outcome.inline), scenario["expected_inline"])
+                if "expected_diagnostic" in scenario:
+                    self.assertEqual(
+                        outcome.diagnostic, scenario["expected_diagnostic"]
+                    )
                 summary, marker = split_published_body(outcome.body)
                 self.assertTrue(marker.startswith(f"{MARKER} "))
                 self.assertIn("head=" + HEAD, marker)

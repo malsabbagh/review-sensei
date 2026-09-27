@@ -81,7 +81,7 @@ accepts those conclusions for required checks:
 | `auto-approve`, `blocking` | partial, incomplete, or summary-only | `action_required` |
 | `auto-approve`, `blocking` | publication failed | `action_required` |
 | `auto-approve`, `blocking` | run ended without a conclusion | `cancelled` |
-| `auto-approve` | check capability unavailable | no check run (`check_permission`); approval is evaluated independently |
+| `auto-approve` | check capability unavailable | no check run; `check_permission` is the run diagnostic while approval follows its independent eligibility blockers |
 | `blocking` | check capability unavailable | no check run (`check_permission`); approval remains disabled by policy |
 | `advisory` | any | `neutral` |
 
@@ -273,6 +273,9 @@ eligibility. Findings, incomplete evidence, unresolved blocking roots,
 ineligible pull requests, and unauthorized writes continue to block approval.
 This exception applies to the default `auto-approve` policy; `blocking` mode
 continues to disable approval by policy when check publication is unavailable.
+If check publication is unavailable while another approval blocker also
+applies, `check_permission` remains the run-level diagnostic; the separate
+approval decision still enforces all eligibility blockers.
 
 ## Links
 
