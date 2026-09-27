@@ -1320,12 +1320,23 @@ function configFile(version: number, packageVersion?: string): string {
   );
 }
 
+/** Released setup-v5 config that named only the backend. */
+export function previousMinimalV5Config(): string {
+  return (
+    `# ReviewSensei setup version: ${SETUP_VERSION}\n` +
+    "schema: 1\n" +
+    "\n" +
+    "inference:\n" +
+    "  backend: local-ollama\n"
+  );
+}
+
 /**
- * Current setup-v5 configuration: minimal and operator-owned.
+ * Current setup-v5 configuration with every packaged default.
  *
- * The package defines a default for every other field, so the generated file
- * states the setup-time backend choice and nothing else; the byte equivalence
- * with the Python builder is pinned by test_current_config_matches_ts_builder_bytes.
+ * Values match the packaged defaults for the local-ollama backend. The byte
+ * equivalence with the Python builder is pinned by
+ * test_current_config_matches_ts_builder_bytes.
  */
 export function currentConfigFile(): string {
   return (
@@ -1333,7 +1344,33 @@ export function currentConfigFile(): string {
     "schema: 1\n" +
     "\n" +
     "inference:\n" +
-    "  backend: local-ollama\n"
+    "  backend: local-ollama\n" +
+    "  model: qwen3.5:4b\n" +
+    "\n" +
+    "github:\n" +
+    "  automatic_reviews: true\n" +
+    "  writes: false\n" +
+    "  reviews: auto-approve\n" +
+    "  mentions: true\n" +
+    "  learning: disabled\n" +
+    "  artifacts: none\n" +
+    "\n" +
+    "advanced:\n" +
+    "  endpoint:\n" +
+    "    allow_custom_endpoint: false\n" +
+    "  context:\n" +
+    "    symbol_context:\n" +
+    "      enabled: false\n" +
+    "      max_files: 16\n" +
+    "      max_bytes: 131072\n" +
+    "      max_depth: 1\n" +
+    "  egress:\n" +
+    "    allow_data_egress: false\n" +
+    "  large_changes:\n" +
+    "    orchestrate: false\n" +
+    "  resources:\n" +
+    "    timeout_seconds: 900\n" +
+    "    max_provider_calls: 8\n"
   );
 }
 
@@ -1892,8 +1929,8 @@ export function setupPullRequestBody(
     importedSettings.length > 0
       ? "The generated file states the setup-time backend choice plus the " +
         "settings imported from your retired configuration"
-      : "The generated file states the setup-time backend choice and " +
-        "nothing else";
+      : "The generated file lists every packaged default so you can change " +
+        "any setting";
   let body =
     "This pull request adds or updates the ReviewSensei review workflow " +
     "(setup version 5): a thin caller that follows the operator-managed " +
@@ -1902,9 +1939,8 @@ export function setupPullRequestBody(
     "Configuration lives in .reviewsensei.yml at the repository root of the " +
     "default branch. " +
     generatedSummary +
-    "; every other setting has a package default and the file belongs to " +
-    "you from here on. Setup creates no repository variables and never " +
-    "rewrites the file. " +
+    ", and the file belongs to you from here on. Setup creates no " +
+    "repository variables and never rewrites the file. " +
     "Approval policy: the package default is github.reviews: auto-approve, " +
     "so ReviewSensei approves an eligible exact head as part of its normal " +
     "pipeline. Set github.reviews: blocking to publish and enforce without " +

@@ -326,15 +326,38 @@ describe("setup-v4 public boundary", () => {
     );
     expect(workflow).not.toContain("vars.");
     expect(workflow).not.toContain("default: main");
-    // The generated configuration is the minimal operator-owned document:
-    // every behavior field belongs to the operator copy, not to generated
-    // bytes, and the package supplies the defaults.
     expect(files[2].content).toBe(
       "# ReviewSensei setup version: 5\n" +
         "schema: 1\n" +
         "\n" +
         "inference:\n" +
-        "  backend: local-ollama\n",
+        "  backend: local-ollama\n" +
+        "  model: qwen3.5:4b\n" +
+        "\n" +
+        "github:\n" +
+        "  automatic_reviews: true\n" +
+        "  writes: false\n" +
+        "  reviews: auto-approve\n" +
+        "  mentions: true\n" +
+        "  learning: disabled\n" +
+        "  artifacts: none\n" +
+        "\n" +
+        "advanced:\n" +
+        "  endpoint:\n" +
+        "    allow_custom_endpoint: false\n" +
+        "  context:\n" +
+        "    symbol_context:\n" +
+        "      enabled: false\n" +
+        "      max_files: 16\n" +
+        "      max_bytes: 131072\n" +
+        "      max_depth: 1\n" +
+        "  egress:\n" +
+        "    allow_data_egress: false\n" +
+        "  large_changes:\n" +
+        "    orchestrate: false\n" +
+        "  resources:\n" +
+        "    timeout_seconds: 900\n" +
+        "    max_provider_calls: 8\n",
     );
     expect(files[2].content).not.toContain("auto_approve");
     expect(files[2].content).not.toContain("learning_proposals");
@@ -407,7 +430,7 @@ describe("retired setup configuration import", () => {
   it("shows the default approval policy and the import without the retired file", () => {
     const plain = setupPullRequestBody();
     expect(plain).toContain("github.reviews: auto-approve");
-    expect(plain).toContain("backend choice and nothing else");
+    expect(plain).toContain("lists every packaged default");
     expect(plain).not.toContain("carried these settings");
     const imported = setupPullRequestBody(["inference.backend"]);
     expect(imported).toContain(

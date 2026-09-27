@@ -33,6 +33,7 @@ import {
   releasedRunnerSwitchV4WorkflowTemplate,
   buildPinnedV4SetupFiles,
   buildSetupFiles,
+  previousMinimalV5Config,
   validatePublicWorkflowSha,
   validatePublicWorkflowTag,
 } from "./setup-content";
@@ -361,6 +362,9 @@ function looksLikeManagedV5Setup(path: string, content: string): boolean {
   }
   if (path === SETUP_UNINSTALL_WORKFLOW_PATH) {
     return content === historicalV5UninstallWorkflow();
+  }
+  if (path === CONFIG_PATH) {
+    return content === previousMinimalV5Config();
   }
   return false;
 }

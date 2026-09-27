@@ -272,7 +272,7 @@ details.path-accordion .accordion-body{padding:0 18px 18px}
           <div class="meta-item"><dt>Provider destination</dt><dd><code>http://127.0.0.1:11434/api</code> (local, default), <code>https://ollama.com/api</code> (cloud, explicit opt-in), or <code>https://openrouter.ai/api/v1</code> (<code>inference.backend: openrouter</code>).</dd></div>
           <div class="meta-item"><dt>Credential names</dt><dd><code>OLLAMA_API_KEY</code> (cloud), <code>OPENROUTER_API_KEY</code> (OpenRouter), and the optional <code>REVIEWSENSEI_PROVIDER</code> / <code>REVIEWSENSEI_MODEL</code> overrides — no other variable reaches a run.</dd></div>
           <div class="meta-item"><dt>Compute / inference cost</dt><dd>You pay for Actions minutes (or self-hosted hardware) and your Ollama, Ollama Cloud, or OpenRouter usage.</dd></div>
-          <div class="meta-item"><dt>Enabled writes (defaults)</dt><dd>The setup pull request writes <code>.reviewsensei.yml</code> with the setup-time backend choice and nothing else; <code>github.writes</code> stays <code>false</code>, so nothing publishes until you enable it.</dd></div>
+          <div class="meta-item"><dt>Enabled writes (defaults)</dt><dd>The setup pull request writes <code>.reviewsensei.yml</code> with every packaged default, including <code>github.writes: false</code>, so nothing publishes until you enable it.</dd></div>
           <div class="meta-item"><dt>First-success output</dt><dd>One App-authored review with inline comments on an eligible PR after you set <code>github.writes: true</code> in <code>.reviewsensei.yml</code> (automatic reviews are on by default).</dd></div>
         </dl>
         <h4>Setup steps</h4>
