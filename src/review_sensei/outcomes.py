@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 import re
-import sys
 import time
 import unicodedata
 from collections.abc import Callable
@@ -685,12 +684,6 @@ def emit_host_outcome(outcome: RunOutcome, *, output_path: Path | None = None) -
             handle.write(f"outcome_status={outcome.status}\n")
             if outcome.diagnostic is not None:
                 handle.write(f"outcome_diagnostic={outcome.diagnostic}\n")
-    if outcome.status == "action_required" and os.environ.get("GITHUB_ACTIONS"):
-        print(
-            "::error title=ReviewSensei maintainer attention required::"
-            "A maintainer decision is required before another automated pass.",
-            file=sys.stderr,
-        )
 
 
 def recovery_expires_at(
