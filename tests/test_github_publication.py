@@ -1267,13 +1267,13 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(outcome.diagnostic, "required_fixes_open")
         self.assertEqual(posted_events(calls), ["COMMENT"])
 
-    def test_skipped_incremental_pass_never_approves_without_a_published_gate(self):
-        """An empty-path skip needs the published gate before it may approve.
+    def test_skipped_incremental_pass_approves_with_missing_gate_diagnostic(self):
+        """An unpublished check is diagnostic and does not block approval.
 
-        The skip itself carries no findings, so the pass relies entirely on the
-        finalizer's unresolved-blocking-root check -- but an unpublished gate is
-        an enforcement gap, and approval is withheld (and reported) instead of
-        quietly emitting ``APPROVE`` under a check result nobody can see.
+        The skip itself carries no findings, so the pass relies on the
+        finalizer's unresolved-blocking-root check. Without Checks: write, the
+        merge gate is absent and reported, but an otherwise eligible exact head
+        still receives its default approval.
         """
 
         head = "b" * 40
@@ -1284,19 +1284,31 @@ class ReviewPublisherTests(unittest.TestCase):
             review_status="complete",
             coverage_mode="incremental",
         )
-        withheld, withheld_calls = self.publish(
+        ungated, ungated_calls = self.publish(
             [
                 json_response(pr_payload(head_sha=head)),
                 json_response([]),
                 json_response(pr_payload(head_sha=head)),
                 json_response({"id": 5}, 200),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(nodes=()),
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response({"id": 6}, 200),
             ],
             result=skipped,
             auto_approve=True,
         )
-        self.assertEqual(withheld.status, "published")
-        self.assertEqual(withheld.diagnostic, "check_permission")
-        self.assertEqual(posted_events(withheld_calls), ["COMMENT"])
+        self.assertEqual(ungated.status, "published")
+        self.assertEqual(ungated.diagnostic, "check_permission")
+        self.assertEqual(posted_events(ungated_calls), ["COMMENT", "APPROVE"])
+        ungated_review_body = review_payloads(ungated_calls)[0]["body"]
+        self.assertIn("ReviewSensei merge gate unavailable", ungated_review_body)
+        self.assertIn(
+            "an otherwise eligible review can still be approved under the "
+            "configured auto-approval policy.",
+            ungated_review_body,
+        )
 
         approved, approved_calls = self.publish(
             [
@@ -1317,6 +1329,42 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(approved.status, "published")
         self.assertIsNone(approved.diagnostic)
         self.assertEqual(posted_events(approved_calls), ["COMMENT", "APPROVE"])
+
+    def test_missing_gate_warning_uses_the_concise_notice_when_space_is_tight(self):
+        """A short notice preserves the merge-gate warning under tight limits."""
+
+        head = "b" * 40
+        skipped = ReviewResult(
+            summary="Incremental review: no changed paths since the last accepted review.",
+            comments=(),
+            provider="ollama",
+            review_status="complete",
+            coverage_mode="incremental",
+            limits=ReviewLimits(max_summary_bytes=640),
+        )
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response(pr_payload(head_sha=head)),
+                json_response({"id": 5}, 200),
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(nodes=()),
+                json_response(pr_payload(head_sha=head)),
+                json_response([]),
+                json_response({"id": 6}, 200),
+            ],
+            result=skipped,
+            auto_approve=True,
+        )
+
+        self.assertEqual(outcome.status, "published")
+        self.assertEqual(outcome.diagnostic, "check_permission")
+        self.assertEqual(posted_events(calls), ["COMMENT", "APPROVE"])
+        body = review_payloads(calls)[0]["body"]
+        self.assertIn("ReviewSensei merge gate unavailable", body)
+        self.assertIn("Auto-approval may proceed when otherwise eligible.", body)
+        self.assertLessEqual(len(body.split("\n\n", 1)[0].encode("utf-8")), 640)
 
     def test_full_review_fingerprint_sweep_fails_closed_before_write(self):
         """An uncertain sweep must not publish a possible duplicate."""

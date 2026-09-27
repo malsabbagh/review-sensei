@@ -25,7 +25,9 @@ from review_sensei.hosting.github.application import (
 )
 from review_sensei.hosting.github.approval import (
     approval_eligibility_from_result,
+    approval_facts_from_result,
     approval_withheld_diagnostic,
+    evaluate_approval_facts,
     evaluate_auto_approval,
 )
 from review_sensei.hosting.github.checks import (
@@ -48,6 +50,7 @@ from review_sensei.hosting.github.publication import (
     review_marker,
 )
 from review_sensei.models import ReviewComment, ReviewResult
+from review_sensei.outcomes import PUBLIC_DIAGNOSTICS
 
 try:
     from fake_github_http import json_response, make_http
@@ -326,6 +329,20 @@ class GateAcceptanceCase(unittest.TestCase):
 
 
 class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
+    def test_unpublished_check_is_not_an_approval_blocker(self):
+        facts = approval_facts_from_result(
+            clean_result(),
+            enabled=True,
+            app_authored=False,
+            check_published=False,
+            has_open_review_threads=False,
+        )
+
+        decision = evaluate_approval_facts(facts)
+
+        self.assertTrue(decision.approved)
+        self.assertEqual(decision.blockers, ())
+
     def test_complete_eligible_positive_emits_one_bound_comment_and_approve(self):
         checks = FakeCheckRuns()
         outcome, calls = self.publish(
@@ -518,7 +535,42 @@ class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
         self.assertEqual(outcome.diagnostic, "app_authored")
         self.assertEqual(checks.writes, [])
 
-    def test_missing_gate_capability_reports_permission_and_withholds(self):
+    def test_missing_gate_capability_reports_permission_but_still_approves(self):
+        outcome, calls = self.publish(
+            [
+                json_response(pr_payload(head_sha=HEAD)),
+                json_response([]),
+                json_response(pr_payload(head_sha=HEAD)),
+                json_response({"id": 5}),
+                json_response(pr_payload(head_sha=HEAD)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=HEAD)),
+                json_response([]),
+                json_response({"id": 6}),
+            ],
+            checks=None,
+        )
+        self.assertEqual(outcome.status, "published")
+        self.assertEqual(posted_events(calls), ["COMMENT", "APPROVE"])
+        self.assertEqual(outcome.diagnostic, "check_permission")
+        self.assertIn(outcome.diagnostic, PUBLIC_DIAGNOSTICS)
+        self.assertFalse(any("/check-runs" in url for _, url, _ in calls))
+
+    def test_missing_gate_still_withholds_for_a_blocking_finding(self):
+        result, facts = admitted_blocking_result(body_comment=True)
+        eligibility = approval_eligibility_from_result(
+            result,
+            head_sha=HEAD,
+            enabled=True,
+            app_authored=False,
+            check_published=False,
+        )
+        decision = eligibility.evaluate(
+            app_authored=False,
+            has_open_review_threads=False,
+        )
+
+        self.assertEqual(decision.blockers, ("blocking-findings-open",))
         outcome, calls = self.publish(
             [
                 json_response(pr_payload(head_sha=HEAD)),
@@ -527,11 +579,16 @@ class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
                 json_response({"id": 5}),
             ],
             checks=None,
+            result=result,
+            blocker_candidates=(facts,),
         )
+
         self.assertEqual(outcome.status, "published")
-        self.assertEqual(posted_events(calls), ["COMMENT"])
         self.assertEqual(outcome.diagnostic, "check_permission")
-        self.assertFalse(any("/check-runs" in url for _, url, _ in calls))
+        self.assertEqual(posted_events(calls), ["COMMENT"])
+        self.assertIn(
+            "This file needs a tighter contract.", review_payloads(calls)[0]["body"]
+        )
 
     def test_writes_disabled_never_reaches_the_api(self):
         class ExplodingBroker:
@@ -743,7 +800,7 @@ class OneGateAcceptanceTests(GateAcceptanceCase):
         patched = [url for method, url, _ in calls if method == "PATCH"]
         self.assertEqual([url.split("/check-runs/")[-1] for url in patched], ["100"])
 
-    def test_gate_permission_failure_still_publishes_the_review(self):
+    def test_gate_permission_failure_still_approves_when_otherwise_eligible(self):
         checks = FakeCheckRuns(denied=True)
         outcome, calls = self.publish(
             [
@@ -751,12 +808,21 @@ class OneGateAcceptanceTests(GateAcceptanceCase):
                 json_response([]),
                 json_response(pr_payload(head_sha=HEAD)),
                 json_response({"id": 5}),
+                json_response(pr_payload(head_sha=HEAD)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=HEAD)),
+                json_response([]),
+                json_response({"id": 6}),
             ],
             checks=checks,
         )
         self.assertEqual(outcome.status, "published")
-        self.assertEqual(posted_events(calls), ["COMMENT"])
+        self.assertEqual(posted_events(calls), ["COMMENT", "APPROVE"])
         self.assertEqual(outcome.diagnostic, "check_permission")
+        self.assertIn(
+            "ReviewSensei merge gate unavailable",
+            review_payloads(calls)[0]["body"],
+        )
         self.assertEqual(checks.writes, [])
 
     def test_pending_gate_state_precedes_its_conclusion_on_the_same_head(self):

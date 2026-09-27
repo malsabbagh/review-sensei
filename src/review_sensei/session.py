@@ -1264,17 +1264,38 @@ class SessionLedger(Protocol):
         ...
 
 
+def _expected_after_slot(record: SessionRecord, slot: str) -> tuple[int, int, int]:
+    """Return the full counter snapshot used to verify a committed replay."""
+
+    written = _apply_slot(record, slot)
+    return (
+        written.get("completed_initial_reviews", record.completed_initial_reviews),
+        written.get(
+            "completed_verification_rounds", record.completed_verification_rounds
+        ),
+        written.get("failed_attempts", record.failed_attempts),
+    )
+
+
 def _apply_slot(record: SessionRecord, slot: str) -> dict[str, int]:
+    """Return the bounded counter value written by the reserved slot."""
+
     if slot == "initial":
         return {
-            "completed_initial_reviews": record.completed_initial_reviews + 1,
+            "completed_initial_reviews": min(
+                record.completed_initial_reviews + 1, DIAGNOSTIC_ROUND_CEILING
+            )
         }
     if slot == "verification":
         return {
-            "completed_verification_rounds": record.completed_verification_rounds + 1,
+            "completed_verification_rounds": min(
+                record.completed_verification_rounds + 1, DIAGNOSTIC_ROUND_CEILING
+            )
         }
     if slot == "failed-attempt":
-        return {"failed_attempts": record.failed_attempts + 1}
+        # The stored count is also the maximum configurable per-head retry
+        # budget, so further failure cleanups remain valid at the bound.
+        return {"failed_attempts": min(record.failed_attempts + 1, MAX_FAILED_ATTEMPTS)}
     raise ReviewInputError("reserved_slot is invalid")
 
 
@@ -2127,14 +2148,8 @@ def complete_session_round(
         slot = prepared.record.reserved_slot
         if slot is None:
             raise ReviewInputError("prepared session reservation is invalid")
-        expected_initial = prepared.record.completed_initial_reviews + (
-            1 if slot == "initial" else 0
-        )
-        expected_verification = prepared.record.completed_verification_rounds + (
-            1 if slot == "verification" else 0
-        )
-        expected_failed = prepared.record.failed_attempts + (
-            1 if slot == "failed-attempt" else 0
+        expected_initial, expected_verification, expected_failed = _expected_after_slot(
+            prepared.record, slot
         )
         if (
             loaded.record.generation == prepared.record.generation + 1

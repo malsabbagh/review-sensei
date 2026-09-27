@@ -189,9 +189,10 @@ persistent `REQUEST_CHANGES`. Enforcement is the `ReviewSensei` check run
 published through the separate `check_publish` capability, which is why
 `checks: write` is requested explicitly: it is not part of review-comment
 permission. If the broker withholds that capability or the App lacks the
-permission, the review is still published, approval is withheld, and the run
-reports `check_permission` rather than implying enforcement. Because a required
-check is matched to its producing App, an administrator who makes
+permission, the check remains unpublished and the run reports
+`check_permission`; an otherwise eligible review can still be approved. A
+repository that requires the check must grant both the permission and broker
+capability. Because a required check is matched to its producing App, an administrator who makes
 `ReviewSensei` required selects it by this App's slug; YAML alone cannot make a
 check required, and GitHub does not run required checks on App-authored pull
 requests, so those are reported as `app_authored` instead of gated. The

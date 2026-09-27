@@ -702,8 +702,10 @@ stand for a review that has not finished, and no persistent `REQUEST_CHANGES`
 is emitted as a second gate. A repository administrator must mark the check
 required for it to gate merges; `doctor` reports the check identity and
 producing App. Checks: write is a scoped broker capability
-(`check_publish`), so a missing permission publishes the review, withholds
-approval, and reports `check_permission` instead of implying enforcement.
+(`check_publish`), so a missing permission leaves the check unpublished and
+reports `check_permission`; it does not prevent approval for an otherwise
+eligible review. Repositories that require this check must grant the
+permission and broker capability for the merge gate to be enforced.
 
 A shared deterministic finalizer then emits `APPROVE` only when an eligible
 exact-head PR has a complete, qualified review with no unresolved ReviewSensei

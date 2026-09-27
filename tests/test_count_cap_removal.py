@@ -15,7 +15,12 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from review_sensei.convergence import ReviewConvergencePolicy
+from review_sensei.convergence import (
+    DIAGNOSTIC_ROUND_CEILING,
+    MAX_FAILED_ATTEMPTS,
+    ReviewConvergencePolicy,
+    RoundAdmissionDecision,
+)
 from review_sensei.disposition import apply_session_command, parse_maintainer_command
 from review_sensei.errors import ReviewInputError
 from review_sensei.outcomes import PUBLIC_DIAGNOSTICS
@@ -26,10 +31,13 @@ from review_sensei.sequence import (
 )
 from review_sensei.session import (
     LocalSessionLedger,
+    PreparedSessionRound,
     SessionIdentity,
     SessionRecord,
+    _apply_slot,
     complete_session_round,
     prepare_session_round,
+    record_session_failed_attempt,
     session_reservation_id,
 )
 
@@ -53,6 +61,244 @@ def _reservation(head: str) -> str:
         head_sha=head,
         kind="publish",
     )
+
+
+class DiagnosticCounterSaturationTests(unittest.TestCase):
+    def test_session_record_rejects_either_count_above_the_storage_ceiling(self):
+        with self.subTest(counter="completed_initial_reviews"):
+            with self.assertRaisesRegex(ReviewInputError, "is out of bounds"):
+                SessionRecord.create(
+                    IDENTITY,
+                    now=FIXED_NOW,
+                    completed_initial_reviews=DIAGNOSTIC_ROUND_CEILING + 1,
+                )
+        with self.subTest(counter="completed_verification_rounds"):
+            with self.assertRaisesRegex(ReviewInputError, "is out of bounds"):
+                SessionRecord.create(
+                    IDENTITY,
+                    now=FIXED_NOW,
+                    completed_verification_rounds=DIAGNOSTIC_ROUND_CEILING + 1,
+                )
+
+    def test_initial_review_counter_saturates_at_its_storage_ceiling(self):
+        record = SessionRecord.create(
+            IDENTITY,
+            now=FIXED_NOW,
+            completed_initial_reviews=DIAGNOSTIC_ROUND_CEILING,
+        )
+
+        self.assertEqual(
+            _apply_slot(record, "initial"),
+            {"completed_initial_reviews": DIAGNOSTIC_ROUND_CEILING},
+        )
+
+    def test_initial_review_commit_saturates_from_one_below_the_ceiling(self):
+        with tempfile.TemporaryDirectory() as raw:
+            ledger = LocalSessionLedger(Path(raw))
+            head = _head(104)
+            reservation_id = _reservation(head)
+            record = SessionRecord.create(
+                IDENTITY,
+                now=FIXED_NOW,
+                completed_initial_reviews=DIAGNOSTIC_ROUND_CEILING - 1,
+                reservation_id=reservation_id,
+                reserved_slot="initial",
+            )
+            ledger._write(IDENTITY, record)
+
+            prepared = PreparedSessionRound(
+                record=record,
+                decision=RoundAdmissionDecision(
+                    mode="merge-focused",
+                    admit=True,
+                    count_as_completed_round=True,
+                    round_kind="initial",
+                    handoff=False,
+                    handoff_reason=None,
+                    may_emit_approve=False,
+                ),
+                reservation_id=reservation_id,
+            )
+
+            committed = complete_session_round(
+                ledger, IDENTITY, prepared, published=True, now=FIXED_NOW
+            )
+            replayed = complete_session_round(
+                ledger, IDENTITY, prepared, published=True, now=FIXED_NOW
+            )
+            persisted = (
+                LocalSessionLedger(Path(raw)).load(IDENTITY, now=FIXED_NOW).record
+            )
+
+            self.assertEqual(
+                committed.completed_initial_reviews, DIAGNOSTIC_ROUND_CEILING
+            )
+            self.assertEqual(replayed, committed)
+            self.assertEqual(persisted, committed)
+
+    def test_failed_attempts_still_increment_when_diagnostic_count_is_full(self):
+        with tempfile.TemporaryDirectory() as raw:
+            ledger = LocalSessionLedger(Path(raw))
+            head = _head(103)
+            record = SessionRecord.create(
+                IDENTITY,
+                now=FIXED_NOW,
+                completed_initial_reviews=1,
+                completed_verification_rounds=DIAGNOSTIC_ROUND_CEILING,
+                failed_attempts_head_sha=head,
+            )
+            ledger._write(IDENTITY, record)
+
+            failed = record_session_failed_attempt(
+                ledger,
+                IDENTITY,
+                reservation_id=_reservation(head),
+                head_sha=head,
+                now=FIXED_NOW,
+            )
+            persisted = (
+                LocalSessionLedger(Path(raw)).load(IDENTITY, now=FIXED_NOW).record
+            )
+
+            self.assertEqual(failed.failed_attempts, 1)
+            self.assertEqual(
+                failed.completed_verification_rounds, DIAGNOSTIC_ROUND_CEILING
+            )
+            self.assertEqual(persisted, failed)
+
+    def test_failed_attempt_counter_saturates_at_its_storage_ceiling(self):
+        with tempfile.TemporaryDirectory() as raw:
+            ledger = LocalSessionLedger(Path(raw))
+            head = _head(105)
+            record = SessionRecord.create(
+                IDENTITY,
+                now=FIXED_NOW,
+                failed_attempts=MAX_FAILED_ATTEMPTS - 1,
+                failed_attempts_head_sha=head,
+            )
+            ledger._write(IDENTITY, record)
+
+            first = record_session_failed_attempt(
+                ledger,
+                IDENTITY,
+                reservation_id="a" * 64,
+                head_sha=head,
+                now=FIXED_NOW,
+            )
+            second = record_session_failed_attempt(
+                ledger,
+                IDENTITY,
+                reservation_id="b" * 64,
+                head_sha=head,
+                now=FIXED_NOW,
+            )
+            persisted = (
+                LocalSessionLedger(Path(raw)).load(IDENTITY, now=FIXED_NOW).record
+            )
+
+            self.assertEqual(first.failed_attempts, MAX_FAILED_ATTEMPTS)
+            self.assertEqual(second.failed_attempts, MAX_FAILED_ATTEMPTS)
+            self.assertEqual(persisted, second)
+            self.assertEqual(persisted.failed_attempts, MAX_FAILED_ATTEMPTS)
+
+    def test_failed_attempt_cleanup_replay_at_ceiling_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as raw:
+            ledger = LocalSessionLedger(Path(raw))
+            head = _head(106)
+            record = SessionRecord.create(
+                IDENTITY,
+                now=FIXED_NOW,
+                failed_attempts=MAX_FAILED_ATTEMPTS - 1,
+                failed_attempts_head_sha=head,
+            )
+            ledger._write(IDENTITY, record)
+            reservation_id = "c" * 64
+
+            first = record_session_failed_attempt(
+                ledger,
+                IDENTITY,
+                reservation_id=reservation_id,
+                head_sha=head,
+                now=FIXED_NOW,
+            )
+            replayed = record_session_failed_attempt(
+                ledger,
+                IDENTITY,
+                reservation_id=reservation_id,
+                head_sha=head,
+                now=FIXED_NOW,
+            )
+            persisted = (
+                LocalSessionLedger(Path(raw)).load(IDENTITY, now=FIXED_NOW).record
+            )
+
+            self.assertEqual(first.failed_attempts, MAX_FAILED_ATTEMPTS)
+            self.assertEqual(replayed, first)
+            self.assertEqual(persisted, first)
+
+    def test_changed_head_rounds_complete_after_the_counter_reaches_its_ceiling(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            ledger = LocalSessionLedger(root)
+            record = SessionRecord.create(
+                IDENTITY,
+                now=FIXED_NOW,
+                completed_initial_reviews=1,
+                completed_verification_rounds=DIAGNOSTIC_ROUND_CEILING - 1,
+            )
+            self.assertEqual(
+                record.completed_verification_rounds,
+                DIAGNOSTIC_ROUND_CEILING - 1,
+            )
+            ledger._write(IDENTITY, record)
+            previous_prepared = None
+
+            for round_number in (1, 2):
+                # Each new head is handled through a fresh ledger instance,
+                # matching a later hosted job that reloads persisted state.
+                head = _head(100 + round_number)
+                ledger = LocalSessionLedger(root)
+                prepared = prepare_session_round(
+                    ledger,
+                    IDENTITY,
+                    POLICY,
+                    reservation_id=_reservation(head),
+                    now=FIXED_NOW,
+                    head_sha=head,
+                    latest_head_reviewed=True,
+                    coverage_complete=True,
+                    independently_approval_eligible=True,
+                )
+                self.assertTrue(prepared.decision.admit)
+                self.assertFalse(prepared.decision.handoff)
+                complete_session_round(
+                    ledger, IDENTITY, prepared, published=True, now=FIXED_NOW
+                )
+                loaded = LocalSessionLedger(root).load(IDENTITY, now=FIXED_NOW)
+                self.assertEqual(loaded.status, "ok")
+                self.assertIsNotNone(loaded.record)
+                assert loaded.record is not None
+                persisted = loaded.record
+                replayed = complete_session_round(
+                    ledger, IDENTITY, prepared, published=True, now=FIXED_NOW
+                )
+                self.assertEqual(replayed, persisted)
+                self.assertEqual(
+                    persisted.completed_verification_rounds,
+                    DIAGNOSTIC_ROUND_CEILING,
+                )
+                if previous_prepared is not None:
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "session generation conflict"
+                    ):
+                        complete_session_round(
+                            ledger,
+                            IDENTITY,
+                            previous_prepared,
+                            published=True,
+                            now=FIXED_NOW,
+                        )
+                previous_prepared = prepared
 
 
 class LongSequenceTests(unittest.TestCase):
@@ -275,7 +521,7 @@ class PerHeadRetryBoundTests(unittest.TestCase):
                 now=FIXED_NOW,
                 completed_initial_reviews=1,
                 completed_verification_rounds=8,
-                failed_attempts=6,
+                failed_attempts=MAX_FAILED_ATTEMPTS,
                 failed_attempts_head_sha=stale_head,
             )
             ledger._write(IDENTITY, record)

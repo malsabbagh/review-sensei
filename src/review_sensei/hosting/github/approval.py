@@ -43,6 +43,9 @@ class ApprovalFacts:
     finalization cannot re-derive eligibility from a different result. The
     unresolved-blocking-thread state is deliberately excluded: the finalizer
     reads it live from the reviewed head instead of trusting a persisted value.
+    ``check_published`` is retained as a diagnostic fact; inability to publish a
+    merge-gate check does not make an otherwise eligible review ineligible for
+    approval.
     """
 
     enabled: bool
@@ -246,7 +249,11 @@ def approval_eligibility_from_result(
 
 
 def evaluate_approval_facts(facts: ApprovalFacts) -> AutoApprovalDecision:
-    """Apply the repository's conservative approval criteria to frozen facts."""
+    """Apply the approval criteria to frozen facts.
+
+    Check publication is reported separately because it controls merge-gate
+    availability, not whether the review itself qualifies for approval.
+    """
 
     blockers: list[str] = []
     if not isinstance(facts.enabled, bool):
@@ -264,8 +271,6 @@ def evaluate_approval_facts(facts: ApprovalFacts) -> AutoApprovalDecision:
         blockers.append("auto-approval-disabled")
     if facts.app_authored is True:
         blockers.append("app-authored-pull-request")
-    if facts.check_published is not True:
-        blockers.append("check-not-published")
     if facts.has_blocking_findings is True:
         blockers.append("blocking-findings-open")
     if facts.has_human_adjudication_findings is True:
@@ -445,7 +450,6 @@ _WITHHELD_DIAGNOSTICS = {
     "app-authored-pull-request": "app_authored",
     "app-authored-flag-invalid": "approval_withheld",
     "blocking-findings-open": "required_fixes_open",
-    "check-not-published": "check_permission",
     "human-adjudication-open": "human_adjudication_open",
     "review-threads-incomplete": "review_threads_incomplete",
     "review-threads-invalid": "approval_withheld",

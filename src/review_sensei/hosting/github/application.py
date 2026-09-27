@@ -1110,8 +1110,8 @@ class GitHubApplication:
 
         The gate is a separate authority from review publication, so a broker
         that does not grant it must not suppress the review itself. A missing
-        token withholds approval instead: the run then reports that the gate
-        was not published rather than implying enforcement it did not have.
+        token leaves the gate unpublished and reports that diagnostic. It does
+        not prevent approval when the review otherwise qualifies.
         """
 
         try:

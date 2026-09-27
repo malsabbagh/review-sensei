@@ -81,6 +81,8 @@ accepts those conclusions for required checks:
 | `auto-approve`, `blocking` | partial, incomplete, or summary-only | `action_required` |
 | `auto-approve`, `blocking` | publication failed | `action_required` |
 | `auto-approve`, `blocking` | run ended without a conclusion | `cancelled` |
+| `auto-approve` | check capability unavailable | no check run; `check_permission` is the run diagnostic while approval follows its independent eligibility blockers |
+| `blocking` | check capability unavailable | no check run (`check_permission`); approval remains disabled by policy |
 | `advisory` | any | `neutral` |
 
 The review itself is always published as a `COMMENT` review: one exact-head
@@ -106,9 +108,11 @@ diagnostic (`required_fixes_open`, `review_incomplete`,
 The check-publication capability is scoped and separate from review
 publication. `Checks: write` is a distinct App permission, and the broker
 grants a distinct `check_publish` capability. When that capability or
-permission is unavailable, the review is still published, approval is withheld,
-and the run reports the `check_permission` diagnostic instead of implying
-enforcement it does not have.
+permission is unavailable, the review is still published and the run reports
+the `check_permission` diagnostic because the merge gate is absent. Missing
+check publication does not block approval for an otherwise eligible exact
+head; approval remains governed by the persisted review evidence, live thread
+scan, pull-request identity, and write authorization.
 
 YAML cannot make a check required, and no product surface claims otherwise.
 `doctor` reports the expected check identity and producing App and states that a
@@ -160,6 +164,10 @@ Tradeoffs:
   `ReviewSensei`, the check is informative rather than blocking, and a
   misconfigured repository can believe it is gated when it is not. `doctor`
   reports the identity to reduce that risk; it cannot remove it.
+- If `Checks: write` or `check_publish` is unavailable, eligible exact-head
+  reviews can still be approved while the merge gate is absent. A repository
+  that requires the gate must provision both before relying on it; the
+  `check_permission` diagnostic makes this degraded enforcement state visible.
 - App-authored pull requests can never be gated by their own check, so they are
   reported and never approved rather than silently ungated.
 - Existing installations that relied on `REQUEST_CHANGES` lose that signal, so
@@ -206,14 +214,16 @@ and advisory transitions). Every row asserts the captured events - review
 events, check-run writes and conclusions, GraphQL operations and cursors,
 diagnostics, and call counts - and asserts that no merge endpoint or auto-merge
 field is ever called. The updated `tests/test_github_publication.py` suite pins
-the comment-only review event and the withheld-approval diagnostics, and the
-Worker/broker suites cover the `check_publish` capability exchange.
+the comment-only review event, the missing-gate diagnostic, and the independent
+approval decision, and the Worker/broker suites cover the `check_publish`
+capability exchange.
 
 ## Rollout and Rollback
 
 Rollout: the App must be granted `Checks: write` and the broker must serve the
-`check_publish` capability before the gate is effective; the package and
-workflow release that enables the check is a reviewed release operation.
+`check_publish` capability before the gate is effective; eligible automatic
+approval remains available without the gate. The package and workflow release
+that enables the check is a reviewed release operation.
 Administrators must mark `ReviewSensei` required for the check to gate merges,
 and `doctor` reports the identity to use.
 
@@ -246,6 +256,31 @@ no `Administration` permission and never *changes* branch protection; the
 conversation-resolution probe exists only for placement, and no enforcement or
 approval decision reads branch protection. No other decision in this record
 changes.
+
+## Amendment 2026-09-26: check publication is not an approval prerequisite
+
+The initial decision made an unpublished check block an otherwise eligible
+approval. The default `auto-approve` behavior should still approve a clean,
+complete exact-head review when review publication is authorized, even when
+`Checks: write` or the broker's `check_publish` capability is unavailable.
+That failure remains reported as `check_permission`, and the ReviewSensei
+merge gate is absent until the permission and capability are restored. The
+expected check identity remains `ReviewSensei` produced by the configured App;
+`doctor` continues to report that identity when no run can be published. The
+`check_published` field remains in persisted eligibility documents for
+diagnostics and compatibility, but no longer participates in approval
+eligibility. Findings, incomplete evidence, unresolved blocking roots,
+ineligible pull requests, and unauthorized writes continue to block approval.
+This exception applies to the default `auto-approve` policy; `blocking` mode
+continues to disable approval by policy when check publication is unavailable.
+If check publication is unavailable while another approval blocker also
+applies, `check_permission` remains the run-level diagnostic; the separate
+approval decision still enforces all eligibility blockers.
+
+The published review body includes the full or concise unavailable-gate warning
+when the summary and complete-body limits allow it. If neither version fits,
+the body keeps its original summary and operators must use the run-level
+`check_permission` diagnostic to identify the missing gate.
 
 ## Links
 

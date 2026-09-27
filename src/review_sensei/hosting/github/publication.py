@@ -43,6 +43,7 @@ from ...presentation import (
     build_finding_view,
     build_review_summary_view,
     render_body_findings,
+    render_check_permission_warning,
     render_finding,
     render_review_summary,
 )
@@ -1225,8 +1226,9 @@ class ReviewPublisher:
 
         ``outcome=None`` publishes the pending state. A missing or unauthorized
         check capability is reported as a ``check_permission`` diagnostic rather
-        than raised: the review itself is still published, and the withheld
-        approval tells the operator that enforcement is not in place.
+        than raised: the review itself is still published, and an otherwise
+        eligible review may still be approved even though the merge gate is
+        unavailable.
         """
 
         if check_token is None:
@@ -1261,11 +1263,11 @@ class ReviewPublisher:
     ) -> str | None:
         """Write one gate state, reporting an unusable capability as a diagnostic.
 
-        A gate that cannot be written must not suppress the review itself: the
-        review content is what the operator needs, and the withheld approval
-        plus the ``check_permission`` diagnostic tell them enforcement is not in
-        place instead of implying it. A pending conclusion left behind by a
-        transient failure is overwritten by the next run for the same head.
+        A gate that cannot be written must not suppress the review itself. The
+        ``check_permission`` diagnostic tells the operator enforcement is not
+        in place; an otherwise eligible review may still be approved. A pending
+        conclusion left behind by a transient failure is overwritten by the
+        next run for the same head.
         """
 
         try:
@@ -1655,10 +1657,32 @@ class ReviewPublisher:
                 label="published review summary",
                 allow_empty=False,
             )
-            body = (
-                f"{_with_discussion_instruction(summary)}\n\n{marker}\n\n"
-                f"{approval_eligibility_marker(eligibility)}"
-            )
+
+            def body_for_summary(review_summary: str) -> str:
+                return (
+                    f"{_with_discussion_instruction(review_summary)}\n\n"
+                    f"{marker}\n\n{approval_eligibility_marker(eligibility)}"
+                )
+
+            body = body_for_summary(summary)
+            if check_diagnostic == "check_permission":
+                for concise in (False, True):
+                    warned_summary = (
+                        f"{render_check_permission_warning(concise=concise)}\n\n"
+                        f"{summary}"
+                    )
+                    if (
+                        len(warned_summary.encode("utf-8"))
+                        > result.limits.max_summary_bytes
+                    ):
+                        continue
+                    warned_body = body_for_summary(warned_summary)
+                    if (
+                        len(warned_body.encode("utf-8"))
+                        <= MAX_PUBLISHED_REVIEW_BODY_BYTES
+                    ):
+                        body = warned_body
+                        break
             validate_bounded_text(
                 body,
                 MAX_PUBLISHED_REVIEW_BODY_BYTES,
@@ -1875,7 +1899,8 @@ class ReviewPublisher:
         app-authored pull request withholds here as well: the finalizer reports
         it before any network read. A ``check_diagnostic`` wins over the
         finalizer's reason because an unpublished gate is an enforcement gap
-        that must be reported rather than folded into a quieter explanation.
+        that must remain visible, even when approval succeeds or is withheld for
+        another eligibility reason.
         """
 
         finalized = self.finalizer.finalize(

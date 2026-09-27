@@ -20,6 +20,7 @@ from pathlib import Path
 from review_sensei.convergence import ReviewConvergencePolicy, derive_blocker_candidate
 from review_sensei.hosting.github import ReviewPublisher
 from review_sensei.models import ReviewResult
+from review_sensei.validation import ReviewLimits
 
 try:
     from fake_github_http import json_response, make_http, placement_responses
@@ -86,6 +87,7 @@ class PublishedScenario:
     events: tuple[str, ...]
     inline: tuple[Mapping[str, object], ...]
     body: str
+    diagnostic: str | None
     calls: list[object]
 
     @property
@@ -97,9 +99,9 @@ class FakeCheckRuns:
     """Answer the check-run API the way GitHub does for one repository.
 
     Every hosted publication attaches the broker's check capability, so the
-    golden scenarios do too: a publication without a check token is the
-    degraded enforcement path that withholds approval and the gate suite
-    covers that separately.
+    golden scenarios do too: a publication without a check token lacks its
+    merge gate but may still approve an otherwise eligible review; the gate
+    acceptance suite covers that diagnostic path separately.
     """
 
     def __init__(self, *, app_slug="reviewsensei[bot]", run_id=100):
@@ -178,6 +180,11 @@ def publish_scenario(scenario, *, thread_nodes=()) -> PublishedScenario:
 
     policy = _policy(scenario)
     result = _result(scenario)
+    if "max_summary_bytes" in scenario:
+        result = replace(
+            result,
+            limits=ReviewLimits(max_summary_bytes=int(scenario["max_summary_bytes"])),
+        )
     candidates = _blocker_candidates(scenario, result.comments)
     facts_required = str(scenario.get("conversation_resolution", "")) == "required"
     checks = FakeCheckRuns()
@@ -217,7 +224,7 @@ def publish_scenario(scenario, *, thread_nodes=()) -> PublishedScenario:
         result=result,
         diff=DIFF,
         app_slug="reviewsensei[bot]",
-        check_token="check-token",
+        check_token=("check-token" if scenario.get("check_capability", True) else None),
         auto_approve=bool(scenario.get("auto_approve", False)),
         convergence_policy=policy,
         allow_retired_legacy_policy=True,
@@ -231,6 +238,7 @@ def publish_scenario(scenario, *, thread_nodes=()) -> PublishedScenario:
         events=tuple(str(review["event"]) for review in reviews),
         inline=tuple(findings["comments"]),
         body=str(findings["body"]),
+        diagnostic=outcome.diagnostic,
         calls=calls,
     )
 
@@ -310,6 +318,9 @@ class ReviewBodyGoldenTests(unittest.TestCase):
             "formatting-edges",
             "conversation-resolution-required",
             "retry-dedupe",
+            "check-permission-warning",
+            "check-permission-warning-tight-summary",
+            "check-permission-warning-no-room",
         ):
             self.assertIn(required, names)
 
@@ -324,6 +335,10 @@ class ReviewBodyGoldenTests(unittest.TestCase):
                     outcome.events, tuple(scenario.get("expected_events", ("COMMENT",)))
                 )
                 self.assertEqual(len(outcome.inline), scenario["expected_inline"])
+                if "expected_diagnostic" in scenario:
+                    self.assertEqual(
+                        outcome.diagnostic, scenario["expected_diagnostic"]
+                    )
                 summary, marker = split_published_body(outcome.body)
                 self.assertTrue(marker.startswith(f"{MARKER} "))
                 self.assertIn("head=" + HEAD, marker)

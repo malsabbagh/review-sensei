@@ -56,7 +56,7 @@ Request only the permissions needed by the features you deploy:
 | Permission | Access | Why |
 | --- | --- | --- |
 | `Metadata` | Read | Required by GitHub for App identity and repository metadata |
-| `Checks` | Write | Required to publish the one stable `ReviewSensei` check run that carries the merge gate (`github.reviews: blocking` and the default `auto-approve` mode). Without it, reviews are still published and approval is withheld with the `check_permission` diagnostic |
+| `Checks` | Write | Required to publish the one stable `ReviewSensei` check run that carries the merge gate (`github.reviews: blocking` and the default `auto-approve` mode). Review publication and otherwise-eligible auto-approval can proceed without it; the missing check is reported as `check_permission`. Repositories relying on the merge gate must also grant the broker `check_publish` capability and mark this check required in branch protection |
 | `Contents` | Write | Required to create the setup branch and generated files |
 | `Pull requests` | Write | Required to open setup pull requests and publish App-identity reviews, inline replies, and top-level replies on pull-request conversations |
 | `Workflows` | Write | Required because setup always creates or updates generated files under `.github/workflows/` |
@@ -73,6 +73,10 @@ does not run required checks on pull requests authored by the App itself, so an
 App-authored pull request can never be gated by its own check; ReviewSensei
 withholds approval for those pull requests and reports `app_authored` instead of
 pretending the gate applies.
+
+When a check write is unavailable, the expected identity remains
+`ReviewSensei` from the configured App slug; `doctor` still reports that same
+identity even though no new check run was published for the head.
 
 Do not request organization administration, secrets, or
 unrelated repository permissions, including `Issues: write`, unless a separate

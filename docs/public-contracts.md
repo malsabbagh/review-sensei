@@ -1142,8 +1142,10 @@ earlier conclusion on the same head cannot stand for a review that has not
 finished, and no persistent `REQUEST_CHANGES` is emitted as a second gate. A
 repository administrator must mark the check required for it to gate merges;
 `review-sensei doctor` reports the expected check identity and producing App,
-and `Checks: write` is a scoped broker capability, so a missing permission
-publishes the review, withholds approval, and reports `check_permission`.
+and `Checks: write` is a scoped broker capability. A missing permission leaves
+the check unpublished and reports `check_permission`, but does not prevent
+approval for an otherwise eligible review. Repositories that require the check
+must grant the permission and broker capability for that merge gate to apply.
 
 The shared finalizer emits `APPROVE` only for an eligible exact head with a
 complete, qualified review and no unresolved ReviewSensei root classified
