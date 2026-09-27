@@ -1,22 +1,52 @@
 # ReviewSensei setup version: 5
-# One-time import of the retired .github/review-sensei/config.yml,
-# which nothing reads any more. The settings below are this file's
-# policies now; review this diff, then delete the retired file
-# after merging.
-# NOTE: 'local_model' is not imported; the selected backend uses inference.model
-# NOTE: 'setup_version' was retired; release/installer identity; the configuration version is 'schema'
-# NOTE: 'review_mode' was retired; one evidence-focused pipeline is the only engine; integration policy is github.reviews
-# NOTE: 'version' was retired; release/installer identity; the configuration version is 'schema'
+# Configuration version. Leave this at 1.
 schema: 1
 
+# Backend and model used for review.
 inference:
+  # local-ollama, cloud-ollama, openrouter, or openai-compatible
   backend: cloud-ollama
+  # Model slug for the selected backend
   model: deepseek-v4.1-flash:cloud
 
+# GitHub publication and conversation policy.
 github:
+  # Review eligible pull requests automatically
   automatic_reviews: true
+  # Publish the validated result to GitHub
   writes: true
+  # auto-approve (request changes or approve), blocking, or advisory
   reviews: auto-approve
+  # Reply to authorized @sensei mentions
   mentions: true
+  # disabled, proposals, or pull-requests
   learning: disabled
+  # none or diagnostics
   artifacts: none
+
+# Optional limits and endpoint overrides.
+advanced:
+  endpoint:
+    # Required to send requests to a custom API root
+    allow_custom_endpoint: false
+  context:
+    symbol_context:
+      # Follow symbols from the diff into trusted files
+      enabled: false
+      # Maximum files loaded for symbol lookup
+      max_files: 16
+      # Maximum bytes loaded for symbol lookup
+      max_bytes: 131072
+      # Maximum symbol-follow depth
+      max_depth: 1
+  egress:
+    # Permit non-loopback provider traffic
+    allow_data_egress: false
+  large_changes:
+    # Split a large diff into bounded review slices
+    orchestrate: false
+  resources:
+    # Provider request timeout in seconds
+    timeout_seconds: 900
+    # Maximum provider calls for one review
+    max_provider_calls: 8
