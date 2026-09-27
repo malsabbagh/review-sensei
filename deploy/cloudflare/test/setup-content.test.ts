@@ -344,7 +344,7 @@ describe("setup-v4 public boundary", () => {
         "  automatic_reviews: true\n" +
         "  # Publish the validated result to GitHub\n" +
         "  writes: false\n" +
-        "  # auto-approve, blocking, or advisory\n" +
+        "  # auto-approve (request changes or approve), blocking, or advisory\n" +
         "  reviews: auto-approve\n" +
         "  # Reply to authorized @sensei mentions\n" +
         "  mentions: true\n" +

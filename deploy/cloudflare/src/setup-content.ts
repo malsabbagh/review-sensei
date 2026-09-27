@@ -1357,7 +1357,7 @@ export function currentConfigFile(): string {
     "  automatic_reviews: true\n" +
     "  # Publish the validated result to GitHub\n" +
     "  writes: false\n" +
-    "  # auto-approve, blocking, or advisory\n" +
+    "  # auto-approve (request changes or approve), blocking, or advisory\n" +
     "  reviews: auto-approve\n" +
     "  # Reply to authorized @sensei mentions\n" +
     "  mentions: true\n" +
@@ -1963,8 +1963,9 @@ export function setupPullRequestBody(
     ", and the file belongs to you from here on. Setup creates no " +
     "repository variables and never rewrites the file. " +
     "Approval policy: the package default is github.reviews: auto-approve, " +
-    "so ReviewSensei approves an eligible exact head as part of its normal " +
-    "pipeline. Set github.reviews: blocking to publish and enforce without " +
+    "so ReviewSensei submits Changes requested when required fixes remain " +
+    "and approves an eligible exact head when they do not. " +
+    "Set github.reviews: blocking to publish and enforce without " +
     "ever approving, or github.reviews: advisory for findings with no " +
     "ReviewSensei merge gate. " +
     "The only two optional Actions overrides are REVIEWSENSEI_PROVIDER " +

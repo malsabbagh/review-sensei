@@ -890,9 +890,7 @@ class ReviewPublisherTests(unittest.TestCase):
             body["body"],
         )
         self.assertEqual(body["commit_id"], head)
-        # Required fixes are carried by the check conclusion, never by a second
-        # review event, so the published review itself stays a COMMENT.
-        self.assertEqual(body["event"], "COMMENT")
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
         self.assertEqual(body["comments"][0]["path"], "src/app.py")
         self.assertIn(
             "To discuss this finding, reply with @sensei followed by your question.",
@@ -959,12 +957,12 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(current.coverage_mode, "full")
         body = __import__("json").loads(calls[4][2].decode("utf-8"))
         self.assertEqual(body["comments"], [])
-        self.assertEqual(body["event"], "COMMENT")
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
         self.assertEqual(finding_fingerprint_from_body(existing), fingerprint)
         self.assertTrue(finding_declares_blocking(existing))
 
     def test_all_fingerprints_already_published_on_same_head_stays_comment(self):
-        """A same-head re-review must not emit a second blocking review event."""
+        """A same-head re-review still submits Changes requested and does not approve."""
 
         from review_sensei.context import finding_lifecycle_for_comment
 
@@ -1013,11 +1011,11 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(outcome.status, "published")
         body = review_payloads(calls)[0]
         self.assertEqual(body["comments"], [])
-        self.assertEqual(body["event"], "COMMENT")
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
         self.assertIn("Summary.", body["body"])
         # The persisted blocking classification withholds approval before any
         # thread read, so the run emits exactly the one suppression review.
-        self.assertEqual(posted_events(calls), ["COMMENT"])
+        self.assertEqual(posted_events(calls), ["REQUEST_CHANGES"])
         self.assertEqual(outcome.diagnostic, "required_fixes_open")
 
     def test_legacy_v1_marker_suppresses_by_inline_location(self):
@@ -1065,7 +1063,7 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[4][2].decode("utf-8"))
         self.assertEqual(body["comments"], [])
-        self.assertEqual(body["event"], "COMMENT")
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
 
     def test_changed_blocking_classification_is_not_suppressed(self):
         """A reclassified finding must publish even when the fingerprint matches."""
@@ -1117,7 +1115,7 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[4][2].decode("utf-8"))
         self.assertEqual(len(body["comments"]), 1)
-        self.assertEqual(body["event"], "COMMENT")
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
 
     def test_fingerprint_sweep_matches_app_slug_case_insensitively(self):
         """GitHub logins are case-insensitive, so the slug must match anyway."""
@@ -1444,7 +1442,7 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertNotIn("Severity:", comment_body)
         self.assertNotIn("Fix effort:", comment_body)
         self.assertEqual(body["commit_id"], head)
-        self.assertEqual(body["event"], "COMMENT")
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
         self.assertIn("<!-- reviewsensei:review:v1", body["body"])
 
     def test_non_blocking_finding_can_publish_an_approval(self):
@@ -1985,10 +1983,8 @@ class ReviewPublisherTests(unittest.TestCase):
             checks=checks,
         )
         self.assertEqual(outcome.status, "published")
-        # The blocking result publishes its finding as a COMMENT and withholds
-        # approval. No REQUEST_CHANGES is emitted as a second gate authority and
-        # the earlier approval is left alone rather than silently dismissed.
-        self.assertEqual(posted_events(calls), ["COMMENT"])
+        # The blocking result submits Changes requested and withholds approval.
+        self.assertEqual(posted_events(calls), ["REQUEST_CHANGES"])
         self.assertEqual(review_payloads(calls)[0]["comments"][0]["path"], "src/app.py")
         self.assertEqual(outcome.diagnostic, "required_fixes_open")
         # The fixture review is not complete, so the gate reports the
@@ -2344,7 +2340,7 @@ class ReviewPublisherTests(unittest.TestCase):
         )
         self.assertEqual(blocking_outcome.status, "published")
         blocking_body = __import__("json").loads(blocking_calls[3][2].decode("utf-8"))
-        self.assertEqual(blocking_body["event"], "COMMENT")
+        self.assertEqual(blocking_body["event"], "REQUEST_CHANGES")
 
     def test_deleted_line_comment_is_published_on_the_left_side(self):
         deletion = """diff --git a/src/legacy.py b/src/legacy.py
@@ -2443,7 +2439,7 @@ deleted file mode 100644
         )
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[3][2].decode("utf-8"))
-        self.assertEqual(body["event"], "COMMENT")
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
         self.assertEqual(body["comments"], [])
         self.assertIn("## ReviewSensei — Changes required", body["body"])
         self.assertIn("## Findings explained in this review body", body["body"])
@@ -2552,9 +2548,8 @@ deleted file mode 100644
             result=file_result,
             auto_approve=False,
         )
-        # A blocking finding still publishes a plain comment: the review event
-        # carries the findings, and only the canonical gate (the check
-        # conclusion) may signal that fixes are required.
+        # auto-approve submits Changes requested for a blocking finding. The
+        # check conclusion still fails while required fixes remain.
         blocking = self.publish(
             [
                 json_response(pr_payload(head_sha=head)),
@@ -2574,7 +2569,7 @@ deleted file mode 100644
         cases = (
             ("APPROVE", approve, 1, 0),
             ("COMMENT", comment, 0, 0),
-            ("COMMENT", blocking, 0, 0),
+            ("REQUEST_CHANGES", blocking, 0, 0),
         )
         for event, (outcome, calls), event_index, finding_index in cases:
             with self.subTest(event=event):
@@ -3309,19 +3304,16 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
             json_response({"id": 5}, 200),
         ]
 
-    def test_legacy_publishes_a_comment_for_an_admitted_blocker(self):
-        # The stable check is the only imposed merge gate (ADR 0057), so even
-        # the retired legacy mode may not post REQUEST_CHANGES: a model
-        # blocker is published inline on the comment review instead.
+    def test_legacy_requests_changes_for_an_admitted_blocker(self):
         outcome, calls = self.publish(
             self._responses(),
             convergence_policy=ReviewConvergencePolicy(mode="legacy"),
             allow_retired_legacy_policy=True,
         )
         self.assertEqual(outcome.status, "published")
-        self.assertEqual(self._posted_events(calls), ["COMMENT"])
+        self.assertEqual(self._posted_events(calls), ["REQUEST_CHANGES"])
         body = json.loads(calls[-1][2].decode("utf-8"))
-        self.assertEqual(body["event"], "COMMENT")
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
         self.assertEqual(len(body["comments"]), 1)
         self.assertIn("blocking=true", body["comments"][0]["body"])
 
@@ -3390,9 +3382,9 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
             blocker_candidates=(facts,),
         )
         self.assertEqual(outcome.status, "published")
-        self.assertEqual(self._posted_events(calls), ["COMMENT"])
+        self.assertEqual(self._posted_events(calls), ["REQUEST_CHANGES"])
         body = json.loads(calls[-1][2].decode("utf-8"))
-        self.assertEqual(body["event"], "COMMENT")
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
         self.assertEqual(len(body["comments"]), 1)
         self.assertIn("blocking=true", body["comments"][0]["body"])
         self.assertIn(
@@ -3552,7 +3544,7 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "published")
         body = json.loads(calls[-1][2].decode("utf-8"))
-        self.assertEqual(body["event"], "COMMENT")
+        self.assertEqual(body["event"], "REQUEST_CHANGES")
         self.assertEqual(len(body["comments"]), 1)
         self.assertIn("Added line is unbounded.", body["comments"][0]["body"])
 
@@ -3759,7 +3751,7 @@ class EffectiveBlockerPublicationTests(unittest.TestCase):
         with patch.dict("os.environ", {REVIEW_MODE_ENV: "merge-focused"}):
             outcome, calls = self.publish(self._responses())
         self.assertEqual(outcome.status, "published")
-        self.assertEqual(self._posted_events(calls), ["COMMENT"])
+        self.assertEqual(self._posted_events(calls), ["REQUEST_CHANGES"])
         body = json.loads(calls[-1][2].decode("utf-8"))
         self.assertEqual(len(body["comments"]), 1)
         self.assertIn("blocking=true", body["comments"][0]["body"])

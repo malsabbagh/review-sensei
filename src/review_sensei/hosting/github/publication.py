@@ -1723,11 +1723,19 @@ class ReviewPublisher:
                 comment_payload["line"] = comment.line
                 comment_payload["side"] = "RIGHT"
             comments.append(comment_payload)
-        # The stable ReviewSensei check run is the only imposed merge gate
-        # (ADR 0057). The review itself is always published as a COMMENT so a
-        # persistent REQUEST_CHANGES cannot become a second, stale gate, and an
-        # empty inline payload can never misrepresent a same-head re-review.
-        event, published_state = "COMMENT", "COMMENTED"
+        # auto-approve submits GitHub's Changes requested review when this
+        # head has required fixes, then approves a later eligible head. The
+        # ReviewSensei check stays the head-bound gate. App-authored pull
+        # requests stay comments because GitHub rejects REQUEST_CHANGES from
+        # the pull request author. blocking and advisory never request changes.
+        if (
+            approval_enabled
+            and has_blocking_findings(result)
+            and not write_preflight.app_authored
+        ):
+            event, published_state = "REQUEST_CHANGES", "CHANGES_REQUESTED"
+        else:
+            event, published_state = "COMMENT", "COMMENTED"
         path = self.http.repository_path(
             repository,
             f"/pulls/{pull_request}/reviews",

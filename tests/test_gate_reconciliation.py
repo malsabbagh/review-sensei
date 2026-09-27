@@ -148,7 +148,7 @@ class GateReconciliationTests(unittest.TestCase):
         self.assertIn(SETUP_APP_LOGIN, section)
         self.assertIn("Never dismiss a human review", normalized)
         self.assertIn("only a review authored by that login", normalized)
-        self.assertIn("never emits REQUEST_CHANGES", normalized)
+        self.assertIn("submits Changes requested again only when", normalized)
         self.assertIn(REVIEW_CHECK_NAME, section)
 
     def test_required_check_reconciliation_covers_rollback_and_writes_disabled(self):

@@ -425,8 +425,9 @@ same review path on the labelled self-hosted runner.
 before provider or broker access and can publish one exact-head App review with
 valid inline comments and a validated summary.
 
-With automatic review and GitHub writes enabled, clean eligible reviews can
-satisfy branch-protection approvals automatically by default. Set
+With automatic review and GitHub writes enabled, `github.reviews: auto-approve`
+submits Changes requested when required fixes remain and approves a clean
+eligible head. Set
 `github.reviews: blocking` (publish and enforce, never automatically approve)
 or `github.reviews: advisory` (no ReviewSensei merge gate and no approval) in
 `.reviewsensei.yml` to select another policy instead. Enforcement is
@@ -438,9 +439,10 @@ for it to gate merges. The
 conclusion is `success` for a complete review with no required fixes, `failure`
 when required fixes remain, `action_required` for a partial, incomplete, or
 unpublished review, `neutral` in `advisory` mode, and `cancelled` for a run that
-ended without a conclusion; no persistent `REQUEST_CHANGES` is emitted as a
-second gate, and the App needs `Checks: write`. A shared idempotent finalizer may
-then emit `APPROVE` once no unresolved ReviewSensei root is classified blocking.
+ended without a conclusion. `auto-approve` also submits `REQUEST_CHANGES`
+when required fixes remain, and the App needs `Checks: write`. A shared
+idempotent finalizer may then emit `APPROVE` once no unresolved ReviewSensei
+root is classified blocking.
 Non-blocking ReviewSensei follow-ups and human threads may remain open. An
 unclassified ReviewSensei root, partial/incomplete/summary-only result,
 incomplete/error thread response, or stale/fork/closed/App-authored target
@@ -647,9 +649,9 @@ gh api --method POST "repos/OWNER/REPO/pulls/NUMBER/reviews/REVIEW_ID/dismissals
 
 A dismissal clears the obsolete review decision only. The review, its inline
 threads, its findings, and its dispositions stay, no human review is touched,
-and the change request does not come back, because the current release never
-emits `REQUEST_CHANGES`: later reviews on that pull request are `COMMENT` and
-the `ReviewSensei` check carries enforcement. Human approval requirements are
+and a later `auto-approve` review submits Changes requested again only when
+required fixes remain. `blocking` and `advisory` reviews stay comments, and
+the `ReviewSensei` check carries the head-bound gate. Human approval requirements are
 unaffected; branch protection still applies exactly as configured.
 
 ### Reconciling required-check state

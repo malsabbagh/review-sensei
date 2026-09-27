@@ -2,7 +2,7 @@
 
 Status: Proposed
 Date: 2026-09-26
-Last amended: 2026-09-26
+Last amended: 2026-09-27
 GitHub Issue: #181
 Pull Request: [#187](https://github.com/malsabbagh/review-sensei/pull/187)
 Owners/Reviewers: Maintainers
@@ -85,11 +85,14 @@ accepts those conclusions for required checks:
 | `blocking` | check capability unavailable | no check run (`check_permission`); approval remains disabled by policy |
 | `advisory` | any | `neutral` |
 
-The review itself is always published as a `COMMENT` review: one exact-head
-App review with the summary body and the valid inline findings. A persistent
-`REQUEST_CHANGES` is never emitted as a second authority, so the enforcement
-state a repository enforces is exactly the check run's conclusion for the
-reviewed head.
+The review is one exact-head App review with the summary body and the valid
+inline findings. `github.reviews: auto-approve` publishes that review as
+`REQUEST_CHANGES` when required fixes remain, and as `COMMENT` otherwise.
+`blocking` and `advisory` stay `COMMENT`. A later eligible head is still
+approved by the finalizer, which replaces the App's changes-requested state.
+The `ReviewSensei` check remains the head-bound gate; GitHub's review decision
+is not bound to one commit, so a repository that requires the check still
+enforces the reviewed head rather than the latest review event.
 
 Approval is emitted only in the default `auto-approve` mode, and only for an
 eligible exact head: trusted complete review evidence for that head, no
@@ -128,8 +131,8 @@ In scope:
 
 - Check-run identity, producer binding, pending/concluding writes, conclusion
   mapping, and cancellation in the Python GitHub adapter.
-- Review-event selection (always `COMMENT`) and the removal of the persistent
-  change-request authority, superseding ADR 0035.
+- Review-event selection: `REQUEST_CHANGES` for `auto-approve` when required
+  fixes remain, otherwise `COMMENT`, superseding the always-comment rule.
 - Default approval eligibility, persisted eligibility evidence, delayed
   finalization, and the withheld-approval diagnostics.
 - The scoped `check_publish` broker capability, App permission documentation,
@@ -170,17 +173,19 @@ Tradeoffs:
   `check_permission` diagnostic makes this degraded enforcement state visible.
 - App-authored pull requests can never be gated by their own check, so they are
   reported and never approved rather than silently ungated.
-- Existing installations that relied on `REQUEST_CHANGES` lose that signal, so
-  the transition must explain the replacement and reconcile stale
-  change-request state (slice G).
+- `auto-approve` again submits `REQUEST_CHANGES` when required fixes remain.
+  That GitHub review state lasts until a later review from the App replaces
+  it, including across a new head, so the check is still the head-bound gate.
 
 ## Alternatives Considered
 
 ### Keep `REQUEST_CHANGES` alongside the check
 
-Rejected. A persistent change request is not head-bound and competes with the
-App's own approval; two authorities can disagree, and the disagreement is
-invisible to anyone reading only the check.
+Adopted for `auto-approve` only. A changes-requested review is the visible
+GitHub state when required fixes remain, and a later eligible approval replaces
+it. The review state is still not head-bound, so the check remains the
+authority a repository can require for one reviewed head. `blocking` and
+`advisory` do not submit `REQUEST_CHANGES`.
 
 ### Encode non-passing enforcement as `neutral` or `skipped`
 
