@@ -34,6 +34,7 @@ from review_sensei.session import (
     _apply_slot,
     complete_session_round,
     prepare_session_round,
+    record_session_failed_attempt,
     session_reservation_id,
 )
 
@@ -60,6 +61,16 @@ def _reservation(head: str) -> str:
 
 
 class DiagnosticCounterSaturationTests(unittest.TestCase):
+    def test_session_record_still_rejects_counts_above_the_storage_ceiling(self):
+        with self.assertRaisesRegex(
+            ReviewInputError, "completed_verification_rounds is out of bounds"
+        ):
+            SessionRecord.create(
+                IDENTITY,
+                now=FIXED_NOW,
+                completed_verification_rounds=DIAGNOSTIC_ROUND_CEILING + 1,
+            )
+
     def test_initial_review_counter_saturates_at_its_storage_ceiling(self):
         record = SessionRecord.create(
             IDENTITY,
@@ -72,14 +83,35 @@ class DiagnosticCounterSaturationTests(unittest.TestCase):
             {"completed_initial_reviews": DIAGNOSTIC_ROUND_CEILING},
         )
 
-    def test_failed_attempts_still_increment_at_diagnostic_ceiling(self):
-        record = SessionRecord.create(
-            IDENTITY,
-            now=FIXED_NOW,
-            completed_verification_rounds=DIAGNOSTIC_ROUND_CEILING,
-        )
+    def test_failed_attempts_still_increment_when_diagnostic_count_is_full(self):
+        with tempfile.TemporaryDirectory() as raw:
+            ledger = LocalSessionLedger(Path(raw))
+            head = _head(103)
+            record = SessionRecord.create(
+                IDENTITY,
+                now=FIXED_NOW,
+                completed_initial_reviews=1,
+                completed_verification_rounds=DIAGNOSTIC_ROUND_CEILING,
+                failed_attempts_head_sha=head,
+            )
+            ledger._write(IDENTITY, record)
 
-        self.assertEqual(_apply_slot(record, "failed-attempt"), {"failed_attempts": 1})
+            failed = record_session_failed_attempt(
+                ledger,
+                IDENTITY,
+                reservation_id=_reservation(head),
+                head_sha=head,
+                now=FIXED_NOW,
+            )
+            persisted = (
+                LocalSessionLedger(Path(raw)).load(IDENTITY, now=FIXED_NOW).record
+            )
+
+            self.assertEqual(failed.failed_attempts, 1)
+            self.assertEqual(
+                failed.completed_verification_rounds, DIAGNOSTIC_ROUND_CEILING
+            )
+            self.assertEqual(persisted, failed)
 
     def test_changed_head_rounds_complete_after_the_counter_reaches_its_ceiling(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -114,9 +146,11 @@ class DiagnosticCounterSaturationTests(unittest.TestCase):
                 complete_session_round(
                     ledger, IDENTITY, prepared, published=True, now=FIXED_NOW
                 )
-                persisted = (
-                    LocalSessionLedger(root).load(IDENTITY, now=FIXED_NOW).record
-                )
+                loaded = LocalSessionLedger(root).load(IDENTITY, now=FIXED_NOW)
+                self.assertEqual(loaded.status, "ok")
+                self.assertIsNotNone(loaded.record)
+                assert loaded.record is not None
+                persisted = loaded.record
                 replayed = complete_session_round(
                     ledger, IDENTITY, prepared, published=True, now=FIXED_NOW
                 )
