@@ -3365,7 +3365,7 @@ class HostedPublicationCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase
             [],
         )
 
-    def test_maintainer_handoff_annotates_the_actions_run(self):
+    def test_maintainer_handoff_does_not_annotate_the_actions_run(self):
         class HandoffApplication(self.FakeApplication):
             publication_status = "handoff"
 
@@ -3392,10 +3392,7 @@ class HostedPublicationCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase
 
         self.assertEqual(status, 1)
         self.assertIn("handoff", stdout.getvalue())
-        self.assertIn(
-            "::error title=ReviewSensei maintainer attention required::",
-            stderr.getvalue(),
-        )
+        self.assertNotIn("::error", stderr.getvalue())
         self.assertIn("action_required", summary_text)
 
     def test_maintainer_handoff_stays_unannotated_off_the_host(self):

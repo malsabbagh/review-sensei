@@ -355,11 +355,11 @@ class RunOutcomeWiringTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             self.assertIn("outcome_diagnostic=secret_redacted", output_text)
             self.assertNotIn(CANARY, outcome_path.read_text(encoding="utf-8"))
 
-    def test_action_required_emits_maintainer_attention_annotation(self):
+    def test_action_required_does_not_emit_maintainer_attention_annotation(self):
         with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}, clear=False):
             with patch("sys.stderr", new_callable=io.StringIO) as stderr:
                 emit_host_outcome(RunOutcome("action_required", diagnostic="paused"))
-        self.assertIn("ReviewSensei maintainer attention required", stderr.getvalue())
+        self.assertNotIn("::error", stderr.getvalue())
 
     def test_maintainer_attention_annotation_stays_on_the_host(self):
         with patch.dict(os.environ, {}, clear=True):
