@@ -48,6 +48,19 @@ _SAFE_LINK_SCHEMES = frozenset(("http", "https"))
 _DISCUSSION_REFERENCE_INLINE = "See the inline discussion."
 _DISCUSSION_REFERENCE_BODY = "See the full explanation below."
 _OPTIONAL_NOT_REQUIRED = "This is not required for this PR."
+_CHECK_PERMISSION_WARNING = (
+    "**Warning: ReviewSensei merge gate unavailable.** This run could not publish "
+    "the required `ReviewSensei` check (`check_permission`). Missing this check "
+    "does not itself withhold approval: an otherwise eligible review can still "
+    "be approved under the configured auto-approval policy. Grant the App "
+    "`Checks: write` and broker `check_publish`, and mark the check required in "
+    "branch protection before relying on it to gate merges."
+)
+_CHECK_PERMISSION_WARNING_CONCISE = (
+    "**Warning: ReviewSensei merge gate unavailable (`check_permission`).** "
+    "Auto-approval may proceed when otherwise eligible. Grant `Checks: write` "
+    "and broker `check_publish`, then require the check in branch protection."
+)
 
 _HEADING_STATES = {
     CHANGES_REQUIRED_STATE: "## ReviewSensei — Changes required",
@@ -78,6 +91,12 @@ def escape_markdown_label(value: str) -> str:
     # label from ever changing the surrounding Markdown line structure.
     escaped = _MARKDOWN_LABEL_CHARS.sub(r"\\\1", value)
     return escaped.replace("\r", r"\r").replace("\n", r"\n")
+
+
+def render_check_permission_warning(*, concise: bool = False) -> str:
+    """Explain an unavailable GitHub merge gate in published review Markdown."""
+
+    return _CHECK_PERMISSION_WARNING_CONCISE if concise else _CHECK_PERMISSION_WARNING
 
 
 # Inline Markdown constructs reshape or hide content regardless of position:

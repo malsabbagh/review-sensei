@@ -43,6 +43,7 @@ from ...presentation import (
     build_finding_view,
     build_review_summary_view,
     render_body_findings,
+    render_check_permission_warning,
     render_finding,
     render_review_summary,
 )
@@ -1665,27 +1666,23 @@ class ReviewPublisher:
 
             body = body_for_summary(summary)
             if check_diagnostic == "check_permission":
-                warning = (
-                    "**Warning: ReviewSensei merge gate unavailable.** This run "
-                    "could not publish the required `ReviewSensei` check "
-                    "(`check_permission`). Missing this check does not itself "
-                    "withhold approval: an otherwise eligible review can still "
-                    "be approved under the configured auto-approval policy. "
-                    "Grant the App `Checks: write` and broker `check_publish`, "
-                    "and mark the check required in branch protection before "
-                    "relying on it to gate merges."
-                )
-                warned_summary = f"{warning}\n\n{summary}"
-                if (
-                    len(warned_summary.encode("utf-8"))
-                    <= result.limits.max_summary_bytes
-                ):
+                for concise in (False, True):
+                    warned_summary = (
+                        f"{render_check_permission_warning(concise=concise)}\n\n"
+                        f"{summary}"
+                    )
+                    if (
+                        len(warned_summary.encode("utf-8"))
+                        > result.limits.max_summary_bytes
+                    ):
+                        continue
                     warned_body = body_for_summary(warned_summary)
                     if (
                         len(warned_body.encode("utf-8"))
                         <= MAX_PUBLISHED_REVIEW_BODY_BYTES
                     ):
                         body = warned_body
+                        break
             validate_bounded_text(
                 body,
                 MAX_PUBLISHED_REVIEW_BODY_BYTES,

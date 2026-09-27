@@ -1330,8 +1330,8 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertIsNone(approved.diagnostic)
         self.assertEqual(posted_events(approved_calls), ["COMMENT", "APPROVE"])
 
-    def test_missing_gate_warning_does_not_exceed_the_summary_limit(self):
-        """The notice is omitted when its bytes would crowd out the review."""
+    def test_missing_gate_warning_uses_the_concise_notice_when_space_is_tight(self):
+        """A short notice preserves the merge-gate warning under tight limits."""
 
         head = "b" * 40
         skipped = ReviewResult(
@@ -1340,7 +1340,7 @@ class ReviewPublisherTests(unittest.TestCase):
             provider="ollama",
             review_status="complete",
             coverage_mode="incremental",
-            limits=ReviewLimits(max_summary_bytes=512),
+            limits=ReviewLimits(max_summary_bytes=640),
         )
         outcome, calls = self.publish(
             [
@@ -1361,10 +1361,10 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(outcome.status, "published")
         self.assertEqual(outcome.diagnostic, "check_permission")
         self.assertEqual(posted_events(calls), ["COMMENT", "APPROVE"])
-        self.assertNotIn(
-            "ReviewSensei merge gate unavailable",
-            review_payloads(calls)[0]["body"],
-        )
+        body = review_payloads(calls)[0]["body"]
+        self.assertIn("ReviewSensei merge gate unavailable", body)
+        self.assertIn("Auto-approval may proceed when otherwise eligible.", body)
+        self.assertLessEqual(len(body.split("\n\n", 1)[0].encode("utf-8")), 640)
 
     def test_full_review_fingerprint_sweep_fails_closed_before_write(self):
         """An uncertain sweep must not publish a possible duplicate."""

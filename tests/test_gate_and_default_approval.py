@@ -25,7 +25,9 @@ from review_sensei.hosting.github.application import (
 )
 from review_sensei.hosting.github.approval import (
     approval_eligibility_from_result,
+    approval_facts_from_result,
     approval_withheld_diagnostic,
+    evaluate_approval_facts,
     evaluate_auto_approval,
 )
 from review_sensei.hosting.github.checks import (
@@ -48,6 +50,7 @@ from review_sensei.hosting.github.publication import (
     review_marker,
 )
 from review_sensei.models import ReviewComment, ReviewResult
+from review_sensei.outcomes import PUBLIC_DIAGNOSTICS
 
 try:
     from fake_github_http import json_response, make_http
@@ -326,6 +329,20 @@ class GateAcceptanceCase(unittest.TestCase):
 
 
 class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
+    def test_unpublished_check_is_not_an_approval_blocker(self):
+        facts = approval_facts_from_result(
+            clean_result(),
+            enabled=True,
+            app_authored=False,
+            check_published=False,
+            has_open_review_threads=False,
+        )
+
+        decision = evaluate_approval_facts(facts)
+
+        self.assertTrue(decision.approved)
+        self.assertEqual(decision.blockers, ())
+
     def test_complete_eligible_positive_emits_one_bound_comment_and_approve(self):
         checks = FakeCheckRuns()
         outcome, calls = self.publish(
@@ -536,6 +553,7 @@ class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
         self.assertEqual(outcome.status, "published")
         self.assertEqual(posted_events(calls), ["COMMENT", "APPROVE"])
         self.assertEqual(outcome.diagnostic, "check_permission")
+        self.assertIn(outcome.diagnostic, PUBLIC_DIAGNOSTICS)
         self.assertFalse(any("/check-runs" in url for _, url, _ in calls))
 
     def test_missing_gate_still_withholds_for_a_blocking_finding(self):

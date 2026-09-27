@@ -18,6 +18,7 @@ from review_sensei import (
 )
 from review_sensei.context import finding_lifecycle_for_comment
 from review_sensei.convergence import (
+    MAX_FAILED_ATTEMPTS,
     PREFERENCE_CATEGORIES,
     REQUIRED_CONTRACT_KINDS,
     REVIEW_MODE_ENV,
@@ -704,6 +705,18 @@ class RoundAdmissionDecisionTableTests(unittest.TestCase):
                 policy,
                 continuation_rounds=1,  # type: ignore[call-arg]
             )
+
+    def test_saturated_failed_attempt_counter_still_exhausts_the_budget(self):
+        policy = ReviewConvergencePolicy(
+            mode="merge-focused", max_failed_attempts=MAX_FAILED_ATTEMPTS
+        )
+        decision = evaluate_round_admission(
+            RoundSessionState(failed_attempts=MAX_FAILED_ATTEMPTS), policy
+        )
+
+        self.assertFalse(decision.admit)
+        self.assertTrue(decision.handoff)
+        self.assertEqual(decision.handoff_reason, "failed-attempt-budget-exhausted")
 
     def test_unreviewed_head_still_admits_but_cannot_approve(self):
         policy = ReviewConvergencePolicy(mode="merge-focused")

@@ -20,6 +20,7 @@ from pathlib import Path
 from review_sensei.convergence import ReviewConvergencePolicy, derive_blocker_candidate
 from review_sensei.hosting.github import ReviewPublisher
 from review_sensei.models import ReviewResult
+from review_sensei.validation import ReviewLimits
 
 try:
     from fake_github_http import json_response, make_http, placement_responses
@@ -178,6 +179,11 @@ def publish_scenario(scenario, *, thread_nodes=()) -> PublishedScenario:
 
     policy = _policy(scenario)
     result = _result(scenario)
+    if "max_summary_bytes" in scenario:
+        result = replace(
+            result,
+            limits=ReviewLimits(max_summary_bytes=int(scenario["max_summary_bytes"])),
+        )
     candidates = _blocker_candidates(scenario, result.comments)
     facts_required = str(scenario.get("conversation_resolution", "")) == "required"
     checks = FakeCheckRuns()
@@ -217,7 +223,7 @@ def publish_scenario(scenario, *, thread_nodes=()) -> PublishedScenario:
         result=result,
         diff=DIFF,
         app_slug="reviewsensei[bot]",
-        check_token="check-token",
+        check_token=("check-token" if scenario.get("check_capability", True) else None),
         auto_approve=bool(scenario.get("auto_approve", False)),
         convergence_policy=policy,
         allow_retired_legacy_policy=True,
@@ -310,6 +316,9 @@ class ReviewBodyGoldenTests(unittest.TestCase):
             "formatting-edges",
             "conversation-resolution-required",
             "retry-dedupe",
+            "check-permission-warning",
+            "check-permission-warning-tight-summary",
+            "check-permission-warning-no-room",
         ):
             self.assertIn(required, names)
 

@@ -269,6 +269,8 @@ merge gate is absent until the permission and capability are restored. The
 diagnostics and compatibility, but no longer participates in approval
 eligibility. Findings, incomplete evidence, unresolved blocking roots,
 ineligible pull requests, and unauthorized writes continue to block approval.
+This exception applies to the default `auto-approve` policy; `blocking` mode
+continues to disable approval by policy when check publication is unavailable.
 
 ## Links
 

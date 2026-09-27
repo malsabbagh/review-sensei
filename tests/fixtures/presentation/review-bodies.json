@@ -761,6 +761,137 @@
           "side": "RIGHT"
         }
       ]
+    },
+    {
+      "name": "check-permission-warning",
+      "description": "An unavailable check capability is visible while eligible auto-approval proceeds.",
+      "policy": "merge-focused",
+      "auto_approve": true,
+      "expected_events": [
+        "COMMENT",
+        "APPROVE"
+      ],
+      "expected_inline": 0,
+      "review": {
+        "summary": "The change is scoped to the pagination helper.",
+        "comments": [],
+        "provider": "fixture",
+        "model": null,
+        "learning_proposals": [],
+        "review_status": "complete",
+        "evidence_policy": "legacy",
+        "coverage": {
+          "schema_version": "1.0",
+          "enumeration_complete": true,
+          "fully_reviewed": true,
+          "files": [
+            {
+              "path": "src/app.py",
+              "outcome": "reviewed"
+            },
+            {
+              "path": "src/util.py",
+              "outcome": "reviewed"
+            }
+          ],
+          "hunks": [],
+          "enumerated_paths": [
+            "src/app.py",
+            "src/util.py"
+          ]
+        }
+      },
+      "summary": "**Warning: ReviewSensei merge gate unavailable.** This run could not publish the required `ReviewSensei` check (`check_permission`). Missing this check does not itself withhold approval: an otherwise eligible review can still be approved under the configured auto-approval policy. Grant the App `Checks: write` and broker `check_publish`, and mark the check required in branch protection before relying on it to gate merges.\n\n## ReviewSensei — No required fixes found\n\nReviewed head: `bbbbbbb`\nCoverage: 2 reviewed, 0 partially-reviewed, 0 excluded-by-policy, 0 unsupported, 0 budget-exhausted. Enumeration complete\n\nThe change is scoped to the pagination helper.\n\n### Next action\nReviewSensei records its decision in the separate approval review.\n\nTo discuss this finding, reply with @sensei followed by your question.",
+      "inline": [],
+      "check_capability": false
+    },
+    {
+      "name": "check-permission-warning-tight-summary",
+      "description": "A concise unavailable-check warning fits when the full notice exceeds the summary budget.",
+      "policy": "merge-focused",
+      "auto_approve": true,
+      "expected_events": [
+        "COMMENT",
+        "APPROVE"
+      ],
+      "expected_inline": 0,
+      "review": {
+        "summary": "The change is scoped to the pagination helper.",
+        "comments": [],
+        "provider": "fixture",
+        "model": null,
+        "learning_proposals": [],
+        "review_status": "complete",
+        "evidence_policy": "legacy",
+        "coverage": {
+          "schema_version": "1.0",
+          "enumeration_complete": true,
+          "fully_reviewed": true,
+          "files": [
+            {
+              "path": "src/app.py",
+              "outcome": "reviewed"
+            },
+            {
+              "path": "src/util.py",
+              "outcome": "reviewed"
+            }
+          ],
+          "hunks": [],
+          "enumerated_paths": [
+            "src/app.py",
+            "src/util.py"
+          ]
+        }
+      },
+      "summary": "**Warning: ReviewSensei merge gate unavailable (`check_permission`).** Auto-approval may proceed when otherwise eligible. Grant `Checks: write` and broker `check_publish`, then require the check in branch protection.\n\n## ReviewSensei — No required fixes found\n\nReviewed head: `bbbbbbb`\nCoverage: 2 reviewed, 0 partially-reviewed, 0 excluded-by-policy, 0 unsupported, 0 budget-exhausted. Enumeration complete\n\nThe change is scoped to the pagination helper.\n\n### Next action\nReviewSensei records its decision in the separate approval review.\n\nTo discuss this finding, reply with @sensei followed by your question.",
+      "inline": [],
+      "check_capability": false,
+      "max_summary_bytes": 650
+    },
+    {
+      "name": "check-permission-warning-no-room",
+      "description": "The warning is omitted when neither full nor concise text fits the summary limit.",
+      "policy": "merge-focused",
+      "auto_approve": true,
+      "expected_events": [
+        "COMMENT",
+        "APPROVE"
+      ],
+      "expected_inline": 0,
+      "review": {
+        "summary": "The change is scoped to the pagination helper.",
+        "comments": [],
+        "provider": "fixture",
+        "model": null,
+        "learning_proposals": [],
+        "review_status": "complete",
+        "evidence_policy": "legacy",
+        "coverage": {
+          "schema_version": "1.0",
+          "enumeration_complete": true,
+          "fully_reviewed": true,
+          "files": [
+            {
+              "path": "src/app.py",
+              "outcome": "reviewed"
+            },
+            {
+              "path": "src/util.py",
+              "outcome": "reviewed"
+            }
+          ],
+          "hunks": [],
+          "enumerated_paths": [
+            "src/app.py",
+            "src/util.py"
+          ]
+        }
+      },
+      "summary": "## ReviewSensei — No required fixes found\n\nReviewed head: `bbbbbbb`\nCoverage: 2 reviewed, 0 partially-reviewed, 0 excluded-by-policy, 0 unsupported, 0 budget-exhausted. Enumeration complete\n\nThe change is scoped to the pagination helper.\n\n### Next action\nReviewSensei records its decision in the separate approval review.\n\nTo discuss this finding, reply with @sensei followed by your question.",
+      "inline": [],
+      "check_capability": false,
+      "max_summary_bytes": 500
     }
   ]
 }
