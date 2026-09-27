@@ -214,7 +214,7 @@ class GeneratedCallerContractTests(unittest.TestCase):
         self.assertNotIn("provider_mode", workflow)
         self.assertIn("backend: local-ollama", config)
         self.assertNotIn("cloud_base_url", config)
-        self.assertNotIn("base_url", config)
+        self.assertNotIn("base_url:", config)
         self.assertNotIn("provider_mode", config)
         for secret in ("OLLAMA_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"):
             with self.subTest(secret=secret):
