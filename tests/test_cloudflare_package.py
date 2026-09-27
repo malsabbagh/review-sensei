@@ -178,7 +178,7 @@ class CloudflarePackageTests(unittest.TestCase):
             '"  # none or diagnostics\\n"',
             '"  artifacts: none\\n"',
             '"# Optional limits and endpoint overrides.\\n"',
-            '"    # Required to send requests to a custom base_url\\n"',
+            '"    # Required to send requests to a custom API root\\n"',
             '"    allow_custom_endpoint: false\\n"',
             '"      # Follow symbols from the diff into trusted files\\n"',
             '"      enabled: false\\n"',
@@ -231,7 +231,7 @@ class CloudflarePackageTests(unittest.TestCase):
             "# Optional limits and endpoint overrides.\n"
             "advanced:\n"
             "  endpoint:\n"
-            "    # Required to send requests to a custom base_url\n"
+            "    # Required to send requests to a custom API root\n"
             "    allow_custom_endpoint: false\n"
             "  context:\n"
             "    symbol_context:\n"

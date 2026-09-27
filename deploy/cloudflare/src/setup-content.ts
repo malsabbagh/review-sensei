@@ -1369,7 +1369,7 @@ export function currentConfigFile(): string {
     "# Optional limits and endpoint overrides.\n" +
     "advanced:\n" +
     "  endpoint:\n" +
-    "    # Required to send requests to a custom base_url\n" +
+    "    # Required to send requests to a custom API root\n" +
     "    allow_custom_endpoint: false\n" +
     "  context:\n" +
     "    symbol_context:\n" +
