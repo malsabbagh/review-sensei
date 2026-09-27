@@ -326,15 +326,59 @@ describe("setup-v4 public boundary", () => {
     );
     expect(workflow).not.toContain("vars.");
     expect(workflow).not.toContain("default: main");
-    // The generated configuration is the minimal operator-owned document:
-    // every behavior field belongs to the operator copy, not to generated
-    // bytes, and the package supplies the defaults.
     expect(files[2].content).toBe(
       "# ReviewSensei setup version: 5\n" +
+        "# Configuration version. Leave this at 1.\n" +
         "schema: 1\n" +
         "\n" +
+        "# Backend and model used for review.\n" +
         "inference:\n" +
-        "  backend: local-ollama\n",
+        "  # local-ollama, cloud-ollama, openrouter, or openai-compatible\n" +
+        "  backend: local-ollama\n" +
+        "  # Model slug for the selected backend\n" +
+        "  model: qwen3.5:4b\n" +
+        "\n" +
+        "# GitHub publication and conversation policy.\n" +
+        "github:\n" +
+        "  # Review eligible pull requests automatically\n" +
+        "  automatic_reviews: true\n" +
+        "  # Publish the validated result to GitHub\n" +
+        "  writes: false\n" +
+        "  # auto-approve, blocking, or advisory\n" +
+        "  reviews: auto-approve\n" +
+        "  # Reply to authorized @sensei mentions\n" +
+        "  mentions: true\n" +
+        "  # disabled, proposals, or pull-requests\n" +
+        "  learning: disabled\n" +
+        "  # none or diagnostics\n" +
+        "  artifacts: none\n" +
+        "\n" +
+        "# Optional limits and endpoint overrides.\n" +
+        "advanced:\n" +
+        "  endpoint:\n" +
+        "    # Required to send requests to a custom API root\n" +
+        "    allow_custom_endpoint: false\n" +
+        "  context:\n" +
+        "    symbol_context:\n" +
+        "      # Follow symbols from the diff into trusted files\n" +
+        "      enabled: false\n" +
+        "      # Maximum files loaded for symbol lookup\n" +
+        "      max_files: 16\n" +
+        "      # Maximum bytes loaded for symbol lookup\n" +
+        "      max_bytes: 131072\n" +
+        "      # Maximum symbol-follow depth\n" +
+        "      max_depth: 1\n" +
+        "  egress:\n" +
+        "    # Permit non-loopback provider traffic\n" +
+        "    allow_data_egress: false\n" +
+        "  large_changes:\n" +
+        "    # Split a large diff into bounded review slices\n" +
+        "    orchestrate: false\n" +
+        "  resources:\n" +
+        "    # Provider request timeout in seconds\n" +
+        "    timeout_seconds: 900\n" +
+        "    # Maximum provider calls for one review\n" +
+        "    max_provider_calls: 8\n",
     );
     expect(files[2].content).not.toContain("auto_approve");
     expect(files[2].content).not.toContain("learning_proposals");
@@ -407,7 +451,7 @@ describe("retired setup configuration import", () => {
   it("shows the default approval policy and the import without the retired file", () => {
     const plain = setupPullRequestBody();
     expect(plain).toContain("github.reviews: auto-approve");
-    expect(plain).toContain("backend choice and nothing else");
+    expect(plain).toContain("lists every packaged default");
     expect(plain).not.toContain("carried these settings");
     const imported = setupPullRequestBody(["inference.backend"]);
     expect(imported).toContain(

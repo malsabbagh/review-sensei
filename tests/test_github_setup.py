@@ -34,6 +34,7 @@ from review_sensei.hosting.github.setup import (
     _provider_parity_workflow,
     _provider_parity_workflow_before_draft_skip,
     _public_workflow_tag_from_job_ref,
+    _released_minimal_v5_config_file,
     _released_runner_switch_v4_workflow,
     _tagged_workflow,
     _v4_with_review_mode_config_file,
@@ -729,7 +730,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
             r for r in transport.requests if r[0] == "create_pull_request"
         )
         body = pull_request[6]
-        self.assertIn("backend choice and nothing else", body)
+        self.assertIn("lists every packaged default", body)
         self.assertNotIn("carried these settings", body)
 
     def test_current_setup_does_not_create_another_pr(self):
@@ -749,6 +750,24 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         self.assertFalse(
             any(r[0] == "create_or_update_branch" for r in transport.requests)
         )
+
+    def test_backend_only_v5_config_is_migrated_to_the_full_default_file(self):
+        plan = SetupPlanBuilder().build("owner/repo")
+        files = {file.path: file.content for file in plan.files}
+        files[CONFIG_PATH] = _released_minimal_v5_config_file()
+        transport = FileTransport(files=files)
+
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(),
+            installation_token="ghs_opaque",
+        )
+
+        self.assertEqual(results[0].status, "created")
+        branch_request = next(
+            r for r in transport.requests if r[0] == "create_or_update_branch"
+        )
+        written = {file.path: file.content for file in branch_request[6]}
+        self.assertEqual(written[CONFIG_PATH], _current_config_file())
 
     def test_stale_v3_setup_with_unexpected_public_workflow_sha_is_migrated(self):
         plan = SetupPlanBuilder(

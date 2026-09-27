@@ -204,7 +204,7 @@ class SetupPullRequestBodyTests(unittest.TestCase):
         )
         plain = _setup_pull_request_body()
         self.assertNotIn("carried these settings", plain)
-        self.assertIn("backend choice and nothing else", plain)
+        self.assertIn("lists every packaged default", plain)
 
     def test_body_bytes_are_shared_with_the_worker_builder(self):
         # The Worker renders the same prose through setupPullRequestBody(), and

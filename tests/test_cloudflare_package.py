@@ -155,10 +155,47 @@ class CloudflarePackageTests(unittest.TestCase):
         # builder emits, so a change to either side breaks this test.
         fragments = (
             "`# ReviewSensei setup version: ${SETUP_VERSION}\\n`",
+            '"# Configuration version. Leave this at 1.\\n"',
             '"schema: 1\\n"',
-            '"\\n"',
+            '"# Backend and model used for review.\\n"',
             '"inference:\\n"',
+            '"  # local-ollama, cloud-ollama, openrouter, or openai-compatible\\n"',
             '"  backend: local-ollama\\n"',
+            '"  # Model slug for the selected backend\\n"',
+            '"  model: qwen3.5:4b\\n"',
+            '"# GitHub publication and conversation policy.\\n"',
+            '"github:\\n"',
+            '"  # Review eligible pull requests automatically\\n"',
+            '"  automatic_reviews: true\\n"',
+            '"  # Publish the validated result to GitHub\\n"',
+            '"  writes: false\\n"',
+            '"  # auto-approve, blocking, or advisory\\n"',
+            '"  reviews: auto-approve\\n"',
+            '"  # Reply to authorized @sensei mentions\\n"',
+            '"  mentions: true\\n"',
+            '"  # disabled, proposals, or pull-requests\\n"',
+            '"  learning: disabled\\n"',
+            '"  # none or diagnostics\\n"',
+            '"  artifacts: none\\n"',
+            '"# Optional limits and endpoint overrides.\\n"',
+            '"    # Required to send requests to a custom API root\\n"',
+            '"    allow_custom_endpoint: false\\n"',
+            '"      # Follow symbols from the diff into trusted files\\n"',
+            '"      enabled: false\\n"',
+            '"      # Maximum files loaded for symbol lookup\\n"',
+            '"      max_files: 16\\n"',
+            '"      # Maximum bytes loaded for symbol lookup\\n"',
+            '"      max_bytes: 131072\\n"',
+            '"      # Maximum symbol-follow depth\\n"',
+            '"      max_depth: 1\\n"',
+            '"    # Permit non-loopback provider traffic\\n"',
+            '"    allow_data_egress: false\\n"',
+            '"    # Split a large diff into bounded review slices\\n"',
+            '"    orchestrate: false\\n"',
+            '"    # Provider request timeout in seconds\\n"',
+            '"    timeout_seconds: 900\\n"',
+            '"    # Maximum provider calls for one review\\n"',
+            '"    max_provider_calls: 8\\n"',
         )
         for fragment in fragments:
             with self.subTest(fragment=fragment):
@@ -166,22 +203,80 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertEqual(
             _current_config_file(),
             "# ReviewSensei setup version: 5\n"
+            "# Configuration version. Leave this at 1.\n"
             "schema: 1\n"
             "\n"
+            "# Backend and model used for review.\n"
             "inference:\n"
-            "  backend: local-ollama\n",
+            "  # local-ollama, cloud-ollama, openrouter, or openai-compatible\n"
+            "  backend: local-ollama\n"
+            "  # Model slug for the selected backend\n"
+            "  model: qwen3.5:4b\n"
+            "\n"
+            "# GitHub publication and conversation policy.\n"
+            "github:\n"
+            "  # Review eligible pull requests automatically\n"
+            "  automatic_reviews: true\n"
+            "  # Publish the validated result to GitHub\n"
+            "  writes: false\n"
+            "  # auto-approve, blocking, or advisory\n"
+            "  reviews: auto-approve\n"
+            "  # Reply to authorized @sensei mentions\n"
+            "  mentions: true\n"
+            "  # disabled, proposals, or pull-requests\n"
+            "  learning: disabled\n"
+            "  # none or diagnostics\n"
+            "  artifacts: none\n"
+            "\n"
+            "# Optional limits and endpoint overrides.\n"
+            "advanced:\n"
+            "  endpoint:\n"
+            "    # Required to send requests to a custom API root\n"
+            "    allow_custom_endpoint: false\n"
+            "  context:\n"
+            "    symbol_context:\n"
+            "      # Follow symbols from the diff into trusted files\n"
+            "      enabled: false\n"
+            "      # Maximum files loaded for symbol lookup\n"
+            "      max_files: 16\n"
+            "      # Maximum bytes loaded for symbol lookup\n"
+            "      max_bytes: 131072\n"
+            "      # Maximum symbol-follow depth\n"
+            "      max_depth: 1\n"
+            "  egress:\n"
+            "    # Permit non-loopback provider traffic\n"
+            "    allow_data_egress: false\n"
+            "  large_changes:\n"
+            "    # Split a large diff into bounded review slices\n"
+            "    orchestrate: false\n"
+            "  resources:\n"
+            "    # Provider request timeout in seconds\n"
+            "    timeout_seconds: 900\n"
+            "    # Maximum provider calls for one review\n"
+            "    max_provider_calls: 8\n",
         )
 
-    def test_current_config_names_no_behavior_switch(self):
+    def test_current_config_lists_packaged_defaults(self):
+        from review_sensei.configuration import parse_configuration_text
         from review_sensei.hosting.github.setup import _current_config_file
 
         content = _current_config_file()
-        self.assertIn("schema: 1", content)
-        self.assertIn("inference:", content)
-        self.assertIn("  backend: local-ollama", content)
-        # The minimal file the App generates names the setup-time backend
-        # choice and nothing else: every behavior field lives in the operator
-        # copy of the file, not in generated bytes.
+        configuration = parse_configuration_text(content, source=".reviewsensei.yml")
+        self.assertEqual(configuration.inference.backend, "local-ollama")
+        self.assertEqual(configuration.inference.model, "qwen3.5:4b")
+        self.assertTrue(configuration.github.automatic_reviews)
+        self.assertFalse(configuration.github.writes)
+        self.assertEqual(configuration.github.reviews, "auto-approve")
+        self.assertTrue(configuration.github.mentions)
+        self.assertEqual(configuration.github.learning, "disabled")
+        self.assertEqual(configuration.github.artifacts, "none")
+        self.assertFalse(configuration.advanced.endpoint.allow_custom_endpoint)
+        self.assertFalse(configuration.advanced.context.symbol_context.enabled)
+        self.assertEqual(configuration.advanced.resources.timeout_seconds, 900)
+        self.assertEqual(configuration.advanced.resources.max_provider_calls, 8)
+        self.assertIn("# Configuration version. Leave this at 1.", content)
+        self.assertIn("# auto-approve, blocking, or advisory", content)
+        self.assertIn("# Maximum provider calls for one review", content)
         for retired in (
             "provider_mode",
             "review_mode",

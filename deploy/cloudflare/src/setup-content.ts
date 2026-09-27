@@ -1320,20 +1320,78 @@ function configFile(version: number, packageVersion?: string): string {
   );
 }
 
-/**
- * Current setup-v5 configuration: minimal and operator-owned.
- *
- * The package defines a default for every other field, so the generated file
- * states the setup-time backend choice and nothing else; the byte equivalence
- * with the Python builder is pinned by test_current_config_matches_ts_builder_bytes.
- */
-export function currentConfigFile(): string {
+/** Released setup-v5 config that named only the backend. */
+export function previousMinimalV5Config(): string {
   return (
     `# ReviewSensei setup version: ${SETUP_VERSION}\n` +
     "schema: 1\n" +
     "\n" +
     "inference:\n" +
     "  backend: local-ollama\n"
+  );
+}
+
+/**
+ * Current setup-v5 configuration with every packaged default.
+ *
+ * Values match the packaged defaults for the local-ollama backend. The byte
+ * equivalence with the Python builder is pinned by
+ * test_current_config_matches_ts_builder_bytes.
+ */
+export function currentConfigFile(): string {
+  return (
+    `# ReviewSensei setup version: ${SETUP_VERSION}\n` +
+    "# Configuration version. Leave this at 1.\n" +
+    "schema: 1\n" +
+    "\n" +
+    "# Backend and model used for review.\n" +
+    "inference:\n" +
+    "  # local-ollama, cloud-ollama, openrouter, or openai-compatible\n" +
+    "  backend: local-ollama\n" +
+    "  # Model slug for the selected backend\n" +
+    "  model: qwen3.5:4b\n" +
+    "\n" +
+    "# GitHub publication and conversation policy.\n" +
+    "github:\n" +
+    "  # Review eligible pull requests automatically\n" +
+    "  automatic_reviews: true\n" +
+    "  # Publish the validated result to GitHub\n" +
+    "  writes: false\n" +
+    "  # auto-approve, blocking, or advisory\n" +
+    "  reviews: auto-approve\n" +
+    "  # Reply to authorized @sensei mentions\n" +
+    "  mentions: true\n" +
+    "  # disabled, proposals, or pull-requests\n" +
+    "  learning: disabled\n" +
+    "  # none or diagnostics\n" +
+    "  artifacts: none\n" +
+    "\n" +
+    "# Optional limits and endpoint overrides.\n" +
+    "advanced:\n" +
+    "  endpoint:\n" +
+    "    # Required to send requests to a custom API root\n" +
+    "    allow_custom_endpoint: false\n" +
+    "  context:\n" +
+    "    symbol_context:\n" +
+    "      # Follow symbols from the diff into trusted files\n" +
+    "      enabled: false\n" +
+    "      # Maximum files loaded for symbol lookup\n" +
+    "      max_files: 16\n" +
+    "      # Maximum bytes loaded for symbol lookup\n" +
+    "      max_bytes: 131072\n" +
+    "      # Maximum symbol-follow depth\n" +
+    "      max_depth: 1\n" +
+    "  egress:\n" +
+    "    # Permit non-loopback provider traffic\n" +
+    "    allow_data_egress: false\n" +
+    "  large_changes:\n" +
+    "    # Split a large diff into bounded review slices\n" +
+    "    orchestrate: false\n" +
+    "  resources:\n" +
+    "    # Provider request timeout in seconds\n" +
+    "    timeout_seconds: 900\n" +
+    "    # Maximum provider calls for one review\n" +
+    "    max_provider_calls: 8\n"
   );
 }
 
@@ -1892,8 +1950,8 @@ export function setupPullRequestBody(
     importedSettings.length > 0
       ? "The generated file states the setup-time backend choice plus the " +
         "settings imported from your retired configuration"
-      : "The generated file states the setup-time backend choice and " +
-        "nothing else";
+      : "The generated file lists every packaged default so you can change " +
+        "any setting";
   let body =
     "This pull request adds or updates the ReviewSensei review workflow " +
     "(setup version 5): a thin caller that follows the operator-managed " +
@@ -1902,9 +1960,8 @@ export function setupPullRequestBody(
     "Configuration lives in .reviewsensei.yml at the repository root of the " +
     "default branch. " +
     generatedSummary +
-    "; every other setting has a package default and the file belongs to " +
-    "you from here on. Setup creates no repository variables and never " +
-    "rewrites the file. " +
+    ", and the file belongs to you from here on. Setup creates no " +
+    "repository variables and never rewrites the file. " +
     "Approval policy: the package default is github.reviews: auto-approve, " +
     "so ReviewSensei approves an eligible exact head as part of its normal " +
     "pipeline. Set github.reviews: blocking to publish and enforce without " +
