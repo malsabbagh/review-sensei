@@ -169,11 +169,13 @@ class RetiredVariableCleanupTests(unittest.TestCase):
             with self.subTest(credential=credential):
                 self.assertIn(credential, section)
 
-    def test_documented_workflow_still_reads_only_the_supported_overrides(self):
+    def test_documented_workflow_reads_only_supported_overrides_and_runner_switch(self):
         workflow = RUNNER.read_text(encoding="utf-8")
         self.assertEqual(
             set(VARIABLE_REFERENCE.findall(workflow)),
-            set(SUPPORTED_OVERRIDES) | _reported_variables(),
+            set(SUPPORTED_OVERRIDES)
+            | _reported_variables()
+            | {"ENABLE_UBICLOUD_HOSTED"},
         )
 
 

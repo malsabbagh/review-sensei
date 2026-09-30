@@ -57,10 +57,13 @@ def _reusable_workflow() -> str:
 class WorkflowValidationTests(unittest.TestCase):
     def test_linux_runner_switch_preserves_local_ollama_requirement(self):
         workflow = _reusable_workflow()
-        jobs = dict(re.findall(
-            r"^  ([a-z-]+):\n(.*?)(?=^  [a-z-]+:|\Z)", workflow,
-            re.M | re.S,
-        ))
+        jobs = dict(
+            re.findall(
+                r"^  ([a-z-]+):\n(.*?)(?=^  [a-z-]+:|\Z)",
+                workflow,
+                re.M | re.S,
+            )
+        )
         expression = (
             "${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && "
             "'ubicloud-standard-2' || 'ubuntu-latest' }}"

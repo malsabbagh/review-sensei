@@ -13,6 +13,11 @@ from review_sensei.errors import ReviewInputError
 from review_sensei.hosted import hosted_plan_outputs, plan_hosted_execution
 from review_sensei.hosting.github.setup import _tagged_workflow
 
+_UBICLOUD_RUNNER = (
+    "${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && "
+    "'ubicloud-standard-2' || 'ubuntu-latest' }}"
+)
+
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "check_action_pins.py"
 _SPEC = importlib.util.spec_from_file_location("check_action_pins", _SCRIPT)
 assert _SPEC is not None and _SPEC.loader is not None
@@ -701,7 +706,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(text.count("Verify mention reply completed"), 2)
         self.assertEqual(text.count("always() && inputs.operation == 'reply' &&"), 2)
         self.assertEqual(text.count("steps.reply.outcome != 'success'"), 2)
-        self.assertEqual(text.count("runs-on: ubuntu-latest"), 4)
+        self.assertEqual(text.count("runs-on: " + _UBICLOUD_RUNNER), 4)
         self.assertEqual(text.count("runs-on: [self-hosted, linux, x64, ollama]"), 1)
 
     def test_reusable_workflow_has_no_profile_or_custom_url_surface(self):
@@ -1213,15 +1218,15 @@ class ActionPinPolicyTests(unittest.TestCase):
 
     def test_provider_jobs_run_the_planned_runner_kind(self):
         # The plan's runner requirement selects the job, and only one provider
-        # job can run for one plan. No input and no repository variable picks
-        # the runner: a repository cannot promote its own pull request onto the
-        # hosted path or pin an unapproved backend.
+        # job can run for one plan. The infrastructure variable selects only the
+        # compatible hosted runner label; it cannot select a backend or move
+        # a local plan onto the hosted path.
         workflow_text = _reusable_workflow_text()
         hosted = _job_section(workflow_text, "hosted")
         local = _job_section(workflow_text, "local")
         self.assertIn("needs.bootstrap.outputs.runner_kind == 'hosted'", hosted)
         self.assertIn("needs.bootstrap.outputs.runner_kind == 'local'", local)
-        self.assertIn("runs-on: ubuntu-latest", hosted)
+        self.assertIn("runs-on: " + _UBICLOUD_RUNNER, hosted)
         self.assertIn("runs-on: [self-hosted, linux, x64, ollama]", local)
         self.assertNotIn("inputs.provider_mode", workflow_text)
         self.assertNotIn("inputs.provider", workflow_text)
@@ -1696,7 +1701,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         self.assertIn('chmod u=rwx,go=rx "${payloads[0]}"', text)
 
-    def test_active_workflow_jobs_use_recognized_github_hosted_runners(self):
+    def test_active_workflow_jobs_use_recognized_runners(self):
         workflow_root = Path(__file__).resolve().parents[1] / ".github" / "workflows"
         workflow_paths = sorted(workflow_root.glob("*.yml"))
         github_hosted_runs_on = (
@@ -1723,11 +1728,9 @@ class ActionPinPolicyTests(unittest.TestCase):
                     continue
                 self.assertTrue(runs_on_lines)
                 for line in runs_on_lines:
-                    self.assertNotIn("ENABLE_UBICLOUD_HOSTED", line)
-                    self.assertNotIn("ubicloud-standard-2", line)
                     if workflow.name == "review-sensei-run.yml":
                         self.assertTrue(
-                            line == "runs-on: ubuntu-latest"
+                            line == "runs-on: " + _UBICLOUD_RUNNER
                             or ollama_self_hosted.match(line),
                             msg=f"{workflow.name} has unrecognized runner: {line}",
                         )
