@@ -55,6 +55,22 @@ def _reusable_workflow() -> str:
 
 
 class WorkflowValidationTests(unittest.TestCase):
+    def test_linux_runner_switch_preserves_local_ollama_requirement(self):
+        workflow = _reusable_workflow()
+        jobs = dict(re.findall(
+            r"^  ([a-z-]+):\n(.*?)(?=^  [a-z-]+:|\Z)", workflow,
+            re.M | re.S,
+        ))
+        expression = (
+            "${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && "
+            "'ubicloud-standard-2' || 'ubuntu-latest' }}"
+        )
+        for name in ("bootstrap", "authoritative-preflight", "command", "hosted"):
+            self.assertIn("runs-on: " + expression, jobs[name])
+        self.assertIn("runs-on: [self-hosted, linux, x64, ollama]", jobs["local"])
+        self.assertNotIn("ENABLE_UBICLOUD_HOSTED", jobs["local"])
+        self.assertEqual(workflow.count("vars.ENABLE_UBICLOUD_HOSTED"), 4)
+
     def test_reusable_workflow_declares_only_invocation_inputs(self):
         from review_sensei.configuration import (
             RETIRED_BEHAVIOR_ENVIRONMENT_SETTINGS,

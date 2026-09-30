@@ -18,7 +18,10 @@ name: ReviewSensei reusable runner
 #    model, endpoint, credential reference, and github policy. Backend
 #    defaults, classification, count arithmetic, markdown assembly, and
 #    approval eligibility are never restated here.
-#  * Only two optional Actions variables exist: REVIEWSENSEI_PROVIDER and
+#  * ENABLE_UBICLOUD_HOSTED selects compatible Linux runners using the caller
+#    repository variables. False/unset uses ubuntu-latest. Local Ollama still
+#    requires its labelled self-hosted runner. This does not change policy.
+#  * Two optional inference variables exist: REVIEWSENSEI_PROVIDER and
 #    REVIEWSENSEI_MODEL. They are mapped into the package resolver exactly
 #    once, in the bootstrap plan step, and nowhere else.
 on:
@@ -124,7 +127,7 @@ jobs:
     # so they are not failed by later eligibility checks; ready_for_review and
     # non-pull_request operations continue.
     if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
     # Read-only. The bootstrap reads the trusted policy commit, installs the
     # exact released package, and reports the plan; it holds no write scope and
     # never materializes a provider credential.
@@ -426,7 +429,7 @@ jobs:
       pull_request_title_b64: ${{ steps.fetch-pr.outputs.pull_request_title_b64 }}
       base_sha: ${{ steps.fetch-pr.outputs.base_sha }}
       pull_request_number: ${{ steps.fetch-pr.outputs.pull_request_number }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
     permissions:
       contents: read
       pull-requests: read
@@ -549,7 +552,7 @@ jobs:
     concurrency:
       group: reviewsensei-command-${{ github.run_id }}
       cancel-in-progress: false
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
     # The session-comment mutation is authorized by the OIDC broker's
     # `review_session` capability (pull_requests: write); GITHUB_TOKEN keeps no
     # write scope, matching ADR 0022/0050.
@@ -681,7 +684,7 @@ jobs:
       # reviews; event PR metadata is only a host-provided fallback.
       group: reviewsensei-provider-${{ inputs.operation == 'review' && 'review' || 'reply' }}-${{ github.repository }}-${{ inputs.operation == 'review' && (needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id) || github.run_id }}
       cancel-in-progress: ${{ inputs.operation == 'review' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
     permissions:
       contents: read
       pull-requests: read

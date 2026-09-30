@@ -630,6 +630,14 @@ policy commit. Every other policy decision is a field of `.reviewsensei.yml`:
 requests no Variables permission and never creates the customer-owned
 `OLLAMA_API_KEY` secret.
 
+Compatible Linux jobs use `ubicloud-standard-2` when the caller repository's
+`ENABLE_UBICLOUD_HOSTED` Actions variable equals `true`; false or unset uses
+`ubuntu-latest`. The caller resolver and uninstall workflow must use the same
+conditional expression. The producer repository's variable does not select a
+consumer's runner. Reuse an existing authorized Ubicloud integration; this
+setting does not install the App or provide capacity. Local Ollama retains
+`[self-hosted, linux, x64, ollama]` and its model prerequisite.
+
 When explicitly enabled, same-repository pull requests can run automatic review
 with either provider mode: cloud on a GitHub-hosted runner or local Ollama on
 the labelled self-hosted runner. ReviewSensei checks out only trusted base
