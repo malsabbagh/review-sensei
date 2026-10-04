@@ -2,12 +2,24 @@
 
 ## Unreleased
 
+## 0.6.12 - 2026-10-04
+
 - Rank optional document context against the actual changed paths and budget it
   across active lenses, so large architecture/ADR catalogs no longer fail solely
   because they discover more than 64 documents. Preserve required and explicit
   files in full. Oversized optional documents can use bounded verbatim excerpts
   with source digests and line ranges; omissions and loss are visible in prompt
   metadata, stderr, and an optional `--context-selection-output` inventory.
+
+- Accept GitHub's canonical `checks` permission when validating an exactly
+  scoped `check_publish` token (#205), fixing rejection of valid `Checks: write`
+  grants while retaining exact permission validation. Missing, downgraded,
+  unrequested, and extra permission grants still fail. This release does not
+  redeploy the Worker.
+
+- The Python and npm package versions advance to `0.6.12`. Promotion of
+  the movable `v5` workflow channel is a separate step after both registries
+  are verified; preparing this release does not move that tag.
 
 ## 0.6.11 - 2026-09-27
 
