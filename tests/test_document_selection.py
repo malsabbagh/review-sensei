@@ -39,7 +39,7 @@ class DocumentSelectionTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def write(self, path, content):
         target = self.root / path
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        target.write_bytes(content.encode("utf-8"))
 
     def category(self, id="architecture", sources=None, applies=("**",)):
         return ReviewCategory(
@@ -199,6 +199,30 @@ class DocumentSelectionTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
         with patch("review_sensei.document_context._extract", return_value=None):
             self.assertEqual(self.select().lens_contexts[0].documents, lens.documents)
 
+    def test_crlf_summary_preserves_source_bytes_and_line_provenance(self):
+        content = (
+            "# Storage\r\n"
+            + "Unrelated detail.\r\n" * 9000
+            + "Payment rule: payments must remain idempotent.\r\nLast line.\r\n"
+        )
+        self.write("docs/payments.md", content)
+        lens = self.select().lens_contexts[0]
+        doc = lens.documents[0]
+        decision = lens.document_selection.decisions[0]
+        self.assertEqual(decision.status, "summarized")
+        self.assertEqual(decision.source_bytes, len(content.encode("utf-8")))
+        self.assertEqual(
+            decision.source_sha256, hashlib.sha256(content.encode("utf-8")).hexdigest()
+        )
+        self.assertEqual(
+            doc.content,
+            "\n".join(
+                "".join(content.splitlines(keepends=True)[start - 1 : end])
+                for start, end in decision.line_ranges
+            ),
+        )
+        self.assertIn("idempotent.\r\n", doc.content)
+
     def test_aggregate_bytes_extract_only_optional_documents(self):
         self.write("AGENTS.md", "Unabridged invariant.\n" * 1000)
         for index in range(6):
@@ -220,7 +244,7 @@ class DocumentSelectionTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
         )
         self.assertEqual(
             next(doc.content for doc in lens.documents if doc.path == "AGENTS.md"),
-            (self.root / "AGENTS.md").read_text(),
+            (self.root / "AGENTS.md").read_bytes().decode("utf-8"),
         )
         self.assertGreater(lens.to_prompt_dict()["document_selection"]["summarized"], 0)
 
