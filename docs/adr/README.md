@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0058](0058-budgeted-document-context.md) | Proposed | Rank and budget supplemental documents across active lenses | Pending triage | Full mandatory guidance, deterministic verbatim excerpts, visible omissions |
 | [0001](0001-provider-neutral-review-engine.md) | Accepted | Keep review behavior behind a provider-neutral service and protocol | Initial architecture | GitHub and model transports remain adapters |
 | [0002](0002-repository-local-review-learnings.md) | Accepted | Store approved learnings in the reviewed repository | #1 | Only target/base content is trusted |
 | [0003](0003-review-concurrency-policy.md) | Accepted | Expose deterministic concurrency policy for host enforcement | Initial architecture, #27 | Amended 2026-08-09, 2026-09-16 |
