@@ -4,7 +4,7 @@
 - Date: 2026-10-04
 - Decision owner/reviewers: ReviewSensei maintainers
 - Linked GitHub issue: Pending maintainer triage of the requested document-selection improvement
-- Linked PR: Pending local candidate review
+- Linked PR: [#204](https://github.com/malsabbagh/review-sensei/pull/204)
 
 ## Context
 
