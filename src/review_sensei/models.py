@@ -437,6 +437,7 @@ class ReviewLensContext:
     category_id: str
     learnings: tuple[LearningEntry, ...] = ()
     documents: tuple[ReviewDocument, ...] = ()
+    document_selection: object | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.category_id, str) or not _LEARNING_ID.fullmatch(
@@ -459,13 +460,26 @@ class ReviewLensContext:
             raise ReviewInputError(
                 "lens context documents must be ReviewDocument values"
             )
+        if self.document_selection is not None:
+            from .document_context import DocumentSelectionReport
+
+            if not isinstance(self.document_selection, DocumentSelectionReport):
+                raise ReviewInputError("lens document selection report is invalid")
+            self.document_selection.validate_documents(self.documents)
 
     def to_prompt_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "category_id": self.category_id,
             "learnings": [learning.to_prompt_dict() for learning in self.learnings],
             "documents": [document.to_prompt_dict() for document in self.documents],
         }
+        if self.document_selection is not None:
+            from .document_context import DocumentSelectionReport
+
+            result["document_selection"] = cast(
+                DocumentSelectionReport, self.document_selection
+            ).to_prompt_dict()
+        return result
 
 
 @dataclass(frozen=True)

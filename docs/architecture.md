@@ -358,6 +358,27 @@ not implicitly use the current directory. The packaged architecture lens opts
 into conventional architecture sources; other lenses receive no document
 context unless configured.
 
+Document selection resolves the active lenses together, deduplicates paths, and
+keeps the existing global limits of 64 documents, 128 KiB per supplied document,
+and 512 KiB of unique supplied content. Present explicit-file sources, all
+required-source matches, and applicable `AGENTS.md` within declared sources are
+reserved in full. Mandatory overflow fails before provider invocation. Optional
+directory documents are ranked by references to each lens's changed paths and
+overlap with changed file stems in document paths, headings, and text; canonical
+paths break ties. Fitting foundational documents remain eligible even without
+lexical matches. No implicit repository scan or category override is required.
+
+Under byte pressure, optional documents may become bounded **verbatim line
+excerpts**, with complete-source and payload digests, original line ranges,
+method/version, and explicit loss warnings. This is extractive summarization,
+with zero additional provider calls; it cannot establish that omitted sections
+contain no requirements. Discovery, inspection, and extraction have separate
+bounds. Selection metadata belongs to the lens prompt and cache identity, and
+loss counts appear on stderr. `--context-selection-output PATH` writes the full
+bounded path/provenance inventory without document text. These counts describe
+supplemental context, independently of source-review coverage and approval.
+See proposed [ADR 0058](adr/0058-budgeted-document-context.md).
+
 Symbol-aware source selection is a separate opt-in policy
 (`SymbolAwareContextPolicy`, `--enable-symbol-context`). Disabled by default,
 it never expands trusted context. When enabled, `SymbolAwareContextSelector`

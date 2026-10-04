@@ -1047,6 +1047,11 @@ def _parser() -> argparse.ArgumentParser:
         help="Allowed repository-relative path pattern for symbol-aware context",
     )
     parser.add_argument(
+        "--context-selection-output",
+        type=Path,
+        help="Write document selection inventory/provenance JSON (no document contents)",
+    )
+    parser.add_argument(
         "--symbol-context-max-files",
         type=int,
         default=16,
@@ -3447,6 +3452,49 @@ def main(argv: list[str] | None = None) -> int:
             snapshot=snapshot,
             changed_lines=analysis.changed_lines,
         )
+        from .document_context import DocumentSelectionReport
+
+        document_reports = []
+        for lens in context_selection.lens_contexts:
+            report = lens.document_selection
+            if isinstance(report, DocumentSelectionReport):
+                metadata = report.to_prompt_dict()
+                document_reports.append(
+                    {
+                        "category_id": lens.category_id,
+                        **metadata,
+                        "inventory": [item.to_dict() for item in report.decisions],
+                    }
+                )
+                if metadata["omitted"] or metadata["summarized"]:
+                    print(
+                        "review-sensei: document-context "
+                        + json.dumps(
+                            {
+                                "category_id": lens.category_id,
+                                **{
+                                    key: metadata[key]
+                                    for key in (
+                                        "policy",
+                                        "discovered",
+                                        "selected",
+                                        "summarized",
+                                        "omitted",
+                                        "inventory_sha256",
+                                        "omission_reasons",
+                                    )
+                                },
+                            },
+                            ensure_ascii=True,
+                            sort_keys=True,
+                        ),
+                        file=sys.stderr,
+                    )
+        if args.context_selection_output is not None:
+            args.context_selection_output.write_text(
+                json.dumps(document_reports, ensure_ascii=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
 
         effective_model = provider_settings.model or provider.model or args.model
         request = ReviewRequest(

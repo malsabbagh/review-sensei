@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import threading
 from collections import OrderedDict, deque
 from dataclasses import dataclass
@@ -30,6 +31,8 @@ from .validation import validate_bounded_text, validate_repository_path
 MAX_CONTEXT_FILES = MAX_REVIEW_CONTEXT_FILES
 MAX_CONTEXT_FILE_BYTES = MAX_REVIEW_DOCUMENT_BYTES
 MAX_CONTEXT_TOTAL_BYTES = MAX_REVIEW_CONTEXT_TOTAL_BYTES
+MAX_DOCUMENT_CANDIDATES = 4096
+MAX_DOCUMENT_DISCOVERY_ENTRIES = 16384
 MAX_ALLOWED_CONTEXT_PATTERNS = 64
 MAX_CACHE_METADATA_ITEMS = MAX_CONTEXT_FILES * 8
 MAX_CACHE_METADATA_ITEM_BYTES = 512
@@ -192,6 +195,16 @@ def _is_secret_like(path: Path) -> bool:
     )
 
 
+def _may_contain_document_match(path: str, patterns: Sequence[str]) -> bool:
+    """Whether a directory can contain a match for a segment-wise glob."""
+    for pattern in patterns:
+        parts = PurePosixPath(pattern).parts
+        stop = len(parts) + 1 if parts[-1] == "**" else len(parts)
+        if any(_matches(path, "/".join(parts[:index])) for index in range(1, stop)):
+            return True
+    return False
+
+
 def _is_supported_text_path(path: Path) -> bool:
     if path.suffix:
         return path.suffix.lower() in _ALLOWED_SUFFIXES
@@ -268,7 +281,7 @@ def _read_file_under_root(root: Path, path: Path, *, max_bytes: int) -> bytes | 
 
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     directory_flag = getattr(os, "O_DIRECTORY", 0)
-    file_flags = os.O_RDONLY | nofollow
+    file_flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0)
     # Every path component is opened without following symlinks.
     directory_flags = os.O_RDONLY | directory_flag | nofollow
     try:
@@ -289,8 +302,7 @@ def _read_file_under_root(root: Path, path: Path, *, max_bytes: int) -> bytes | 
             if not _opened_path_within_root(root, next_fd):
                 os.close(next_fd)
                 return None
-            if current_fd != root_fd:
-                intermediate_fds.append(current_fd)
+            intermediate_fds.append(next_fd)
             current_fd = next_fd
         try:
             file_fd = os.open(parts[-1], file_flags, dir_fd=current_fd)
@@ -299,7 +311,8 @@ def _read_file_under_root(root: Path, path: Path, *, max_bytes: int) -> bytes | 
         if not _opened_path_within_root(root, file_fd):
             return None
         try:
-            if os.fstat(file_fd).st_size > max_bytes:
+            metadata = os.fstat(file_fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > max_bytes:
                 return None
             with os.fdopen(file_fd, "rb") as stream:
                 file_fd = None
@@ -339,13 +352,69 @@ class RepositoryContextStore:
         self,
         sources: Iterable[ContextDocumentSource],
     ) -> tuple[ReviewDocument, ...]:
+        selected = self.discover_sources(sources)
+        if len(selected) > MAX_CONTEXT_FILES:
+            raise ContextLoadError("review context contains too many documents")
+        documents: list[ReviewDocument] = []
+        total_bytes = 0
+        for relative, (path, _pinned) in sorted(selected.items()):
+            data = _read_file_under_root(
+                self.root, path, max_bytes=MAX_CONTEXT_FILE_BYTES
+            )
+            if data is None:
+                raise ContextLoadError(
+                    "context document is unreadable or exceeds the per-file size limit"
+                )
+            total_bytes += len(data)
+            if total_bytes > MAX_CONTEXT_TOTAL_BYTES:
+                raise ContextLoadError("review context exceeds the total size limit")
+            try:
+                content = data.decode("utf-8")
+            except UnicodeError as exc:
+                raise ContextLoadError(
+                    "context document must be readable UTF-8 text"
+                ) from exc
+            if not content.strip():
+                raise ContextLoadError("context document must not be empty")
+            documents.append(
+                ReviewDocument(
+                    path=relative,
+                    content=content,
+                    sha256=hashlib.sha256(data).hexdigest(),
+                )
+            )
+        return tuple(documents)
+
+    def discover_sources(
+        self, sources: Iterable[ContextDocumentSource]
+    ) -> dict[str, tuple[Path, bool]]:
+        """Discover declared sources; the bool pins required/explicit file inputs.
+
+        Exhaustion fails before selection, never returning a traversal prefix.
+        """
         raw_sources = tuple(sources)
         if any(not isinstance(source, ContextDocumentSource) for source in raw_sources):
             raise ContextLoadError(
                 "context sources must contain only ContextDocumentSource values"
             )
+        # Merge duplicate declarations before filesystem work, retaining the
+        # strongest required flag for the same source specification.
+        sources_by_spec: dict[
+            tuple[str, tuple[str, ...], tuple[str, ...]], ContextDocumentSource
+        ] = {}
+        for source in raw_sources:
+            spec = (source.path, source.include, source.exclude)
+            previous = sources_by_spec.get(spec)
+            sources_by_spec[spec] = ContextDocumentSource(
+                source.path,
+                source.include,
+                source.exclude,
+                source.required or bool(previous and previous.required),
+            )
+        raw_sources = tuple(sources_by_spec.values())
 
-        selected: dict[str, Path] = {}
+        selected: dict[str, tuple[Path, bool]] = {}
+        visited = 0
         for source in raw_sources:
             unresolved = self.root / source.path
             if _has_symlink_component(self.root, unresolved):
@@ -367,22 +436,72 @@ class RepositoryContextStore:
             if source_path.is_file():
                 candidates = [source_path]
             elif source_path.is_dir():
-                candidates = sorted(
-                    {
-                        candidate
-                        for pattern in source.include
-                        for candidate in source_path.glob(pattern)
-                        if candidate.is_file()
-                    }
-                )
-                candidates = [
-                    candidate
-                    for candidate in candidates
-                    if not any(
-                        _matches(candidate.relative_to(source_path).as_posix(), pattern)
-                        for pattern in source.exclude
-                    )
-                ]
+                candidates = []
+                directories = [source_path]
+                while directories:
+                    directory = directories.pop()
+                    if _has_symlink_component(self.root, directory):
+                        raise ContextLoadError("context documents must not be symlinks")
+                    try:
+                        # Incremental discovery enforces the entry budget before
+                        # materializing a huge directory or an arbitrary prefix.
+                        with os.scandir(directory) as entries:
+                            for entry in entries:
+                                visited += 1
+                                if visited > MAX_DOCUMENT_DISCOVERY_ENTRIES:
+                                    raise ContextLoadError(
+                                        "context discovery entry budget exhausted; narrow document sources"
+                                    )
+                                candidate = Path(entry.path)
+                                relative_name = candidate.relative_to(
+                                    source_path
+                                ).as_posix()
+                                subtree_excluded = any(
+                                    _matches(
+                                        relative_name,
+                                        pattern[:-3]
+                                        if pattern.endswith("/**")
+                                        else pattern,
+                                    )
+                                    for pattern in source.exclude
+                                    if pattern == "**" or pattern.endswith("/**")
+                                )
+                                can_descend = (
+                                    not subtree_excluded
+                                    and _may_contain_document_match(
+                                        relative_name, source.include
+                                    )
+                                )
+                                file_matches = any(
+                                    _matches(relative_name, pattern)
+                                    for pattern in source.include
+                                ) and not any(
+                                    _matches(relative_name, pattern)
+                                    for pattern in source.exclude
+                                )
+                                if entry.is_symlink():
+                                    if can_descend or file_matches:
+                                        raise ContextLoadError(
+                                            "context documents must not be symlinks"
+                                        )
+                                    continue
+                                if entry.is_dir(follow_symlinks=False):
+                                    if can_descend:
+                                        directories.append(candidate)
+                                elif file_matches:
+                                    if not entry.is_file(follow_symlinks=False):
+                                        raise ContextLoadError(
+                                            "context document must be a regular file"
+                                        )
+                                    candidates.append(candidate)
+                                    if len(candidates) > MAX_DOCUMENT_CANDIDATES:
+                                        raise ContextLoadError(
+                                            "context discovery candidate budget exhausted; narrow document sources"
+                                        )
+                    except OSError as exc:
+                        raise ContextLoadError(
+                            "context directory is not readable"
+                        ) from exc
                 if source.required and not candidates:
                     raise ContextLoadError(
                         "required context source did not match any files"
@@ -408,40 +527,17 @@ class RepositoryContextStore:
                     raise ContextLoadError(
                         "context document must use a supported text format"
                     )
-                selected[relative] = resolved
-
-        if len(selected) > MAX_CONTEXT_FILES:
-            raise ContextLoadError("review context contains too many documents")
-
-        documents: list[ReviewDocument] = []
-        total_bytes = 0
-        for relative, path in sorted(selected.items()):
-            try:
-                size = path.stat().st_size
-            except OSError as exc:
-                raise ContextLoadError(
-                    "context document metadata is not readable"
-                ) from exc
-            if size > MAX_CONTEXT_FILE_BYTES:
-                raise ContextLoadError(
-                    "context document exceeds the per-file size limit"
+                pinned = source.required or source_path.is_file()
+                previous_document = selected.get(relative)
+                selected[relative] = (
+                    resolved,
+                    pinned or bool(previous_document and previous_document[1]),
                 )
-            total_bytes += size
-            if total_bytes > MAX_CONTEXT_TOTAL_BYTES:
-                raise ContextLoadError("review context exceeds the total size limit")
-            try:
-                content = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError) as exc:
-                raise ContextLoadError(
-                    "context document must be readable UTF-8 text"
-                ) from exc
-            if not content.strip():
-                raise ContextLoadError("context document must not be empty")
-            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            documents.append(
-                ReviewDocument(path=relative, content=content, sha256=digest)
-            )
-        return tuple(documents)
+                if len(selected) > MAX_DOCUMENT_CANDIDATES:
+                    raise ContextLoadError(
+                        "context discovery candidate budget exhausted; narrow document sources"
+                    )
+        return selected
 
 
 @dataclass(frozen=True)
@@ -2147,6 +2243,9 @@ def context_configuration_digest(lens_contexts: Sequence[ReviewLensContext]) -> 
                     for document in context.documents
                 ],
                 "learnings": [learning.id for learning in context.learnings],
+                "document_selection": context.to_prompt_dict().get(
+                    "document_selection"
+                ),
             }
             for context in lens_contexts
         ]
@@ -2337,10 +2436,28 @@ def build_review_context_selection(
         raise ContextLoadError("source context snapshot is invalid")
 
     paths = tuple(path for path in changed_paths if isinstance(path, str) and path)
+    paths = tuple(sorted(set(paths)))
     relevant_learnings = LearningStore(learnings).for_paths(paths)
     active_ids: list[str] = []
     lens_contexts: list[ReviewLensContext] = []
-    unique_documents: dict[str, ReviewDocument] = {}
+    from .document_context import select_documents
+
+    applicable = tuple(
+        category
+        for category in category_values
+        if any(
+            _matches(path, pattern) for path in paths for pattern in category.applies_to
+        )
+    )
+    document_selections = (
+        select_documents(
+            context_store,
+            tuple(category for category in applicable if category.uses_context),
+            paths,
+        )
+        if context_store is not None
+        else {}
+    )
     for category in category_values:
         if not any(
             _matches(path, pattern) for path in paths for pattern in category.applies_to
@@ -2368,28 +2485,15 @@ def build_review_context_selection(
                 )
             documents: tuple[ReviewDocument, ...] = ()
         else:
-            documents = context_store.for_sources(category.document_sources)
-        for document in documents:
-            existing = unique_documents.setdefault(document.path, document)
-            if existing != document:
-                raise ContextLoadError(
-                    "a context document path resolved to inconsistent content"
-                )
-        if len(unique_documents) > MAX_CONTEXT_FILES:
-            raise ContextLoadError("review context contains too many documents")
-        if (
-            sum(
-                len(document.content.encode("utf-8"))
-                for document in unique_documents.values()
-            )
-            > MAX_CONTEXT_TOTAL_BYTES
-        ):
-            raise ContextLoadError("review context exceeds the total size limit")
+            documents = document_selections[category.id][0]
         lens_contexts.append(
             ReviewLensContext(
                 category_id=category.id,
                 learnings=selected_learnings,
                 documents=documents,
+                document_selection=document_selections[category.id][1]
+                if category.id in document_selections
+                else None,
             )
         )
 

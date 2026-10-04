@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Rank optional document context against the actual changed paths and budget it
+  across active lenses, so large architecture/ADR catalogs no longer fail solely
+  because they discover more than 64 documents. Preserve required and explicit
+  files in full. Oversized optional documents can use bounded verbatim excerpts
+  with source digests and line ranges; omissions and loss are visible in prompt
+  metadata, stderr, and an optional `--context-selection-output` inventory.
+
 ## 0.6.11 - 2026-09-27
 
 - Submit `REQUEST_CHANGES` when automatic approval finds required fixes
