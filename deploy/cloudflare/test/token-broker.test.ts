@@ -5,6 +5,7 @@ const oidc = vi.hoisted(() => ({ verify: vi.fn() }));
 vi.mock("../src/oidc", () => ({ verifyOidcAssertion: oidc.verify }));
 
 import type { WorkerEnv } from "../src/env";
+import { GitHubApi } from "../src/github-api";
 import { TokenBroker } from "../src/token-broker";
 import commandParityCases from "../../../tests/fixtures/maintainer-command-parity.json";
 
@@ -109,7 +110,7 @@ function harness(
     capabilityToken: vi.fn(async () => "ghs_scoped_token"),
   };
   const broker = new TokenBroker(env, github as never);
-  return { broker, github, ledgerFetch };
+  return { broker, github, ledgerFetch, env };
 }
 
 beforeEach(() => {
@@ -118,6 +119,75 @@ beforeEach(() => {
 });
 
 describe("token broker authorization", () => {
+  it("exchanges check_publish through the real GitHub adapter with exact Checks write scope", async () => {
+    const { env, ledgerFetch } = harness();
+    const github = new GitHubApi({
+      ...env,
+      GITHUB_APP_ID: "12345",
+      GITHUB_APP_PRIVATE_KEY: "unused-by-test",
+      GITHUB_API_URL: "https://api.example.test",
+    });
+    vi.spyOn(github as never, "appJwt" as never).mockResolvedValue("app-jwt");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      let data: unknown;
+      if (path === `/repos/malsabbagh/review-sensei/git/ref/tags/${TAG}`) {
+        data = { object: { type: "commit", sha: SHA } };
+      } else if (path === "/repos/acme/widgets/installation") {
+        data = { id: 2468 };
+      } else if (path === "/repos/acme/widgets") {
+        data = { id: 987654321, fork: false };
+      } else if (path === "/app/installations/2468/access_tokens") {
+        const body = JSON.parse(String(init?.body));
+        const metadataOnly = body.permissions.metadata === "read";
+        data = {
+          token: metadataOnly ? "ghs_metadata_token" : "ghs_check_token",
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          permissions: metadataOnly
+            ? { metadata: "read" }
+            : { checks: "write", metadata: "read" },
+        };
+      } else {
+        throw new Error(`unexpected_test_request:${path}`);
+      }
+      return new Response(JSON.stringify(data), {
+        status: init?.method === "POST" ? 201 : 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    try {
+      const broker = new TokenBroker(env, github);
+      await expect(broker.exchange({
+        oidc_token: "signed-jwt",
+        capability: "check_publish",
+      })).resolves.toEqual({ token: "ghs_check_token", capability: "check_publish" });
+
+      const tokenRequests = fetchMock.mock.calls.filter(
+        ([input]) => new URL(String(input)).pathname === "/app/installations/2468/access_tokens",
+      );
+      expect(tokenRequests.map(([, init]) => JSON.parse(String(init?.body)))).toEqual([
+        { repositories: ["widgets"], permissions: { metadata: "read" } },
+        { repositories: ["widgets"], permissions: { checks: "write" } },
+      ]);
+      const metadataRequest = fetchMock.mock.calls.find(
+        ([input]) => new URL(String(input)).pathname === "/repos/acme/widgets",
+      );
+      expect(new Headers(metadataRequest?.[1]?.headers).get("authorization")).toBe(
+        "Bearer ghs_metadata_token",
+      );
+      expect(oidc.verify).toHaveBeenCalledWith("signed-jwt", {
+        audience: "sts.reviewsensei.dev",
+        issuer: "https://token.actions.githubusercontent.com",
+      });
+      expect(ledgerFetch.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).action))
+        .toEqual(["admit", "claim"]);
+      expect(fetchMock).toHaveBeenCalledTimes(5);
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
   it.each([
     [undefined, "review_publish", { pull_requests: "write" }, true],
     ["review_publish", "review_publish", { pull_requests: "write" }, true],

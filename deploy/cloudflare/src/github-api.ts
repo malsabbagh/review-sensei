@@ -14,15 +14,13 @@ const MAX_PUBLIC_REF_BYTES = 64 * 1024;
 // broker policy documents that GitHub may add the grant implicitly.
 const IMPLICIT_METADATA_PERMISSION = "read";
 const RETURNED_CONTENTS_READ_PERMISSION = "read";
-// Permission names GitHub may return on an installation token. The App never
-// requests `checks`: ADR 0022/0006 register it without Checks, and no broker
-// capability asks for one, so a returned `checks` grant must keep failing the
-// permission-shape check rather than being silently accepted. The retired
-// `variables` permission (payload spelling `actions_variables`) is the same
-// kind of exclusion: setup no longer provisions repository variables, nothing
-// requests it, and a returned grant must fail closed instead of being
-// recognized.
+// Permission names supported by the adapter. ADR 0057's check_publish
+// capability requests `checks`: recognizing it still requires an exact match
+// to the requested scope; unrequested Checks grants are rejected. The retired
+// `variables` permission (payload spelling `actions_variables`) stays excluded:
+// setup no longer provisions repository variables and no capability requests it.
 const KNOWN_PERMISSION_NAMES = new Set([
+  "checks",
   "contents",
   "metadata",
   "pull_requests",
