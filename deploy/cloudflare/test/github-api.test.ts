@@ -180,6 +180,113 @@ describe("GitHubApi public workflow resolution", () => {
 });
 
 describe("GitHubApi capability issuance", () => {
+  it.each(["checks", "contents", "metadata", "pull_requests", "workflows"])(
+    "recognizes only the requested canonical %s permission with metadata read",
+    async (permission) => {
+      const client = api();
+      const permissions = { [permission]: permission === "metadata" ? "read" : "write" };
+      vi.spyOn(client, "request").mockResolvedValue({
+        status: 201,
+        data: {
+          token: "ghs_scoped_token",
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          permissions: { ...permissions, metadata: "read" },
+        },
+      });
+
+      await expect(client.installationToken(2468, "acme/widgets", permissions)).resolves.toMatchObject({
+        token: "ghs_scoped_token",
+        permissions: { ...permissions, metadata: "read" },
+      });
+    },
+  );
+
+  it.each([
+    ["canonical grants", { checks: "write", metadata: "read" }],
+    ["case and whitespace normalization", { " Checks ": " WRITE ", " METADATA ": " READ " }],
+    ["ignored inherited extra grants", Object.assign(
+      Object.create({ contents: "write", future_permission: "write" }),
+      { checks: "write", metadata: "read" },
+    )],
+  ])("accepts exactly requested Checks write with %s", async (_name, permissions) => {
+    const client = api();
+    const request = vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: {
+        token: "ghs_check_token",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions,
+      },
+    });
+
+    await expect(
+      client.capabilityToken(2468, "acme/widgets", { checks: "write" }),
+    ).resolves.toBe("ghs_check_token");
+    expect(request).toHaveBeenCalledWith(
+      "POST", "/app/installations/2468/access_tokens", "app-jwt",
+      { repositories: ["widgets"], permissions: { checks: "write" } },
+    );
+  });
+
+  it.each([
+    ["missing Checks", { metadata: "read" }],
+    ["downgraded Checks", { checks: "read", metadata: "read" }],
+    ["disabled Checks", { checks: "none", metadata: "read" }],
+    ["inherited Checks", Object.assign(Object.create({ checks: "write" }), { metadata: "read" })],
+    ["missing metadata", { checks: "write" }],
+    ["writable metadata", { checks: "write", metadata: "write" }],
+    ["disabled metadata", { checks: "write", metadata: "none" }],
+    ["extra contents read", { checks: "write", metadata: "read", contents: "read" }],
+    ["extra contents write", { checks: "write", metadata: "read", contents: "write" }],
+    ["extra pull-request write", { checks: "write", metadata: "read", pull_requests: "write" }],
+    ["extra workflows write", { checks: "write", metadata: "read", workflows: "write" }],
+    ["unknown grant", { checks: "write", metadata: "read", future_permission: "read" }],
+    ["retired variables", { checks: "write", metadata: "read", variables: "write" }],
+    ["retired actions_variables", { checks: "write", metadata: "read", actions_variables: "write" }],
+    ["duplicate Checks aliases", { checks: "write", " Checks ": "write", metadata: "read" }],
+    ["duplicate metadata aliases", { checks: "write", metadata: "read", " Metadata ": "read" }],
+    ["hyphenated lookalike", { "check-runs": "write", metadata: "read" }],
+    ["unknown level", { checks: "admin", metadata: "read" }],
+    ["non-string level", { checks: 1, metadata: "read" }],
+  ])("rejects Checks issuance with %s", async (_name, permissions) => {
+    const client = api();
+    vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: {
+        token: "ghs_check_token",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions,
+      },
+    });
+
+    await expect(
+      client.capabilityToken(2468, "acme/widgets", { checks: "write" }),
+    ).rejects.toThrow("github_capability_permissions_invalid");
+  });
+
+  it.each([
+    ["empty requested map", {}],
+    ["disabled requested Checks", { checks: "none" }],
+    ["writable requested metadata", { checks: "write", metadata: "write" }],
+    ["unknown requested permission", { checks: "write", future_permission: "read" }],
+    ["retired requested permission", { checks: "write", actions_variables: "write" }],
+    ["duplicate requested aliases", { checks: "write", " Checks ": "write" }],
+  ])("rejects an invalid %s even with valid Checks grants", async (_name, requested) => {
+    const client = api();
+    vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: {
+        token: "ghs_check_token",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions: { checks: "write", metadata: "read" },
+      },
+    });
+
+    await expect(
+      client.installationToken(2468, "acme/widgets", requested),
+    ).rejects.toThrow("github_installation_permissions_invalid");
+  });
+
   it("reads a live issue comment only when its identity is bound to the target PR", async () => {
     const client = api();
     const request = vi.spyOn(client, "request").mockResolvedValue({
@@ -365,7 +472,8 @@ describe("GitHubApi capability issuance", () => {
 
   it.each([
     ["an inherited writable capability", { pull_requests: "write", contents: "write", metadata: "read" }],
-    ["an unrecognized read capability", { pull_requests: "write", checks: "read", metadata: "read" }],
+    ["an unrequested Checks read capability", { pull_requests: "write", checks: "read", metadata: "read" }],
+    ["an unrequested Checks write capability", { pull_requests: "write", checks: "write", metadata: "read" }],
     ["a hyphenated lookalike permission", { "pull-requests": "write", metadata: "read" }],
     ["a missing mandatory metadata grant", { pull_requests: "write" }],
     ["an unexpected writable implicit capability", {
