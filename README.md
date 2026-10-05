@@ -701,7 +701,12 @@ blocker. See
 for the criteria and rollback path.
 
 Manual review and authorized `@sensei` replies use the same selected provider
-mode. Each authorized mention receives a temporary 👀 reaction while the reply
+mode. Generated `github reply` commands use the same inference configuration
+and CLI overrides as normal reviews, including `cloud-ollama` and
+`local-ollama`. Run from the trusted policy checkout or pass `--config` with
+its trusted configuration. A local backend receives no ambient cloud key;
+an explicitly named `--api-key-env` remains an operator opt-in.
+Each authorized mention receives a temporary 👀 reaction while the reply
 is generated; ReviewSensei removes it after the reply or another terminal
 outcome. Follow-up mentions in the same inline or PR conversation include the
 bounded prior thread, diff context, findings, and trusted-base learnings. Cloud
