@@ -71,6 +71,30 @@ INVALIDATION_REASONS = frozenset(
         "ledger-untrusted",
     }
 )
+# Explicit fresh-analysis eligibility; trust failures never gain authority by
+# appearing in the planner's broader invalidation vocabulary. Narrowed coverage
+# can be recovered only by reviewing the full current input without prior reuse.
+RECOVERABLE_FALLBACK_REASONS = frozenset(
+    {
+        "rebase-or-base-change",
+        "model-change",
+        "engine-change",
+        "profile-change",
+        "policy-change",
+        "prompt-or-stage-digest-change",
+        "context-digest-change",
+        "learning-digest-change",
+        "coverage-incomplete",
+    }
+)
+BASELINE_RECOVERY_REASONS = INVALIDATION_REASONS | frozenset(
+    {
+        "missing-or-unfinished-history",
+        "malformed-baseline",
+        "baseline-identity-mismatch",
+        "unverifiable-scope",
+    }
+)
 FINDING_CLASSIFICATIONS = frozenset(
     {
         "continuing-concern",
@@ -1443,6 +1467,7 @@ def candidate_from_later_finding(
 
 
 __all__ = [
+    "BASELINE_RECOVERY_REASONS",
     "BaselineFinding",
     "FINDING_CLASSIFICATIONS",
     "INVALIDATION_REASONS",
@@ -1452,6 +1477,7 @@ __all__ = [
     "MAX_HISTORY_READ_FINDINGS",
     "MAX_VERIFICATION_CONCERNS",
     "PUBLIC_SCHEMA_VERSION",
+    "RECOVERABLE_FALLBACK_REASONS",
     "ReviewBaseline",
     "SCOPE_STATUSES",
     "VerificationScope",

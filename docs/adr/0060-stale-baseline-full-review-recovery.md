@@ -30,7 +30,9 @@ Construct the current cache identity from the trusted current snapshot and
 effective provider/model/profile/stages/context/learnings before reserving
 analysis. Bind transaction attempt identity to that key, policy, configuration
 and evidence digests. Exact retries remain duplicates; changed base or trusted
-context on the same head becomes new work. Preserve unchanged legacy attempt
+context on the same head becomes new work. The reservation kind encodes four
+fixed-length SHA-256 hex digests separated by colons, so component boundaries
+are unambiguous. Preserve unchanged legacy attempt
 idempotency only when its persisted baseline and transaction prove that exact
 identity. Reservation ownership, generation/CAS, pause and failed-attempt
 limits remain authoritative; context changes never reset them.
@@ -56,10 +58,13 @@ remain intact. ADR 0057 approval/check gates and ADR 0059 partial semantics
 remain applicable.
 
 Emit the existing sanitized diagnostic token to stderr as well as Actions
-summary/output and optional outcome JSON. Baseline failures carry a closed
+summary/output and optional outcome JSON. A refusal emits one consolidated
+stderr diagnostic including its specific reason; review exit semantics retain
+their existing separate exit-reason line. Baseline failures carry a closed
 specific reason in `stage_summary.baseline_recovery`; attempted refreshes carry
 `stage_summary.baseline_refresh`. No patch, prompt, model response or credential
-is added to diagnostics. `action_required` means action is needed; its reason
+is accepted in those reserved fields: unknown reasons emit `unverifiable-scope`.
+`action_required` means action is needed; its reason
 distinguishes an operational recovery problem from finding adjudication. Exit
 semantics remain unchanged.
 

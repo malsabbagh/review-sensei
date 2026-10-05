@@ -8,6 +8,7 @@ import unittest
 from contextlib import redirect_stderr
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from review_sensei.baseline import (
@@ -428,6 +429,47 @@ class BaselineRecoveryTests(unittest.TestCase):
         self.assertEqual(self.record(), before)
         self.assertEqual(self.provider.calls, 1)
 
+    def test_nontransaction_operator_rounds_keep_existing_admission(self):
+        for flag in ("--configuration-context-output", "--admission-context-output"):
+            index = self.argv.index(flag)
+            del self.argv[index : index + 2]
+        self.assertEqual(self.run_cli()[0], 0)
+        reservation = self.record().reservation_id
+        self.assertIsNotNone(reservation)
+        code, stderr, outcome = self.run_cli(base="c", head="d")
+        self.assertEqual(code, 1, stderr)
+        self.assertEqual(outcome["diagnostic"], "paused")
+        self.assertEqual(self.provider.calls, 1)
+        self.assertEqual(self.record().reservation_id, reservation)
+        self.assertIsNone(self.record().transaction)
+
+    def test_unrecognized_or_nonfallback_scope_cannot_authorize_full_review(self):
+        self.assertEqual(self.run_cli()[0], 0)
+        for mode, reason, diagnostic in (
+            ("full", "rebase-or-base-change", "rebase-or-base-change"),
+            ("fallback-full", "unexpected-private-detail", "unverifiable-scope"),
+        ):
+            with self.subTest(mode=mode, reason=reason):
+                before = self.record().convergence_history
+                scope = SimpleNamespace(
+                    status="incompatible",
+                    incremental=None,
+                    coverage_mode=mode,
+                    invalidation_reason=reason,
+                )
+                with patch(
+                    "review_sensei.cli.plan_verification_scope", return_value=scope
+                ):
+                    code, stderr, outcome = self.run_cli(base="c", head="d")
+                self.assertEqual(code, 1, stderr)
+                self.assertEqual(
+                    outcome["stage_summary"]["baseline_recovery"], diagnostic
+                )
+                self.assertEqual(self.provider.calls, 1)
+                self.assertEqual(self.record().convergence_history, before)
+                self.assertNotIn("unexpected-private-detail", stderr)
+                self.assertNotIn("unexpected-private-detail", json.dumps(outcome))
+
     def test_blocked_recovery_prints_reason_without_an_outcome_artifact(self):
         self.assertEqual(self.run_cli()[0], 0)
         self.ledger.replace(
@@ -445,6 +487,7 @@ class BaselineRecoveryTests(unittest.TestCase):
         self.assertFalse(outcome_path.exists())
         self.assertIn("action_required: durable_baseline_recovery_required", stderr)
         self.assertIn("missing-or-unfinished-history", stderr)
+        self.assertEqual(stderr.count("missing-or-unfinished-history"), 1)
         self.assertIn("missing-or-unfinished-history", summary.read_text())
         self.assertNotIn("change", summary.read_text())
         self.assertEqual(self.provider.calls, 1)

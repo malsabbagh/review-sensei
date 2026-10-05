@@ -378,6 +378,38 @@ class RunOutcomeWiringTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             "run-outcome",
         )
 
+    def test_reserved_baseline_reasons_are_sanitized_on_every_emitted_surface(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            summary = Path(temp_dir) / "summary.md"
+            output = Path(temp_dir) / "outcome.json"
+            with (
+                patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}),
+                patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
+                emit_host_outcome(
+                    RunOutcome(
+                        "action_required",
+                        diagnostic="durable_baseline_recovery_required",
+                        stage_summary={
+                            "baseline_recovery": CANARY,
+                            "baseline_refresh": CANARY,
+                        },
+                    ),
+                    output_path=output,
+                )
+            for text in (stderr.getvalue(), summary.read_text(), output.read_text()):
+                self.assertNotIn(CANARY, text)
+                self.assertIn("unverifiable-scope", text)
+            self.assertEqual(len(stderr.getvalue().splitlines()), 1)
+
+    def test_successful_outcome_without_diagnostic_is_quiet(self):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("sys.stderr", new_callable=io.StringIO) as stderr,
+        ):
+            emit_host_outcome(RunOutcome("reviewed"))
+        self.assertEqual(stderr.getvalue(), "")
+
     def test_ineligible_plan_emits_skipped_policy(self):
         plan = plan_review_execution(
             repository="acme/repo",

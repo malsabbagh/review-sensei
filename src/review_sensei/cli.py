@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from .baseline import (
+    RECOVERABLE_FALLBACK_REASONS,
     admission_context_document,
     admission_context_from_document,
     baseline_from_history_document,
@@ -3318,9 +3319,6 @@ def main(argv: list[str] | None = None) -> int:
                 provider_calls=0,
             )
             emit_host_outcome(outcome, output_path=args.outcome)
-            print(
-                f"review-sensei: baseline recovery blocked: {reason}", file=sys.stderr
-            )
             return _review_exit_status(args, outcome)
 
         if (
@@ -3706,6 +3704,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
             except ReviewInputError:
                 return emit_durable_baseline_recovery("malformed-baseline")
+            # Reserving this round advances generation once. Valid prior history
+            # precedes that reserved generation; equality denotes future history.
             if (
                 persisted_baseline.cache_key.repository != identity.repository
                 or persisted_baseline.cache_key.pull_request != identity.pull_request
@@ -3736,18 +3736,7 @@ def main(argv: list[str] | None = None) -> int:
             if scope.status != "verify" or scope.incremental is None:
                 if not (
                     scope.coverage_mode == "fallback-full"
-                    and scope.invalidation_reason
-                    in {
-                        "rebase-or-base-change",
-                        "model-change",
-                        "engine-change",
-                        "profile-change",
-                        "policy-change",
-                        "prompt-or-stage-digest-change",
-                        "context-digest-change",
-                        "learning-digest-change",
-                        "coverage-incomplete",
-                    }
+                    and scope.invalidation_reason in RECOVERABLE_FALLBACK_REASONS
                 ):
                     return emit_durable_baseline_recovery(
                         scope.invalidation_reason or "unverifiable-scope"
