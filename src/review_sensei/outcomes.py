@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
 import unicodedata
 from collections.abc import Callable
@@ -113,7 +114,7 @@ _ACTIONS_SUMMARY_TITLES = {
     "budget_exhausted": "Review stopped after exhausting a resource budget",
     "publication_failed": "Review publication failed",
     "already_published": "Review already published for this head",
-    "action_required": "Review requires a human decision before another automated pass",
+    "action_required": "Review requires action",
 }
 
 
@@ -671,6 +672,11 @@ def emit_host_outcome(outcome: RunOutcome, *, output_path: Path | None = None) -
     """Write the machine-readable outcome and optional Actions annotations."""
 
     outcome = replace(outcome, diagnostic=sanitize_diagnostic(outcome.diagnostic))
+    if outcome.diagnostic is not None:
+        print(
+            f"review-sensei: {outcome.status}: {outcome.diagnostic}",
+            file=sys.stderr,
+        )
     document = json.dumps(outcome.to_dict(), indent=2) + "\n"
     if output_path is not None:
         output_path.write_text(document, encoding="utf-8")

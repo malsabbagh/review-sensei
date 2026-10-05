@@ -65,10 +65,12 @@ The durable session record supplies the baseline only after transaction
 checkpointing validates a completed review. The transaction-enabled CLI
 (including an explicit `--transaction`) restores that serialized baseline
 before each later admitted round and passes the resulting
-`IncrementalReviewPlan` into `ReviewService.run`. Missing, incomplete, or
-incompatible durable history is an `action_required` recovery outcome before a
-provider call or a new reservation charge; it is never treated as fresh
-initial-review authority. A successful verification on that CLI path
+`IncrementalReviewPlan` into `ReviewService.run`. Missing or malformed durable
+history is an `action_required` recovery outcome before a provider call or a
+new reservation charge. The original F3 slice also refused incompatible
+history; [ADR 0060](0060-stale-baseline-full-review-recovery.md) now admits
+eligible reuse invalidations through bounded full analysis while preserving
+the prior baseline's publication classifier and human gates. A successful verification on that CLI path
 checkpoints the next baseline atomically with the validated result. In this F3
 slice the GitHub application only restores and forwards the baseline for
 hosted admission; hosted write-through checkpointing remains follow-up F5
@@ -130,7 +132,8 @@ Positive:
 Tradeoffs:
 
 - Durable recovery depends on the completed, compatible baseline checkpoint;
-  incomplete or incompatible history requires explicit operator recovery.
+untrusted or incomplete history requires explicit operator recovery, while
+eligible reuse invalidation uses the bounded full recovery in ADR 0060.
 - Directory siblings are a bounded stand-in for impact when symbol-aware
   related paths are not supplied.
 

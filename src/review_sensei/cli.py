@@ -3305,7 +3305,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
                 )
 
-        def emit_durable_baseline_recovery() -> int:
+        def emit_durable_baseline_recovery(reason: str) -> int:
             cleanup_analysis_reservation(charge_failed_attempt=False)
             outcome = RunOutcome(
                 "action_required",
@@ -3314,10 +3314,13 @@ def main(argv: list[str] | None = None) -> int:
                 base_sha=resolved_base_sha,
                 head_sha=resolved_head_sha,
                 diagnostic="durable_baseline_recovery_required",
+                stage_summary={"baseline_recovery": reason},
                 provider_calls=0,
             )
             emit_host_outcome(outcome, output_path=args.outcome)
-            print(f"review-sensei: {outcome.status}", file=sys.stderr)
+            print(
+                f"review-sensei: baseline recovery blocked: {reason}", file=sys.stderr
+            )
             return _review_exit_status(args, outcome)
 
         if (
@@ -3326,66 +3329,71 @@ def main(argv: list[str] | None = None) -> int:
             and args.pull_request is not None
             and policy.mode in OPERATOR_REVIEW_MODES
         ):
+            preflight = ledger.load(
+                SessionIdentity(
+                    repository=args.repository,
+                    pull_request=args.pull_request,
+                    repository_id=args.repository_id if hosted_session_ledger else None,
+                )
+            )
+            if preflight.status == "expired":
+                raise ReviewInputError(
+                    "session ledger load failed: expired; authenticated recovery is "
+                    "required: re-enroll the session or explicitly replace the "
+                    "expired session marker"
+                )
+            if preflight.status not in {"ok", "migrated", "missing"}:
+                raise ReviewInputError(
+                    f"session ledger load failed: {preflight.status}"
+                )
             if resolved_head_sha is None:
                 raise ReviewInputError(
                     "operator-mode session admission requires --head-sha"
                 )
-            head_sha = resolved_head_sha
-            identity = SessionIdentity(
-                repository=args.repository,
-                pull_request=args.pull_request,
-                repository_id=(
-                    getattr(args, "repository_id", None)
-                    if hosted_session_ledger
-                    else None
-                ),
-            )
-            reservation = session_reservation_id(
-                repository=args.repository,
-                pull_request=args.pull_request,
-                head_sha=head_sha,
-                kind="publish",
-            )
-            if transaction_requested:
-                effective_base_sha = resolved_base_sha or ""
-                effective_stages = stages if stages is not None else DEFAULT_STAGES
-                stage_identity, category_policy = transaction_stage_identity(
-                    effective_stages
-                )
-                transaction_configuration_context = (
-                    build_transaction_configuration_context(
-                        provider=transaction_provider_identity,
-                        model=transaction_model,
-                        stages=stage_identity,
-                        category_policy=category_policy,
-                        publication_mode=policy.mode,
-                        orchestration_enabled=orchestrate,
-                    )
-                )
-                transaction_configuration_digest = (
-                    ReviewTransaction.compute_configuration_digest(
-                        transaction_configuration_context
-                    )
-                )
-                # The analysis CLI produces the compatible single-pass result
-                # contract only. Confirmed evidence is a separate publication
-                # gate and requires a reviewed snapshot plus candidate
-                # verification, so it cannot be represented by this path.
-                transaction_evidence_digest = ReviewTransaction.compute_evidence_digest(
-                    {"evidence_policy": "legacy", "snapshot_sha256": None}
-                )
-                prepared_round = prepare_review_transaction(
-                    ledger,
-                    identity,
+            if transaction_requested and preflight.record is not None:
+                from .convergence import evaluate_round_admission
+
+                preflight_decision = evaluate_round_admission(
+                    preflight.record.to_round_state(
+                        head_sha=resolved_head_sha,
+                        paused=(
+                            preflight.record.operator_paused
+                            or preflight.record.reservation_id is not None
+                        ),
+                    ),
                     policy,
-                    reservation_id=reservation,
-                    base_sha=effective_base_sha,
-                    head_sha=head_sha,
-                    configuration_digest=transaction_configuration_digest,
-                    evidence_digest=transaction_evidence_digest,
                 )
-                prepared_transaction = prepared_round.transaction
-            else:
+                # The later atomic reservation repeats these fences after
+                # context construction; refusal never constructs a provider.
+                if should_skip_automation(preflight_decision, inference=True):
+                    outcome = RunOutcome(
+                        "action_required"
+                        if preflight_decision.handoff
+                        else "skipped_policy",
+                        repository=args.repository,
+                        pull_request_number=args.pull_request,
+                        base_sha=resolved_base_sha,
+                        head_sha=resolved_head_sha,
+                        diagnostic=admission_diagnostic(preflight_decision),
+                        provider_calls=0,
+                    )
+                    emit_host_outcome(outcome, output_path=args.outcome)
+                    return _review_exit_status(args, outcome)
+            if not transaction_requested:
+                # Keep legacy unbound reviews' admission before provider
+                # construction; only transactions need the full context key.
+                head_sha = resolved_head_sha
+                identity = SessionIdentity(
+                    repository=args.repository,
+                    pull_request=args.pull_request,
+                    repository_id=args.repository_id if hosted_session_ledger else None,
+                )
+                reservation = session_reservation_id(
+                    repository=args.repository,
+                    pull_request=args.pull_request,
+                    head_sha=head_sha,
+                    kind="publish",
+                )
                 prepared_round = prepare_session_round(
                     ledger,
                     identity,
@@ -3393,27 +3401,26 @@ def main(argv: list[str] | None = None) -> int:
                     reservation_id=reservation,
                     head_sha=head_sha,
                 )
-            held_reservation = (
-                prepared_round.reservation_id if prepared_round.decision.admit else None
-            )
-            if should_skip_automation(prepared_round.decision, inference=True):
-                status = (
-                    "action_required"
-                    if prepared_round.decision.handoff
-                    else "skipped_policy"
+                held_reservation = (
+                    prepared_round.reservation_id
+                    if prepared_round.decision.admit
+                    else None
                 )
-                outcome = RunOutcome(
-                    status,
-                    repository=args.repository,
-                    pull_request_number=args.pull_request,
-                    base_sha=resolved_base_sha,
-                    head_sha=head_sha,
-                    diagnostic=admission_diagnostic(prepared_round.decision),
-                    provider_calls=0,
-                )
-                emit_host_outcome(outcome, output_path=args.outcome)
-                print(f"review-sensei: {outcome.status}", file=sys.stderr)
-                return _review_exit_status(args, outcome)
+                if should_skip_automation(prepared_round.decision, inference=True):
+                    outcome = RunOutcome(
+                        "action_required"
+                        if prepared_round.decision.handoff
+                        else "skipped_policy",
+                        repository=args.repository,
+                        pull_request_number=args.pull_request,
+                        base_sha=resolved_base_sha,
+                        head_sha=head_sha,
+                        diagnostic=admission_diagnostic(prepared_round.decision),
+                        provider_calls=0,
+                    )
+                    emit_host_outcome(outcome, output_path=args.outcome)
+                    return _review_exit_status(args, outcome)
+
         provider, stage_providers = bind_stage_providers(
             registry=default_registry(),
             settings=provider_settings,
@@ -3523,8 +3530,159 @@ def main(argv: list[str] | None = None) -> int:
             orchestrate_large_changes=orchestrate,
             work_budget=work_budget,
         )
+        current_key = build_review_context_cache_key(
+            _checkpoint_cache_request(
+                request, base_sha=resolved_base_sha, head_sha=resolved_head_sha
+            ),
+            provider_name=service.provider.name,
+            stages=service.stages,
+            profile=effective_profile,
+        )
+        if (
+            ledger is not None
+            and args.repository
+            and args.pull_request is not None
+            and policy.mode in OPERATOR_REVIEW_MODES
+            and transaction_requested
+        ):
+            if resolved_head_sha is None:
+                raise ReviewInputError(
+                    "operator-mode session admission requires --head-sha"
+                )
+            head_sha = resolved_head_sha
+            identity = SessionIdentity(
+                repository=args.repository,
+                pull_request=args.pull_request,
+                repository_id=(
+                    getattr(args, "repository_id", None)
+                    if hosted_session_ledger
+                    else None
+                ),
+            )
+            reservation = session_reservation_id(
+                repository=args.repository,
+                pull_request=args.pull_request,
+                head_sha=head_sha,
+                kind="publish",
+            )
+            if transaction_requested:
+                effective_base_sha = resolved_base_sha or ""
+                effective_stages = stages if stages is not None else DEFAULT_STAGES
+                stage_identity, category_policy = transaction_stage_identity(
+                    effective_stages
+                )
+                transaction_configuration_context = (
+                    build_transaction_configuration_context(
+                        provider=transaction_provider_identity,
+                        model=transaction_model,
+                        stages=stage_identity,
+                        category_policy=category_policy,
+                        publication_mode=policy.mode,
+                        orchestration_enabled=orchestrate,
+                    )
+                )
+                transaction_configuration_digest = (
+                    ReviewTransaction.compute_configuration_digest(
+                        transaction_configuration_context
+                    )
+                )
+                # The analysis CLI produces the compatible single-pass result
+                # contract only. Confirmed evidence is a separate publication
+                # gate and requires a reviewed snapshot plus candidate
+                # verification, so it cannot be represented by this path.
+                transaction_evidence_digest = ReviewTransaction.compute_evidence_digest(
+                    {"evidence_policy": "legacy", "snapshot_sha256": None}
+                )
+                if current_key is not None:
+                    # One deterministic attempt per exact trusted snapshot and
+                    # context. A changed base on the same head is new work;
+                    # retries keep the same id and cannot charge another pass.
+                    reservation = session_reservation_id(
+                        repository=args.repository,
+                        pull_request=args.pull_request,
+                        head_sha=head_sha,
+                        kind=(
+                            "publish:"
+                            + current_key.digest()
+                            + ":"
+                            + policy.digest()
+                            + ":"
+                            + transaction_configuration_digest
+                            + ":"
+                            + transaction_evidence_digest
+                        ),
+                    )
+                    loaded = ledger.load(identity)
+                    if (
+                        loaded.status in {"ok", "migrated"}
+                        and loaded.record is not None
+                    ):
+                        prior = loaded.record
+                        history = prior.convergence_history
+                        # Preserve idempotency for an unchanged legacy attempt
+                        # whose current context is proved by its full baseline.
+                        if prior.transaction is not None and isinstance(history, dict):
+                            try:
+                                previous = baseline_from_history_document(
+                                    history.get("baseline")
+                                )
+                            except ReviewInputError:
+                                previous = None
+                            tx = prior.transaction
+                            if (
+                                previous is not None
+                                and previous.cache_key == current_key
+                                and tx.base_sha == effective_base_sha
+                                and tx.head_sha == head_sha
+                                and tx.policy_digest == policy.digest()
+                                and tx.configuration_digest
+                                == transaction_configuration_digest
+                                and tx.evidence_digest == transaction_evidence_digest
+                                and prior.last_committed_reservation_id
+                                == tx.reservation_id
+                            ):
+                                reservation = tx.reservation_id
+                prepared_round = prepare_review_transaction(
+                    ledger,
+                    identity,
+                    policy,
+                    reservation_id=reservation,
+                    base_sha=effective_base_sha,
+                    head_sha=head_sha,
+                    configuration_digest=transaction_configuration_digest,
+                    evidence_digest=transaction_evidence_digest,
+                )
+                prepared_transaction = prepared_round.transaction
+            else:
+                prepared_round = prepare_session_round(
+                    ledger,
+                    identity,
+                    policy,
+                    reservation_id=reservation,
+                    head_sha=head_sha,
+                )
+            held_reservation = (
+                prepared_round.reservation_id if prepared_round.decision.admit else None
+            )
+            if should_skip_automation(prepared_round.decision, inference=True):
+                status = (
+                    "action_required"
+                    if prepared_round.decision.handoff
+                    else "skipped_policy"
+                )
+                outcome = RunOutcome(
+                    status,
+                    repository=args.repository,
+                    pull_request_number=args.pull_request,
+                    base_sha=resolved_base_sha,
+                    head_sha=head_sha,
+                    diagnostic=admission_diagnostic(prepared_round.decision),
+                    provider_calls=0,
+                )
+                emit_host_outcome(outcome, output_path=args.outcome)
+                print(f"review-sensei: {outcome.status}", file=sys.stderr)
+                return _review_exit_status(args, outcome)
         incremental = None
-        current_key = None
         verification_scope = None
         admission_baseline = None
         # F3 durable-baseline enforcement is explicitly opted into by the
@@ -3541,13 +3699,19 @@ def main(argv: list[str] | None = None) -> int:
         ):
             history = prepared_round.record.convergence_history
             if not isinstance(history, dict) or history.get("state") != "completed":
-                return emit_durable_baseline_recovery()
+                return emit_durable_baseline_recovery("missing-or-unfinished-history")
             try:
                 persisted_baseline = baseline_from_history_document(
                     history.get("baseline")
                 )
             except ReviewInputError:
-                return emit_durable_baseline_recovery()
+                return emit_durable_baseline_recovery("malformed-baseline")
+            if (
+                persisted_baseline.cache_key.repository != identity.repository
+                or persisted_baseline.cache_key.pull_request != identity.pull_request
+                or persisted_baseline.generation >= prepared_round.record.generation
+            ):
+                return emit_durable_baseline_recovery("baseline-identity-mismatch")
             # This round classifies the new head against the durable baseline,
             # so the publication boundary of the same run needs the exact
             # baseline and current key this analysis admitted with. The
@@ -3570,7 +3734,32 @@ def main(argv: list[str] | None = None) -> int:
                 changed_paths=analysis.changed_paths,
             )
             if scope.status != "verify" or scope.incremental is None:
-                return emit_durable_baseline_recovery()
+                if not (
+                    scope.coverage_mode == "fallback-full"
+                    and scope.invalidation_reason
+                    in {
+                        "rebase-or-base-change",
+                        "model-change",
+                        "engine-change",
+                        "profile-change",
+                        "policy-change",
+                        "prompt-or-stage-digest-change",
+                        "context-digest-change",
+                        "learning-digest-change",
+                        "coverage-incomplete",
+                    }
+                ):
+                    return emit_durable_baseline_recovery(
+                        scope.invalidation_reason or "unverifiable-scope"
+                    )
+                # Reuse is invalid, not fresh analysis authority. Keep the old
+                # baseline for publication classification but supply no prior
+                # findings, scope, or cache reuse to this bounded full review.
+                print(
+                    "review-sensei: baseline refresh: full review required: "
+                    + scope.invalidation_reason,
+                    file=sys.stderr,
+                )
             verification_scope = scope
             incremental = scope.incremental
         try:
@@ -3601,6 +3790,16 @@ def main(argv: list[str] | None = None) -> int:
             run.outcome,
             base_sha=resolved_base_sha,
             head_sha=resolved_head_sha,
+            stage_summary={
+                **run.outcome.stage_summary,
+                **(
+                    {"baseline_refresh": verification_scope.invalidation_reason}
+                    if verification_scope is not None
+                    and verification_scope.coverage_mode == "fallback-full"
+                    and verification_scope.invalidation_reason is not None
+                    else {}
+                ),
+            },
         )
         if run.result is None:
             emit_host_outcome(outcome, output_path=args.outcome)

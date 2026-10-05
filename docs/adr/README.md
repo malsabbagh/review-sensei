@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0060](0060-stale-baseline-full-review-recovery.md) | Proposed | Recover valid stale baselines through bounded full review | Sanitized 0.6.13 reproduction | Exact-context idempotency, preserved history and human gates |
 | [0058](0058-budgeted-document-context.md) | Proposed | Rank and budget supplemental documents across active lenses | Pending triage | Full mandatory guidance, deterministic verbatim excerpts, visible omissions |
 | [0001](0001-provider-neutral-review-engine.md) | Accepted | Keep review behavior behind a provider-neutral service and protocol | Initial architecture | GitHub and model transports remain adapters |
 | [0059](0059-dependency-review-and-partial-publication.md) | Proposed | Review raw dependency changes and safely publish validated partial work | PR #203 reproduction | Completeness, identity and approval remain fenced |

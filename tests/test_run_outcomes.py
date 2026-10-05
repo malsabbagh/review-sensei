@@ -346,7 +346,10 @@ class RunOutcomeWiringTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                     "GITHUB_OUTPUT": str(github_output),
                 },
             ):
-                emit_host_outcome(leaked, output_path=outcome_path)
+                with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    emit_host_outcome(leaked, output_path=outcome_path)
+                self.assertIn("provider_failed: secret_redacted", stderr.getvalue())
+                self.assertNotIn(CANARY, stderr.getvalue())
             text = summary.read_text(encoding="utf-8")
             self.assertIn("provider_failed", text)
             self.assertNotIn(CANARY, text)

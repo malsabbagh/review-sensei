@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Recover valid stale review baselines through bounded full analysis, including
+  a changed base or trusted context on the same head. Preserve prior finding
+  admission, incomplete-work accounting, publication freshness and approval
+  gates. Emit sanitized operational diagnostics to stderr even without retained
+  artifacts, with specific baseline recovery reasons in run outcomes and Actions
+  summaries.
+
 ## 0.6.13 - 2026-10-04
 
 - Refresh the Cloudflare Worker development toolchain to Wrangler `4.147.0`
