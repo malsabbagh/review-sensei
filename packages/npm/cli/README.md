@@ -10,6 +10,9 @@ This npm package runs the same Python review engine as the `review-sensei`
 Python package through a bundled native executable. A separate Python
 installation is unnecessary. It works for local reviews and scripted CI use;
 the repository's reusable GitHub workflow is a separate integration.
+This guide describes the engine bundled with this package version; CLI
+`--help` and the linked engine references are the shared option and contract
+reference, rather than an independent npm API.
 
 ## Install and run
 
@@ -72,7 +75,12 @@ advanced:
 
 Inference precedence is CLI `--provider`/`--model`, then environment
 `REVIEWSENSEI_PROVIDER`/`REVIEWSENSEI_MODEL`, then YAML `inference.backend`/
-`inference.model`, then packaged defaults. The supported backends are
+`inference.model`, then packaged defaults. Environment overrides therefore
+take precedence over YAML, including in CI. Unset those variables when you
+want YAML to select the backend and model, or inspect the effective settings
+with `npx review-sensei config show --explain`. This is the engine's explicit
+operator-override behavior; npm does not add another precedence layer. The
+backends for live reviews are
 `local-ollama`, `cloud-ollama`, `openrouter`, and `openai-compatible`.
 
 | Backend | Authentication |
@@ -90,6 +98,8 @@ An inherited credential does not select a backend. After setting
 npx review-sensei --diff pr.patch --provider cloud-ollama --model deepseek-v4.1-flash:cloud
 ```
 
+These backend names and `--api-key-env`/`--allow-custom-endpoint` are accepted
+by the engine's review parser; `fixture` is a separate repository test seam.
 `--api-key-env` selects an explicitly named credential variable. Endpoint
 overrides use `--base-url` and, for custom OpenAI-compatible endpoints,
 `--allow-custom-endpoint`; see the configuration reference for validation and
@@ -119,8 +129,16 @@ rendered report, and `--output` writes it to a file. Warnings and diagnostics go
 to stderr. The launcher returns the engine's exit code: `0` means a completed
 review with no required fixes, `1` means required fixes remain, and `2` means
 the review could not complete. Partial coverage does not establish full
-approval. `--exit-semantics operational` instead returns `0` for a completed run
-and `1` for failure or skip; launcher startup errors also return `1`.
+approval. `--exit-semantics operational` instead returns `0` for non-failure
+engine outcomes, including partial, skipped, and already-published runs, and
+`1` for failures or required human action; launcher startup errors also return
+`1`. Neither operational code establishes full review coverage or approval.
+Exit code `1` alone cannot distinguish an engine failure from a launcher
+failure. Inspect stderr and any structured engine outcome requested with
+`--outcome outcome.json`
+for status and diagnostics. Early failures may not write an outcome, and a
+launcher failure cannot produce an engine outcome file. Use a fresh output path
+so an old file cannot be mistaken for the current result.
 
 A local review prints or writes its report; GitHub publication is a separate
 workflow/command with its own authorization. Selecting a remote provider sends
