@@ -144,7 +144,10 @@ def _is_registered_option_token(
 
 
 def _explicit_cli_options(
-    parser: argparse.ArgumentParser, arguments: list[str]
+    parser: argparse.ArgumentParser,
+    arguments: list[str],
+    *,
+    subcommand: str | None = None,
 ) -> set[str]:
     """Return long options from *arguments* that include an explicit value."""
 
@@ -152,7 +155,7 @@ def _explicit_cli_options(
     if arguments:
         for action in parser._actions:
             if isinstance(action, argparse._SubParsersAction):
-                selected = action.choices.get(arguments[0])
+                selected = action.choices.get(subcommand or arguments[0])
                 if selected is not None:
                     option_actions.update(selected._option_string_actions)
     long_options = sorted(
@@ -3055,7 +3058,9 @@ def main(argv: list[str] | None = None) -> int:
         github_argv = args_list[1:]
         github_parser = _github_parser()
         args = github_parser.parse_args(github_argv)
-        args._explicit_cli_options = _explicit_cli_options(github_parser, github_argv)
+        args._explicit_cli_options = _explicit_cli_options(
+            github_parser, github_argv, subcommand=args.command
+        )
         try:
             if getattr(args, "command", None) == "reply":
                 _apply_provider_defaults(args, github_argv)

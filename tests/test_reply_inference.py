@@ -27,7 +27,13 @@ class ReplyProvider:
 
 class ReplyInferenceTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def invoke(
-        self, extra=(), *, environment=None, factory_error=None, reply_error=None
+        self,
+        extra=(),
+        *,
+        global_options=(),
+        environment=None,
+        factory_error=None,
+        reply_error=None,
     ):
         from review_sensei.hosting import github as github_module
 
@@ -56,6 +62,7 @@ class ReplyInferenceTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
 
         argv = [
             "github",
+            *global_options,
             "reply",
             "--generate",
             "--repository",
@@ -184,6 +191,32 @@ class ReplyInferenceTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 self.assertEqual(settings[0].base_url, endpoint)
                 self.assertEqual(settings[0].api_key, "synthetic-explicit-key")
                 self.assertEqual(settings[0].timeout_seconds, 17)
+
+    def test_global_option_before_reply_preserves_all_explicit_inference_options(self):
+        status, settings, calls, _, stderr = self.invoke(
+            [
+                "--provider",
+                "openai-compatible",
+                "--model",
+                "synthetic-gateway-model",
+                "--base-url",
+                "https://synthetic.invalid/v1",
+                "--api-key-env",
+                "SYNTHETIC_PROVIDER_KEY",
+                "--timeout-seconds",
+                "17",
+            ],
+            global_options=["--allow-custom-endpoint"],
+            environment={"SYNTHETIC_PROVIDER_KEY": "synthetic-explicit-key"},
+        )
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(len(settings), 1)
+        self.assertEqual(settings[0].name, "openai-compatible")
+        self.assertEqual(settings[0].model, "synthetic-gateway-model")
+        self.assertEqual(settings[0].base_url, "https://synthetic.invalid/v1")
+        self.assertEqual(settings[0].api_key, "synthetic-explicit-key")
+        self.assertEqual(settings[0].timeout_seconds, 17)
+        self.assertEqual(calls[0]["model"], settings[0].model)
 
     def test_supported_environment_backend_override_uses_canonical_resolution(self):
         status, settings, _, _, stderr = self.invoke(
