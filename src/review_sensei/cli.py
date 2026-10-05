@@ -1119,7 +1119,9 @@ def _parser() -> argparse.ArgumentParser:
             "Exit contract: 'review' (default) returns 0 with no required "
             "fixes, 1 when required fixes remain, and 2 when the review could "
             "not complete; 'operational' keeps the host/launcher contract of "
-            "0 for any completed run and 1 for a failed or skipped one"
+            "0 for non-failure outcomes (including partial and skipped runs) "
+            "and 1 for failures or required human action; neither code "
+            "establishes full review coverage or approval"
         ),
     )
     parser.add_argument(

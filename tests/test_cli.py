@@ -19,10 +19,12 @@ from review_sensei.cli import (
     _learnings_parser,
     _parser,
     _plan_parser,
+    _review_exit_status,
     main,
     resolve_review_inference,
 )
 from review_sensei.errors import ReviewInputError
+from review_sensei.outcomes import RunOutcome
 
 try:
     from isolated_working_directory import IsolatedWorkingDirectoryMixin
@@ -629,6 +631,22 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
         self.assertIn(
             "OPENAI_TIMEOUT_SECONDS must be a positive number", stderr.getvalue()
         )
+
+    def test_operational_help_matches_partial_and_skipped_exit_statuses(self):
+        with patch.dict("os.environ", {}, clear=True):
+            parser = _parser()
+            args = parser.parse_args(["--exit-semantics", "operational"])
+            help_text = " ".join(parser.format_help().split())
+        self.assertIn("0 for non-failure outcomes", help_text)
+        self.assertIn("including partial and skipped runs", help_text)
+        self.assertIn(
+            "neither code establishes full review coverage or approval", help_text
+        )
+        self.assertNotIn("1 for a failed or skipped one", help_text)
+        for status in ("partial", "skipped_policy", "skipped_stale"):
+            with self.subTest(status=status):
+                self.assertEqual(_review_exit_status(args, RunOutcome(status)), 0)
+        self.assertEqual(_review_exit_status(args, RunOutcome("action_required")), 1)
 
     def test_operational_semantics_classify_spellings_after_a_parse_error(self):
         for spelling in (
