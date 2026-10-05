@@ -15,7 +15,9 @@ from review_sensei.diff import analyze_diff
 from review_sensei.errors import ProviderError
 from review_sensei.models import ProviderResponse, ReviewComment, ReviewRequest
 from review_sensei.planning import plan_change
-from review_sensei.service import ReviewService
+from review_sensei.service import DEFAULT_STAGES, ReviewService
+from review_sensei.session import review_analysis_checkpoint_eligible
+from review_sensei.stages import Stage
 from review_sensei.validation import ReviewLimits
 
 
@@ -161,6 +163,10 @@ class DependencyReviewTests(unittest.TestCase):
         self.assertLessEqual(len(note.encode()), 2000)
         self.assertIn('"annotation_truncated": true', note)
         self.assertEqual(dependency_review_note(analysis, max_bytes=1), "")
+        self.assertIn(
+            "evidence omitted: prompt budget",
+            dependency_review_note(analysis, max_bytes=500),
+        )
         provider = Provider()
         service = ReviewService(provider)
         request = ReviewRequest(diff=diff)
@@ -172,7 +178,7 @@ class DependencyReviewTests(unittest.TestCase):
         )
         self.assertTrue(result.coverage.fully_reviewed)
         self.assertIn(diff, provider.requests[1].prompt)
-        self.assertEqual(len(provider.requests[1].prompt.encode()), limit)
+        self.assertLessEqual(len(provider.requests[1].prompt.encode()), limit)
 
     def test_malformed_compact_or_unrecognized_json_is_still_raw_review(self):
         for after in (
@@ -291,3 +297,37 @@ class DependencyReviewTests(unittest.TestCase):
         self.assertEqual(result.review_status, "partial")
         self.assertEqual(result.finding_lifecycles[0].state, "uncertain")
         self.assertEqual(cache.get(prior_key), (1, "full", 1))
+
+    def test_filtered_review_stages_cannot_fabricate_checkpointable_work(self):
+        summary = Stage(
+            name="Only summary", prompt_template="{diff}", outputs=("summary",)
+        )
+        for stages in ((DEFAULT_STAGES[0],), (DEFAULT_STAGES[0], summary), (summary,)):
+            for orchestrate in (False, True):
+                with self.subTest(
+                    stages=[stage.name for stage in stages], orchestrate=orchestrate
+                ):
+                    provider = Provider()
+                    run = ReviewService(provider, stages=stages).run(
+                        ReviewRequest(
+                            diff=MANIFEST + npm_update(),
+                            active_category_ids=(),
+                            orchestrate_large_changes=orchestrate,
+                        )
+                    )
+                    self.assertIsNotNone(run.result)
+                    self.assertFalse(run.result.coverage.fully_reviewed)
+                    self.assertFalse(review_analysis_checkpoint_eligible(run.result))
+                    self.assertEqual(
+                        {entry.reason for entry in run.result.coverage.files},
+                        {"no-review-stage"},
+                    )
+                    self.assertFalse(
+                        any(
+                            entry.outcome == "reviewed"
+                            for entry in run.result.coverage.hunks
+                        )
+                    )
+                    if len(stages) == 1 and stages[0] == DEFAULT_STAGES[0]:
+                        self.assertEqual(provider.requests, [])
+                        self.assertNotIn("Review complete", run.result.summary)

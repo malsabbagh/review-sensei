@@ -45,6 +45,9 @@ publication from the same checkpoint without another provider call or charge.
 
 Decide coverage completeness before lifecycle resolution and complete-pass
 caching. Publication delivery does not upgrade `partial` to `reviewed`.
+Filtered or summary-only pipelines that execute no comment stage receive
+`unsupported` / `no-review-stage` coverage; chunk aggregation never relabels
+that lack of work as validated partial evidence.
 Approval stays withheld; enforcement checks remain `action_required`, while
 advisory policy keeps its documented neutral check. Default review exit `2`
 and operational workflow semantics remain distinct.

@@ -30,6 +30,7 @@ COVERAGE_REASONS = frozenset(
         "binary",
         "generated",
         "lockfile-format",
+        "no-review-stage",
         "too-large-hunk",
         "too-large-file",
         "chunk-failed",

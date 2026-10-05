@@ -317,6 +317,9 @@ same validated result.
   receive `unsupported` / `lockfile-format`; generated non-lockfiles retain
   their existing exclusion. Completeness is decided before lifecycle resolution
   and complete-pass caching, so unreviewed paths cannot be silently resolved.
+  Filtered or summary-only pipelines with no executed review stage mark their
+  otherwise reviewable material `unsupported` / `no-review-stage`; chunking
+  cannot convert that absence of work into validated partial evidence.
 - `ReviewComment` must use a repository-relative path. Right-side comments
   require a positive new-file line; left-side comments require a deleted
   old-file line; file-level comments omit `line`.

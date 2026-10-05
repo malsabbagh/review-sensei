@@ -49,6 +49,10 @@ _FIELDS = frozenset(
 _MAX_EVIDENCE = 48
 _MAX_MEMBER_BYTES = 512
 MAX_DEPENDENCY_NOTE_BYTES = 12_288
+_OMITTED_NOTE = (
+    "\n\n<dependency-review>\nOptional member evidence omitted: prompt budget. "
+    "Review all original raw npm lockfile hunks.\n</dependency-review>"
+)
 
 
 def lockfile_kind(path: str) -> str | None:
@@ -67,6 +71,12 @@ def dependency_review_note(analysis: DiffAnalysis, *, max_bytes: int) -> str:
     escaped as untrusted reference data and no package/version pairing is inferred.
     """
     if max_bytes < 512:
+        if max_bytes >= len(_OMITTED_NOTE.encode()) and any(
+            lockfile_kind(path) == "npm"
+            for record in analysis.file_records
+            for path in record.coverage_paths
+        ):
+            return _OMITTED_NOTE
         return ""
     files: list[dict[str, object]] = []
     count = 0
@@ -146,4 +156,4 @@ def dependency_review_note(analysis: DiffAnalysis, *, max_bytes: int) -> str:
             last.pop()
         else:
             files.pop()
-    return ""
+    return _OMITTED_NOTE if len(_OMITTED_NOTE.encode()) <= budget else ""

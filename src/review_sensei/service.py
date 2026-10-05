@@ -477,6 +477,21 @@ class ReviewService:
                     break
                 continue
             chunk_result = chunk_run.result
+            if chunk_result.coverage is not None and any(
+                entry.reason == "no-review-stage"
+                for entry in chunk_result.coverage.files
+            ):
+                # A filtered or summary-only pipeline validates no review work.
+                # Never turn its optimistic plan into cross-file evidence.
+                coverage = apply_chunk_outcomes(
+                    coverage,
+                    paths=chunk.paths,
+                    hunk_indexes=chunk.hunk_indexes,
+                    outcome="unsupported",
+                    reason="no-review-stage",
+                    limits=request.limits,
+                )
+                continue
             chunks_completed += 1
             accumulated_summary = (
                 f"{accumulated_summary}\n\n{chunk_result.summary}"
@@ -1150,7 +1165,32 @@ class ReviewService:
             last_model = response_model
             stage_summary[stage.name] = "complete"
 
-        final_summary = accumulated_summary or "Review complete."
+        if not executed_comment_stage:
+            planned = change_plan.coverage
+            change_plan = replace(
+                change_plan,
+                coverage=apply_chunk_outcomes(
+                    planned,
+                    paths=tuple(
+                        entry.path
+                        for entry in planned.files
+                        if entry.outcome == "reviewed"
+                    ),
+                    hunk_indexes=tuple(
+                        entry.index
+                        for entry in planned.hunks
+                        if entry.outcome == "reviewed"
+                    ),
+                    outcome="unsupported",
+                    reason="no-review-stage",
+                    limits=request.limits,
+                ),
+            )
+        final_summary = accumulated_summary or (
+            "Review complete."
+            if executed_comment_stage
+            else "No review stage executed."
+        )
         review_status = (
             "partial"
             if skipped_stages
@@ -1187,7 +1227,7 @@ class ReviewService:
                 repository=request.repository,
                 pull_request_number=request.pull_request_number,
             )
-        if attach_change_coverage:
+        if attach_change_coverage or not executed_comment_stage:
             result = self._attach_coverage(result, change_plan.coverage)
         status, diagnostic = self._run_outcome_for_result(result)
         return self._finish_run(
