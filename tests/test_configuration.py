@@ -825,6 +825,29 @@ class ConfigurationCliTests(unittest.TestCase):
             self.assertIn("omitted fields and their sources:", output)
             self.assertIn("local-ollama", output)
 
+    def test_config_show_explain_reports_environment_override_with_spaced_path(self):
+        with tempfile.TemporaryDirectory(prefix="configuration path ") as tmp:
+            path = self._write(tmp, MINIMAL)
+            stdout = io.StringIO()
+            with patch.dict(
+                "os.environ",
+                {
+                    "REVIEWSENSEI_PROVIDER": "cloud-ollama",
+                    "REVIEWSENSEI_MODEL": "deepseek-v4.1-flash:cloud",
+                },
+                clear=True,
+            ):
+                with redirect_stderr(io.StringIO()), patch("sys.stdout", stdout):
+                    status = main(
+                        ["config", "show", "--explain", "--config", str(path)]
+                    )
+            self.assertEqual(status, 0)
+            output = stdout.getvalue()
+            self.assertIn("cloud-ollama", output)
+            self.assertIn("deepseek-v4.1-flash:cloud", output)
+            self.assertIn("REVIEWSENSEI_PROVIDER", output)
+            self.assertIn("REVIEWSENSEI_MODEL", output)
+
     def test_missing_configuration_file_exits_two(self):
         with tempfile.TemporaryDirectory() as tmp:
             stderr = io.StringIO()
