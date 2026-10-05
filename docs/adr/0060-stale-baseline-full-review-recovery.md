@@ -5,7 +5,7 @@ Date: 2026-10-05
 Owners/Reviewers: Maintainers
 Approved by: not applicable
 GitHub Issue: none; source-confirmed 0.6.13 reproduction
-Pull Request: pending
+Pull Request: [#209](https://github.com/malsabbagh/review-sensei/pull/209)
 
 ## Context
 
