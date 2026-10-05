@@ -2988,6 +2988,33 @@ def _configure_standard_streams() -> None:
             continue
 
 
+def _report_broker_failure(error: BaseException, args: argparse.Namespace) -> bool:
+    """Supplement broker failures without changing exits or wrapper semantics."""
+    from .broker_diagnostics import exception_broker_diagnostic
+    from .hosting.github.errors import GitHubHTTPTransientError
+
+    diagnostic = exception_broker_diagnostic(error)
+    if diagnostic is None:
+        return False
+    transient = isinstance(error, GitHubHTTPTransientError)
+    token = "broker_temporarily_unavailable" if transient else "broker_rejected"
+    print(f"review-sensei: {diagnostic.message()}", file=sys.stderr)
+    print(f"review-sensei: reason={token}", file=sys.stderr)
+    try:
+        emit_host_outcome(
+            RunOutcome(
+                status="action_required",
+                diagnostic=token,
+                stage_summary=diagnostic.metadata(),
+            ),
+            output_path=getattr(args, "outcome", None),
+        )
+    except (OSError, ValueError, ReviewSenseiError):
+        # Optional output must never replace the original failure or its exit.
+        print("review-sensei: broker diagnostic output unavailable", file=sys.stderr)
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     _configure_standard_streams()
     args_list = list(argv) if argv is not None else sys.argv[1:]
@@ -3066,7 +3093,8 @@ def main(argv: list[str] | None = None) -> int:
                 _apply_provider_defaults(args, github_argv)
             return _run_github(args, argv=github_argv)
         except (OSError, ValueError, ReviewSenseiError) as exc:
-            print(f"review-sensei: {exc}", file=sys.stderr)
+            if not _report_broker_failure(exc, args):
+                print(f"review-sensei: {exc}", file=sys.stderr)
             return 1
     try:
         args = _parser().parse_args(args_list)
@@ -3815,8 +3843,11 @@ def main(argv: list[str] | None = None) -> int:
             required_fixes=any(comment.blocks_approval for comment in result.comments),
         )
     except (OSError, ValueError, ReviewSenseiError) as exc:
-        print(f"review-sensei: {exc}", file=sys.stderr)
+        broker_reported = _report_broker_failure(exc, args)
+        if not broker_reported:
+            print(f"review-sensei: {exc}", file=sys.stderr)
         if getattr(args, "exit_semantics", "review") == "operational":
             return 1
-        print("review-sensei: reason=invalid-input", file=sys.stderr)
+        if not broker_reported:
+            print("review-sensei: reason=invalid-input", file=sys.stderr)
         return REVIEW_EXIT_INCOMPLETE

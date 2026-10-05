@@ -1,0 +1,412 @@
+{
+  "broker_capability_invalid": {
+    "stage": "request_validation",
+    "action": "check_request",
+    "hint": "The broker request was not accepted. Use the supported released CLI/workflow and valid bounded request fields."
+  },
+  "broker_content_length_required": {
+    "stage": "request_validation",
+    "action": "check_request",
+    "hint": "The broker request was not accepted. Use the supported released CLI/workflow and valid bounded request fields."
+  },
+  "broker_cors_not_supported": {
+    "stage": "request_validation",
+    "action": "check_request",
+    "hint": "The broker request was not accepted. Use the supported released CLI/workflow and valid bounded request fields."
+  },
+  "broker_event_rejected": {
+    "stage": "workflow_identity",
+    "action": "check_workflow",
+    "hint": "Workflow identity was not accepted. Confirm the supported release, workflow ref/SHA, event and runner against broker policy; do not loosen policy."
+  },
+  "broker_installation_unavailable": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "broker_invalid_request": {
+    "stage": "request_validation",
+    "action": "check_request",
+    "hint": "The broker request was not accepted. Use the supported released CLI/workflow and valid bounded request fields."
+  },
+  "broker_ledger_invalid": {
+    "stage": "broker_ledger",
+    "action": "contact_operator",
+    "hint": "The broker ledger could not complete validation. Retry later; if it persists, ask the broker operator to inspect ledger health."
+  },
+  "broker_ledger_unavailable": {
+    "stage": "broker_ledger",
+    "action": "contact_operator",
+    "hint": "The broker ledger could not complete validation. Retry later; if it persists, ask the broker operator to inspect ledger health."
+  },
+  "broker_payload_too_large": {
+    "stage": "request_validation",
+    "action": "check_request",
+    "hint": "The broker request was not accepted. Use the supported released CLI/workflow and valid bounded request fields."
+  },
+  "broker_rate_limited": {
+    "stage": "broker_admission",
+    "action": "retry_later",
+    "hint": "The broker rejected admission or replay. Wait before starting a fresh run; do not reuse an OIDC token."
+  },
+  "broker_replay": {
+    "stage": "broker_admission",
+    "action": "retry_later",
+    "hint": "The broker rejected admission or replay. Wait before starting a fresh run; do not reuse an OIDC token."
+  },
+  "broker_repository_rejected": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "broker_request_invalid": {
+    "stage": "request_validation",
+    "action": "check_request",
+    "hint": "The broker request was not accepted. Use the supported released CLI/workflow and valid bounded request fields."
+  },
+  "broker_runner_rejected": {
+    "stage": "workflow_identity",
+    "action": "check_workflow",
+    "hint": "Workflow identity was not accepted. Confirm the supported release, workflow ref/SHA, event and runner against broker policy; do not loosen policy."
+  },
+  "broker_session_actor_rejected": {
+    "stage": "session_validation",
+    "action": "check_session",
+    "hint": "Session scope, head, actor or grant was not accepted. Refresh the pull request head and start a fresh supported workflow run."
+  },
+  "broker_session_attestation_invalid": {
+    "stage": "session_validation",
+    "action": "check_session",
+    "hint": "Session scope, head, actor or grant was not accepted. Refresh the pull request head and start a fresh supported workflow run."
+  },
+  "broker_session_grant_invalid": {
+    "stage": "session_validation",
+    "action": "check_session",
+    "hint": "Session scope, head, actor or grant was not accepted. Refresh the pull request head and start a fresh supported workflow run."
+  },
+  "broker_session_grant_rejected": {
+    "stage": "session_validation",
+    "action": "check_session",
+    "hint": "Session scope, head, actor or grant was not accepted. Refresh the pull request head and start a fresh supported workflow run."
+  },
+  "broker_session_head_rejected": {
+    "stage": "session_validation",
+    "action": "check_session",
+    "hint": "Session scope, head, actor or grant was not accepted. Refresh the pull request head and start a fresh supported workflow run."
+  },
+  "broker_session_invalid": {
+    "stage": "session_validation",
+    "action": "check_session",
+    "hint": "Session scope, head, actor or grant was not accepted. Refresh the pull request head and start a fresh supported workflow run."
+  },
+  "broker_unknown": {
+    "stage": "broker",
+    "action": "contact_operator",
+    "hint": "The broker supplied no recognized reason. Use the correlation ID and run time to inspect broker logs; do not infer a cause."
+  },
+  "broker_workflow_rejected": {
+    "stage": "workflow_identity",
+    "action": "check_workflow",
+    "hint": "Workflow identity was not accepted. Confirm the supported release, workflow ref/SHA, event and runner against broker policy; do not loosen policy."
+  },
+  "github_api_url_invalid": {
+    "stage": "broker_configuration",
+    "action": "contact_operator",
+    "hint": "Broker configuration could not be used. Ask the broker operator to validate the existing configuration."
+  },
+  "github_app_id_invalid": {
+    "stage": "broker_configuration",
+    "action": "contact_operator",
+    "hint": "Broker configuration could not be used. Ask the broker operator to validate the existing configuration."
+  },
+  "github_app_key_invalid": {
+    "stage": "broker_configuration",
+    "action": "contact_operator",
+    "hint": "Broker configuration could not be used. Ask the broker operator to validate the existing configuration."
+  },
+  "github_capability_issue_failed": {
+    "stage": "capability_issuance",
+    "action": "contact_operator",
+    "hint": "GitHub capability issuance failed. Ask the broker operator to inspect the installation grant and any upstream status; preserve existing permissions."
+  },
+  "github_capability_permissions_invalid": {
+    "stage": "capability_issuance",
+    "action": "contact_operator",
+    "hint": "GitHub capability issuance failed. Ask the broker operator to inspect the installation grant and any upstream status; preserve existing permissions."
+  },
+  "github_capability_response_invalid": {
+    "stage": "capability_issuance",
+    "action": "contact_operator",
+    "hint": "GitHub capability issuance failed. Ask the broker operator to inspect the installation grant and any upstream status; preserve existing permissions."
+  },
+  "github_installation_invalid": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_installation_lookup_failed": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_installation_permissions_invalid": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_installation_repositories_failed": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_installation_repositories_invalid": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_installation_repositories_limit": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_installation_repository_invalid": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_installation_token_failed": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_installation_token_invalid": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_issue_comment_forbidden": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_issue_comment_invalid": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_issue_comment_lookup_failed": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_issue_comment_response_invalid": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_path_invalid": {
+    "stage": "broker_configuration",
+    "action": "contact_operator",
+    "hint": "Broker configuration could not be used. Ask the broker operator to validate the existing configuration."
+  },
+  "github_pull_request_forbidden": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_pull_request_invalid": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_pull_request_lookup_failed": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_pull_request_response_invalid": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_repository_invalid": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_repository_lookup_failed": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_repository_response_invalid": {
+    "stage": "repository_installation",
+    "action": "check_installation",
+    "hint": "Repository or installation validation failed. Confirm the App is installed and enabled for this repository and the request targets the current pull request."
+  },
+  "github_response_invalid": {
+    "stage": "github_api",
+    "action": "contact_operator",
+    "hint": "A GitHub API response could not be used. Retry later or ask the broker operator to inspect the upstream request."
+  },
+  "github_response_too_large": {
+    "stage": "github_api",
+    "action": "contact_operator",
+    "hint": "A GitHub API response could not be used. Retry later or ask the broker operator to inspect the upstream request."
+  },
+  "github_workflow_tag_invalid": {
+    "stage": "workflow_identity",
+    "action": "check_workflow",
+    "hint": "Workflow identity was not accepted. Confirm the supported release, workflow ref/SHA, event and runner against broker policy; do not loosen policy."
+  },
+  "github_workflow_tag_unavailable": {
+    "stage": "workflow_identity",
+    "action": "check_workflow",
+    "hint": "Workflow identity was not accepted. Confirm the supported release, workflow ref/SHA, event and runner against broker policy; do not loosen policy."
+  },
+  "oidc_actor_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_audience_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_claims_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_event_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_header_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_identity_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_issuer_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_job_workflow_ref_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_job_workflow_sha_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_jti_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_jwks_invalid": {
+    "stage": "oidc_validation",
+    "action": "retry_later",
+    "hint": "OIDC signing keys could not be used. Retry later; if it persists, ask the broker operator to inspect signing-key availability."
+  },
+  "oidc_jwks_too_large": {
+    "stage": "oidc_validation",
+    "action": "retry_later",
+    "hint": "OIDC signing keys could not be used. Retry later; if it persists, ask the broker operator to inspect signing-key availability."
+  },
+  "oidc_jwks_unavailable": {
+    "stage": "oidc_validation",
+    "action": "retry_later",
+    "hint": "OIDC signing keys could not be used. Retry later; if it persists, ask the broker operator to inspect signing-key availability."
+  },
+  "oidc_key_not_found": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_ref_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_repository_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_repository_owner_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_run_attempt_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_run_id_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_run_number_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_runner_environment_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_sha_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_signature_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_subject_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_time_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_token_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_workflow_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_workflow_ref_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  },
+  "oidc_workflow_sha_invalid": {
+    "stage": "oidc_validation",
+    "action": "check_workflow",
+    "hint": "OIDC identity validation failed. Confirm the supported released workflow and GitHub Actions OIDC configuration; start a fresh run."
+  }
+}

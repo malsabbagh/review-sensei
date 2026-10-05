@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ...broker_diagnostics import BrokerDiagnostic
 from ...errors import ReviewSenseiError
 
 
@@ -142,11 +143,23 @@ class GitHubHTTPTransientError(GitHubHTTPError):
 
     error_category = "github_http_transient"
 
+    def __init__(
+        self, message: str = "", *, broker_diagnostic: BrokerDiagnostic | None = None
+    ) -> None:
+        super().__init__(message)
+        self.broker_diagnostic = broker_diagnostic
+
 
 class GitHubBrokerClientError(ReviewSenseiError):
     """Raised when the Actions workflow cannot exchange an OIDC capability."""
 
     error_category = "github_broker_client"
+
+    def __init__(
+        self, message: str = "", *, broker_diagnostic: BrokerDiagnostic | None = None
+    ) -> None:
+        super().__init__(message)
+        self.broker_diagnostic = broker_diagnostic
 
 
 class GitHubPublicationError(ReviewSenseiError):
