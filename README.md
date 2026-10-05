@@ -320,7 +320,9 @@ coverage limitations remain visible; approval is withheld, and enforcement
 modes keep the check at `action_required`. Publication success means the
 findings were delivered, not that review coverage became complete. Missing
 coverage, incomplete enumeration, summary-only results, and total analysis
-failure still cannot enter the identity-bound publication path. The default
+failure still cannot enter the partial identity-bound publication path. Legacy
+complete artifacts without coverage retain checkpoint/publication compatibility;
+unknown coverage withholds approval and projects a partial publication outcome. The default
 review exit is `2` for a partial result; workflow `operational` exit semantics
 allow safe checkpointed findings to reach publication. Existing publisher
 diff-size and location-validation limits still apply.

@@ -39,6 +39,9 @@ Permit a validated `partial` result to checkpoint and publish only with explicit
 complete enumeration and evidence of reviewed work. Keep exact identity,
 configuration, digest and generation fences. Reject missing coverage,
 incomplete enumeration, summary-only results and wholly failed analysis.
+Legacy complete artifacts without coverage retain checkpoint/publication
+compatibility; unknown coverage withholds approval and projects a partial
+publication outcome.
 Charge a partial checkpoint as one failed attempt; preserve prior complete
 baseline/counters and omit completed convergence/no-progress markers. Retry
 publication from the same checkpoint without another provider call or charge.
