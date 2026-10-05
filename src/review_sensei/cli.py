@@ -144,11 +144,20 @@ def _is_registered_option_token(
 
 
 def _explicit_cli_options(
-    parser: argparse.ArgumentParser, arguments: list[str]
+    parser: argparse.ArgumentParser,
+    arguments: list[str],
+    *,
+    subcommand: str | None = None,
 ) -> set[str]:
     """Return long options from *arguments* that include an explicit value."""
 
-    option_actions = parser._option_string_actions
+    option_actions = dict(parser._option_string_actions)
+    if arguments:
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                selected = action.choices.get(subcommand or arguments[0])
+                if selected is not None:
+                    option_actions.update(selected._option_string_actions)
     long_options = sorted(
         (option for option in option_actions if option.startswith("--")),
         key=len,
@@ -621,7 +630,7 @@ def resolve_review_inference(
             _provider_settings_from_args(
                 args,
                 api_key=api_key,
-                fixture_response=args.fixture_response,
+                fixture_response=getattr(args, "fixture_response", None),
                 argv=argv,
             ),
             api_key,
@@ -648,11 +657,11 @@ def resolve_review_inference(
         else resolved.timeout_seconds
     )
     if resolved.backend == "fixture":
-        if not args.fixture_response:
+        if not getattr(args, "fixture_response", None):
             raise ReviewInputError("--provider fixture requires --fixture-response")
         api_key = None
     else:
-        if args.fixture_response is not None:
+        if getattr(args, "fixture_response", None) is not None:
             raise ReviewInputError(
                 "--fixture-response is only valid with --provider fixture"
             )
@@ -672,7 +681,7 @@ def resolve_review_inference(
         _provider_settings_from_args(
             args,
             api_key=api_key,
-            fixture_response=args.fixture_response,
+            fixture_response=getattr(args, "fixture_response", None),
             argv=argv,
         ),
         api_key,
@@ -1900,6 +1909,9 @@ def _github_parser() -> argparse.ArgumentParser:
     reply = subparsers.add_parser("reply", help="Generate or publish a mention reply")
     reply.add_argument("--reply", type=Path)
     reply.add_argument(
+        "--config", type=Path, help="Path to trusted ReviewSensei configuration"
+    )
+    reply.add_argument(
         "--generate",
         action="store_true",
         help="Build bounded GitHub context, invoke the provider, and publish the reply.",
@@ -2411,13 +2423,8 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 f"GitHub read token environment variable {args.github_token_env} is unavailable"
             )
         _validate_live_profile_gates(args, argv)
-        provider = default_registry().create(
-            _provider_settings_from_args(
-                args,
-                api_key=_resolve_api_key(args, argv=argv),
-                argv=argv,
-            )
-        )
+        provider_settings, _ = resolve_review_inference(args, argv)
+        provider = default_registry().create(provider_settings)
         reply_outcome = application.generate_and_publish_reply(
             options=GitHubWriteOptions(
                 github_writes=True,
@@ -3051,7 +3058,9 @@ def main(argv: list[str] | None = None) -> int:
         github_argv = args_list[1:]
         github_parser = _github_parser()
         args = github_parser.parse_args(github_argv)
-        args._explicit_cli_options = _explicit_cli_options(github_parser, github_argv)
+        args._explicit_cli_options = _explicit_cli_options(
+            github_parser, github_argv, subcommand=args.command
+        )
         try:
             if getattr(args, "command", None) == "reply":
                 _apply_provider_defaults(args, github_argv)
