@@ -2263,7 +2263,11 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 print(f"review-sensei: {exc}", file=sys.stderr)
                 print(outcome.status)
                 return run_outcome_exit_code(outcome.status)
-            outcome = outcome_from_publication(review_publication, **identity)
+            outcome = outcome_from_publication(
+                review_publication,
+                review_result=ReviewResult.from_dict(artifact.result),
+                **identity,
+            )
             emit_host_outcome(outcome, output_path=args.outcome)
             print(review_publication.status)
             return run_outcome_exit_code(outcome.status)
@@ -2387,7 +2391,9 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 base_sha=args.base_sha,
                 result=result,
             )
-        outcome = outcome_from_publication(review_outcome, **identity)
+        outcome = outcome_from_publication(
+            review_outcome, review_result=result, **identity
+        )
         emit_host_outcome(outcome, output_path=args.outcome)
         statuses = [review_outcome.status]
         statuses.extend(item.status for item in learning_outcomes)
@@ -3182,6 +3188,7 @@ def main(argv: list[str] | None = None) -> int:
             prepare_session_round,
             record_session_failed_attempt,
             resolve_local_session_ledger,
+            review_analysis_checkpoint_eligible,
             session_reservation_id,
             should_skip_automation,
         )
@@ -3608,12 +3615,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise ReviewInputError("review transaction admission is incomplete")
             if held_reservation is None:
                 raise ReviewInputError("review transaction reservation is missing")
-            if result.review_status != "complete":
-                # Partial coverage is a valid run outcome, but it is not a
-                # publishable transaction. Release the analysis reservation
-                # through the bounded failed-attempt path and preserve the
-                # partial result for a caller that only wanted a review instead
-                # of turning it into a generic checkpoint error.
+            if not review_analysis_checkpoint_eligible(result):
+                # Preserve uncheckpointable output for review-only callers,
+                # but never emit identity-bound publication artifacts for it.
                 cleanup_analysis_reservation(charge_failed_attempt=True)
                 prepared_round = None
                 prepared_transaction = None

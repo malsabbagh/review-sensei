@@ -37,6 +37,7 @@ from ...session import (
     prepare_session_round,
     record_admitted_blocker_progress,
     record_session_failed_attempt,
+    review_analysis_checkpoint_eligible,
     session_reservation_id,
     should_skip_automation,
 )
@@ -597,6 +598,7 @@ class GitHubApplication:
                 and (
                     callable(getattr(self.reviewer, "prepare", None))
                     or not validated_transaction_recovery
+                    or result.review_status == "partial"
                 )
             ):
                 prepare = getattr(self.reviewer, "prepare", None)
@@ -644,104 +646,109 @@ class GitHubApplication:
                         evidence_confirmed_concerns=evidence_confirmed_concerns,
                         authorized_dispositions=authorized_dispositions,
                     )
-                current_blockers = blocker_set_digest(
-                    tuple(
-                        finding_lifecycle_for_comment(comment).fingerprint
-                        for comment in prepared_publishable.result.comments
-                        if comment.effective_blocking is True
+                if result.review_status == "complete":
+                    current_blockers = blocker_set_digest(
+                        tuple(
+                            finding_lifecycle_for_comment(comment).fingerprint
+                            for comment in prepared_publishable.result.comments
+                            if comment.effective_blocking is True
+                        )
                     )
-                )
-                prior_markers = convergence_progress_blocker_markers(
-                    transaction_record.convergence_history
-                )
-                prior_blockers = tuple(
-                    (digest, count) for digest, count, _transaction_id in prior_markers
-                )
-                if validated_transaction_recovery and transaction_record.transaction:
-                    history = transaction_record.convergence_history
-                    progress = (
-                        history.get("progress")
-                        if isinstance(history, Mapping)
-                        else None
+                    prior_markers = convergence_progress_blocker_markers(
+                        transaction_record.convergence_history
+                    )
+                    prior_blockers = tuple(
+                        (digest, count)
+                        for digest, count, _transaction_id in prior_markers
                     )
                     if (
-                        isinstance(progress, list)
-                        and progress
-                        and isinstance(progress[-1], Mapping)
-                        and "blocker_set_sha256" in progress[-1]
-                        and "blocker_count" in progress[-1]
-                        and progress[-1].get("transaction_id")
-                        == transaction_record.transaction.transaction_id
+                        validated_transaction_recovery
+                        and transaction_record.transaction
                     ):
-                        # This result already has a durable blocker marker. It
-                        # belongs to the recovery attempt being replayed, not
-                        # to the prior round window used for no-progress.
-                        # Filter by ownership rather than by a projected list
-                        # position: lifecycle-only placeholders are omitted
-                        # from ``prior_markers``.
-                        prior_markers = tuple(
-                            marker
-                            for marker in prior_markers
-                            if marker[2]
-                            != transaction_record.transaction.transaction_id
+                        history = transaction_record.convergence_history
+                        progress = (
+                            history.get("progress")
+                            if isinstance(history, Mapping)
+                            else None
                         )
-                        prior_blockers = tuple(
-                            (digest, count)
-                            for digest, count, _transaction_id in prior_markers
-                        )
+                        if (
+                            isinstance(progress, list)
+                            and progress
+                            and isinstance(progress[-1], Mapping)
+                            and "blocker_set_sha256" in progress[-1]
+                            and "blocker_count" in progress[-1]
+                            and progress[-1].get("transaction_id")
+                            == transaction_record.transaction.transaction_id
+                        ):
+                            # This result already has a durable blocker marker. It
+                            # belongs to the recovery attempt being replayed, not
+                            # to the prior round window used for no-progress.
+                            # Filter by ownership rather than by a projected list
+                            # position: lifecycle-only placeholders are omitted
+                            # from ``prior_markers``.
+                            prior_markers = tuple(
+                                marker
+                                for marker in prior_markers
+                                if marker[2]
+                                != transaction_record.transaction.transaction_id
+                            )
+                            prior_blockers = tuple(
+                                (digest, count)
+                                for digest, count, _transaction_id in prior_markers
+                            )
 
-                def blocker_set_identity(value: tuple[str, int]) -> tuple[str, ...]:
-                    """Wrap the canonical whole-set digest for the detector."""
+                    def blocker_set_identity(value: tuple[str, int]) -> tuple[str, ...]:
+                        """Wrap the canonical whole-set digest for the detector."""
 
-                    # ``blocker_set_sha256`` already identifies the complete
-                    # admitted set; it is not one finding fingerprint. The
-                    # digest/count pair is storage metadata, so an empty
-                    # admitted set must not become a synthetic singleton.
-                    return (value[0],) if value[1] else ()
+                        # ``blocker_set_sha256`` already identifies the complete
+                        # admitted set; it is not one finding fingerprint. The
+                        # digest/count pair is storage metadata, so an empty
+                        # admitted set must not become a synthetic singleton.
+                        return (value[0],) if value[1] else ()
 
-                no_progress = detect_no_progress(
-                    previous_blocking=(*blocker_set_identity(prior_blockers[-1]),)
-                    if prior_blockers
-                    else (),
-                    current_blocking=blocker_set_identity(current_blockers),
-                    earlier_blocking=(*blocker_set_identity(prior_blockers[-2]),)
-                    if len(prior_blockers) >= 2
-                    else (),
-                )
-                flags["no_progress"] = no_progress
-                durable_transaction = transaction_record.transaction
-                # Every admitted set is recorded, including an empty set. An
-                # empty set is progress, but retaining it in the bounded
-                # window is what lets a later A -> empty -> A regression be
-                # classified as oscillation.
-                admitted_record = record_admitted_blocker_progress(
-                    ledger,
-                    identity,
-                    durable_transaction,
-                    blocker_set_sha256=current_blockers[0],
-                    blocker_count=current_blockers[1],
-                    suppress_publication=no_progress,
-                )
-                if (
-                    admitted_record.transaction is not None
-                    and admitted_record.transaction.phase == "publication_succeeded"
-                ):
-                    return PublicationResult(
-                        status="already_published",
-                        diagnostic="transaction-publication-complete",
-                        transaction_id=admitted_record.transaction.transaction_id,
-                        generation=admitted_record.generation,
+                    no_progress = detect_no_progress(
+                        previous_blocking=(*blocker_set_identity(prior_blockers[-1]),)
+                        if prior_blockers
+                        else (),
+                        current_blocking=blocker_set_identity(current_blockers),
+                        earlier_blocking=(*blocker_set_identity(prior_blockers[-2]),)
+                        if len(prior_blockers) >= 2
+                        else (),
                     )
-                if no_progress:
-                    return _with_shadow(
-                        PublicationResult(
-                            status="handoff",
-                            diagnostic="no_progress",
-                            transaction_id=durable_transaction.transaction_id,
+                    flags["no_progress"] = no_progress
+                    durable_transaction = transaction_record.transaction
+                    # Every admitted set is recorded, including an empty set. An
+                    # empty set is progress, but retaining it in the bounded
+                    # window is what lets a later A -> empty -> A regression be
+                    # classified as oscillation.
+                    admitted_record = record_admitted_blocker_progress(
+                        ledger,
+                        identity,
+                        durable_transaction,
+                        blocker_set_sha256=current_blockers[0],
+                        blocker_count=current_blockers[1],
+                        suppress_publication=no_progress,
+                    )
+                    if (
+                        admitted_record.transaction is not None
+                        and admitted_record.transaction.phase == "publication_succeeded"
+                    ):
+                        return PublicationResult(
+                            status="already_published",
+                            diagnostic="transaction-publication-complete",
+                            transaction_id=admitted_record.transaction.transaction_id,
                             generation=admitted_record.generation,
-                        ),
-                        _shadow_observation(_shadow_state(prepared, flags)),
-                    )
+                        )
+                    if no_progress:
+                        return _with_shadow(
+                            PublicationResult(
+                                status="handoff",
+                                diagnostic="no_progress",
+                                transaction_id=durable_transaction.transaction_id,
+                                generation=admitted_record.generation,
+                            ),
+                            _shadow_observation(_shadow_state(prepared, flags)),
+                        )
             publisher_has_prepare = callable(getattr(self.reviewer, "prepare", None))
             publisher_result = (
                 prepared_publishable.result
@@ -1212,7 +1219,10 @@ class GitHubApplication:
         if not options.github_writes or not options.auto_review:
             return PublicationResult(status="disabled")
         result = ReviewResult.from_dict(artifact.result)
-        if result.review_status == "incomplete":
+        if result.review_status == "incomplete" or (
+            result.review_status == "partial"
+            and not review_analysis_checkpoint_eligible(result)
+        ):
             raise ReviewInputError(
                 "recovery artifact result is incomplete",
                 diagnostic="recovery_artifact_incomplete",
