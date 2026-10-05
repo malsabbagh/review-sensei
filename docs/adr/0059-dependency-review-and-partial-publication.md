@@ -5,7 +5,7 @@ Date: 2026-10-05
 Owners/Reviewers: Maintainers
 Approved by: not applicable
 GitHub Issue: none; reproduces [PR #203](https://github.com/malsabbagh/review-sensei/pull/203)
-Pull Request: pending
+Pull Request: [#208](https://github.com/malsabbagh/review-sensei/pull/208)
 
 ## Context
 
@@ -40,8 +40,7 @@ complete enumeration and evidence of reviewed work. Keep exact identity,
 configuration, digest and generation fences. Reject missing coverage,
 incomplete enumeration, summary-only results and wholly failed analysis.
 Legacy complete artifacts without coverage retain checkpoint/publication
-compatibility; unknown coverage withholds approval and projects a partial
-publication outcome.
+compatibility and their existing compatibility behavior.
 Charge a partial checkpoint as one failed attempt; preserve prior complete
 baseline/counters and omit completed convergence/no-progress markers. Retry
 publication from the same checkpoint without another provider call or charge.
