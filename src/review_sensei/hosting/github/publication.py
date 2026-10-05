@@ -576,10 +576,20 @@ def outcome_from_publication(
     base_sha: str | None = None,
     head_sha: str | None = None,
     diagnostic: str | None = None,
+    review_result: ReviewResult | None = None,
 ) -> RunOutcome:
     """Project a GitHub publication result onto the public run-outcome contract."""
 
     status = _PUBLICATION_TO_RUN_STATUS.get(result.status, "publication_failed")
+    if (
+        status in {"reviewed", "already_published"}
+        and review_result is not None
+        and (
+            review_result.review_status != "complete"
+            or not _coverage_complete(review_result)
+        )
+    ):
+        status = "partial"
     token = diagnostic
     if token is None:
         token = getattr(result, "diagnostic", None)
@@ -589,6 +599,8 @@ def outcome_from_publication(
             token = candidate
         elif status == "publication_failed":
             token = "publication_failed"
+        elif status == "partial":
+            token = "partial_coverage"
     return RunOutcome(
         status,
         repository=repository,

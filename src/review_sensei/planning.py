@@ -17,6 +17,7 @@ from .coverage import (
     HunkCoverage,
     _validate_reason,
 )
+from .dependencies import lockfile_kind
 from .diff import DiffAnalysis, DiffFileRecord, DiffHunk, analyze_diff
 from .errors import ReviewInputError
 from .validation import (
@@ -30,18 +31,6 @@ from .validation import (
 
 MAX_RELATED_PATHS = 32
 
-GENERATED_FILE_NAMES = frozenset(
-    {
-        "package-lock.json",
-        "pnpm-lock.yaml",
-        "yarn.lock",
-        "cargo.lock",
-        "poetry.lock",
-        "composer.lock",
-        "go.sum",
-        "gemfile.lock",
-    }
-)
 GENERATED_SUFFIXES = (".min.js", ".min.css", ".min.map", ".map")
 GENERATED_PATH_PREFIXES = ("dist/", "vendor/", "node_modules/", "generated/")
 
@@ -50,9 +39,6 @@ def is_generated_path(path: str) -> bool:
     """Return whether ``path`` matches the explicit generated-file policy."""
 
     lowered = path.lower()
-    name = lowered.rsplit("/", 1)[-1]
-    if name in GENERATED_FILE_NAMES:
-        return True
     if any(lowered.endswith(suffix) for suffix in GENERATED_SUFFIXES):
         return True
     return any(
@@ -141,6 +127,12 @@ def _classify_file(
     paths = record.coverage_paths
     if record.binary or any(path in analysis.binary_paths for path in paths):
         return "unsupported", "binary"
+    if any(lockfile_kind(path) == "unsupported" for path in paths):
+        return "unsupported", "lockfile-format"
+    # npm lockfiles are material review input, even below a generated directory.
+    # Keep the raw hunks rather than treating a derived summary as coverage.
+    if any(lockfile_kind(path) == "npm" for path in paths):
+        return "reviewable", None
     if any(is_generated_path(path) for path in paths):
         return "excluded-by-policy", "generated"
     # Hunkless records cannot be split further; oversized payloads fail closed here.

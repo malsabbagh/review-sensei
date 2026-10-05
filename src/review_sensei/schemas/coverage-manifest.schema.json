@@ -43,6 +43,7 @@
             "enum": [
               "binary",
               "generated",
+              "lockfile-format",
               "too-large-hunk",
               "too-large-file",
               "chunk-failed",
@@ -81,6 +82,7 @@
             "enum": [
               "binary",
               "generated",
+              "lockfile-format",
               "too-large-hunk",
               "too-large-file",
               "chunk-failed",

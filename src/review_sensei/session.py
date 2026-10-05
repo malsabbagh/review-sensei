@@ -38,6 +38,7 @@ from .convergence import (
     RoundSessionState,
     evaluate_round_admission,
 )
+from .coverage import FileCoverage, HunkCoverage
 from .errors import ReviewInputError
 from .models import ReviewResult, ReviewTransaction
 from .schemas import validate_public_document
@@ -1623,6 +1624,7 @@ def _checkpoint_transaction_record(
     result_digest: str,
     *,
     baseline: object | None = None,
+    review_complete: bool = True,
     now: datetime | None = None,
 ) -> SessionRecord:
     if (
@@ -1654,9 +1656,16 @@ def _checkpoint_transaction_record(
         }
     ):
         raise ReviewInputError("session analysis reservation does not match")
-    increments = _apply_slot(record, record.reserved_slot)
+    # Retained partial findings are publishable, but cannot complete a round
+    # or replace its last complete baseline. Charge their bounded incomplete
+    # attempt once, at the checkpoint, rather than again on publication retry.
+    increments = _apply_slot(
+        record, record.reserved_slot if review_complete else "failed-attempt"
+    )
     next_generation = _next_generation(record)
     convergence_history: Mapping[str, object] | None = record.convergence_history
+    if not review_complete and baseline is not None:
+        raise ReviewInputError("a partial review cannot checkpoint a baseline")
     if baseline is not None:
         from .baseline import ReviewBaseline, baseline_history_document
 
@@ -1715,8 +1724,41 @@ def _checkpoint_transaction_record(
         last_committed_reservation_id=transaction.reservation_id,
         completed_initial_reviews=increments.get("completed_initial_reviews"),
         completed_verification_rounds=increments.get("completed_verification_rounds"),
+        failed_attempts=increments.get("failed_attempts"),
         transaction=pending,
         convergence_history=convergence_history,
+    )
+
+
+def review_analysis_checkpoint_eligible(result: ReviewResult) -> bool:
+    """Admit complete compatibility or explicitly covered validated partial work.
+
+    Failed chunks may carry ``partially-reviewed`` without validated output;
+    those entries alone cannot justify a checkpoint. Missing coverage and
+    unknown enumeration also fail closed. Partial evidence never becomes a
+    complete convergence baseline.
+    """
+
+    if result.review_status == "complete":
+        return result.coverage is None or result.coverage.fully_reviewed
+    coverage = result.coverage
+    if (
+        result.review_status != "partial"
+        or coverage is None
+        or not coverage.enumeration_complete
+    ):
+        return False
+    entries: tuple[FileCoverage | HunkCoverage, ...] = (
+        *coverage.files,
+        *coverage.hunks,
+    )
+    return any(
+        entry.outcome == "reviewed"
+        or (
+            entry.outcome == "partially-reviewed"
+            and entry.reason == "cross-file-relationship"
+        )
+        for entry in entries
     )
 
 
@@ -1729,12 +1771,14 @@ def checkpoint_review_analysis(
     baseline: object | None = None,
     now: datetime | None = None,
 ) -> ReviewResult:
-    """Durably commit completed analysis once and return its bound artifact."""
+    """Durably commit validated analysis once and return its bound artifact."""
 
     if not isinstance(result, ReviewResult):
         raise ReviewInputError("review analysis result is invalid")
-    if result.review_status != "complete":
-        raise ReviewInputError("only a complete review can be checkpointed")
+    if not review_analysis_checkpoint_eligible(result):
+        raise ReviewInputError("review has no checkpointable validated coverage")
+    if result.review_status != "complete" and baseline is not None:
+        raise ReviewInputError("a partial review cannot checkpoint a baseline")
     transaction = prepared.transaction
     if transaction is None or prepared.reservation_id != transaction.reservation_id:
         raise ReviewInputError("prepared review transaction is invalid")
@@ -1748,7 +1792,12 @@ def checkpoint_review_analysis(
     updated = ledger.replace(
         identity,
         lambda record: _checkpoint_transaction_record(
-            record, transaction, result_digest, baseline=baseline, now=now
+            record,
+            transaction,
+            result_digest,
+            baseline=baseline,
+            review_complete=result.review_status == "complete",
+            now=now,
         ),
         now=now,
     )
@@ -1787,8 +1836,8 @@ def load_review_transaction_for_publication(
         raise ReviewInputError(
             "publication requires an identity-bound review transaction"
         )
-    if result.review_status != "complete":
-        raise ReviewInputError("publication requires a complete checkpointed review")
+    if not review_analysis_checkpoint_eligible(result):
+        raise ReviewInputError("publication requires checkpointable validated coverage")
     transaction = result.transaction
     if not transaction.identity_matches(
         repository=identity.repository,
@@ -1824,7 +1873,11 @@ def load_review_transaction_for_publication(
         return ledger.replace(
             identity,
             lambda current: _checkpoint_transaction_record(
-                current, transaction, result_digest, now=now
+                current,
+                transaction,
+                result_digest,
+                review_complete=result.review_status == "complete",
+                now=now,
             ),
             now=now,
         )

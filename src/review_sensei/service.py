@@ -21,7 +21,8 @@ from .context import (
     reconcile_finding_set,
 )
 from .coverage import CoverageManifest
-from .diff import DiffAnalysis
+from .dependencies import dependency_review_note
+from .diff import DiffAnalysis, analyze_diff
 from .errors import (
     ChunkPreflightError,
     ContextLoadError,
@@ -308,13 +309,17 @@ class ReviewService:
     def _attach_coverage(
         self, result: ReviewResult, coverage: CoverageManifest
     ) -> ReviewResult:
-        status = result.review_status
+        status = self._status_with_coverage(result.review_status, coverage)
+        return replace(result, coverage=coverage, review_status=status)
+
+    @staticmethod
+    def _status_with_coverage(status: str, coverage: CoverageManifest) -> str:
         if status == "complete" and not coverage.fully_reviewed:
             if not coverage.enumeration_complete:
                 status = "incomplete"
             else:
                 status = "partial"
-        return replace(result, coverage=coverage, review_status=status)
+        return status
 
     @staticmethod
     def _run_outcome_for_result(result: ReviewResult) -> tuple[str, str | None]:
@@ -766,7 +771,9 @@ class ReviewService:
                     proposals=(),
                     provider=last_provider,
                     model=last_model,
-                    review_status="complete",
+                    review_status=self._status_with_coverage(
+                        "complete", change_plan.coverage
+                    ),
                     coverage=coverage,
                 )
             except ReviewInputError as exc:
@@ -786,7 +793,7 @@ class ReviewService:
             result = self._attach_coverage(result, change_plan.coverage)
             return self._finish_run(
                 tracker=tracker,
-                status="reviewed",
+                status=self._run_outcome_for_result(result)[0],
                 stage_summary=stage_summary,
                 result=result,
                 repository=request.repository,
@@ -829,6 +836,8 @@ class ReviewService:
                 coverage_mode=coverage.mode,
                 reviewed_paths=coverage.reviewed_paths,
                 related_paths=coverage.related_paths,
+                max_prompt_bytes=prompt_limit,
+                analysis=analysis,
             )
             current_prompt = prompt
             stage_text: str | None = None
@@ -1149,6 +1158,9 @@ class ReviewService:
             if not executed_comment_stage
             else "complete"
         )
+        # Decide completeness before resolving prior findings or caching a
+        # complete pass. Attaching coverage afterwards is too late.
+        review_status = self._status_with_coverage(review_status, change_plan.coverage)
         try:
             result = self._finalize_result(
                 request,
@@ -1380,6 +1392,8 @@ class ReviewService:
         coverage_mode: str = "full",
         reviewed_paths: tuple[str, ...] = (),
         related_paths: tuple[str, ...] = (),
+        max_prompt_bytes: int | None = None,
+        analysis: DiffAnalysis | None = None,
     ) -> str:
         active_ids = {category.id for category in active_categories}
         lens_learning_ids = {
@@ -1453,13 +1467,20 @@ class ReviewService:
             "review_categories": review_categories,
             "review_context": review_context,
         }
-        return _PROMPT_PLACEHOLDER.sub(
+        prompt = _PROMPT_PLACEHOLDER.sub(
             lambda match: replacements[match.group(1)],
             stage.prompt_template,
         ) + self._coverage_appendix(
             coverage_mode=coverage_mode,
             reviewed_paths=reviewed_paths,
             related_paths=related_paths,
+        )
+        remaining = (max_prompt_bytes or request.limits.max_prompt_bytes) - utf8_size(
+            prompt, label="review prompt"
+        )
+        return prompt + dependency_review_note(
+            analysis or analyze_diff(request.diff, limits=request.limits),
+            max_bytes=max(0, remaining),
         )
 
     @staticmethod

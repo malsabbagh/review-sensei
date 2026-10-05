@@ -310,6 +310,13 @@ same validated result.
   cannot be auto-approved. Every enumerated changed path has one outcome:
   `reviewed`, `partially-reviewed`, `excluded-by-policy`, `unsupported`, or
   `budget-exhausted`.
+- Npm named lockfiles receive raw hunk review with optional bounded member
+  evidence (exact record SHA-256, supplied-diff hunk index, original side/line).
+  Evidence never replaces source or certifies package identity, format version,
+  graph completeness, or registry contents. Other recognized lock formats
+  receive `unsupported` / `lockfile-format`; generated non-lockfiles retain
+  their existing exclusion. Completeness is decided before lifecycle resolution
+  and complete-pass caching, so unreviewed paths cannot be silently resolved.
 - `ReviewComment` must use a repository-relative path. Right-side comments
   require a positive new-file line; left-side comments require a deleted
   old-file line; file-level comments omit `line`.
@@ -744,6 +751,16 @@ existing `pull_requests: write` capability and per-head approval
 marker/idempotency boundary are shared, so approval adds no credential or
 persistence boundary; ReviewSensei never calls a merge endpoint or enables
 auto-merge.
+
+[ADR 0059](adr/0059-dependency-review-and-partial-publication.md) permits
+validated partial analysis to cross the identity-bound checkpoint/publication
+boundary only with complete enumeration and evidence of reviewed work. The
+same repository/PR/base/head/policy/configuration/result-digest checks apply to
+first publication and crash recovery. Partial checkpoints charge one failed
+attempt, preserve the last complete baseline, and do not increment completed
+review counters or create convergence/no-progress markers. Successful transport
+preserves the `partial` run outcome and approval/check limitations; incomplete
+or wholly failed analysis remains fail-closed.
 
 Issue #136 adds a versioned review-convergence policy (ADR 0046) that doctor
 and plan can display. Issue #146 F7 (ADR 0055) makes `merge-focused` the

@@ -305,6 +305,26 @@ limits stay in place; opt-in `--orchestrate-large-changes` adds a separate
 total-work budget so larger diffs can be chunked without silent truncation or
 unbounded provider calls.
 
+Npm `package-lock.json` and `npm-shrinkwrap.json` changes are reviewed as
+material dependency input. Every original hunk remains in the request; a
+bounded aid identifies visible dependency members with exact diff hashes and
+left/right line references. This is patch evidence, not a validated full
+dependency graph or an integrity/security audit of downloaded packages. The
+lockfile version and owning package may be unknown in isolated hunks. Other
+recognized lockfile formats currently report `unsupported` with reason
+`lockfile-format`; generated non-lockfile exclusions still report `generated`.
+
+Validated partial results with explicit complete enumeration and evidence of
+some reviewed work can be checkpointed and published. Their findings and
+coverage limitations remain visible; approval is withheld, and enforcement
+modes keep the check at `action_required`. Publication success means the
+findings were delivered, not that review coverage became complete. Missing
+coverage, incomplete enumeration, summary-only results, and total analysis
+failure still cannot enter the identity-bound publication path. The default
+review exit is `2` for a partial result; workflow `operational` exit semantics
+allow safe checkpointed findings to reach publication. Existing publisher
+diff-size and location-validation limits still apply.
+
 Repository paths are strict canonical NFC UTF-8, `/`-separated, relative paths:
 no empty, dot, parent, absolute, drive/UNC, backslash, surrounding whitespace,
 control/format/surrogate, or silently normalized forms are accepted. Glob
