@@ -57,7 +57,13 @@ test("forwards argv and inherited process options, and returns child exit code",
   const runtime = fakeRuntime();
   let call;
   const child = new EventEmitter();
-  const code = await launcher.run(["--title", "space & *", "--diff", "$(echo nope)"], {
+  const argv = [
+    "--config", "config/review settings.yml", "--provider", "cloud-ollama",
+    "--model", "deepseek-v4.1-flash:cloud", "--format", "json",
+    "--output", "reports/review result.json", "--title", "space & *",
+    "--diff", "$(echo nope)",
+  ];
+  const code = await launcher.run(argv, {
     process: runtime,
     resolveExecutable: () => "/safe/bin/review-sensei",
     spawn: (executable, argv, options) => {
@@ -67,7 +73,7 @@ test("forwards argv and inherited process options, and returns child exit code",
     },
   });
   assert.equal(code, 17);
-  assert.deepEqual(call.argv, ["--title", "space & *", "--diff", "$(echo nope)"]);
+  assert.deepEqual(call.argv, argv);
   assert.equal(call.executable, "/safe/bin/review-sensei");
   assert.deepEqual(call.options, {
     shell: false,
@@ -135,7 +141,7 @@ test("validates exact installed package metadata and regular payload", () => {
     fs.writeFileSync(executable, "#!/bin/sh\n", { mode: 0o755 });
     const manifest = {
       name: "@reviewsensei/cli-darwin-arm64",
-      version: "0.6.12",
+      version: "0.6.13",
     };
     const fakeRequire = (request) => {
       assert.equal(request, "@reviewsensei/cli-darwin-arm64/package.json");

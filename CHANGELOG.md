@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.6.13 - 2026-10-04
+
+- Refresh the Cloudflare Worker development toolchain to Wrangler `4.147.0`
+  and matching workers-types `5.20261001.1` (#203), including transitive Undici
+  `7.29.1` with [upstream security fixes](https://github.com/nodejs/undici/releases/tag/v7.29.1).
+  These are development dependencies; this cutoff changes no Python review
+  engine behavior and does not deploy the Worker.
+
+- Update CI tooling and Action pins: Ruff `0.16.9` (#199), grouped CodeQL
+  Action pins (#200), and checkout `7.0.1` in the uninstall workflow (#201).
+
+- Expand the npm package descriptions and packaged CLI documentation with
+  installation, local review, provider/model/authentication configuration,
+  argument forwarding, lenses, outputs, and exit behavior. Keep Python and all
+  six npm package versions aligned at `0.6.13`. The partial-review policy fix
+  remains separate; this release does not change lockfile coverage policy.
+
 ## 0.6.12 - 2026-10-04
 
 - Rank optional document context against the actual changed paths and budget it
