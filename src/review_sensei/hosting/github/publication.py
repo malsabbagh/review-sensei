@@ -458,7 +458,7 @@ def approval_eligibility_from_body(body: object) -> ReviewApprovalEligibility | 
     withholds approval rather than inferring eligibility from a partial read.
     """
 
-    if not isinstance(body, str):
+    if not isinstance(body, str) or body.count(APPROVAL_ELIGIBILITY_MARKER_PREFIX) != 1:
         return None
     match = _APPROVAL_ELIGIBILITY_RE.search(body)
     if match is None:
@@ -654,6 +654,7 @@ class ReviewApprovalFinalizer:
         head_sha: str,
         app_slug: str,
         eligibility: ReviewApprovalEligibility,
+        require_persisted: bool = False,
     ) -> PublicationResult:
         """Emit at most one exact-head APPROVE from trusted eligibility.
 
@@ -697,6 +698,11 @@ class ReviewApprovalFinalizer:
         if preflight.app_authored:
             return PublicationResult(status="skipped_app_authored")
         assert preflight.repository_id is not None and preflight.base_sha is not None
+        if (
+            eligibility.human_review is not None
+            and eligibility.human_review.base_sha != preflight.base_sha
+        ):
+            return PublicationResult(status="skipped_stale_base")
         open_blocking = self._scan_blocking_threads(
             token=token,
             repository=repository,
@@ -736,6 +742,16 @@ class ReviewApprovalFinalizer:
         reviews = self._load_head_reviews(
             token=token, repository=repository, pull_request=pull_request
         )
+        if (
+            require_persisted
+            and self._eligibility_from_reviews(
+                reviews, head_sha=head_sha, app_slug=app_slug
+            )
+            != eligibility
+        ):
+            return PublicationResult(
+                status="approval_withheld", diagnostic="approval_withheld"
+            )
         marker = approval_marker(
             repository_id=preflight.repository_id,
             pull_request=pull_request,
@@ -1049,19 +1065,33 @@ class ReviewApprovalFinalizer:
         reviews = self._load_head_reviews(
             token=token, repository=repository, pull_request=pull_request
         )
+        return self._eligibility_from_reviews(
+            reviews, head_sha=head_sha, app_slug=app_slug
+        )
+
+    @staticmethod
+    def _eligibility_from_reviews(
+        reviews: list[Any], *, head_sha: str, app_slug: str
+    ) -> ReviewApprovalEligibility | None:
         expected = app_slug.casefold()
         for review in reversed(reviews):
-            if not isinstance(review, dict):
-                continue
-            if review.get("commit_id") != head_sha:
+            if not isinstance(review, dict) or review.get("commit_id") != head_sha:
                 continue
             user = review.get("user")
             login = user.get("login") if isinstance(user, dict) else None
             if not isinstance(login, str) or login.casefold() != expected:
                 continue
-            eligibility = approval_eligibility_from_body(review.get("body"))
+            body = review.get("body")
+            if (
+                not isinstance(body, str)
+                or APPROVAL_ELIGIBILITY_MARKER_PREFIX not in body
+            ):
+                continue
+            # A malformed newer App record cannot reveal an older clean one.
+            eligibility = approval_eligibility_from_body(body)
             if eligibility is not None and eligibility.head_sha == head_sha:
                 return eligibility
+            return None
         return None
 
     def _reviews_have_app_head_state(
@@ -1644,6 +1674,7 @@ class ReviewPublisher:
         eligibility = approval_eligibility_from_result(
             result,
             head_sha=head_sha,
+            base_sha=base_sha,
             enabled=approval_enabled,
             app_authored=write_preflight.app_authored,
             qualification=qualification,

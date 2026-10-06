@@ -213,9 +213,9 @@ class CallerRunnerInputContractTests(unittest.TestCase):
             "comment_actor_type",
             "comment_association",
         }
-        self.assertEqual(runner_inputs, invocation_inputs)
-        # No policy or infrastructure travels as an input: a caller cannot
-        # restate configuration, and no run can be steered through an input.
+        self.assertEqual(runner_inputs, invocation_inputs | {"hosted_runner"})
+        # The optional label changes hosted infrastructure only. Callers cannot
+        # restate inference or policy, and generated callers retain the default.
         for retired in (
             "stages_dir",
             "categories_dir",

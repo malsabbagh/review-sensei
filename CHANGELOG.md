@@ -2,12 +2,44 @@
 
 ## Unreleased
 
+## 0.6.14 - 2026-10-06
+
 - Recover valid stale review baselines through bounded full analysis, including
   a changed base or trusted context on the same head. Preserve prior finding
   admission, incomplete-work accounting, publication freshness and approval
   gates. Emit sanitized operational diagnostics to stderr even without retained
   artifacts, with specific baseline recovery reasons in run outcomes and Actions
-  summaries.
+  summaries (#209).
+
+- Resolve mention-reply inference through the canonical backend configuration
+  (#210), fixing `Unknown provider cloud-ollama` for configured cloud replies.
+  Preserve explicit reply overrides, including options after global CLI flags.
+
+- Explain broker token and session-grant rejections with bounded, catalog-backed
+  reason, stage, action and operator hints (#211). Carry only validated safe
+  diagnostics into CLI stderr, outcome JSON and Actions summaries; older Workers
+  retain the generic fallback. Detailed broker reasons also require a separate
+  Worker deployment.
+
+- Reassess pending human-review findings when an authorized collaborator replies
+  with `@sensei` and a concrete explanation. Validate finding identities and
+  literal evidence from the human reply and current diff before refreshing
+  exact-head eligibility. Approve only after every pending concern is assessed
+  and the existing blocker, coverage, qualification and policy gates permit it;
+  partial assessments and stale or unauthorized replies cannot grant approval.
+  Existing pending reviews need a fresh review to record the bounded inventory.
+
+- Add a validated `hosted_runner` input for the three hosted reusable-workflow
+  jobs, defaulting to `ubuntu-latest`. Keep bootstrap and local Ollama routing
+  unchanged. Tag-pinned callers must wait for the released `v5` workflow before
+  sending the new input.
+
+- Align the Python package, npm launcher and five platform packages at `0.6.14`.
+  Publish and verify this version before promoting the separate `v5` workflow
+  channel. Moving `v5` without a new package version still allows PyPI `0.6.13`
+  to be installed and does not deliver the mention-reply fix. Package publication,
+  Worker deployment, channel promotion and fresh end-to-end verification remain
+  separate maintainer operations.
 
 ## 0.6.13 - 2026-10-04
 

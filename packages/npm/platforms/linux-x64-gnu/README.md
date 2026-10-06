@@ -7,7 +7,7 @@ standalone Python engine bundled for Linux x64 with glibc 2.36+.
 Install the public launcher, which selects the matching native package:
 
 ```console
-npm install --save-dev @reviewsensei/cli@0.6.13
+npm install --save-dev @reviewsensei/cli@0.6.14
 npx review-sensei --help
 ```
 

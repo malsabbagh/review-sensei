@@ -1,6 +1,6 @@
 {
   "name": "@reviewsensei/cli",
-  "version": "0.6.13",
+  "version": "0.6.14",
   "description": "Provider-neutral AI code review CLI with configurable models, review lenses, and validated diff findings",
   "license": "MIT",
   "repository": {
@@ -14,11 +14,11 @@
     "review-sensei": "bin/review-sensei.js"
   },
   "optionalDependencies": {
-    "@reviewsensei/cli-darwin-arm64": "0.6.13",
-    "@reviewsensei/cli-darwin-x64": "0.6.13",
-    "@reviewsensei/cli-linux-arm64-gnu": "0.6.13",
-    "@reviewsensei/cli-linux-x64-gnu": "0.6.13",
-    "@reviewsensei/cli-win32-x64": "0.6.13"
+    "@reviewsensei/cli-darwin-arm64": "0.6.14",
+    "@reviewsensei/cli-darwin-x64": "0.6.14",
+    "@reviewsensei/cli-linux-arm64-gnu": "0.6.14",
+    "@reviewsensei/cli-linux-x64-gnu": "0.6.14",
+    "@reviewsensei/cli-win32-x64": "0.6.14"
   },
   "publishConfig": {
     "access": "public"

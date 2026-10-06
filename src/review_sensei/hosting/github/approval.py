@@ -7,6 +7,7 @@ from typing import Mapping
 
 from ...coverage import coverage_approval_state
 from ...errors import ReviewInputError
+from ...human_assessment import PendingHumanReview
 from ...models import ReviewResult
 
 APPROVAL_ELIGIBILITY_SCHEMA_VERSION = "1"
@@ -140,20 +141,27 @@ class ReviewApprovalEligibility:
     head_sha: str
     result_digest: str
     facts: ApprovalFacts
+    human_review: PendingHumanReview | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "schema_version": APPROVAL_ELIGIBILITY_SCHEMA_VERSION,
             "head_sha": self.head_sha,
             "result_digest": self.result_digest,
             "facts": self.facts.to_dict(),
         }
+        if self.human_review is not None:
+            value["human_review"] = self.human_review.to_dict()
+        return value
 
     @classmethod
     def from_dict(cls, value: object) -> "ReviewApprovalEligibility":
         if not isinstance(value, Mapping):
             raise ReviewInputError("approval eligibility must be an object")
-        if set(value) != {"schema_version", "head_sha", "result_digest", "facts"}:
+        if set(value) not in (
+            {"schema_version", "head_sha", "result_digest", "facts"},
+            {"schema_version", "head_sha", "result_digest", "facts", "human_review"},
+        ):
             raise ReviewInputError(
                 "approval eligibility must contain the documented fields"
             )
@@ -170,10 +178,21 @@ class ReviewApprovalEligibility:
             or any(character not in "0123456789abcdef" for character in result_digest)
         ):
             raise ReviewInputError("approval eligibility identity is invalid")
+        facts = ApprovalFacts.from_dict(value.get("facts"))
+        human_review = (
+            PendingHumanReview.from_dict(value["human_review"])
+            if "human_review" in value
+            else None
+        )
+        if human_review is not None and facts.has_human_adjudication_findings != bool(
+            human_review.pending
+        ):
+            raise ReviewInputError("human review facts disagree with the inventory")
         return cls(
             head_sha=head_sha,
             result_digest=result_digest,
-            facts=ApprovalFacts.from_dict(value.get("facts")),
+            facts=facts,
+            human_review=human_review,
         )
 
     def evaluate(
@@ -230,6 +249,7 @@ def approval_eligibility_from_result(
     app_authored: bool,
     qualification: str = "not-required",
     check_published: bool = True,
+    base_sha: str | None = None,
 ) -> ReviewApprovalEligibility:
     """Build the persisted eligibility document for one published review."""
 
@@ -238,6 +258,7 @@ def approval_eligibility_from_result(
     return ReviewApprovalEligibility(
         head_sha=head_sha,
         result_digest=review_result_digest(result),
+        human_review=PendingHumanReview.from_result(result, base_sha),
         facts=approval_facts_from_result(
             result,
             enabled=enabled,

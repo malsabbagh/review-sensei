@@ -9,8 +9,8 @@ install lifecycle hook. An external `git` executable is also required for
 `prepare-diff`.
 
 ```bash
-npx --yes @reviewsensei/cli@0.6.13 --version
-npx --yes @reviewsensei/cli@0.6.13 prepare-diff \
+npx --yes @reviewsensei/cli@0.6.14 --version
+npx --yes @reviewsensei/cli@0.6.14 prepare-diff \
   --repository . --base-ref main --head-ref feature --output pr.patch
 ```
 
@@ -54,8 +54,8 @@ doctor exits `2`:
 
 ```text
 status: action
-version: 0.6.13
-pass: package — 0.6.13
+version: 0.6.14
+pass: package — 0.6.14
 pass: packaged-assets — default stages and categories available
 pass: provider-mode — local (offline check)
 pass: review-convergence — mode=merge-focused enforcement=publication compatibility=explicit-opt-in rounds=uncapped failed_attempts=6
@@ -770,3 +770,27 @@ verify setup PR reconciliation; merge desired setup PRs; enable repository
 opt-ins; and only then run hosted acceptance. Rollback is a code-only
 revert/redeploy that preserves delivery and broker ledger migrations; close or
 revert unmerged setup PRs rather than writing the default branch directly.
+
+
+## Replying to human-review findings (0.6.14)
+
+When ReviewSensei withholds approval for human assessment, an authorized
+repository owner, member or collaborator can reply with `@sensei` and a concrete
+explanation addressing those findings. Body findings can be addressed in a PR
+conversation comment; no inline thread is required. ReviewSensei checks the
+explanation against the current diff and records only supported resolutions or
+dismissals. A bare dismissal, thanks, unrelated text or request to approve does
+not settle a concern.
+
+Approval follows only when every pending human concern is assessed, no blocking
+finding or blocking App thread remains, coverage and qualification are complete
+and the published policy permits auto-approval. Partial assessments keep the
+remaining findings pending. Source edits, head/base changes or a newer review
+require fresh evidence. The `github.writes` and `github.mentions` switches still
+apply; ordinary unmentioned replies do not invoke this flow.
+
+An older pending review needs a fresh 0.6.14 review to record the bounded finding
+inventory. Missing or oversized inventories keep approval withheld. A later
+source review may reopen a concern; permanent explicit dispositions continue to
+use the documented maintainer-command contract. See
+[ADR 0061](adr/0061-human-reply-reassessment.md) for evidence bounds and races.

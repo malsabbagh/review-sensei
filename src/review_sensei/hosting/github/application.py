@@ -21,6 +21,7 @@ from ...coverage import coverage_approval_state
 from ...diff import analyze_diff
 from ...disposition import MaintainerCommand
 from ...errors import ReviewInputError
+from ...human_assessment import HumanAssessmentService
 from ...models import ReviewResult, ReviewTransaction
 from ...outcomes import RecoveryArtifact
 from ...planning import related_paths_for_change
@@ -60,6 +61,7 @@ from .errors import (
     GitHubPublicationError,
 )
 from .http import GitHubHttp
+from .human_assessment import HumanAssessmentPublisher
 from .learning_pr import LearningPRPublisher, LearningPRResult
 from .publication import (
     PublicationResult,
@@ -1415,6 +1417,43 @@ class GitHubApplication:
             source_kind=prepared.source_kind,
         )
         try:
+            # Adapter test seams may implement only the original conversation
+            # interface. The real GitHub adapter shares one bounded transport.
+            if isinstance(self.replier, ConversationPublisher):
+                assessor = HumanAssessmentPublisher(http=self.replier.http)
+                human = assessor.prepare(
+                    token=read_token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    prepared=prepared,
+                    app_slug=app_slug,
+                )
+                if human is not None:
+                    assert human.eligibility.human_review is not None
+                    assessment = HumanAssessmentService(reply_provider).reply(
+                        context=human.conversation.context,
+                        pending=human.eligibility.human_review,
+                        source_body=human.source_body,
+                        model=model,
+                    )
+                    accepted = any(
+                        item.decision != "unresolved" for item in assessment.decisions
+                    )
+                    review_token = None
+                    if accepted:
+                        review_token = self.broker.exchange(
+                            oidc_token or self.broker.request_oidc_token(),
+                            capability="review_publish",
+                        )
+                    return assessor.publish(
+                        token=capability_token,
+                        review_token=review_token,
+                        repository=repository,
+                        pull_request=pull_request,
+                        prepared=human,
+                        reply=assessment,
+                        app_slug=app_slug,
+                    )
             reply = ConversationService(reply_provider).reply(
                 prepared.context,
                 model=model,

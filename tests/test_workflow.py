@@ -69,6 +69,7 @@ class WorkflowValidationTests(unittest.TestCase):
             [
                 "mode",
                 "operation",
+                "hosted_runner",
                 "repository",
                 "repository_id",
                 "pull_request_number",
@@ -87,7 +88,7 @@ class WorkflowValidationTests(unittest.TestCase):
                 "comment_association",
             ],
         )
-        # An invocation carries identity and payload only. Backend, model,
+        # An invocation carries identity, payload, and a hosted runner label. Backend, model,
         # endpoint, credential, and policy are package decisions, so no input
         # may name any of them.
         for token in (
@@ -122,6 +123,61 @@ class WorkflowValidationTests(unittest.TestCase):
                 re.search(rf"(?<![A-Z0-9_]){name}(?![A-Z0-9_])", workflow),
                 f"{name} must not appear in the workflow",
             )
+
+    @unittest.skipIf(sys.platform == "win32", "hosted Linux script requires POSIX Bash")
+    def test_hosted_runner_label_validation_defaults_and_rejects_invalid_shapes(self):
+        workflow = _reusable_workflow()
+        step = workflow.split("      - name: Resolve hosted runner label\n", 1)[1]
+        step = step.split("\n      - name:", 1)[0]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        for supplied, expected in (
+            (None, "ubuntu-latest"),
+            ("", "ubuntu-latest"),
+            ("ubuntu-latest", "ubuntu-latest"),
+            ("ubicloud-standard-2", "ubicloud-standard-2"),
+            ("company_linux.x64", "company_linux.x64"),
+            ("r" * 128, "r" * 128),
+        ):
+            with self.subTest(supplied=supplied), tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp) / "outputs"
+                environment = dict(os.environ, GITHUB_OUTPUT=str(output))
+                environment.pop("HOSTED_RUNNER", None)
+                if supplied is not None:
+                    environment["HOSTED_RUNNER"] = supplied
+                result = subprocess.run(
+                    ["bash", "-c", script],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output.read_text(), f"label={expected}\n")
+        for supplied in (
+            " ",
+            "ubuntu latest",
+            "-runner",
+            "r" * 129,
+            '["self-hosted","linux"]',
+            '{"group":"linux"}',
+            "ubuntu-latest\nother=runner",
+            "$(touch unsafe)",
+            "${{ vars.RUNNER }}",
+        ):
+            with self.subTest(supplied=supplied), tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp) / "outputs"
+                result = subprocess.run(
+                    ["bash", "-c", script],
+                    env=dict(
+                        os.environ, GITHUB_OUTPUT=str(output), HOSTED_RUNNER=supplied
+                    ),
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "hosted_runner must be one Linux runner label", result.stderr
+                )
+                self.assertFalse(output.exists())
 
     def test_retired_variables_are_reported_and_change_no_behavior(self):
         # The workflow's own retired-variable report is executed here, not just

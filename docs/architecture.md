@@ -707,8 +707,12 @@ only product overrides. Local, cloud, and OpenRouter runtime jobs expose the
 same operation matrix—automatic/manual review, review and learning publication,
 optional artifacts, and bounded `@sensei` replies—while retaining different
 compute and egress boundaries. `local-ollama` uses the labelled self-hosted
-Ollama runner; `cloud-ollama` uses GitHub-hosted Ollama Cloud; `openrouter`
-uses GitHub-hosted OpenRouter for allowlisted models.
+Ollama runner; `cloud-ollama` uses the hosted Ollama Cloud lane; `openrouter`
+uses the hosted OpenRouter lane for allowlisted models. Hosted reusable jobs
+default to GitHub; an operator may select one validated trusted Linux label
+through `hosted_runner` (ADR 0062). Read-only bootstrap and the local Ollama
+label array retain their existing routing. Backend, model and policy still
+resolve from trusted configuration, not this infrastructure input.
 Older setup-v4 callers remain recognized as managed content and migrate through
 the existing reviewable setup PR path.
 
@@ -812,6 +816,18 @@ resolution without creating a duplicate. After a successful AI resolution of a
 blocking root, the adapter invokes the shared finalizer on the same exact head;
 this avoids a second provider pass, synthetic commit, or Actions-dispatch
 capability while preserving the normal approval gates.
+
+Pending `needs_human` findings follow the separate evidence-backed reassessment
+path in [ADR 0061](adr/0061-human-reply-reassessment.md). A new review records a
+complete bounded inventory in its App eligibility document. An authorized
+explicit `@sensei` explanation and validated provider assessment can refresh
+only the human flag for that exact base/head and result. Literal human/diff
+citations establish provenance; the model supplies semantic judgment. Fresh
+source authorization, latest persisted eligibility and all existing approval
+gates are checked before approval. Legacy, incomplete, stale or unsupported
+inventories keep withholding; no session baseline or cross-head disposition
+changes. Supported resolution uses the existing review publication capability,
+with the issue-reply token kept on conversation operations.
 
 This architecture preserves the provider-neutral core: GitHub transport,
 Actions OIDC, broker capabilities, setup lifecycle, publication markers, and

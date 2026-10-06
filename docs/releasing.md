@@ -196,7 +196,7 @@ Keep these names distinct:
   format.
 - **`v5`** is the movable public workflow channel. Generated callers use
   `@v5`. Configure the Worker with `PUBLIC_WORKFLOW_TAG=v5`.
-- **`0.6.13` / `v0.6.13`** is the immutable Python and npm package cutoff.
+- **`0.6.14` / `v0.6.14`** is the immutable Python and npm package cutoff.
   `release.yml` publishes PyPI from `v*.*.*` tags. Do not create a package tag
   named `v5.0.0`; that would collide with the `v*.*.*` release trigger and
   confuse the workflow channel with a library version.
@@ -215,6 +215,47 @@ A Python/PyPI release still uses an immutable `vX.Y.Z` tag and the `Release`
 workflow above. Publishing an npm package or deploying the Worker does not move
 the public `v5` tag or replay historical App deliveries; each is a separate,
 operator-owned cutoff step.
+
+## 0.6.14 rollout verification
+
+This cutoff includes bounded stale-baseline recovery (#209), canonical backend
+resolution for mention replies (#210), safe broker rejection diagnostics
+(#211), evidence-backed human-reply reassessment (ADR 0061), and the validated
+`hosted_runner` reusable-workflow input. Preparing or merging the release PR
+does not update installed consumers.
+The maintainer rollout must complete these separately authorized steps:
+
+1. Build and verify the immutable 0.6.14 artifact lanes, including the Worker,
+   and bind the exact compatibility manifest and canary evidence as described
+   below before publication. Publish the `v0.6.14` cutoff through `Release` and
+   verify the exact PyPI distribution and all six npm packages and attestations.
+   Moving `v5` while the package metadata still says `0.6.13` is insufficient:
+   the reusable workflow prefers the matching PyPI package and can install the
+   old CLI even when the workflow source contains #210.
+2. Build and deploy the reviewed Worker with #211 for detailed broker reasons.
+   The new CLI retains the generic safe fallback against older Workers. No
+   ledger schema migration is required for these fixes; preserve the current
+   deployment configuration, secret bindings and operator rollback record.
+3. Verify that the compatibility manifest and canary binding match the completed
+   published/deployed lanes, then promote `v5` to the reviewed 0.6.14 workflow commit
+   under the existing publication and channel gates. Record old and new SHAs.
+4. Only after promoted `v5` declares `hosted_runner`, update opted-in downstream
+   callers to pass their trusted runner label. Older tag-pinned workflows reject
+   this unknown input. Verify actual Ubicloud routing for an opted-in caller,
+   the GitHub default for an unchanged caller, and preserved local Ollama
+   routing; source-level runner assertions alone are insufficient.
+5. Trigger a fresh end-to-end mention reply on the promoted channel. Retain
+   sanitized evidence bound to the new workflow SHA, installed CLI `0.6.14`,
+   configured backend/model, successful inference and posted reply. Historical
+   failed runs are not proof that the new cutoff works. Separately verify
+   a fresh human-review finding followed by an authorized supported explanation,
+   checking that only eligible exact-head approval follows. Also verify a
+   valid stale-baseline full recovery and a synthetic broker rejection after
+   Worker deployment, preserving finding adjudication and approval gates.
+
+Use the rollback and yank policy below if verification fails. Never overwrite a
+published version; workflow rollback uses the previous immutable target, and
+Worker rollback uses the prior recorded deployment.
 
 ## Compatibility manifest and release sequencing
 

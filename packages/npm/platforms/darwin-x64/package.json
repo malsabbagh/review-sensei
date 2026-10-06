@@ -1,6 +1,6 @@
 {
   "name": "@reviewsensei/cli-darwin-x64",
-  "version": "0.6.13",
+  "version": "0.6.14",
   "description": "ReviewSensei AI code review engine for macOS Intel; native payload used by @reviewsensei/cli",
   "license": "MIT",
   "repository": {
