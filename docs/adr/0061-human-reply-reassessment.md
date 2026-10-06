@@ -31,6 +31,13 @@ new field and withhold approval rather than infer eligibility. More than 20
 findings, oversized entries or an inventory over 24 KiB omit the inventory and
 preserve withholding; no truncated list can stand for the complete result.
 
+The omission behavior and concern-identity assumption above are superseded by
+[ADR 0065](0065-complete-human-inventory-and-approval-retry.md): construction now
+fails visibly before publication, colliding concerns retain separate assessment
+identities, and a legacy missing inventory returns an actionable full-review
+error instead of ordinary chat. Durable reassessment can also resume approval
+after an interrupted runner.
+
 The configured provider returns one strict bounded assessment per addressed
 concern, including its fingerprint, addressed/dismissed/unresolved decision,
 concrete rationale and literal excerpts from both the authenticated human reply

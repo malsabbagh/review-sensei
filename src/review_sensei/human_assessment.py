@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from typing import Mapping
 
 from .context import finding_lifecycle_for_comment
@@ -124,23 +125,40 @@ class PendingHumanReview:
         cls, result: ReviewResult, base_sha: str | None
     ) -> PendingHumanReview | None:
         comments = tuple(comment for comment in result.comments if comment.needs_human)
-        if not comments or base_sha is None:
+        if not comments:
             return None
-        try:
-            return cls(
-                base_sha=base_sha,
-                findings=tuple(
-                    HumanReviewFinding(
-                        finding_lifecycle_for_comment(comment).fingerprint,
-                        comment.path,
-                        comment.body,
-                    )
-                    for comment in comments
-                ),
+        if base_sha is None:
+            raise ReviewInputError("human review inventory requires an exact base sha")
+        # Lifecycle fingerprints deliberately omit prose and line locations.
+        # They identify concerns across rounds, not individual assessments.
+        # Keep the old identity for unambiguous concerns; split collisions by
+        # the complete validated comment, independent of provider ordering.
+        groups: dict[str, dict[str, HumanReviewFinding]] = {}
+        for comment in comments:
+            fingerprint = finding_lifecycle_for_comment(comment).fingerprint
+            canonical = json.dumps(
+                asdict(comment), sort_keys=True, separators=(",", ":")
             )
-        except ReviewInputError:
-            # Never truncate the inventory or claim all concerns were assessed.
-            return None
+            groups.setdefault(fingerprint, {})[canonical] = HumanReviewFinding(
+                fingerprint, comment.path, comment.body
+            )
+        findings = []
+        for fingerprint, group in sorted(groups.items()):
+            for canonical, finding in sorted(group.items()):
+                if len(group) > 1:
+                    identity = hashlib.sha256(
+                        (
+                            "reviewsensei:human-finding:v1:"
+                            + fingerprint
+                            + ":"
+                            + canonical
+                        ).encode()
+                    ).hexdigest()
+                    finding = replace(finding, fingerprint=identity)
+                findings.append(finding)
+        # Only byte-identical validated comments coalesce. Bounds and identity
+        # validation still fail closed, visibly, before anything is published.
+        return cls(base_sha=base_sha, findings=tuple(findings))
 
     def apply(
         self, decisions: tuple[HumanAssessmentDecision, ...]

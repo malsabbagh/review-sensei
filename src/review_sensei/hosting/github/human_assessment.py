@@ -100,12 +100,18 @@ class HumanAssessmentPublisher:
             pull_request=pull_request,
             head_sha=prepared.head_sha,
             app_slug=app_slug,
+            require_valid=True,
         )
-        if (
-            eligibility is None
-            or eligibility.human_review is None
-            or not eligibility.human_review.pending
-        ):
+        if eligibility is None:
+            return None
+        if eligibility.human_review is None:
+            if eligibility.facts.has_human_adjudication_findings:
+                # Public prose/short RS identifiers do not bind a complete
+                # inventory to the result digest. Never reconstruct authority
+                # from a chat reply, or expose this as ordinary conversation.
+                raise GitHubConversationError(
+                    "human-review inventory is missing; rerun a full review for the current head before reassessment"
+                )
             return None
         preflight = self.finalizer._preflight(
             token=token,
@@ -120,7 +126,9 @@ class HumanAssessmentPublisher:
             or preflight.base_sha != eligibility.human_review.base_sha
             or prepared.context.base_sha != preflight.base_sha
         ):
-            return None
+            raise GitHubConversationError(
+                "human reassessment requires the current open PR and exact reviewed base/head; rerun a full review if the base changed"
+            )
         source = self._source(
             token=token,
             repository=repository,
@@ -129,7 +137,9 @@ class HumanAssessmentPublisher:
             app_slug=app_slug,
         )
         if source is None:
-            return None
+            raise GitHubConversationError(
+                "human reassessment source changed or is unauthorized; submit a new authorized mention"
+            )
         # Inline comment hunks can belong to a historical commit. For human
         # reassessment always read the current PR diff rather than that hunk.
         diff, _paths = self.conversation._load_diff_context(
@@ -139,8 +149,10 @@ class HumanAssessmentPublisher:
             source=source,
             source_kind="issue",
         )
-        if not diff:
-            return None
+        if not diff and eligibility.human_review.pending:
+            raise GitHubConversationError(
+                "human reassessment current diff is missing; rerun a full review before reassessment"
+            )
         context = replace(prepared.context, diff_context=diff)
         return PreparedHumanAssessment(
             conversation=replace(prepared, context=context),
@@ -201,7 +213,9 @@ class HumanAssessmentPublisher:
             raise GitHubConversationError(
                 "human assessment evidence is unsupported"
             ) from exc
-        if updated_inventory != inventory and not review_token:
+        if (
+            updated_inventory != inventory or not inventory.pending
+        ) and not review_token:
             raise GitHubConversationError(
                 "human assessment review capability is missing"
             )
@@ -212,7 +226,15 @@ class HumanAssessmentPublisher:
             head_sha=conversation.head_sha,
             app_slug=app_slug,
         )
-        if current != original:
+        refreshed = replace(
+            original,
+            human_review=updated_inventory,
+            facts=replace(
+                original.facts,
+                has_human_adjudication_findings=bool(updated_inventory.pending),
+            ),
+        )
+        if current not in (original, refreshed):
             return ReplyResult(status="skipped_stale_head")
         preflight = self.finalizer._preflight(
             token=token,
@@ -225,6 +247,27 @@ class HumanAssessmentPublisher:
             return ReplyResult(status=preflight.result.status)
         if preflight.app_authored or preflight.base_sha != inventory.base_sha:
             return ReplyResult(status="skipped_stale_base")
+        if current == refreshed and (
+            updated_inventory != inventory or not inventory.pending
+        ):
+            # A previous attempt durably reassessed but failed before approval.
+            # Re-enter the existing exact-head finalizer without another model
+            # decision or COMMENT. A newer/conflicting result still wins.
+            assert review_token is not None
+            finalized = self.finalizer.finalize(
+                token=review_token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=conversation.head_sha,
+                app_slug=app_slug,
+                eligibility=refreshed,
+                require_persisted=True,
+            )
+            return ReplyResult(
+                status=finalized.status
+                if finalized.status.startswith("skipped_")
+                else "already_replied"
+            )
         outcome = self.conversation.publish(
             token=token,
             repository=repository,
@@ -287,14 +330,6 @@ class HumanAssessmentPublisher:
             return ReplyResult(
                 status="skipped_stale_head", comment_id=outcome.comment_id
             )
-        refreshed = replace(
-            original,
-            human_review=updated_inventory,
-            facts=replace(
-                original.facts,
-                has_human_adjudication_findings=bool(updated_inventory.pending),
-            ),
-        )
         evidence_digest = hashlib.sha256(
             json.dumps(
                 {

@@ -1047,6 +1047,7 @@ class ReviewApprovalFinalizer:
         pull_request: int,
         head_sha: str,
         app_slug: str,
+        require_valid: bool = False,
     ) -> ReviewApprovalEligibility | None:
         """Read the persisted eligibility document for one reviewed head.
 
@@ -1066,12 +1067,12 @@ class ReviewApprovalFinalizer:
             token=token, repository=repository, pull_request=pull_request
         )
         return self._eligibility_from_reviews(
-            reviews, head_sha=head_sha, app_slug=app_slug
+            reviews, head_sha=head_sha, app_slug=app_slug, require_valid=require_valid
         )
 
     @staticmethod
     def _eligibility_from_reviews(
-        reviews: list[Any], *, head_sha: str, app_slug: str
+        reviews: list[Any], *, head_sha: str, app_slug: str, require_valid: bool = False
     ) -> ReviewApprovalEligibility | None:
         expected = app_slug.casefold()
         for review in reversed(reviews):
@@ -1091,6 +1092,10 @@ class ReviewApprovalFinalizer:
             eligibility = approval_eligibility_from_body(body)
             if eligibility is not None and eligibility.head_sha == head_sha:
                 return eligibility
+            if require_valid:
+                raise GitHubPublicationError(
+                    "latest review eligibility is invalid; rerun a full review for the current head before reassessment"
+                )
             return None
         return None
 
@@ -1357,6 +1362,7 @@ class ReviewPublisher:
         repository: str,
         pull_request: int,
         head_sha: str,
+        base_sha: str,
         app_slug: str,
         check_token: str | None,
         result: ReviewResult,
@@ -1390,6 +1396,7 @@ class ReviewPublisher:
             eligibility=approval_eligibility_from_result(
                 result,
                 head_sha=head_sha,
+                base_sha=base_sha,
                 enabled=approval_enabled,
                 app_authored=False,
                 qualification=qualification,
@@ -1539,6 +1546,16 @@ class ReviewPublisher:
                 authorized_dispositions=authorized_dispositions,
             )
         result = prepared.result
+        # Validate the complete inventory before checks or review mutations.
+        # Failure must not publish an unreassessable human-review record.
+        approval_eligibility_from_result(
+            result,
+            head_sha=head_sha,
+            base_sha=base_sha,
+            enabled=approval_enabled,
+            app_authored=False,
+            qualification=qualification,
+        )
         # Automatic approval also requires an eligible review: a partial or
         # failed analysis, a pending human assessment, or incomplete coverage
         # must never converge to APPROVE on the maintainer's behalf. Eligibility
@@ -1597,6 +1614,7 @@ class ReviewPublisher:
                             repository=repository,
                             pull_request=pull_request,
                             head_sha=head_sha,
+                            base_sha=base_sha,
                             app_slug=app_slug,
                             check_token=check_token,
                             result=result,
@@ -1615,6 +1633,7 @@ class ReviewPublisher:
                             repository=repository,
                             pull_request=pull_request,
                             head_sha=head_sha,
+                            base_sha=base_sha,
                             app_slug=app_slug,
                             check_token=check_token,
                             result=result,
