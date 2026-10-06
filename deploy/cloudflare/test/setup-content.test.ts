@@ -37,7 +37,9 @@ const INLINE_COMMAND_PREFILTER_START =
  * dropped and its `\Z` anchor becomes a JavaScript end-of-input `$` without
  * the `m` flag. That translation is only equivalent while the pattern uses
  * neither anchor itself, so an inner `^` or `$` is rejected below instead of
- * silently changing what the pattern matches.
+ * silently changing what the pattern matches. The canonical `(?ai:...)` group
+ * becomes a literal: JavaScript's non-Unicode `i` flag has the same ASCII case
+ * behavior for these letters. Python tests execute the actual caller regex.
  */
 function inlineCommandPrefilter(text: string): string {
   const start = text.indexOf(INLINE_COMMAND_PREFILTER_START);
@@ -55,7 +57,13 @@ function inlineCommandPrefilter(text: string): string {
       "inline command prefilter anchors changed; update the JavaScript translation",
     );
   }
-  const translated = literal.slice("(?m)".length, -"\\Z".length);
+  const canonical = "(?ai:reviewsensei)";
+  if (literal.split(canonical).length !== 2) {
+    throw new Error("canonical ASCII case scope changed; update the JavaScript translation");
+  }
+  const translated = literal
+    .slice("(?m)".length, -"\\Z".length)
+    .replace(canonical, "reviewsensei");
   if (/[\^$]/.test(translated)) {
     throw new Error(
       "inline command prefilter uses an inner anchor; the JavaScript translation is not equivalent",
@@ -172,7 +180,7 @@ describe("setup-v4 public boundary", () => {
         "      (github.event_name == 'issue_comment' &&\n" +
         "      github.event.action == 'created' &&\n" +
         "      github.event.issue.pull_request &&\n" +
-        "      contains(github.event.comment.body, '@sensei') &&\n" +
+        "      (contains(github.event.comment.body, '@reviewsensei') || contains(github.event.comment.body, '@sensei')) &&\n" +
         "      (github.event.comment.author_association == 'OWNER' ||\n" +
         "      github.event.comment.author_association == 'MEMBER' ||\n" +
         "      github.event.comment.author_association == 'COLLABORATOR') &&\n" +
@@ -181,7 +189,7 @@ describe("setup-v4 public boundary", () => {
     expect(workflow).toContain(
       "      (github.event_name == 'pull_request_review_comment' &&\n" +
         "      github.event.action == 'created' &&\n" +
-        "      contains(github.event.comment.body, '@sensei') &&\n",
+        "      (contains(github.event.comment.body, '@reviewsensei') || contains(github.event.comment.body, '@sensei')) &&\n",
     );
     expect(workflow).not.toContain("vars.");
     // Rendering must collapse every @@{{ }} escape and leave the raw ${{ }}
@@ -215,6 +223,8 @@ describe("setup-v4 public boundary", () => {
       .filter((item) => item.accepted && !prefilter.test(item.body))
       .map((item) => item.body);
     expect(missed).toEqual([]);
+    expect(prefilter.test("@reviewſensei review pause")).toBe(false);
+    expect(prefilter.test("@revıewsensei review pause")).toBe(false);
   });
 
   it("does not invent a SHA-based concurrency key; hosted reviews use the reusable workflow", () => {
@@ -346,7 +356,7 @@ describe("setup-v4 public boundary", () => {
         "  writes: false\n" +
         "  # auto-approve (request changes or approve), blocking, or advisory\n" +
         "  reviews: auto-approve\n" +
-        "  # Reply to authorized @sensei mentions\n" +
+        "  # Reply to authorized @reviewsensei (or @sensei) mentions\n" +
         "  mentions: true\n" +
         "  # disabled, proposals, or pull-requests\n" +
         "  learning: disabled\n" +

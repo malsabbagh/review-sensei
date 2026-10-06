@@ -397,7 +397,7 @@ class SetupPlanTests(unittest.TestCase):
             "      (github.event_name == 'issue_comment' &&\n"
             "      github.event.action == 'created' &&\n"
             "      github.event.issue.pull_request &&\n"
-            "      contains(github.event.comment.body, '@sensei') &&\n"
+            "      (contains(github.event.comment.body, '@reviewsensei') || contains(github.event.comment.body, '@sensei')) &&\n"
             "      (github.event.comment.author_association == 'OWNER' ||\n"
             "      github.event.comment.author_association == 'MEMBER' ||\n"
             "      github.event.comment.author_association == 'COLLABORATOR') &&\n"
@@ -1087,6 +1087,39 @@ class SetupPullRequestServiceTests(unittest.TestCase):
 
         self.assertEqual(results[0].status, "created")
         self.assertTrue(any(r[0] == "create_pull_request" for r in transport.requests))
+
+    def test_sensei_only_v5_caller_migrates_but_edited_content_is_preserved(self):
+        import review_sensei.hosting.github.setup as setup_module
+
+        plan = SetupPlanBuilder().build("owner/repo")
+        files = {file.path: file.content for file in plan.files}
+        previous = setup_module._sensei_only_v5_workflow("v5")
+        self.assertNotEqual(previous, files[WORKFLOW_PATH])
+        self.assertNotIn("@reviewsensei", previous)
+        files[WORKFLOW_PATH] = previous
+        self.assertEqual(setup_module._classify_setup_files(files), "migration")
+        transport = FileTransport(files=files)
+        results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+            delivery(), installation_token="ghs_opaque"
+        )
+        self.assertEqual(results[0].status, "created")
+        branch_request = next(
+            r for r in transport.requests if r[0] == "create_or_update_branch"
+        )
+        written = {file.path: file.content for file in branch_request[6]}
+        self.assertEqual(written[WORKFLOW_PATH], plan.files[0].content)
+        self.assertIn(
+            "contains(github.event.comment.body, '@reviewsensei')",
+            written[WORKFLOW_PATH],
+        )
+        self.assertNotEqual(written[WORKFLOW_PATH], previous)
+        files[WORKFLOW_PATH] = previous + "# operator-owned edit\n"
+        self.assertEqual(setup_module._classify_setup_files(files), "unknown")
+        worker_fixture = (
+            Path(__file__).resolve().parents[1]
+            / "deploy/cloudflare/fixtures/sensei-only-v5-caller.yml"
+        )
+        self.assertEqual(worker_fixture.read_text(), previous)
 
     def test_released_v5_setup_is_migrated(self):
         plan = SetupPlanBuilder().build("owner/repo")

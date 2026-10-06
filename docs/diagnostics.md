@@ -87,7 +87,7 @@ required fixes.
 
 A held reservation can block admission even when `operator_paused` is false.
 After the reviewed recovery runtime and workflow are installed, an authorized
-maintainer can comment `@sensei review continue` on that PR. The command uses
+maintainer can comment `@reviewsensei review continue` on that PR. The command uses
 GitHub Actions reads to prove the originating run has completed, refuses an active
 owner run, rechecks ledger ownership and the current PR head, and charges
 one failed attempt to the abandoned head. Run a new review only after the

@@ -19,6 +19,7 @@ import {
   buildTaggedV4SetupFiles,
   buildSetupFiles,
   historicalV4UninstallWorkflow,
+  senseiOnlyV5WorkflowTemplate,
   mergeFocusedV4ConfigFile,
   mergeFocusedV4WorkflowTemplate,
   providerParityWorkflowBeforeDraftSkip,
@@ -679,6 +680,25 @@ describe("setup repository reconciliation", () => {
         { repository: "acme/widgets", status: "skipped_unknown_setup" },
       ]);
       expect(mutationRequests(fake)).toEqual([]);
+    }
+  });
+
+  it.each([false, true])("handles sensei-only v5 caller with operator edit=%s", async (edited) => {
+    const fake = new FakeGitHub();
+    fake.files = Object.fromEntries(buildSetupFiles(TAG).map(({ path, content }) => [path, content]));
+    fake.files[SETUP_FILE_PATHS[0]] = senseiOnlyV5WorkflowTemplate(TAG) + (edited ? "# operator-owned edit\n" : "");
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: edited ? "skipped_unknown_setup" : "created", ...(edited ? {} : { pull_request_number: 42 }) },
+    ]);
+    if (edited) {
+      expect(mutationRequests(fake)).toEqual([]);
+    } else {
+      const tree = fake.requests.find(({ path }) => path.endsWith("/git/trees"));
+      const entries = tree?.body?.tree as Array<{ path: string; content: string }>;
+      const caller = entries.find(({ path }) => path === SETUP_FILE_PATHS[0])?.content;
+      expect(caller).toEqual(buildSetupFiles(TAG)[0].content);
+      expect(caller).toContain("contains(github.event.comment.body, '@reviewsensei')");
+      expect(caller).not.toEqual(senseiOnlyV5WorkflowTemplate(TAG));
     }
   });
 

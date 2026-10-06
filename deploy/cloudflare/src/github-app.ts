@@ -25,6 +25,7 @@ import {
   historicalV4UninstallWorkflow,
   historicalV5UninstallWorkflow,
   historicalV5WorkflowTemplate,
+  senseiOnlyV5WorkflowTemplate,
   mergeFocusedV4ConfigFile,
   mergeFocusedV4WorkflowTemplate,
   previousProviderParityWorkflowTemplate,
@@ -354,7 +355,8 @@ function looksLikeManagedV5Setup(path: string, content: string): boolean {
     try {
       return (
         content === buildTaggedV4SetupFiles(publicWorkflowTag)[0].content ||
-        content === historicalV5WorkflowTemplate(publicWorkflowTag)
+        content === historicalV5WorkflowTemplate(publicWorkflowTag) ||
+        content === senseiOnlyV5WorkflowTemplate(publicWorkflowTag)
       );
     } catch {
       return false;

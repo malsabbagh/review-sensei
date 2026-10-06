@@ -134,7 +134,7 @@ def repaired_command(body: str) -> str:
     shape no documented rule covers.
     """
 
-    repaired = re.sub(r"(?i)@sensei", "@sensei", body)
+    repaired = re.sub(r"(?i)@(?:reviewsensei|sensei)", "@sensei", body)
     repaired = re.sub(r"\s+", " ", repaired)
     if parses_as_command(repaired):
         return repaired
@@ -188,7 +188,14 @@ def command_corpus() -> list[str]:
     bodies: list[str] = []
     for command, mention, prefix, separator, suffix in itertools.product(
         commands,
-        ("@sensei", "@Sensei", "@SENSEI"),
+        (
+            "@sensei",
+            "@Sensei",
+            "@SENSEI",
+            "@reviewsensei",
+            "@ReviewSensei",
+            "@REVIEWSENSEI",
+        ),
         ("", "note ", "note\n", "> "),
         (" ", "\t", "\n", "  "),
         ("", " ", "\n", " trailing"),
@@ -210,6 +217,50 @@ def command_corpus() -> list[str]:
 
 
 class GitHubTriggerTests(unittest.TestCase):
+    def test_canonical_handle_rescan_and_nonmatches(self):
+        for alias in ("@reviewsensei", "@ReviewSensei", "@REVIEWSENSEI", "@sensei"):
+            with self.subTest(alias=alias):
+                self.assertTrue(comment_mentions_sensei(alias))
+                self.assertEqual(
+                    resolve_issue_comment(
+                        f"{alias} re-scan commit bbbbbbb", _pull()
+                    ).operation,
+                    "review",
+                )
+                self.assertEqual(
+                    resolve_issue_comment(f"{alias} review status", _pull()).operation,
+                    "command",
+                )
+                self.assertEqual(
+                    resolve_review_comment_event(f"{alias} fixed?", _pull()).operation,
+                    "reply",
+                )
+        for body in (
+            "@reviewsenseiish re-scan",
+            "x@ReviewSensei re-scan",
+            "@reviewsensei-bot re-scan",
+            "@review-sensei re-scan",
+            "@review sensei re-scan",
+        ):
+            with self.subTest(body=body):
+                self.assertFalse(comment_mentions_sensei(body))
+                self.assertFalse(issue_comment_requests_rescan(body))
+
+    def test_rescan_keeps_unicode_boundaries_but_command_parser_requires_ascii(self):
+        for alias in ("@sensei", "@reviewsensei", "@ReviewSensei", "@REVIEWSENSEI"):
+            for separator in ("\u00a0", "\u2003", "\u3000"):
+                with self.subTest(alias=alias, separator=separator):
+                    body = f"{separator}{alias}{separator}re-scan"
+                    self.assertTrue(issue_comment_requests_rescan(body))
+                    self.assertEqual(
+                        resolve_issue_comment(body, _pull()).operation, "review"
+                    )
+                    command = f"{separator}{alias}{separator}review pause"
+                    self.assertEqual(
+                        resolve_issue_comment(command, _pull()).operation, "command"
+                    )
+                    self.assertIsNone(parse_maintainer_command(command, actor="alice"))
+
     def test_issue_comment_requests_rescan(self):
         self.assertTrue(
             issue_comment_requests_rescan("@sensei please re-scan commit 016017b")
@@ -448,9 +499,9 @@ class InlineCallerResolverTests(unittest.TestCase):
             ("generated", _tagged_workflow("v5")),
             (
                 "worker-template",
-                (ROOT / "deploy" / "cloudflare" / "src" / "setup-content.ts").read_text(
-                    encoding="utf-8"
-                ),
+                (ROOT / "deploy" / "cloudflare" / "src" / "setup-content.ts")
+                .read_text(encoding="utf-8")
+                .split("function resolveTriggerWorkflowTemplate(", 1)[1],
             ),
         ):
             with self.subTest(name=name):
@@ -520,22 +571,43 @@ class InlineCallerResolverTests(unittest.TestCase):
                     "fixture body is over-accepted outside the documented "
                     "over-acceptance dimensions",
                 )
-        self.assertEqual(
-            over_accepted,
+        legacy_expected = {
+            "@Sensei review pause",
+            "@SENSEI review pause",
+            "@SeNsEi review ReEnRoLl",
+            "@sensei review pause\n@sensei review pause",
+            "@sensei review pause\n@sensei verify",
+            f'@sensei dismiss {fingerprint} --reason ""',
+            f'@sensei dismiss {fingerprint} --reason "accepted"\u2003',
+            f"@sensei dismiss {fingerprint} --reason " + "x" * 513,
+            "@sensei review\x1creenroll",
+            "@sensei review\x85reenroll",
+            "@sensei review\u2003reenroll",
+        }
+        # Preserve each raw handle in the snapshot. Rewriting actual bodies to
+        # @sensei would conceal which alias introduced an unexpected shape.
+        expected = legacy_expected | {
+            body.replace("@sensei", alias)
+            for body in legacy_expected
+            if "@sensei" in body
+            for alias in ("@reviewsensei", "@ReviewSensei", "@REVIEWSENSEI")
+        }
+        expected.update(
             {
-                "@Sensei review pause",
-                "@SENSEI review pause",
-                "@SeNsEi review ReEnRoLl",
-                "@sensei review pause\n@sensei review pause",
-                "@sensei review pause\n@sensei verify",
-                f'@sensei dismiss {fingerprint} --reason ""',
-                f'@sensei dismiss {fingerprint} --reason "accepted"\u2003',
-                f"@sensei dismiss {fingerprint} --reason " + "x" * 513,
-                "@sensei review\x1creenroll",
-                "@sensei review\x85reenroll",
-                "@sensei review\u2003reenroll",
-            },
+                "@ReviewSensei review pause\n@sensei verify",
+                "@sensei review pause\n@ReviewSensei verify",
+            }
         )
+        expected.update(
+            body
+            for alias in ("@sensei", "@reviewsensei", "@ReviewSensei", "@REVIEWSENSEI")
+            for separator in ("\u00a0", "\u2003", "\u3000")
+            for body in (
+                f"{alias}{separator}review pause",
+                f"{separator}{alias} review pause",
+            )
+        )
+        self.assertEqual(over_accepted, expected)
 
     def test_command_corpus_covers_every_maintainer_action(self):
         """The corpus must exercise every action the parser can return.
@@ -587,10 +659,12 @@ class InlineCallerResolverTests(unittest.TestCase):
             {
                 ".github/workflows/review-sensei-review.yml",
                 "deploy/cloudflare/fixtures/merge-focused-v4-caller.yml",
+                "deploy/cloudflare/fixtures/sensei-only-v5-caller.yml",
                 "deploy/cloudflare/src/setup-content.ts",
                 "deploy/cloudflare/test/setup-content.test.ts",
                 "examples/github-actions/review-sensei-review.yml",
                 "src/review_sensei/hosting/github/fixtures/merge-focused-v4-caller.yml",
+                "src/review_sensei/hosting/github/fixtures/sensei-only-v5-caller.yml",
                 "src/review_sensei/hosting/github/setup.py",
                 "tests/test_github_trigger.py",
             },
@@ -614,15 +688,27 @@ class InlineCallerResolverTests(unittest.TestCase):
             ),
             ("issue_comment", "@sensei review continue --rounds 2"),
             ("issue_comment", "@sensei review reenroll trailing"),
+            ("issue_comment", "@reviewſensei review pause"),
+            ("issue_comment", "@revıewsensei review pause"),
             ("pull_request", ""),
             ("pull_request_review_comment", "@sensei fixed?"),
             ("workflow_dispatch", ""),
+        )
+        cases += tuple(
+            ("issue_comment", f"{separator}@sensei{separator}{suffix}")
+            for separator in ("\u00a0", "\u2003", "\u3000")
+            for suffix in ("re-scan", "review pause", "what changed?")
         )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             pull_path = root / "pull.json"
             pull_path.write_text(json.dumps(pull), encoding="utf-8")
-            for event, body in cases:
+            aliases = ("@sensei", "@reviewsensei", "@ReviewSensei", "@REVIEWSENSEI")
+            for event, body in (
+                (event, body.replace("@sensei", alias))
+                for event, body in cases
+                for alias in aliases
+            ):
                 with self.subTest(event=event, body=body):
                     module_output = root / f"{event}-module.out"
                     inline_output = root / f"{event}-inline.out"

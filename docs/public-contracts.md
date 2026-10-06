@@ -299,7 +299,7 @@ reinitialized. Ledger loading reports `expired`, or reports unreadable state
 when the enrollment witness has no record; every admission path then fails
 closed with the recovery instruction. Only `SessionLedger.reenroll` may retire
 that state, reachable as the authenticated maintainer command
-`@sensei review reenroll` (a write command, so it requires `--allow-write`).
+`@reviewsensei review reenroll` (a write command, so it requires `--allow-write`).
 The local ledger removes its enrollment witness before the record, so an
 interrupted recovery leaves a loadable expired record rather than a witness
 without a record. The GitHub-backed ledger rewrites its own expired marker
@@ -392,7 +392,7 @@ across jobs that share no local disk. `--repository-id` and `--oidc-token`
 are valid only with `--github-session-ledger`, and the broker session needs an
 operator `--review-mode`; a session whose broker verdict is `known` but whose
 marker is absent fails closed and requires a maintainer
-`@sensei review reenroll` rather than silently re-enrolling.
+`@reviewsensei review reenroll` rather than silently re-enrolling.
 The local `--session-ledger` file stays the default for operator diagnostics.
 An optional `reservation_owner` object carries the broker-authenticated
 `run_id` and reviewed `head_sha` only while a reservation is held. It is covered
@@ -1049,7 +1049,7 @@ review data migration is required.
 locations against the exact diff, rereads the open non-draft same-repository PR
 head, and submits one App-authored review whose formatted summary and inline
 comments append the fixed follow-up instruction `To discuss this finding, reply
-with @sensei followed by your question.` and carry the marker
+with @reviewsensei followed by your question.` and carry the marker
 `<!-- reviewsensei:review:v1 repo=<id> pr=<n> head=<sha> result=<sha256> -->`.
 The default evidence policy is `legacy` single-pass mode. `confirmed` publishes
 only snapshot-bound confirmed candidates; unverified comments never become
@@ -1115,7 +1115,27 @@ the GitHub HTTP client's 512 KiB per-response ceiling without skipping or
 duplicating candidates. An oversized single-item response, an overfull page, or
 incomplete pagination fails closed.
 
-Conversation replies require a standalone case-insensitive `@sensei` mention
+The canonical handle is `@reviewsensei`, matched without ASCII case sensitivity
+(including `@ReviewSensei`). `@sensei` remains a supported alias: its command and
+re-scan gates retain the historical lowercase requirement, and its conversational
+matching remains case-insensitive. Commands require ASCII whitespace before the
+handle (or start of body) and after it, retain first-mention parsing and the exact
+command grammar, and remain subject to the 4096-byte hosted body and 512-byte
+reason bounds. Conversation mentions require start/whitespace before the handle
+and end/whitespace or `. , ! ?` after it; prefixes, suffixes and alternate spellings
+such as `@review-sensei`, `@review sensei`, and `@reviewsensei-bot` do not qualify.
+Caller `contains` filters are intentionally broad routing gates, followed by the
+authoritative syntax and actor checks. See [caller rollout](mention-handle-rollout.md).
+
+Conversation and re-scan mention boundaries preserve Python's Unicode whitespace
+semantics (`\s`), including U+00A0, U+2003 and U+3000. Command separators remain
+the explicit ASCII set space, tab, CR and LF. The stdlib trigger resolver and
+embedded caller command prefilter may route Unicode-separated command-shaped
+text, but the full command parser and broker reject it before any command write.
+The canonical handle's `(?ai:...)` scope changes only letter matching, not these
+boundaries: ASCII case variants qualify, Unicode lookalikes do not.
+
+Conversation replies require a standalone case-insensitive `@reviewsensei` mention
 from a human OWNER, MEMBER, or COLLABORATOR. Reply bodies are bounded and
 validated before marker append; source update time, exact head, root-thread
 identity, PR state, and fork state are reread before publication. The inline
@@ -1135,7 +1155,7 @@ conversation context to Ollama Cloud; local operations use the labelled
 self-hosted runner and configured local Ollama service. After authorization and
 before provider execution, ReviewSensei adds an App-authored `eyes` reaction to
 the source comment. It removes that reaction after reply publication or another
-terminal outcome. Each subsequent standalone `@sensei` mention is a new bounded,
+terminal outcome. Each subsequent standalone `@reviewsensei` mention is a new bounded,
 idempotent conversation turn over the current thread and exact PR head. When a
 reply returns `resolve: true` for a blocking root and the resolution mutation
 succeeds, the same provider job invokes the deterministic exact-head approval
@@ -1171,7 +1191,7 @@ The shared finalizer emits `APPROVE` only for an eligible exact head with a
 complete, qualified review and no unresolved ReviewSensei root classified
 blocking, deciding from the persisted eligibility document rather than a
 caller-supplied boolean. Non-blocking ReviewSensei follow-ups and human threads
-may remain open; blocking or unclassified ReviewSensei roots and `@sensei`
+may remain open; blocking or unclassified ReviewSensei roots and `@reviewsensei`
 replies remain ordinary comments. Partial, incomplete, or summary-only
 artifacts never approve. Draft, closed, stale, fork, or App-authored pull
 requests are never approved; GitHub does not run required checks on App-authored

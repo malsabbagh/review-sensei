@@ -1549,7 +1549,7 @@ def _require_present_marker(
         # the recovery command so an operator does not have to infer it.
         raise GitHubPublicationError(
             "session ledger marker is missing; authenticated recovery is "
-            "required: a maintainer must comment `@sensei review reenroll` "
+            "required: a maintainer must comment `@reviewsensei review reenroll` "
             "to re-establish this session"
         )
 

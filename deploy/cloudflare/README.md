@@ -235,7 +235,7 @@ existing variable/secret values are preserved.
 
 ### Setup-v5 execution and broker boundary
 
-Cloud review and `@sensei` reply operations use GitHub-hosted compute. Local
+Cloud review and `@reviewsensei` reply operations use GitHub-hosted compute. Local
 review and reply operations use the labelled self-hosted runner. Both provider
 modes support automatic/manual review, learning proposals, optional artifacts,
 and bounded multi-turn PR conversations. Cloud mode sends the selected review
@@ -245,7 +245,7 @@ reply or another terminal outcome.
 Generated write and artifact switches default to false. When automatic review
 and GitHub writes are enabled, only a validated clean exact-head review whose
 bounded final thread sweep is fully resolved emits `APPROVE`. Findings, open
-threads, ineligible pull requests, and `@sensei` replies remain ordinary
+threads, ineligible pull requests, and `@reviewsensei` replies remain ordinary
 `COMMENT` events, and the existing per-head marker prevents duplicate writes.
 The generated caller may forward `OLLAMA_API_KEY`, `OPENROUTER_API_KEY`, or
 `OPENAI_API_KEY` from repository secrets by name only; the App never creates,

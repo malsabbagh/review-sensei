@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Make `@reviewsensei` the canonical mention handle, including `@ReviewSensei`,
+  while retaining `@sensei`. Update current caller/installer routing, commands,
+  broker recognition and finding reply prompts. Existing consumer callers need
+  the workflow patch described in `docs/mention-handle-rollout.md`.
+
 - Clean up owned analysis reservations when context construction or other
   pre-inference work fails. Authenticated `@sensei review continue` can recover
   abandoned analysis after live GitHub run proofs, without resetting session
