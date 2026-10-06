@@ -23,7 +23,7 @@ unsupported. Keep npm optional dependencies enabled: the launcher needs its
 exact-version platform package and reports an error if it is missing.
 
 ```console
-npm install --save-dev @reviewsensei/cli@0.6.15
+npm install --save-dev @reviewsensei/cli@0.6.16
 npx review-sensei --version
 npx review-sensei --help
 ```
@@ -31,7 +31,7 @@ npx review-sensei --help
 Or run an exact version without adding a project dependency:
 
 ```console
-npx --yes @reviewsensei/cli@0.6.15 --help
+npx --yes @reviewsensei/cli@0.6.16 --help
 ```
 
 From your repository directory, create a patch and review it with a reachable
