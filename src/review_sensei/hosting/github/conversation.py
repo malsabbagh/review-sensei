@@ -256,6 +256,17 @@ class HumanAssessmentDiffContext:
     diff_context: str | None
     diagnostic: str | None = None
 
+    def __post_init__(self) -> None:
+        from ...human_assessment import HUMAN_ASSESSMENT_EVIDENCE_DIAGNOSTICS
+
+        if self.diagnostic is not None and (
+            self.diagnostic not in HUMAN_ASSESSMENT_EVIDENCE_DIAGNOSTICS
+            or self.diff_context is not None
+        ):
+            raise GitHubConversationError(
+                "human assessment evidence diagnostic is invalid"
+            )
+
 
 @dataclass(frozen=True)
 class PreparedConversation:

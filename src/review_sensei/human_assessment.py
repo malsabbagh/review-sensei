@@ -19,6 +19,14 @@ MAX_HUMAN_REVIEW_BYTES = 24 * 1024
 MAX_HUMAN_SOURCE_BYTES = 4096
 
 
+HUMAN_ASSESSMENT_EVIDENCE_DIAGNOSTICS = frozenset(
+    {
+        "human_assessment_evidence_missing_patch",
+        "human_assessment_evidence_conflicting_patch",
+        "human_assessment_evidence_budget_exhausted",
+    }
+)
+
 HUMAN_ASSESSMENT_VALIDATION_REASONS = frozenset(
     {
         "human_assessment_invalid_json",

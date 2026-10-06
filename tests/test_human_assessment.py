@@ -28,6 +28,7 @@ from review_sensei.hosting.github.approval import (
 )
 from review_sensei.hosting.github.conversation import (
     ConversationPublisher,
+    HumanAssessmentDiffContext,
     PreparedConversation,
 )
 from review_sensei.hosting.github.errors import (
@@ -1043,6 +1044,26 @@ class HumanAssessmentTests(unittest.TestCase):
                 reply=reply,
                 app_slug=APP,
             )
+        self.assertFalse(any(method == "POST" for method, _, _ in state.calls))
+
+    def test_evidence_diagnostic_carriers_reject_untrusted_reason_text(self):
+        state = State()
+        _publisher, prepared = state.bridge()
+        secret = "PRIVATE_REASON_SENTINEL"
+        for construct in (
+            lambda: HumanAssessmentDiffContext(None, secret),
+            lambda: replace(prepared, evidence_diagnostic=secret),
+            lambda: HumanAssessmentDiffContext(
+                "partial patch", "human_assessment_evidence_missing_patch"
+            ),
+            lambda: replace(
+                prepared, evidence_diagnostic="human_assessment_evidence_missing_patch"
+            ),
+        ):
+            with self.subTest(construct=construct):
+                with self.assertRaises(GitHubConversationError) as caught:
+                    construct()
+                self.assertNotIn(secret, str(caught.exception))
         self.assertFalse(any(method == "POST" for method, _, _ in state.calls))
 
     def test_optional_patch_header_is_not_appended_to_required_patch_when_it_cannot_fit(

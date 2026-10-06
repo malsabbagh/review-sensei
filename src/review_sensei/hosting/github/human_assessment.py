@@ -9,6 +9,7 @@ from typing import Any
 
 from ...errors import ReviewInputError
 from ...human_assessment import (
+    HUMAN_ASSESSMENT_EVIDENCE_DIAGNOSTICS,
     MAX_HUMAN_SOURCE_BYTES,
     HumanAssessmentReply,
     validate_assessment_evidence,
@@ -34,6 +35,15 @@ class PreparedHumanAssessment:
     source_body: str
     source_actor: str
     evidence_diagnostic: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.evidence_diagnostic is not None and (
+            self.evidence_diagnostic not in HUMAN_ASSESSMENT_EVIDENCE_DIAGNOSTICS
+            or self.conversation.context.diff_context is not None
+        ):
+            raise GitHubConversationError(
+                "human assessment evidence diagnostic is invalid"
+            )
 
 
 class HumanAssessmentPublisher:
