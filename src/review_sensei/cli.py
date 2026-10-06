@@ -2445,6 +2445,20 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             source_kind=args.source_kind,
         )
         print(reply_outcome.status)
+        approval_status = getattr(reply_outcome, "approval_status", None)
+        if approval_status is not None:
+            reply_approval_diagnostic = getattr(
+                reply_outcome, "approval_diagnostic", None
+            )
+            print(
+                f"review-sensei: approval={approval_status}"
+                + (
+                    f" diagnostic={reply_approval_diagnostic}"
+                    if reply_approval_diagnostic
+                    else ""
+                ),
+                file=sys.stderr,
+            )
         return 0
     if args.reply is None or not args.head_sha:
         raise ReviewInputError(

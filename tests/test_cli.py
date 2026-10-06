@@ -472,7 +472,11 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
 
             def generate_and_publish_reply(self, **kwargs):
                 self.calls.append(kwargs)
-                return SimpleNamespace(status="replied")
+                return SimpleNamespace(
+                    status="replied",
+                    approval_status="approval_withheld",
+                    approval_diagnostic="approval_withheld_qualification",
+                )
 
         class FakeRegistry:
             def create(self, settings):
@@ -480,6 +484,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 return FakeProvider()
 
         registry = FakeRegistry()
+        stdout, stderr = io.StringIO(), io.StringIO()
         with patch.multiple(
             github_module,
             BrokerClient=lambda: object(),
@@ -494,7 +499,11 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 {"REVIEW_SENSEI_READ_TOKEN": "read-token"},
                 clear=True,
             ):
-                with patch("review_sensei.cli.default_registry", return_value=registry):
+                with (
+                    patch("review_sensei.cli.default_registry", return_value=registry),
+                    redirect_stdout(stdout),
+                    redirect_stderr(stderr),
+                ):
                     status = main(
                         [
                             "github",
@@ -518,6 +527,11 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                     )
 
         self.assertEqual(status, 0)
+        self.assertEqual(stdout.getvalue(), "replied\n")
+        self.assertEqual(
+            stderr.getvalue(),
+            "review-sensei: approval=approval_withheld diagnostic=approval_withheld_qualification\n",
+        )
         self.assertEqual(FakeApplication.instance.calls[0]["read_token"], "read-token")
         self.assertEqual(registry.settings.api_key, None)
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from typing import Mapping
 
 from .context import finding_lifecycle_for_comment
@@ -132,12 +132,13 @@ class PendingHumanReview:
         # Lifecycle fingerprints deliberately omit prose and line locations.
         # They identify concerns across rounds, not individual assessments.
         # Keep the old identity for unambiguous concerns; split collisions by
-        # the complete validated comment, independent of provider ordering.
+        # the validated v1 comment, independent of provider ordering and
+        # runtime admission fields. Approval facts retain admission authority.
         groups: dict[str, dict[str, HumanReviewFinding]] = {}
         for comment in comments:
             fingerprint = finding_lifecycle_for_comment(comment).fingerprint
             canonical = json.dumps(
-                asdict(comment), sort_keys=True, separators=(",", ":")
+                comment.to_dict(), sort_keys=True, separators=(",", ":")
             )
             groups.setdefault(fingerprint, {})[canonical] = HumanReviewFinding(
                 fingerprint, comment.path, comment.body
@@ -156,7 +157,7 @@ class PendingHumanReview:
                     ).hexdigest()
                     finding = replace(finding, fingerprint=identity)
                 findings.append(finding)
-        # Only byte-identical validated comments coalesce. Bounds and identity
+        # Only identical validated v1 comments coalesce. Bounds and identity
         # validation still fail closed, visibly, before anything is published.
         return cls(base_sha=base_sha, findings=tuple(findings))
 

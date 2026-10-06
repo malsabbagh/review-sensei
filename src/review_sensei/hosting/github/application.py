@@ -1451,7 +1451,7 @@ class GitHubApplication:
                         )
                         if inventory.pending
                         else HumanAssessmentReply(
-                            body="Human findings were already reassessed; rechecking approval requirements.",
+                            body="Retrying approval finalization for previously reassessed findings; all approval requirements still apply.",
                             decisions=(),
                         )
                     )

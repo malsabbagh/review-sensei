@@ -330,6 +330,8 @@ class HumanAssessmentPublisher:
                 if finalized.status.startswith("skipped_")
                 else outcome.status,
                 comment_id=outcome.comment_id,
+                approval_status=finalized.status,
+                approval_diagnostic=finalized.diagnostic,
             )
         evidence_digest = hashlib.sha256(
             json.dumps(
@@ -376,7 +378,7 @@ class HumanAssessmentPublisher:
             )
         # Re-read durable eligibility inside finalization, including after the
         # thread scan, so a newer same-head human finding wins over this result.
-        self.finalizer.finalize(
+        finalized = self.finalizer.finalize(
             token=review_token,
             repository=repository,
             pull_request=pull_request,
@@ -385,4 +387,8 @@ class HumanAssessmentPublisher:
             eligibility=refreshed,
             require_persisted=True,
         )
-        return outcome
+        return replace(
+            outcome,
+            approval_status=finalized.status,
+            approval_diagnostic=finalized.diagnostic,
+        )

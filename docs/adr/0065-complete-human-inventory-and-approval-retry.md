@@ -25,12 +25,14 @@ path; it does not reconstruct that historical artifact.
 ## Decision
 
 Keep the existing lifecycle identity for unambiguous human concerns. For each
-collision group, hash a domain-separated canonical complete validated comment
+collision group, hash a domain-separated canonical validated v1 comment
 with its concern fingerprint to produce a separate assessment identity. Provider
-ordering does not change identities. Only identical validated comments coalesce;
+ordering does not change identities. Only identical validated v1 comments coalesce;
 distinct text or locations remain independently assessable. Persisted inventories
 and provider decisions still reject duplicate, unknown and conflicting identities.
-Existing inventories keep their original identities and need no migration.
+Runtime-only admission fields do not change assessment identity; approval facts
+still retain their authority. Existing inventories keep their original identities
+and need no migration.
 
 The complete inventory must satisfy the existing limits: 20 distinct findings,
 2 KiB per finding, 24 KiB total and an exact base SHA. Construction failures are
@@ -64,7 +66,11 @@ approval marker. A newer same-head result or stale base/head wins. Retry creates
 neither another reassessment COMMENT nor a second approval in sequential replay.
 The source reply is reconciled through the existing conversation publisher
 before finalization, so retries reuse the reply marker and new mentions receive
-an acknowledgment rather than a false `already_replied` result.
+an acknowledgment rather than a false `already_replied` result. `ReplyResult`
+retains the source receipt status and separately reports finalizer status and
+diagnostic for initial and resumed assessment. The generated-reply CLI keeps the
+receipt on stdout and emits the approval outcome on stderr. A withheld approval
+or finalizer exception is never described as successful approval.
 
 ## Scope
 

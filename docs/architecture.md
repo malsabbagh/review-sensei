@@ -831,7 +831,7 @@ with the issue-reply token kept on conversation operations.
 
 [ADR 0065](adr/0065-complete-human-inventory-and-approval-retry.md) distinguishes
 assessment identities from lifecycle concern fingerprints. Colliding concerns
-retain separate identities derived from their complete validated comments;
+retain separate identities derived from their validated v1 comments;
 identical comments coalesce. Invalid or oversized inventories fail before
 publication instead of silently disappearing. A missing legacy inventory or a
 malformed latest authority record returns an actionable full-review error,

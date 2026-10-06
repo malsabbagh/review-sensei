@@ -368,6 +368,49 @@ class HumanAssessmentTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewInputError, "duplicated"):
             PendingHumanReview.from_dict(document)
 
+    def test_collision_identity_ignores_runtime_admission_fields(self):
+        first = ReviewComment(
+            path="src/app.py", line=1, body="First concern.", needs_human=True
+        )
+        second = replace(first, body="Second concern.")
+        expected = PendingHumanReview.from_result(
+            self.human_result((first, second)), BASE
+        )
+        actual = PendingHumanReview.from_result(
+            self.human_result(
+                (
+                    replace(first, effective_blocking=False),
+                    replace(first, effective_blocking=True),
+                    replace(second, effective_blocking=False),
+                )
+            ),
+            BASE,
+        )
+        self.assertEqual(actual, expected)
+        self.assertEqual(len(actual.findings), 2)
+
+    def test_strict_prepare_ignores_unrelated_reviews_before_latest_authority(self):
+        for unrelated in (
+            {"commit_id": "c" * 40, "user": {"login": APP}},
+            {"commit_id": HEAD, "user": {"login": "another[bot]"}},
+            {
+                "commit_id": HEAD,
+                "user": {"login": APP},
+                "body": "Ordinary acknowledgment.",
+            },
+        ):
+            with self.subTest(unrelated=unrelated):
+                state = State()
+                review = {
+                    "id": 21,
+                    "body": "<!-- reviewsensei:eligibility:v1 invalid -->",
+                    **unrelated,
+                }
+                state.reviews.append(review)
+                _publisher, prepared = state.bridge()
+                self.assertEqual(prepared.eligibility, state.eligibility)
+                self.assertEqual(state.events(), [])
+
     def test_invalid_or_unbounded_inventory_is_visible_before_publication_writes(self):
         comment = ReviewComment(
             path="src/app.py",
@@ -457,6 +500,7 @@ class HumanAssessmentTests(unittest.TestCase):
         self.assertEqual(outcome.status, "replied")
         self.assertEqual(broker.capabilities, ["issue_reply", "review_publish"])
         self.assertEqual(state.events(), ["COMMENT", "COMMENT", "APPROVE"])
+        self.assertEqual(outcome.approval_status, "approved")
         self.assertEqual(state.reply_count, 1)
         refreshed = approval_eligibility_from_body(state.reviews[-2]["body"])
         self.assertFalse(refreshed.human_review.pending)
@@ -486,6 +530,7 @@ class HumanAssessmentTests(unittest.TestCase):
         retry_provider = Provider({})
         outcome, broker = state.application_reply(retry_provider)
         self.assertEqual(outcome.status, "already_replied")
+        self.assertEqual(outcome.approval_status, "approved")
         self.assertEqual(state.events(), ["COMMENT", "APPROVE"])
         self.assertFalse(retry_provider.calls)
         self.assertEqual(broker.capabilities, ["issue_reply", "review_publish"])
@@ -511,9 +556,12 @@ class HumanAssessmentTests(unittest.TestCase):
         self.assertEqual(state.reply_count, 1)
         self.assertFalse(provider.calls)
         self.assertEqual(state.events(), ["APPROVE"])
+        self.assertEqual(outcome.approval_status, "approved")
+        self.assertIn("Retrying approval finalization", state.replies[-1]["body"])
         outcome, _ = state.application_reply(provider)
         self.assertEqual(outcome.status, "already_replied")
         self.assertEqual(state.reply_count, 1)
+        self.assertEqual(outcome.approval_status, "already_approved")
         self.assertEqual(state.events(), ["APPROVE"])
 
     def test_failure_before_source_reply_does_not_persist_assessment_or_approve(self):
@@ -699,6 +747,14 @@ class HumanAssessmentTests(unittest.TestCase):
                     )
                 outcome, _ = state.application_reply(Provider({}))
                 self.assertEqual(outcome.status, "replied")
+                self.assertEqual(
+                    outcome.approval_status,
+                    "auto_approval_disabled"
+                    if not state.eligibility.facts.enabled
+                    else "approval_withheld",
+                )
+                if state.eligibility.facts.enabled:
+                    self.assertIsNotNone(outcome.approval_diagnostic)
                 self.assertEqual(state.events(), [])
 
     def test_resumed_approval_rechecks_stale_head_base_and_latest_result(self):

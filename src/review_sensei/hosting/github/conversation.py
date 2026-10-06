@@ -241,6 +241,10 @@ class ReplyResult:
     status: str
     comment_id: int | None = None
     resolved: bool = False
+    # Source receipt and approval finalization are separate outcomes. Ordinary
+    # conversations do not finalize approval and leave these fields unset.
+    approval_status: str | None = None
+    approval_diagnostic: str | None = None
 
 
 @dataclass(frozen=True)
