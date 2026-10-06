@@ -16,12 +16,19 @@ name: Local review contract
 
 on:
   workflow_dispatch:
+    inputs:
+      diagnose_immutable_0614:
+        description: "Capture immutable 0.6.14 Intel standalone parity; never publish"
+        type: boolean
+        default: false
+        required: false
 
 permissions:
   contents: read
 
 jobs:
   local-review-contract:
+    if: ${{ !inputs.diagnose_immutable_0614 }}
     name: Documented local review contract
     runs-on: ubuntu-latest
     steps:
@@ -45,3 +52,63 @@ jobs:
             --repository "$GITHUB_WORKSPACE" \
             --diff evaluation/v1/diffs/off-by-one.patch \
             --fixture-response evaluation/v1/responses/off-by-one.json
+
+  diagnose:
+    if: github.repository == 'malsabbagh/review-sensei' && inputs.diagnose_immutable_0614
+    runs-on: macos-15-intel
+    timeout-minutes: 15
+    steps:
+      - name: Check out reviewed diagnostic code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: diagnostic-code
+          persist-credentials: false
+
+      - name: Check out unchanged published source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: v0.6.14
+          path: release-source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify released identity
+        working-directory: release-source
+        run: |
+          test "$(git rev-parse HEAD)" = 319cd3b53ebeeb8d009366d1f27ca344b1fddd87
+
+      - name: Set up the failed job's exact Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11.9'
+
+      - name: Install original oracle and build dependencies
+        working-directory: release-source
+        run: |
+          python -m pip install --disable-pip-version-check .
+          python -m pip install --disable-pip-version-check -r packaging/standalone/requirements.txt
+
+      - name: Build the unchanged native target
+        working-directory: release-source
+        run: python scripts/build_standalone.py --target darwin-x64 --output dist/standalone/darwin-x64
+
+      - name: Capture the original strict comparison
+        working-directory: release-source
+        env:
+          PYTHONPATH: src
+        run: |
+          python ../diagnostic-code/scripts/diagnose_standalone.py \
+            --repository "$PWD" \
+            --executable "$PWD/dist/standalone/darwin-x64/review-sensei/review-sensei" \
+            --expected-sha 319cd3b53ebeeb8d009366d1f27ca344b1fddd87 \
+            --report "$RUNNER_TEMP/standalone-diagnostics/parity.json"
+
+      - name: Retain sanitized comparison after failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: immutable-0.6.14-intel-parity-diagnostics
+          path: ${{ runner.temp }}/standalone-diagnostics/parity.json
+          if-no-files-found: warn
+          retention-days: 7
