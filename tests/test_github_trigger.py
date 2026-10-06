@@ -134,7 +134,7 @@ def repaired_command(body: str) -> str:
     shape no documented rule covers.
     """
 
-    repaired = re.sub(r"(?i)@sensei", "@sensei", body)
+    repaired = re.sub(r"(?i)@(?:reviewsensei|sensei)", "@sensei", body)
     repaired = re.sub(r"\s+", " ", repaired)
     if parses_as_command(repaired):
         return repaired
@@ -188,7 +188,14 @@ def command_corpus() -> list[str]:
     bodies: list[str] = []
     for command, mention, prefix, separator, suffix in itertools.product(
         commands,
-        ("@sensei", "@Sensei", "@SENSEI"),
+        (
+            "@sensei",
+            "@Sensei",
+            "@SENSEI",
+            "@reviewsensei",
+            "@ReviewSensei",
+            "@REVIEWSENSEI",
+        ),
         ("", "note ", "note\n", "> "),
         (" ", "\t", "\n", "  "),
         ("", " ", "\n", " trailing"),
@@ -210,6 +217,35 @@ def command_corpus() -> list[str]:
 
 
 class GitHubTriggerTests(unittest.TestCase):
+    def test_canonical_handle_rescan_and_nonmatches(self):
+        for alias in ("@reviewsensei", "@ReviewSensei", "@REVIEWSENSEI", "@sensei"):
+            with self.subTest(alias=alias):
+                self.assertTrue(comment_mentions_sensei(alias))
+                self.assertEqual(
+                    resolve_issue_comment(
+                        f"{alias} re-scan commit bbbbbbb", _pull()
+                    ).operation,
+                    "review",
+                )
+                self.assertEqual(
+                    resolve_issue_comment(f"{alias} review status", _pull()).operation,
+                    "command",
+                )
+                self.assertEqual(
+                    resolve_review_comment_event(f"{alias} fixed?", _pull()).operation,
+                    "reply",
+                )
+        for body in (
+            "@reviewsenseiish re-scan",
+            "x@ReviewSensei re-scan",
+            "@reviewsensei-bot re-scan",
+            "@review-sensei re-scan",
+            "@review sensei re-scan",
+        ):
+            with self.subTest(body=body):
+                self.assertFalse(comment_mentions_sensei(body))
+                self.assertFalse(issue_comment_requests_rescan(body))
+
     def test_issue_comment_requests_rescan(self):
         self.assertTrue(
             issue_comment_requests_rescan("@sensei please re-scan commit 016017b")
@@ -448,9 +484,9 @@ class InlineCallerResolverTests(unittest.TestCase):
             ("generated", _tagged_workflow("v5")),
             (
                 "worker-template",
-                (ROOT / "deploy" / "cloudflare" / "src" / "setup-content.ts").read_text(
-                    encoding="utf-8"
-                ),
+                (ROOT / "deploy" / "cloudflare" / "src" / "setup-content.ts")
+                .read_text(encoding="utf-8")
+                .split("function resolveTriggerWorkflowTemplate(", 1)[1],
             ),
         ):
             with self.subTest(name=name):
@@ -521,7 +557,7 @@ class InlineCallerResolverTests(unittest.TestCase):
                     "over-acceptance dimensions",
                 )
         self.assertEqual(
-            over_accepted,
+            {re.sub(r"(?i)@reviewsensei", "@sensei", body) for body in over_accepted},
             {
                 "@Sensei review pause",
                 "@SENSEI review pause",
@@ -587,10 +623,12 @@ class InlineCallerResolverTests(unittest.TestCase):
             {
                 ".github/workflows/review-sensei-review.yml",
                 "deploy/cloudflare/fixtures/merge-focused-v4-caller.yml",
+                "deploy/cloudflare/fixtures/sensei-only-v5-caller.yml",
                 "deploy/cloudflare/src/setup-content.ts",
                 "deploy/cloudflare/test/setup-content.test.ts",
                 "examples/github-actions/review-sensei-review.yml",
                 "src/review_sensei/hosting/github/fixtures/merge-focused-v4-caller.yml",
+                "src/review_sensei/hosting/github/fixtures/sensei-only-v5-caller.yml",
                 "src/review_sensei/hosting/github/setup.py",
                 "tests/test_github_trigger.py",
             },
@@ -622,7 +660,12 @@ class InlineCallerResolverTests(unittest.TestCase):
             root = Path(temporary)
             pull_path = root / "pull.json"
             pull_path.write_text(json.dumps(pull), encoding="utf-8")
-            for event, body in cases:
+            aliases = ("@sensei", "@reviewsensei", "@ReviewSensei", "@REVIEWSENSEI")
+            for event, body in (
+                (event, body.replace("@sensei", alias))
+                for event, body in cases
+                for alias in aliases
+            ):
                 with self.subTest(event=event, body=body):
                     module_output = root / f"{event}-module.out"
                     inline_output = root / f"{event}-inline.out"

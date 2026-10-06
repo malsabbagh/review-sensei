@@ -507,7 +507,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             "      (github.event_name == 'issue_comment' &&\n"
             "      github.event.action == 'created' &&\n"
             "      github.event.issue.pull_request &&\n"
-            "      contains(github.event.comment.body, '@sensei') &&\n"
+            "      (contains(github.event.comment.body, '@reviewsensei') || contains(github.event.comment.body, '@sensei')) &&\n"
             "      (github.event.comment.author_association == 'OWNER' ||\n"
             "      github.event.comment.author_association == 'MEMBER' ||\n"
             "      github.event.comment.author_association == 'COLLABORATOR') &&\n"

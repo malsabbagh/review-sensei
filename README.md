@@ -211,7 +211,7 @@ broker resolves the same tag at capability exchange time and checks the
 executing workflow SHA. Moving `v5` is therefore the public cutoff action.
 The selected provider mode applies consistently to automatic pull-request
 reviews, manual reviews, learning proposals, artifacts, and authorized
-`@sensei` conversations. Cloud runs use GitHub-hosted compute; local runs use
+`@reviewsensei` conversations. Cloud runs use GitHub-hosted compute; local runs use
 the operator-controlled labeled self-hosted runner. Every generated write
 switch except automatic approval defaults to `false`; automatic approval
 defaults to `true` and requires automatic review and GitHub writes as separate
@@ -714,7 +714,7 @@ approval. An unclassified ReviewSensei root, malformed or incomplete thread
 data, an unverified configuration, or a draft/closed/fork/stale/App-authored PR
 fails closed or reports why approval was withheld. The finalizer runs after
 review publication and after the AI resolves a blocking ReviewSensei thread;
-`@sensei` replies themselves remain ordinary comments. Existing approval markers
+`@reviewsensei` replies themselves remain ordinary comments. Existing approval markers
 prevent duplicate approvals, and ReviewSensei never calls a merge endpoint or
 enables auto-merge.
 
@@ -726,19 +726,25 @@ blocker. See
 [ADR 0032](docs/adr/0032-blocking-finding-classification-for-approvals.md)
 for the criteria and rollback path.
 
-Manual review and authorized `@sensei` replies use the same selected provider
+Manual review and authorized `@reviewsensei` replies use the same selected provider
 mode. Generated `github reply` commands use the same inference configuration
 and CLI overrides as normal reviews, including `cloud-ollama` and
 `local-ollama`. Run from the trusted policy checkout or pass `--config` with
 its trusted configuration. A local backend receives no ambient cloud key;
 an explicitly named `--api-key-env` remains an operator opt-in.
+The canonical handle is `@reviewsensei`; `@ReviewSensei` and other ASCII case
+variants work too. `@sensei` remains supported, with its existing case behavior.
+Both handles use the same authorization, publication policy, and bounded context.
+Existing installations need a caller update as well as the matching runtime and
+broker update; see [the caller rollout guide](docs/mention-handle-rollout.md).
+
 Each authorized mention receives a temporary 👀 reaction while the reply
 is generated; ReviewSensei removes it after the reply or another terminal
 outcome. Follow-up mentions in the same inline or PR conversation include the
 bounded prior thread, diff context, findings, and trusted-base learnings. Cloud
 mode sends that bounded conversation context to Ollama Cloud; local mode keeps
 it on the configured local service. Published review summaries and inline
-findings also tell readers to reply with @sensei followed by their question.
+findings also tell readers to reply with @reviewsensei followed by their question.
 `review.json` is uploaded only when
 `github.artifacts: diagnostics` is set in `.reviewsensei.yml`; setup-v5 does not
 create a separate version artifact. See

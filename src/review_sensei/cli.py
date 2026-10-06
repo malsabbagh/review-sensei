@@ -1856,7 +1856,7 @@ def _github_parser() -> argparse.ArgumentParser:
     )
     command = subparsers.add_parser(
         "command",
-        help="Apply an authenticated @sensei maintainer command to the session ledger",
+        help="Apply an authenticated @reviewsensei maintainer command to the session ledger",
     )
     command.add_argument("--comment-body", required=True)
     command.add_argument("--actor", required=True)

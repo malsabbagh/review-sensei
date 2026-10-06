@@ -47,7 +47,9 @@ MAX_CONTEXT_FINDING_BYTES = 512
 MAX_CONTEXT_LEARNINGS_BYTES = 6 * 1024
 CONVERSATION_COMMENT_PAGE_SIZES = (20, 10, 5, 1)
 MAX_REVIEW_THREAD_PAGES = 10
-MENTION_PATTERN = re.compile(r"(?i)(?:^|\s)@sensei(?:$|\s|[.,!?])")
+MENTION_PATTERN = re.compile(
+    r"(?i)(?:^|\s)(?:@sensei|(?a:@reviewsensei))(?:$|\s|[.,!?])"
+)
 AUTHORIZED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 GIT_SHA_HEX = re.compile(r"^[a-f0-9]{40}$")
 DIFF_HUNK_HEADER = re.compile(
@@ -259,7 +261,7 @@ class ProcessingReaction:
 
 
 class ConversationPublisher:
-    """Publish an App reply to an authorized explicit @sensei mention."""
+    """Publish an App reply to an authorized explicit @reviewsensei or @sensei mention."""
 
     def __init__(self, *, http: GitHubHttp) -> None:
         self.http = http

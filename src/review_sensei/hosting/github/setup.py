@@ -309,6 +309,7 @@ def _looks_like_managed_v5_setup(path: str, content: str) -> bool:
             return content in {
                 _tagged_workflow(tag_matches[0]),
                 _historical_v5_workflow(tag_matches[0]),
+                _sensei_only_v5_workflow(tag_matches[0]),
             }
         except GitHubSetupError:
             return False
@@ -834,6 +835,28 @@ def _released_runner_switch_v4_caller_bytes() -> str:
     return content
 
 
+@functools.lru_cache(maxsize=1)
+def _sensei_only_v5_caller_bytes() -> str:
+    """Read the frozen invocation-only caller installed before the alias."""
+    from importlib.resources import files
+
+    content = (
+        files("review_sensei.hosting.github.fixtures")
+        .joinpath("sensei-only-v5-caller.yml")
+        .read_text(encoding="utf-8")
+    )
+    if (
+        hashlib.sha256(content.encode("utf-8")).hexdigest()
+        != "7a8351b7ef5537cc4c9549ae6752a0d7c9e320fee87832966596995c6a0d44e3"
+    ):
+        raise GitHubSetupError("sensei-only v5 caller fixture digest mismatch")
+    return content
+
+
+def _sensei_only_v5_workflow(public_workflow_tag: str) -> str:
+    return _retag_frozen_caller(_sensei_only_v5_caller_bytes(), public_workflow_tag)
+
+
 def _historical_v5_workflow(public_workflow_tag: str) -> str:
     """Return the released setup-v5 caller bytes.
 
@@ -1281,21 +1304,21 @@ permissions:
 jobs:
   resolve-trigger:
     # Event shape only: which events may start a run, and which commenters may
-    # address @sensei. Nothing here depends on configuration.
+    # address @reviewsensei or @sensei. Nothing here depends on configuration.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'pull_request' ||
       (github.event_name == 'issue_comment' &&
       github.event.action == 'created' &&
       github.event.issue.pull_request &&
-      contains(github.event.comment.body, '@sensei') &&
+      (contains(github.event.comment.body, '@reviewsensei') || contains(github.event.comment.body, '@sensei')) &&
       (github.event.comment.author_association == 'OWNER' ||
       github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'COLLABORATOR') &&
       github.event.comment.user.type != 'Bot') ||
       (github.event_name == 'pull_request_review_comment' &&
       github.event.action == 'created' &&
-      contains(github.event.comment.body, '@sensei') &&
+      (contains(github.event.comment.body, '@reviewsensei') || contains(github.event.comment.body, '@sensei')) &&
       (github.event.comment.author_association == 'OWNER' ||
       github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'COLLABORATOR') &&
@@ -1439,7 +1462,7 @@ jobs:
           elif event_name == "issue_comment":
               wants_rescan = (
                   isinstance(comment_body, str)
-                  and "@sensei" in comment_body
+                  and ("@sensei" in comment_body or re.search(r"(?:^|\s)(?ai:@reviewsensei)(?:$|\s|[.,!?])", comment_body))
                   and rescan.search(comment_body) is not None
               )
               if wants_rescan:
@@ -1450,7 +1473,7 @@ jobs:
                   ):
                       token = None
                   resolved_head = choose_head(token)
-              elif isinstance(comment_body, str) and len(comment_body.encode("utf-8")) <= 4096 and re.search(r"(?m)(?<!\S)@sensei\s+(?:review\s+(?:status|pause|continue|reenroll)|verify|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}\s+--reason\s+\S.*)\s*\Z", comment_body, re.IGNORECASE):
+              elif isinstance(comment_body, str) and len(comment_body.encode("utf-8")) <= 4096 and re.search(r"(?m)(?<!\S)@(?:reviewsensei|sensei)\s+(?:review\s+(?:status|pause|continue|reenroll)|verify|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}\s+--reason\s+\S.*)\s*\Z", comment_body, re.IGNORECASE):
                   operation = "command"
               else:
                   operation = "reply"
@@ -1666,7 +1689,7 @@ def _current_config_file() -> str:
         "  writes: false\n"
         "  # auto-approve (request changes or approve), blocking, or advisory\n"
         "  reviews: auto-approve\n"
-        "  # Reply to authorized @sensei mentions\n"
+        "  # Reply to authorized @reviewsensei (or @sensei) mentions\n"
         "  mentions: true\n"
         "  # disabled, proposals, or pull-requests\n"
         "  learning: disabled\n"

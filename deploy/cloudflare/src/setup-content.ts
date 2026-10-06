@@ -7,6 +7,7 @@
  * to the workflow; this module never handles its value.
  */
 
+import senseiOnlyV5CallerFixture from "../fixtures/sensei-only-v5-caller.yml";
 import {
   historicalV4UninstallBytes,
   mergeFocusedV4CallerBytes,
@@ -795,6 +796,10 @@ jobs:
     .replaceAll(GITHUB_EXPRESSION, "$");
 }
 
+export function senseiOnlyV5WorkflowTemplate(publicWorkflowTag: string): string {
+  return retagFrozenCaller(senseiOnlyV5CallerFixture, publicWorkflowTag);
+}
+
 /**
  * Current setup-v5 caller: invocation-only.
  *
@@ -805,6 +810,7 @@ jobs:
  * .reviewsensei.yml on the trusted policy commit, so this file reads no
  * repository variables and carries no policy expression.
  */
+
 function resolveTriggerWorkflowTemplate(publicWorkflowTag: string): string {
   const tag = validatePublicWorkflowTag(publicWorkflowTag);
   return String.raw`# ReviewSensei setup version: 5
@@ -869,21 +875,21 @@ permissions:
 jobs:
   resolve-trigger:
     # Event shape only: which events may start a run, and which commenters may
-    # address @sensei. Nothing here depends on configuration.
+    # address @reviewsensei or @sensei. Nothing here depends on configuration.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'pull_request' ||
       (github.event_name == 'issue_comment' &&
       github.event.action == 'created' &&
       github.event.issue.pull_request &&
-      contains(github.event.comment.body, '@sensei') &&
+      (contains(github.event.comment.body, '@reviewsensei') || contains(github.event.comment.body, '@sensei')) &&
       (github.event.comment.author_association == 'OWNER' ||
       github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'COLLABORATOR') &&
       github.event.comment.user.type != 'Bot') ||
       (github.event_name == 'pull_request_review_comment' &&
       github.event.action == 'created' &&
-      contains(github.event.comment.body, '@sensei') &&
+      (contains(github.event.comment.body, '@reviewsensei') || contains(github.event.comment.body, '@sensei')) &&
       (github.event.comment.author_association == 'OWNER' ||
       github.event.comment.author_association == 'MEMBER' ||
       github.event.comment.author_association == 'COLLABORATOR') &&
@@ -1027,7 +1033,7 @@ jobs:
           elif event_name == "issue_comment":
               wants_rescan = (
                   isinstance(comment_body, str)
-                  and "@sensei" in comment_body
+                  and ("@sensei" in comment_body or re.search(r"(?:^|\s)(?ai:@reviewsensei)(?:$|\s|[.,!?])", comment_body))
                   and rescan.search(comment_body) is not None
               )
               if wants_rescan:
@@ -1038,7 +1044,7 @@ jobs:
                   ):
                       token = None
                   resolved_head = choose_head(token)
-              elif isinstance(comment_body, str) and len(comment_body.encode("utf-8")) <= 4096 and re.search(r"(?m)(?<!\S)@sensei\s+(?:review\s+(?:status|pause|continue|reenroll)|verify|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}\s+--reason\s+\S.*)\s*\Z", comment_body, re.IGNORECASE):
+              elif isinstance(comment_body, str) and len(comment_body.encode("utf-8")) <= 4096 and re.search(r"(?m)(?<!\S)@(?:reviewsensei|sensei)\s+(?:review\s+(?:status|pause|continue|reenroll)|verify|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}\s+--reason\s+\S.*)\s*\Z", comment_body, re.IGNORECASE):
                   operation = "command"
               else:
                   operation = "reply"
@@ -1359,7 +1365,7 @@ export function currentConfigFile(): string {
     "  writes: false\n" +
     "  # auto-approve (request changes or approve), blocking, or advisory\n" +
     "  reviews: auto-approve\n" +
-    "  # Reply to authorized @sensei mentions\n" +
+    "  # Reply to authorized @reviewsensei (or @sensei) mentions\n" +
     "  mentions: true\n" +
     "  # disabled, proposals, or pull-requests\n" +
     "  learning: disabled\n" +

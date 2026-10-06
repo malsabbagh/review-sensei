@@ -171,7 +171,7 @@ class CloudflarePackageTests(unittest.TestCase):
             '"  writes: false\\n"',
             '"  # auto-approve (request changes or approve), blocking, or advisory\\n"',
             '"  reviews: auto-approve\\n"',
-            '"  # Reply to authorized @sensei mentions\\n"',
+            '"  # Reply to authorized @reviewsensei (or @sensei) mentions\\n"',
             '"  mentions: true\\n"',
             '"  # disabled, proposals, or pull-requests\\n"',
             '"  learning: disabled\\n"',
@@ -221,7 +221,7 @@ class CloudflarePackageTests(unittest.TestCase):
             "  writes: false\n"
             "  # auto-approve (request changes or approve), blocking, or advisory\n"
             "  reviews: auto-approve\n"
-            "  # Reply to authorized @sensei mentions\n"
+            "  # Reply to authorized @reviewsensei (or @sensei) mentions\n"
             "  mentions: true\n"
             "  # disabled, proposals, or pull-requests\n"
             "  learning: disabled\n"

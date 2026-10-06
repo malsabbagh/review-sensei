@@ -209,7 +209,7 @@ class ConversationPublisherTests(unittest.TestCase):
         source = {
             "id": 10,
             "issue_url": ISSUE_URL,
-            "body": "@sensei please explain",
+            "body": "@ReviewSensei please explain",
             "user": {"login": "alice", "type": "User"},
             "author_association": "OWNER",
             "updated_at": updated,
@@ -529,7 +529,7 @@ class ConversationPublisherTests(unittest.TestCase):
         source = {
             "id": 10,
             "pull_request_url": INLINE_URL,
-            "body": "@sensei please explain",
+            "body": "@ReviewSensei please explain",
             "user": {"login": "alice", "type": "User"},
             "author_association": "MEMBER",
             "updated_at": updated,
@@ -947,6 +947,28 @@ class ConversationPublisherTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "skipped_unauthorized")
         self.assertEqual(len(calls), 1)
+
+    def test_canonical_mention_boundaries_and_case(self):
+        for alias in (
+            "@reviewsensei",
+            "@ReviewSensei",
+            "@REVIEWSENSEI",
+            "@sensei",
+            "@SENSEI",
+        ):
+            for body in (alias, f"please {alias} help", f"{alias}!", f"{alias}\nhelp"):
+                with self.subTest(body=body):
+                    self.assertTrue(has_standalone_sensei_mention(body))
+        for body in (
+            "@reviewsenseiish",
+            "@reviewsensei-bot",
+            "x@ReviewSensei",
+            "(@reviewsensei)",
+            "@review-sensei",
+            "@review sensei",
+        ):
+            with self.subTest(body=body):
+                self.assertFalse(has_standalone_sensei_mention(body))
 
     def test_mention_and_authorization_helpers_are_strict(self):
         self.assertTrue(has_standalone_sensei_mention("please @sensei help"))

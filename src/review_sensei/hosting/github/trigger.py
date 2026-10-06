@@ -15,8 +15,8 @@ _GIT_SHA_PREFIX = re.compile(r"^[a-f0-9]{7,39}$")
 _GIT_REF = re.compile(r"^[A-Za-z0-9._/-]+$")
 _RESCAN = re.compile(r"\bre[\s-]?scan\b", re.IGNORECASE)
 _COMMIT_SHA = re.compile(r"\bcommit\s+([a-f0-9]{7,40})\b", re.IGNORECASE)
-_SENSEI_MENTION = "@sensei"
-_SENSEI_COMMAND = re.compile(r"(?m)(?<!\S)@sensei(?=\s+)")
+_REVIEWSENSEI_MENTION = re.compile(r"(?:^|\s)(?ai:@reviewsensei)(?:$|\s|[.,!?])")
+_SENSEI_COMMAND = re.compile(r"(?m)(?<!\S)(?:@sensei|(?ai:@reviewsensei))(?=\s+)")
 # Grammar and dispatch move together: every token below must be handled by
 # `parse_maintainer_command` and dispatched by `apply_maintainer_command`, and
 # `reenroll` is the sharp one - the ledger retires state only for an expired or
@@ -61,9 +61,11 @@ class TriggerResolution:
 
 
 def comment_mentions_sensei(body: str) -> bool:
-    """Return whether a comment body includes the case-sensitive @sensei gate."""
+    """Route the canonical handle or the historical case-sensitive @sensei gate."""
 
-    return isinstance(body, str) and _SENSEI_MENTION in body
+    return isinstance(body, str) and (
+        "@sensei" in body or _REVIEWSENSEI_MENTION.search(body) is not None
+    )
 
 
 def issue_comment_requests_rescan(body: str) -> bool:

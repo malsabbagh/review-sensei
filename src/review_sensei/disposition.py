@@ -2,7 +2,7 @@
 
 C5 enforces round admission but maps handoff onto ``skipped_policy``. GitHub
 treats skipped/neutral required checks as passing. C6 publishes a clearly
-non-passing ``action_required`` outcome, parses bounded ``@sensei`` commands,
+non-passing ``action_required`` outcome, parses bounded ``@reviewsensei`` / ``@sensei`` commands,
 and records human dispositions without claiming an independently verified fix.
 """
 
@@ -48,7 +48,9 @@ _COMMAND_NON_WS = r"[^ \t\r\n]"
 # A command mention must start at the beginning of a line or after whitespace.
 # This keeps prose/markdown prefixes valid while rejecting punctuation-adjacent
 # text such as ``!@sensei`` and ``(@sensei``.
-_SENSEI = re.compile(r"(?m)(?<![^ \t\r\n])@sensei(?=[ \t\r\n]+)")
+_SENSEI = re.compile(
+    r"(?m)(?<![^ \t\r\n])(?:@sensei|(?ai:@reviewsensei))(?=[ \t\r\n]+)"
+)
 _CONTINUE = re.compile(
     rf"^review{_COMMAND_WS}+continue{_COMMAND_WS}*$",
     re.IGNORECASE,
@@ -154,9 +156,9 @@ def parse_maintainer_command(
     head_sha: str | None = None,
     command_id: str | None = None,
 ) -> MaintainerCommand | None:
-    """Parse a bounded ``@sensei`` command. Unknown text is not a command."""
+    """Parse a bounded ``@reviewsensei`` or legacy ``@sensei`` command. Unknown text is not a command."""
 
-    if not isinstance(body, str) or "@sensei" not in body:
+    if not isinstance(body, str):
         return None
     match = _SENSEI.search(body)
     if match is None:

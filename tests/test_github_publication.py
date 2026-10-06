@@ -886,14 +886,14 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertIn("coverage=full", body["body"])
         self.assertIn("<!-- reviewsensei:finding:v2", body["comments"][0]["body"])
         self.assertIn(
-            "To discuss this finding, reply with @sensei followed by your question.",
+            "To discuss this finding, reply with @reviewsensei followed by your question.",
             body["body"],
         )
         self.assertEqual(body["commit_id"], head)
         self.assertEqual(body["event"], "REQUEST_CHANGES")
         self.assertEqual(body["comments"][0]["path"], "src/app.py")
         self.assertIn(
-            "To discuss this finding, reply with @sensei followed by your question.",
+            "To discuss this finding, reply with @reviewsensei followed by your question.",
             body["comments"][0]["body"],
         )
 

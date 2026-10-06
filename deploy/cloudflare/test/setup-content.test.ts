@@ -172,7 +172,7 @@ describe("setup-v4 public boundary", () => {
         "      (github.event_name == 'issue_comment' &&\n" +
         "      github.event.action == 'created' &&\n" +
         "      github.event.issue.pull_request &&\n" +
-        "      contains(github.event.comment.body, '@sensei') &&\n" +
+        "      (contains(github.event.comment.body, '@reviewsensei') || contains(github.event.comment.body, '@sensei')) &&\n" +
         "      (github.event.comment.author_association == 'OWNER' ||\n" +
         "      github.event.comment.author_association == 'MEMBER' ||\n" +
         "      github.event.comment.author_association == 'COLLABORATOR') &&\n" +
@@ -181,7 +181,7 @@ describe("setup-v4 public boundary", () => {
     expect(workflow).toContain(
       "      (github.event_name == 'pull_request_review_comment' &&\n" +
         "      github.event.action == 'created' &&\n" +
-        "      contains(github.event.comment.body, '@sensei') &&\n",
+        "      (contains(github.event.comment.body, '@reviewsensei') || contains(github.event.comment.body, '@sensei')) &&\n",
     );
     expect(workflow).not.toContain("vars.");
     // Rendering must collapse every @@{{ }} escape and leave the raw ${{ }}
@@ -346,7 +346,7 @@ describe("setup-v4 public boundary", () => {
         "  writes: false\n" +
         "  # auto-approve (request changes or approve), blocking, or advisory\n" +
         "  reviews: auto-approve\n" +
-        "  # Reply to authorized @sensei mentions\n" +
+        "  # Reply to authorized @reviewsensei (or @sensei) mentions\n" +
         "  mentions: true\n" +
         "  # disabled, proposals, or pull-requests\n" +
         "  learning: disabled\n" +

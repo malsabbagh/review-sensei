@@ -46,7 +46,7 @@ const COMMAND_WHITESPACE = "[ \\t\\r\\n]";
 const COMMAND_WHITESPACE_RUN = `${COMMAND_WHITESPACE}+`;
 const COMMAND_TRIM = /^[ \t\r\n]+|[ \t\r\n]+$/g;
 const RECOGNIZED_COMMAND = new RegExp(
-  `(?:^|${COMMAND_WHITESPACE})@sensei${COMMAND_WHITESPACE_RUN}([\\s\\S]*?)${COMMAND_WHITESPACE}*$`,
+  `(?:^|${COMMAND_WHITESPACE})@(?:sensei|[rR][eE][vV][iI][eE][wW][sS][eE][nN][sS][eE][iI])${COMMAND_WHITESPACE_RUN}([\\s\\S]*?)${COMMAND_WHITESPACE}*$`,
 );
 const RECOGNIZED_FINDING = new RegExp(
   `^(?:dismiss|defer|accept-risk)${COMMAND_WHITESPACE_RUN}[a-f0-9]{16,64}${COMMAND_WHITESPACE_RUN}--reason${COMMAND_WHITESPACE_RUN}([^ \\t\\r\\n][\\s\\S]*)$`,

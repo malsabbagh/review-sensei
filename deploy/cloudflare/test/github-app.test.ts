@@ -19,6 +19,7 @@ import {
   buildTaggedV4SetupFiles,
   buildSetupFiles,
   historicalV4UninstallWorkflow,
+  senseiOnlyV5WorkflowTemplate,
   mergeFocusedV4ConfigFile,
   mergeFocusedV4WorkflowTemplate,
   providerParityWorkflowBeforeDraftSkip,
@@ -680,6 +681,15 @@ describe("setup repository reconciliation", () => {
       ]);
       expect(mutationRequests(fake)).toEqual([]);
     }
+  });
+
+  it.each([false, true])("handles sensei-only v5 caller with operator edit=%s", async (edited) => {
+    const fake = new FakeGitHub();
+    fake.files = Object.fromEntries(buildSetupFiles(TAG).map(({ path, content }) => [path, content]));
+    fake.files[SETUP_FILE_PATHS[0]] = senseiOnlyV5WorkflowTemplate(TAG) + (edited ? "# operator-owned edit\n" : "");
+    expect(await serviceWith(fake).process(delivery())).toEqual([
+      { repository: "acme/widgets", status: edited ? "skipped_unknown_setup" : "created", ...(edited ? {} : { pull_request_number: 42 }) },
+    ]);
   });
 
   it("migrates a managed v5 setup following an older public tag", async () => {

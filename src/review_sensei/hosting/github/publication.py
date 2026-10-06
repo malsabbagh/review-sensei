@@ -80,7 +80,7 @@ APPROVAL_ELIGIBILITY_MARKER_PREFIX = "<!-- reviewsensei:eligibility:v1"
 GIT_SHA_HEX = re.compile(r"^[a-f0-9]{40}$")
 PUBLISHED_REVIEW_STATES = frozenset({"COMMENTED", "APPROVED", "CHANGES_REQUESTED"})
 DISCUSSION_INSTRUCTION = (
-    "To discuss this finding, reply with @sensei followed by your question."
+    "To discuss this finding, reply with @reviewsensei followed by your question."
 )
 # GitHub's review body limit is independent of the provider-neutral summary
 # profile. The formatted summary is checked against ReviewLimits first, then

@@ -148,7 +148,7 @@ file uses the packaged defaults:
 | `github.automatic_reviews` | `true` | Automatic review of eligible pull requests |
 | `github.writes` | `false` | Publication of the validated result to GitHub |
 | `github.reviews` | `auto-approve` | Review policy: `auto-approve`, `blocking`, or `advisory` |
-| `github.mentions` | `true` | Authorized `@sensei` conversation |
+| `github.mentions` | `true` | Authorized `@reviewsensei` conversation |
 | `github.learning` | `disabled` | Learning mode: `disabled`, `proposals`, or `pull-requests` |
 | `github.artifacts` | `none` | Artifact mode: `none` or `diagnostics` |
 
@@ -405,14 +405,14 @@ generated learning proposals require `github.learning: proposals`, and
 `github.learning: pull-requests` additionally publishes those proposals as
 draft PRs. `github.writes: true` also exposes the maintainer command
 surface, independently of `github.mentions`. An authorized human
-`OWNER`, `MEMBER`, or `COLLABORATOR` may post `@sensei review
-status|pause|continue|reenroll`, `@sensei verify`, or `@sensei
+`OWNER`, `MEMBER`, or `COLLABORATOR` may post `@reviewsensei review
+status|pause|continue|reenroll`, `@reviewsensei verify`, or `@reviewsensei
 dismiss|defer|accept-risk <fingerprint> --reason <text>` on a pull request;
 those comments take the command path whenever writes are enabled, while
 `github.mentions` continues to control only conversational
 replies. The command path is the pull-request conversation: an inline review
 comment on a diff line always resolves as a conversational reply and therefore
-still requires `github.mentions`. The caller workflow's `@sensei`
+still requires `github.mentions`. The caller workflow's `@reviewsensei`
 and association checks are routing gates, not the authorization decision: every
 mutation is re-authorized inside the reusable workflow against the
 broker-attested actor and the durable session ledger before any write.
@@ -456,7 +456,7 @@ The review body includes a full or concise gate warning when the configured
 summary and complete-body limits allow it; if neither fits, monitor the
 run-level `check_permission` diagnostic because the body retains its original
 summary.
-All `@sensei` replies remain ordinary comments.
+All `@reviewsensei` replies remain ordinary comments.
 
 The approval marker deduplicates the `APPROVED` state per exact head. The
 finalizer runs immediately after review publication and after an AI reply
@@ -473,7 +473,7 @@ for the full criteria and rollback procedure.
 
 For local Ollama, install and pull `qwen3.5:4b` on the labelled self-hosted
 runner. Automatic reviews, manual reviews, learning proposals, artifact upload,
-and authorized `@sensei` replies are available in both provider modes. A cloud
+and authorized `@reviewsensei` replies are available in both provider modes. A cloud
 reply sends its bounded thread and review context to Ollama Cloud; local mode
 keeps that context on the configured local service.
 `review.json` is uploaded only when `github.artifacts: diagnostics` is set in
@@ -538,7 +538,7 @@ is never read as success; the transition rules are:
   phase and result digest while never storing the result body
   (`test_checkpoint_persists_completed_baseline_for_a_fresh_ledger`).
 - **An expired, witness-only, or integrity-failed record** fails closed and
-  names `@sensei review reenroll`; established but lost state requires that
+  names `@reviewsensei review reenroll`; established but lost state requires that
   repair and is never reinitialized into an empty clean review
   (`test_expired_established_history_never_reopens_an_initial_allowance`).
 
@@ -708,14 +708,14 @@ the backend, endpoint, model, and credential name from it. Cloud review and
 reply operations run on `ubuntu-latest`; local review and reply operations run
 on `[self-hosted, linux, x64, ollama]`. Both modes support automatic review,
 manual review, validated review publication, learning draft PRs, optional
-artifacts, and authorized `@sensei` conversations. An authorized
+artifacts, and authorized `@reviewsensei` conversations. An authorized
 mention receives 👀 while the response is being generated, and the reaction is
 removed after the reply or another terminal outcome. The provider may include
 `resolve: true` in its validated reply when the current exact-head context
 shows that a ReviewSensei-authored inline finding is fully addressed; the
 publisher then resolves only that thread through a bounded GraphQL mutation.
 Issue comments and human-authored roots remain open. Add another standalone
-`@sensei` mention in the same thread to continue the bounded conversation. A
+`@reviewsensei` mention in the same thread to continue the bounded conversation. A
 successful AI resolution automatically causes one fresh same-head review pass;
 approval still requires the ordinary no-blocker and all-threads-resolved gates.
 
@@ -775,7 +775,7 @@ revert unmerged setup PRs rather than writing the default branch directly.
 ## Replying to human-review findings (0.6.14)
 
 When ReviewSensei withholds approval for human assessment, an authorized
-repository owner, member or collaborator can reply with `@sensei` and a concrete
+repository owner, member or collaborator can reply with `@reviewsensei` and a concrete
 explanation addressing those findings. Body findings can be addressed in a PR
 conversation comment; no inline thread is required. ReviewSensei checks the
 explanation against the current diff and records only supported resolutions or
@@ -794,3 +794,12 @@ inventory. Missing or oversized inventories keep approval withheld. A later
 source review may reopen a concern; permanent explicit dispositions continue to
 use the documented maintainer-command contract. See
 [ADR 0061](adr/0061-human-reply-reassessment.md) for evidence bounds and races.
+
+## Canonical mention handle and caller upgrades
+
+Use `@reviewsensei` (including `@ReviewSensei`) for conversations, re-scans, and
+maintainer commands. The supported legacy alias `@sensei` is retained. New-handle
+matching is ASCII case-insensitive; legacy conversations stay case-insensitive,
+while legacy command and re-scan gates keep requiring lowercase `@sensei`.
+See [the caller rollout guide](mention-handle-rollout.md): a reusable-workflow
+channel update cannot change an installed caller's event filter or inline resolver.

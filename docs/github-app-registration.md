@@ -215,7 +215,7 @@ Cloud review and conversation operations use GitHub-hosted compute; local review
 and conversation operations use the operator's labelled self-hosted runner.
 Either compute path supports automatic/manual review (`github.automatic_reviews`),
 learning proposals and learning PRs (`github.learning`), artifacts
-(`github.artifacts`), and authorized `@sensei` replies (`github.mentions`, with
+(`github.artifacts`), and authorized `@reviewsensei` replies (`github.mentions`, with
 `github.writes: true`). Automatic fork review remains
 disabled.
 

@@ -705,7 +705,7 @@ and every `github.*` policy resolve from `.reviewsensei.yml` on the trusted
 policy commit, with `REVIEWSENSEI_PROVIDER` and `REVIEWSENSEI_MODEL` as the
 only product overrides. Local, cloud, and OpenRouter runtime jobs expose the
 same operation matrix—automatic/manual review, review and learning publication,
-optional artifacts, and bounded `@sensei` replies—while retaining different
+optional artifacts, and bounded `@reviewsensei` replies—while retaining different
 compute and egress boundaries. `local-ollama` uses the labelled self-hosted
 Ollama runner; `cloud-ollama` uses the hosted Ollama Cloud lane; `openrouter`
 uses the hosted OpenRouter lane for allowlisted models. Hosted reusable jobs
@@ -820,7 +820,7 @@ capability while preserving the normal approval gates.
 Pending `needs_human` findings follow the separate evidence-backed reassessment
 path in [ADR 0061](adr/0061-human-reply-reassessment.md). A new review records a
 complete bounded inventory in its App eligibility document. An authorized
-explicit `@sensei` explanation and validated provider assessment can refresh
+explicit `@reviewsensei` explanation and validated provider assessment can refresh
 only the human flag for that exact base/head and result. Literal human/diff
 citations establish provenance; the model supplies semantic judgment. Fresh
 source authorization, latest persisted eligibility and all existing approval
@@ -878,7 +878,7 @@ unchanged by that documentation.
 
 Authenticated abandoned analysis recovery is described in
 [ADR 0063](adr/0063-authenticated-reservation-recovery.md). The broker can bind a
-held reservation to its OIDC run. `@sensei review continue` requires live Actions
+held reservation to its OIDC run. `@reviewsensei review continue` requires live Actions
 completion evidence before reclaiming analysis, including a constrained origin
 proof for older PR-triggered runs. Recovery preserves session budgets and saved
 publication work; cooperating command/review jobs serialize the comment write.
