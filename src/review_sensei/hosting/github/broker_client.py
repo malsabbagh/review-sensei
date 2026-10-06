@@ -11,6 +11,7 @@ from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from ...broker_diagnostics import parse_broker_diagnostic
 from .errors import GitHubBrokerClientError, GitHubHTTPTransientError
 
 MAX_BROKER_BODY_BYTES = 256 * 1024
@@ -387,11 +388,16 @@ class BrokerClient:
                     raise ValueError
                 parsed = json.loads(bytes(raw).decode("utf-8", errors="strict"))
         except HTTPError as exc:
+            diagnostic = parse_broker_diagnostic(exc)
             if exc.code == 429 or exc.code >= 500:
                 raise GitHubHTTPTransientError(
-                    "Broker token request failed temporarily"
+                    "Broker token request failed temporarily; " + diagnostic.message(),
+                    broker_diagnostic=diagnostic,
                 ) from exc
-            raise GitHubBrokerClientError("Broker token request was rejected") from exc
+            raise GitHubBrokerClientError(
+                "Broker token request was rejected; " + diagnostic.message(),
+                broker_diagnostic=diagnostic,
+            ) from exc
         except (URLError, TimeoutError, OSError, UnicodeDecodeError, ValueError) as exc:
             raise GitHubBrokerClientError("Broker token request failed") from exc
         if not isinstance(parsed, dict):

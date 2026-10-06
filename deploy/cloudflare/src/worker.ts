@@ -2,6 +2,7 @@ import type { WorkerEnv } from "./env";
 import { DeliveryLedger } from "./delivery-ledger";
 import { BrokerLedger } from "./broker-ledger";
 import { TokenBroker } from "./token-broker";
+import { brokerDiagnostic } from "./broker-diagnostics";
 import {
   MAX_WEBHOOK_BODY_BYTES,
   WebhookPayloadError,
@@ -107,10 +108,7 @@ const BROKER_CAPABILITIES = new Set([
  * every other exception is intentionally collapsed to one generic code.
  */
 export function brokerErrorCode(error: unknown): string {
-  const message = error instanceof Error ? error.message.trim() : "";
-  return /^(?:broker|oidc|github)_[a-z0-9_]{1,120}$/.test(message)
-    ? message
-    : "broker_failed";
+  return brokerDiagnostic(error).code;
 }
 
 function brokerCapability(body: unknown): string {
@@ -165,24 +163,24 @@ async function readBoundedBody(request: Request, maximum: number): Promise<Array
 
 async function token(request: Request, env: WorkerEnv): Promise<Response> {
   if (request.headers.has("origin") || request.headers.has("access-control-request-method")) {
-    return response({ error: "cors_not_supported" }, 400, true);
+    return response({ error: "cors_not_supported", diagnostic: brokerDiagnostic(new Error("broker_cors_not_supported"), brokerRayId(request)) }, 400, true);
   }
   const length = request.headers.get("content-length");
   if (length === null) {
-    return response({ error: "content_length_required" }, 411, true);
+    return response({ error: "content_length_required", diagnostic: brokerDiagnostic(new Error("broker_content_length_required"), brokerRayId(request)) }, 411, true);
   }
   if (!/^\d+$/.test(length) || Number(length) > MAX_BROKER_REQUEST_BYTES) {
-    return response({ error: "payload_too_large" }, 413, true);
+    return response({ error: "payload_too_large", diagnostic: brokerDiagnostic(new Error("broker_payload_too_large"), brokerRayId(request)) }, 413, true);
   }
   let body: unknown;
   try {
     const bytes = await readBoundedBody(request, MAX_BROKER_REQUEST_BYTES);
     if (bytes.byteLength === 0 || bytes.byteLength > MAX_BROKER_REQUEST_BYTES) {
-      return response({ error: "payload_too_large" }, 413, true);
+      return response({ error: "payload_too_large", diagnostic: brokerDiagnostic(new Error("broker_payload_too_large"), brokerRayId(request)) }, 413, true);
     }
     body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
   } catch {
-    return response({ error: "invalid_request" }, 400, true);
+    return response({ error: "invalid_request", diagnostic: brokerDiagnostic(new Error("broker_invalid_request"), brokerRayId(request)) }, 400, true);
   }
   try {
     const result = await new TokenBroker(env).exchange(
@@ -199,12 +197,16 @@ async function token(request: Request, env: WorkerEnv): Promise<Response> {
           ? 503
           : 403;
     const rayId = brokerRayId(request);
+    const diagnostic = brokerDiagnostic(error, rayId);
     console.error("github_broker_failed", {
-      error_code: brokerErrorCode(error),
+      error_code: diagnostic.code,
+      stage: diagnostic.stage,
+      action: diagnostic.action,
+      ...("upstream_status" in diagnostic ? { upstream_status: diagnostic.upstream_status } : {}),
       capability: brokerCapability(body),
       ...(rayId === undefined ? {} : { cf_ray: rayId }),
     });
-    return response({ error: "capability_not_issued" }, status, true);
+    return response({ error: "capability_not_issued", diagnostic }, status, true);
   }
 }
 
@@ -215,27 +217,27 @@ async function token(request: Request, env: WorkerEnv): Promise<Response> {
  */
 async function sessionGrant(request: Request, env: WorkerEnv): Promise<Response> {
   if (request.headers.has("origin") || request.headers.has("access-control-request-method")) {
-    return response({ error: "cors_not_supported" }, 400, true);
+    return response({ error: "cors_not_supported", diagnostic: brokerDiagnostic(new Error("broker_cors_not_supported"), brokerRayId(request)) }, 400, true);
   }
   const length = request.headers.get("content-length");
   if (length === null) {
-    return response({ error: "content_length_required" }, 411, true);
+    return response({ error: "content_length_required", diagnostic: brokerDiagnostic(new Error("broker_content_length_required"), brokerRayId(request)) }, 411, true);
   }
   if (!/^\d+$/.test(length) || Number(length) > MAX_BROKER_REQUEST_BYTES) {
-    return response({ error: "payload_too_large" }, 413, true);
+    return response({ error: "payload_too_large", diagnostic: brokerDiagnostic(new Error("broker_payload_too_large"), brokerRayId(request)) }, 413, true);
   }
   let body: unknown;
   try {
     const bytes = await readBoundedBody(request, MAX_BROKER_REQUEST_BYTES);
     if (bytes.byteLength === 0 || bytes.byteLength > MAX_BROKER_REQUEST_BYTES) {
-      return response({ error: "payload_too_large" }, 413, true);
+      return response({ error: "payload_too_large", diagnostic: brokerDiagnostic(new Error("broker_payload_too_large"), brokerRayId(request)) }, 413, true);
     }
     body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
   } catch {
-    return response({ error: "invalid_request" }, 400, true);
+    return response({ error: "invalid_request", diagnostic: brokerDiagnostic(new Error("broker_invalid_request"), brokerRayId(request)) }, 400, true);
   }
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
-    return response({ error: "invalid_request" }, 400, true);
+    return response({ error: "invalid_request", diagnostic: brokerDiagnostic(new Error("broker_invalid_request"), brokerRayId(request)) }, 400, true);
   }
   try {
     const values = body as Record<string, unknown>;
@@ -245,7 +247,7 @@ async function sessionGrant(request: Request, env: WorkerEnv): Promise<Response>
       !Object.hasOwn(values, "session_grant") ||
       !Object.hasOwn(values, "session_attestation")
     ) {
-      return response({ error: "invalid_request" }, 400, true);
+      return response({ error: "invalid_request", diagnostic: brokerDiagnostic(new Error("broker_invalid_request"), brokerRayId(request)) }, 400, true);
     }
     const attestation = await new TokenBroker(env).verifySessionGrant(
       values.session_grant,
@@ -254,15 +256,19 @@ async function sessionGrant(request: Request, env: WorkerEnv): Promise<Response>
     return response({ session_attestation: attestation }, 200, true);
   } catch (error) {
     const rayId = brokerRayId(request);
+    const diagnostic = brokerDiagnostic(error, rayId);
     console.error("github_session_grant_failed", {
-      error_code: brokerErrorCode(error),
+      error_code: diagnostic.code,
+      stage: diagnostic.stage,
+      action: diagnostic.action,
+      ...("upstream_status" in diagnostic ? { upstream_status: diagnostic.upstream_status } : {}),
       ...(rayId === undefined ? {} : { cf_ray: rayId }),
     });
     const status =
       error instanceof Error && error.message === "broker_ledger_unavailable"
         ? 503
         : 403;
-    return response({ error: "session_grant_not_verified" }, status, true);
+    return response({ error: "session_grant_not_verified", diagnostic }, status, true);
   }
 }
 

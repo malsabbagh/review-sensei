@@ -11,6 +11,7 @@ vi.mock("../src/token-broker", () => ({
 
 import type { WorkerEnv } from "../src/env";
 import worker, { brokerErrorCode, setupErrorCode } from "../src/worker";
+import { brokerDiagnostic } from "../src/broker-diagnostics";
 
 const env = {} as WorkerEnv;
 
@@ -72,7 +73,7 @@ describe("session-grant verification route", () => {
     broker.verifySessionGrant.mockRejectedValue(new Error("broker_session_grant_invalid"));
     const result = await worker.fetch(grantRequest(), env);
     expect(result.status).toBe(403);
-    expect(await result.json()).toEqual({ error: "session_grant_not_verified" });
+    expect(await result.json()).toMatchObject({ error: "session_grant_not_verified" });
   });
 
   it.each([
@@ -86,7 +87,7 @@ describe("session-grant verification route", () => {
       env,
     );
     expect(result.status).toBe(status);
-    expect(await result.json()).toEqual({ error });
+    expect(await result.json()).toEqual({ error, diagnostic: brokerDiagnostic(new Error(`broker_${error}`)) });
     expect(broker.verifySessionGrant).not.toHaveBeenCalled();
   });
 
@@ -100,7 +101,7 @@ describe("session-grant verification route", () => {
       env,
     );
     expect(result.status).toBe(400);
-    expect(await result.json()).toEqual({ error: "invalid_request" });
+    expect(await result.json()).toEqual({ error: "invalid_request", diagnostic: brokerDiagnostic(new Error("broker_invalid_request")) });
     expect(broker.verifySessionGrant).not.toHaveBeenCalled();
   });
 
@@ -114,7 +115,7 @@ describe("session-grant verification route", () => {
       env,
     );
     expect(result.status).toBe(400);
-    expect(await result.json()).toEqual({ error: "invalid_request" });
+    expect(await result.json()).toEqual({ error: "invalid_request", diagnostic: brokerDiagnostic(new Error("broker_invalid_request")) });
     expect(broker.verifySessionGrant).not.toHaveBeenCalled();
   });
 
@@ -122,7 +123,7 @@ describe("session-grant verification route", () => {
     broker.verifySessionGrant.mockRejectedValue(new Error("broker_ledger_unavailable"));
     const result = await worker.fetch(grantRequest(), env);
     expect(result.status).toBe(503);
-    expect(await result.json()).toEqual({ error: "session_grant_not_verified" });
+    expect(await result.json()).toMatchObject({ error: "session_grant_not_verified" });
   });
 
   it("rejects non-POST session-grant requests", async () => {
@@ -150,7 +151,7 @@ describe("token route response security", () => {
     expect(result.status).toBe(400);
     expect(result.headers.get("cache-control")).toBe("no-store");
     expect(result.headers.has("access-control-allow-origin")).toBe(false);
-    expect(await result.json()).toEqual({ error: "cors_not_supported" });
+    expect(await result.json()).toEqual({ error: "cors_not_supported", diagnostic: brokerDiagnostic(new Error("broker_cors_not_supported")) });
     expect(broker.exchange).not.toHaveBeenCalled();
   });
 
@@ -164,11 +165,13 @@ describe("token route response security", () => {
       const body = await result.text();
       expect(result.status).toBe(403);
       expect(result.headers.get("cache-control")).toBe("no-store");
-      expect(body).toBe('{"error":"capability_not_issued"}');
+      expect(JSON.parse(body)).toEqual({ error: "capability_not_issued", diagnostic: brokerDiagnostic(new Error("unknown")) });
       expect(body).not.toContain("ghs_sensitive");
       expect(body).not.toContain("signed-jwt");
       expect(log).toHaveBeenCalledWith("github_broker_failed", {
-        error_code: "broker_failed",
+        error_code: "broker_unknown",
+        stage: "broker",
+        action: "contact_operator",
         capability: "review_publish",
       });
     } finally {
@@ -187,9 +190,12 @@ describe("token route response security", () => {
         env,
       );
       expect(result.status).toBe(403);
-      expect(await result.json()).toEqual({ error: "capability_not_issued" });
+      expect(await result.json()).toMatchObject({ error: "capability_not_issued" });
       expect(log).toHaveBeenCalledWith("github_broker_failed", {
-        error_code: "github_capability_issue_failed_422",
+        error_code: "github_capability_issue_failed",
+        stage: "capability_issuance",
+        action: "contact_operator",
+        upstream_status: 422,
         capability: "learning_write",
         cf_ray: "0123456789abcdef-YYZ",
       });
@@ -205,7 +211,7 @@ describe("token route response security", () => {
     broker.exchange.mockRejectedValue(new Error(message));
     const result = await worker.fetch(request(), env);
     expect(result.status).toBe(status);
-    expect(await result.json()).toEqual({ error: "capability_not_issued" });
+    expect(await result.json()).toMatchObject({ error: "capability_not_issued" });
   });
 
   it("applies no-store to method and malformed-body failures", async () => {
@@ -241,9 +247,9 @@ describe("token route response security", () => {
 
 describe("failure diagnostics", () => {
   it.each([
-    [new Error("github_capability_issue_failed_422"), "github_capability_issue_failed_422"],
+    [new Error("github_capability_issue_failed_422"), "github_capability_issue_failed"],
     [new Error("oidc_audience_invalid"), "oidc_audience_invalid"],
-    [new Error("unexpected provider response"), "broker_failed"],
+    [new Error("unexpected provider response"), "broker_unknown"],
   ])("normalizes broker diagnostics for %s", (error, expected) => {
     expect(brokerErrorCode(error)).toBe(expected);
   });
@@ -260,5 +266,34 @@ describe("failure diagnostics", () => {
     expect(setupErrorCode(new Error("github rejected ghs_sensitive-token"))).toBe(
       "setup_failed",
     );
+  });
+});
+
+describe("broker diagnostic response contract", () => {
+  it.each([
+    ["broker_workflow_rejected", 403],
+    ["broker_rate_limited", 429],
+    ["broker_ledger_unavailable", 503],
+    ["github_capability_issue_failed_500", 403],
+    ["broker_ghs_sensitive_token", 403],
+  ])("emits safe facts and retains token HTTP classification for %s", async (message, status) => {
+    broker.exchange.mockRejectedValue(new Error(message));
+    const result = await worker.fetch(request(undefined, { "cf-ray": "0123456789abcdef-YYZ" }), env);
+    expect(result.status).toBe(status);
+    expect(result.headers.get("cache-control")).toBe("no-store");
+    expect(await result.json()).toEqual({
+      error: "capability_not_issued",
+      diagnostic: brokerDiagnostic(new Error(message), "0123456789abcdef-YYZ"),
+    });
+  });
+
+  it("retains the session-grant rejection classification and includes validated correlation", async () => {
+    broker.verifySessionGrant.mockRejectedValue(new Error("broker_session_grant_invalid"));
+    const result = await worker.fetch(grantRequest(undefined, { "cf-ray": "0123456789abcdef-YYZ" }), env);
+    expect(result.status).toBe(403);
+    expect(await result.json()).toEqual({
+      error: "session_grant_not_verified",
+      diagnostic: brokerDiagnostic(new Error("broker_session_grant_invalid"), "0123456789abcdef-YYZ"),
+    });
   });
 });

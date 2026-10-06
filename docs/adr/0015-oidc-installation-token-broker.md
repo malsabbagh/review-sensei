@@ -180,3 +180,49 @@ conversations and therefore requests `pull_requests: write`, not
 The broker requires the configured public workflow tag in `job_workflow_ref`.
 The write channel is now `@refs/tags/v5`; `v4` remains accepted during
 migration. The runtime `job_workflow_sha` must still match the resolved tag.
+
+## Safe rejection diagnostics
+
+The token and session-grant HTTP routes return a versioned `diagnostic` object
+on rejection, alongside their existing generic `error` and HTTP status. The
+Worker and CLI share a closed catalog in `schemas/broker-diagnostics.json`:
+`code`, `stage`, and `action` must match that catalog exactly. Stages describe
+subsystems, rather than claiming a precise checkpoint when a reason is shared
+by several checks. Operator hints come from the installed catalog, never from
+remote error text.
+
+For example, `broker_workflow_rejected` reports `workflow_identity` and
+`check_workflow`, with a hint to verify the supported release, workflow ref/SHA,
+event and runner against the existing broker policy. `broker_ledger_unavailable`
+reports `broker_ledger` and asks the operator to inspect ledger health if a retry
+fails. These diagnostics do not change authorization, capability permissions,
+HTTP status selection, retry behavior or CLI exit conventions.
+
+When available, `correlation_id` contains only a validated Cloudflare Ray ID.
+`upstream_status` is included only for a known GitHub failure family whose
+exception includes an actual numeric status. An upstream 500 inside an outer
+403 remains a broker rejection; it is not promoted to a transient exception.
+No repository names, tokens, JWTs, authentication headers or response bodies
+are copied into diagnostic output. Unknown code-shaped strings are redacted too.
+
+The CLI reads at most 4097 error-body bytes and accepts a diagnostic only within
+the 4096-byte limit, using strict UTF-8 and rejecting duplicate, unknown or
+inconsistent fields. Missing or malformed diagnostics, including older Worker
+responses, yield `broker_unknown` and a validated Ray ID when available. That
+fallback is evidence of a missing reason, not evidence of a particular cause.
+Use the run time and correlation ID to inspect broker logs.
+
+HTTP broker failures reach stderr, optional outcome JSON, and the Actions step
+summary/output. Wrapped session-grant errors retain their safe diagnostic. The
+summary identifies an operational failure without claiming review findings or
+inference coverage; default outcome counters are not measurements of preceding
+inference. Supplementary output failures preserve the original failure and exit.
+Local pre-request validation/OIDC acquisition, invalid successful responses and
+the successful-response enrollment throttle retain their existing messages.
+The best-effort check-publication fallback still suppresses its broker error
+and returns no check; this change does not turn that fallback into a fatal error.
+
+Deploying the updated Worker and releasing the CLI are separate operator steps.
+Until both are available, an older Worker can supply only the generic fallback.
+A previous rejected run followed by a successful rerun does not prove why the
+first run was rejected.

@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping
 
+from .broker_diagnostics import outcome_broker_diagnostic
 from .errors import ReviewInputError
 from .schemas import validate_public_document
 from .validation import DEFAULT_REVIEW_LIMITS, ReviewLimits, utf8_size
@@ -56,6 +57,8 @@ FAILURE_RUN_STATUSES = frozenset(
 )
 PUBLIC_DIAGNOSTICS = frozenset(
     {
+        "broker_rejected",
+        "broker_temporarily_unavailable",
         "already_published",
         "approval_withheld",
         "app_authored",
@@ -646,6 +649,14 @@ def render_actions_summary(outcome: RunOutcome) -> str:
     """Return a human-readable Actions summary without source or secrets."""
 
     title = _ACTIONS_SUMMARY_TITLES.get(outcome.status, "Review run finished")
+    broker = outcome_broker_diagnostic(outcome.diagnostic, outcome.stage_summary)
+    if broker is not None:
+        return (
+            "## Broker request could not complete\n"
+            f"- status: `{outcome.status}`\n"
+            f"- diagnostic: `{outcome.diagnostic}`\n"
+            f"- {broker.message()}\n"
+        )
     lines = [
         f"## {title}",
         f"- status: `{outcome.status}`",
