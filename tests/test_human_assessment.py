@@ -141,6 +141,7 @@ class State:
         self.reviews = [self.review(self.eligibility, 20)]
         self.head = HEAD
         self.base = BASE
+        self.diff = DIFF
         self.source = {
             "id": 10,
             "issue_url": "https://api.github.test/repos/owner/repo/issues/1",
@@ -198,7 +199,7 @@ class State:
             if path.endswith("/pulls/1/reviews"):
                 return json_response(self.reviews)
             if path.endswith("/pulls/1/files"):
-                return json_response([{"filename": "src/app.py", "patch": DIFF}])
+                return json_response([{"filename": "src/app.py", "patch": self.diff}])
             if path.endswith("/issues/1/comments"):
                 return json_response([self.source, *self.replies])
             if path.endswith("/pulls/1/comments"):
@@ -800,6 +801,16 @@ class HumanAssessmentTests(unittest.TestCase):
                 self.assertFalse(provider.calls)
                 self.assertEqual(state.reply_count, 0)
                 self.assertEqual(state.events(), [])
+
+    def test_missing_current_diff_fails_before_inference_or_chat(self):
+        state = State()
+        state.diff = ""
+        provider = Provider({"body": "No defects.", "resolve": True})
+        with self.assertRaisesRegex(GitHubConversationError, "current diff is missing"):
+            state.application_reply(provider)
+        self.assertFalse(provider.calls)
+        self.assertEqual(state.reply_count, 0)
+        self.assertEqual(state.events(), [])
 
     def test_pending_assessment_stale_preparation_never_generates_ordinary_chat(self):
         for race in ("base", "head", "state", "draft", "app"):
