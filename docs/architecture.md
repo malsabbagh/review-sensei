@@ -765,6 +765,17 @@ review counters or create convergence/no-progress markers. Successful transport
 preserves the `partial` run outcome and approval/check limitations; incomplete
 or wholly failed analysis remains fail-closed.
 
+[ADR 0060](adr/0060-stale-baseline-full-review-recovery.md) permits bounded
+fresh full analysis when a valid durable baseline loses incremental reuse
+compatibility. The analysis attempt is deterministic for the exact current
+base/head, configuration and context, so a same-head base change runs once.
+The prior baseline stays in trusted publication admission inputs; fallback
+findings retain human adjudication. Only a validated complete checkpoint
+replaces the baseline. Missing, malformed, foreign or future history stays
+blocked, and partial or failed work preserves the last complete baseline.
+Closed operational diagnostic tokens reach stderr and Actions summaries
+without requiring retained artifacts.
+
 Issue #136 adds a versioned review-convergence policy (ADR 0046) that doctor
 and plan can display. Issue #146 F7 (ADR 0055) makes `merge-focused` the
 runtime default and retires live `legacy` selection, so the policy is now bound

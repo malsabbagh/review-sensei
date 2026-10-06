@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
 import unicodedata
 from collections.abc import Callable
@@ -116,7 +117,7 @@ _ACTIONS_SUMMARY_TITLES = {
     "budget_exhausted": "Review stopped after exhausting a resource budget",
     "publication_failed": "Review publication failed",
     "already_published": "Review already published for this head",
-    "action_required": "Review requires a human decision before another automated pass",
+    "action_required": "Review requires action",
 }
 
 
@@ -679,9 +680,34 @@ def render_actions_summary(outcome: RunOutcome) -> str:
 
 
 def emit_host_outcome(outcome: RunOutcome, *, output_path: Path | None = None) -> None:
-    """Write the machine-readable outcome and optional Actions annotations."""
+    """Emit sanitized stderr diagnostics, JSON and optional Actions summaries.
 
-    outcome = replace(outcome, diagnostic=sanitize_diagnostic(outcome.diagnostic))
+    Baseline reason fields use a closed vocabulary on every emitted surface.
+    Successful outcomes without diagnostics remain quiet on stderr.
+    """
+
+    stages = dict(outcome.stage_summary)
+    if "baseline_recovery" in stages or "baseline_refresh" in stages:
+        from .baseline import BASELINE_RECOVERY_REASONS, RECOVERABLE_FALLBACK_REASONS
+
+        for field, allowed in (
+            ("baseline_recovery", BASELINE_RECOVERY_REASONS),
+            ("baseline_refresh", RECOVERABLE_FALLBACK_REASONS),
+        ):
+            if field in stages and stages[field] not in allowed:
+                stages[field] = "unverifiable-scope"
+    outcome = replace(
+        outcome,
+        diagnostic=sanitize_diagnostic(outcome.diagnostic),
+        stage_summary=stages,
+    )
+    if outcome.diagnostic is not None:
+        reason = stages.get("baseline_recovery")
+        print(
+            f"review-sensei: {outcome.status}: {outcome.diagnostic}"
+            + (f": {reason}" if reason is not None else ""),
+            file=sys.stderr,
+        )
     document = json.dumps(outcome.to_dict(), indent=2) + "\n"
     if output_path is not None:
         output_path.write_text(document, encoding="utf-8")

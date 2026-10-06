@@ -258,6 +258,14 @@ the handoff as a non-passing check, skipping its publication and artifact
 steps. The CLI reports the outcome and exit code and posts no maintainer
 notice itself; a caller that wants an informational comment renders it from
 the public diagnostics.
+`emit_host_outcome` emits one sanitized stderr diagnostic line even without an
+outcome artifact. Its reserved `stage_summary.baseline_recovery` field uses
+`BASELINE_RECOVERY_REASONS`; `baseline_refresh` uses the explicit
+`RECOVERABLE_FALLBACK_REASONS` subset defined in `review_sensei.baseline`.
+Unknown values in either reserved field become `unverifiable-scope` on emitted
+JSON, Actions summary and stderr surfaces. Other stage names retain their
+existing schema contract. A successful outcome without a diagnostic emits no
+stderr line.
 `GitHubIssueCommentSessionLedger` is the hosted runner's own adapter and is
 not part of this list, so removing its notice-publishing method is not a
 contract change; a caller that relied on it posts the notice itself.

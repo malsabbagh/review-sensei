@@ -1067,10 +1067,11 @@ diff --git a/src/helper.py b/src/helper.py
 
             stage_mismatch_history = json.loads(json.dumps(initial_history))
             stage_mismatch_head = "c" * 40
-            # Keep the prior head stable so this exercises the stage digest
-            # mismatch rather than a head mismatch short-circuit.
+            # A changed stage digest now permits full review, but a foreign
+            # baseline identity remains blocked even when context also changed.
             stage_mismatch_history["baseline"]["cache_key"]["head_sha"] = HEAD_SHA
             stage_mismatch_history["baseline"]["cache_key"]["stage_digest"] = "f" * 64
+            stage_mismatch_history["baseline"]["cache_key"]["repository"] = "other/repo"
             stage_mismatch_argv = list(argv)
             stage_mismatch_argv[stage_mismatch_argv.index("--head-sha") + 1] = (
                 stage_mismatch_head
@@ -1180,11 +1181,11 @@ diff --git a/src/helper.py b/src/helper.py
                 "review_sensei.cli.default_registry",
                 return_value=RecordingRegistry(provider),
             ):
-                self.assertNotEqual(main(incompatible_argv), 0)
+                self.assertEqual(main(incompatible_argv), 0)
             rejected = LocalSessionLedger(ledger_path).load(IDENTITY).record
-            self.assertEqual(provider.calls, 2)
+            self.assertEqual(provider.calls, 3)
             self.assertEqual(rejected.completed_initial_reviews, 1)
-            self.assertEqual(rejected.completed_verification_rounds, 1)
+            self.assertEqual(rejected.completed_verification_rounds, 2)
             self.assertIsNone(rejected.reservation_id)
 
     def test_cli_checkpoint_preserves_named_profile_in_cache_identity(self):
