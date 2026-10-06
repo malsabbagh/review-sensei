@@ -1739,7 +1739,8 @@ class ActionPinPolicyTests(unittest.TestCase):
                     if workflow.name == "review-sensei-run.yml":
                         self.assertTrue(
                             line == "runs-on: ubuntu-latest"
-                            or line == "runs-on: ${{ needs.bootstrap.outputs.hosted_runner }}"
+                            or line
+                            == "runs-on: ${{ needs.bootstrap.outputs.hosted_runner }}"
                             or ollama_self_hosted.match(line),
                             msg=f"{workflow.name} has unrecognized runner: {line}",
                         )

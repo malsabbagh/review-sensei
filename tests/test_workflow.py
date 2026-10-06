@@ -144,24 +144,38 @@ class WorkflowValidationTests(unittest.TestCase):
                 if supplied is not None:
                     environment["HOSTED_RUNNER"] = supplied
                 result = subprocess.run(
-                    ["bash", "-c", script], env=environment, capture_output=True, text=True
+                    ["bash", "-c", script],
+                    env=environment,
+                    capture_output=True,
+                    text=True,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(output.read_text(), f"label={expected}\n")
         for supplied in (
-            " ", "ubuntu latest", "-runner", "r" * 129,
-            '["self-hosted","linux"]', '{"group":"linux"}',
-            "ubuntu-latest\nother=runner", "$(touch unsafe)", "${{ vars.RUNNER }}",
+            " ",
+            "ubuntu latest",
+            "-runner",
+            "r" * 129,
+            '["self-hosted","linux"]',
+            '{"group":"linux"}',
+            "ubuntu-latest\nother=runner",
+            "$(touch unsafe)",
+            "${{ vars.RUNNER }}",
         ):
             with self.subTest(supplied=supplied), tempfile.TemporaryDirectory() as tmp:
                 output = Path(tmp) / "outputs"
                 result = subprocess.run(
                     ["bash", "-c", script],
-                    env=dict(os.environ, GITHUB_OUTPUT=str(output), HOSTED_RUNNER=supplied),
-                    capture_output=True, text=True,
+                    env=dict(
+                        os.environ, GITHUB_OUTPUT=str(output), HOSTED_RUNNER=supplied
+                    ),
+                    capture_output=True,
+                    text=True,
                 )
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("hosted_runner must be one Linux runner label", result.stderr)
+                self.assertIn(
+                    "hosted_runner must be one Linux runner label", result.stderr
+                )
                 self.assertFalse(output.exists())
 
     def test_retired_variables_are_reported_and_change_no_behavior(self):
