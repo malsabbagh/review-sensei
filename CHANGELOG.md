@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.6.15 - 2026-10-06
+
+- Fix Intel macOS native packaging's OpenSSL ABI mismatch. Source-built
+  cryptography now uses private static OpenSSL in both release paths; disable
+  cached/shared cryptography reuse without downgrading the declared dependency.
+  Preserve native/direct CLI parity, including the safe invalid-input exit.
+- Audit the actual frozen cryptography binding's linked libraries and exercise
+  RSA signing and verification using a temporary in-memory key. Add the failing
+  macOS Intel / Python 3.11.9 combination to required PR CI so an incompatible
+  native bundle cannot pass the release gate.
+- Align Python, the npm launcher, five platform manifests and current install
+  examples at `0.6.15`. Preserve immutable `0.6.14`, its published Python bytes
+  and the separately managed `v5` workflow channel; publication remains a
+  maintainer operation after this repair is reviewed and merged.
+
 ## 0.6.14 - 2026-10-06
 
 - Recover valid stale review baselines through bounded full analysis, including

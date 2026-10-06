@@ -557,7 +557,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         text = workflow.read_text(encoding="utf-8")
         self.assertIn("language: [python, javascript-typescript]", text)
         self.assertIn(
-            "needs: [compatibility, quality, schemas, package, npm, linux-standalone, workers, codeql]",
+            "needs: [compatibility, quality, schemas, package, npm, linux-standalone, intel-standalone, workers, codeql]",
             text,
         )
         self.assertIn('require_success "${{ needs.codeql.result }}"', text)
@@ -1712,6 +1712,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         workflow_paths = sorted(workflow_root.glob("*.yml"))
         github_hosted_runs_on = (
             re.compile(r"^runs-on: ubuntu-latest$"),
+            re.compile(r"^runs-on: macos-15-intel$"),
             re.compile(r"^runs-on: \$\{\{ matrix\.os \}\}$"),
         )
         ollama_self_hosted = re.compile(
@@ -1785,7 +1786,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("secrets:", canary)
         self.assertIn("Required checks", ci)
         self.assertIn(
-            "needs: [compatibility, quality, schemas, package, npm, linux-standalone, workers, codeql]",
+            "needs: [compatibility, quality, schemas, package, npm, linux-standalone, intel-standalone, workers, codeql]",
             ci,
         )
         self.assertNotIn("downstream-canary", ci)

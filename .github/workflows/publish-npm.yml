@@ -10,7 +10,7 @@ on:
         description: "Exact npm package version, for example 0.1.0"
         required: true
         type: string
-        default: "0.6.14"
+        default: "0.6.15"
       publish:
         description: "Publish after validation (false prepares only the attested package bundle)"
         required: true
@@ -118,7 +118,7 @@ jobs:
 
       - name: Install standalone smoke oracle
         if: ${{ !startsWith(matrix.target, 'linux-') }}
-        run: python -m pip install --disable-pip-version-check .
+        run: python scripts/install_standalone_oracle.py --target "${{ matrix.target }}"
 
       - name: Install pinned PyInstaller
         if: ${{ !startsWith(matrix.target, 'linux-') }}
@@ -127,6 +127,10 @@ jobs:
       - name: Build one-folder standalone executable
         if: ${{ !startsWith(matrix.target, 'linux-') }}
         run: python scripts/build_standalone.py --target "${{ matrix.target }}" --output "dist/standalone/${{ matrix.target }}"
+
+      - name: Verify frozen Intel cryptography ABI
+        if: ${{ matrix.target == 'darwin-x64' }}
+        run: python scripts/check_standalone_crypto.py --bundle dist/standalone/darwin-x64/review-sensei
 
       - name: Run native standalone smoke equivalence
         if: ${{ !startsWith(matrix.target, 'linux-') }}
