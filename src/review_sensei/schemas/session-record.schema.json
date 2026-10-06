@@ -41,6 +41,16 @@
         {"type": "string", "pattern": "^[a-f0-9]{8,64}$"}
       ]
     },
+    "reservation_owner": {
+      "description": "Owning run from the authenticated OIDC broker; absent in legacy reservations.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "head_sha"],
+      "properties": {
+        "run_id": {"type": "string", "pattern": "^[1-9][0-9]{0,18}$"},
+        "head_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"}
+      }
+    },
     "reserved_slot": {
       "type": ["string", "null"],
       "enum": ["initial", "verification", "failed-attempt", null]
@@ -233,6 +243,15 @@
     }
   },
   "allOf": [
+    {
+      "if": {"required": ["reservation_owner"]},
+      "then": {
+        "properties": {
+          "reservation_id": {"type": "string"},
+          "reserved_slot": {"type": "string"}
+        }
+      }
+    },
     {
       "if": {
         "required": ["transaction"],

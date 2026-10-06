@@ -7,7 +7,7 @@ import json
 import os
 import re
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import NoReturn
@@ -3105,6 +3105,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print("review-sensei: reason=invalid-input", file=sys.stderr)
         return REVIEW_EXIT_INCOMPLETE
+    analysis_cleanup: Callable[[BaseException, bool], None] | None = None
     try:
         if args.version:
             print(_package_version())
@@ -3323,7 +3324,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
         def cleanup_analysis_error(
-            analysis_error: BaseException, *, charge_failed_attempt: bool
+            analysis_error: BaseException, charge_failed_attempt: bool
         ) -> None:
             if (
                 ledger is None
@@ -3342,6 +3343,8 @@ def main(argv: list[str] | None = None) -> int:
                     f"{type(cleanup_error).__name__}: "
                     f"{str(cleanup_error).replace(chr(10), ' ')[:160]}"
                 )
+
+        analysis_cleanup = cleanup_analysis_error
 
         def emit_durable_baseline_recovery(reason: str) -> int:
             cleanup_analysis_reservation(charge_failed_attempt=False)
@@ -4030,7 +4033,11 @@ def main(argv: list[str] | None = None) -> int:
             outcome,
             required_fixes=any(comment.blocks_approval for comment in result.comments),
         )
-    except (OSError, ValueError, ReviewSenseiError) as exc:
+    except BaseException as exc:
+        if analysis_cleanup is not None:
+            analysis_cleanup(exc, not isinstance(exc, (KeyboardInterrupt, SystemExit)))
+        if not isinstance(exc, (OSError, ValueError, ReviewSenseiError)):
+            raise
         broker_reported = _report_broker_failure(exc, args)
         if not broker_reported:
             print(f"review-sensei: {exc}", file=sys.stderr)

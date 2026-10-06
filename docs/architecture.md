@@ -875,3 +875,10 @@ prospective commercial boundary are documented in
 App/broker source remains MIT; official channel control does not reclassify
 that source as proprietary. Package identities and runtime contracts are
 unchanged by that documentation.
+
+Authenticated abandoned analysis recovery is described in
+[ADR 0063](adr/0063-authenticated-reservation-recovery.md). The broker can bind a
+held reservation to its OIDC run. `@sensei review continue` requires live Actions
+completion evidence before reclaiming analysis, including a constrained origin
+proof for older PR-triggered runs. Recovery preserves session budgets and saved
+publication work; cooperating command/review jobs serialize the comment write.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from typing import Any, Mapping, Sequence
@@ -299,7 +300,7 @@ class GitHubApplication:
         # (a failed marker create) can require recovery; that state is what
         # `reenroll` and the enrollment retention window exist for.
         if hosted_session_ledger:
-            session_token, session_state = _open_broker_session(
+            session_token, session_state, _owner = _open_broker_session(
                 self.broker,
                 exchange_input,
                 repository_id=repository_id,
@@ -998,8 +999,9 @@ class GitHubApplication:
                 raise GitHubPublicationError(
                     "hosted maintainer command requires a session attestation"
                 )
+            command_exchange_input = oidc_token or self.broker.request_oidc_token()
             grant = self.broker.authorize_session_mutation(
-                oidc_token or self.broker.request_oidc_token(),
+                command_exchange_input,
                 repository_id=repository_id,
                 pull_request=pull_request,
                 head_sha=head_sha,
@@ -1101,6 +1103,13 @@ class GitHubApplication:
                 session_grant=session_grant,
                 session_attestation=broker_attestation,
                 head_sha=head_sha if hosted_mutation else None,
+                actions_token_provider=(
+                    lambda: self.broker.exchange(
+                        command_exchange_input, capability="review_actions"
+                    )
+                )
+                if hosted_mutation and command.action == "continue"
+                else None,
             )
         if ledger is None:
             raise GitHubPublicationError("maintainer commands require a session ledger")
@@ -1139,6 +1148,7 @@ class GitHubApplication:
         session_grant: str | None = None,
         session_attestation: Mapping[str, object] | None = None,
         head_sha: str | None = None,
+        actions_token_provider: Callable[[], str] | None = None,
     ) -> SessionLedger | None:
         if self.session_ledger is not None and not prefer_remote:
             return self.session_ledger
@@ -1156,6 +1166,7 @@ class GitHubApplication:
             session_grant=session_grant,
             session_attestation=session_attestation,
             head_sha=head_sha,
+            actions_token_provider=actions_token_provider,
         )
 
     @staticmethod
@@ -1503,7 +1514,7 @@ def _open_broker_session(
     repository_id: int,
     pull_request: int,
     head_sha: str,
-) -> tuple[str, str]:
+) -> tuple[str, str, Mapping[str, object] | None]:
     """Open one broker session witness and require a usable session token."""
 
     session = broker.open_session(
@@ -1517,7 +1528,7 @@ def _open_broker_session(
         raise GitHubPublicationError(
             "hosted session ledger requires a broker-attested session token"
         )
-    return token, session.state
+    return token, session.state, getattr(session, "reservation_owner", None)
 
 
 def _require_present_marker(
@@ -1566,7 +1577,7 @@ def resolve_hosted_session_ledger(
 
     from .session_ledger import GitHubIssueCommentSessionLedger
 
-    session_token, session_state = _open_broker_session(
+    session_token, session_state, owner = _open_broker_session(
         broker,
         oidc_token,
         repository_id=repository_id,
@@ -1581,6 +1592,7 @@ def resolve_hosted_session_ledger(
         http,
         token=session_token,
         app_slug=app_slug,
+        reservation_owner=owner,
     )
     identity = SessionIdentity(
         repository=repository,

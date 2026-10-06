@@ -551,6 +551,23 @@ def migrate_session_document(value: Mapping[str, object]) -> dict[str, object]:
     return migrated
 
 
+def _stored_reservation_owner(value: object) -> Mapping[str, object] | None:
+    """Bounded broker-authenticated ownership, omitted for older records."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != {"run_id", "head_sha"}:
+        raise ReviewInputError("session reservation owner is invalid")
+    run_id, head_sha = value["run_id"], value["head_sha"]
+    if (
+        not isinstance(run_id, str)
+        or re.fullmatch(r"[1-9][0-9]{0,18}", run_id) is None
+        or not isinstance(head_sha, str)
+        or re.fullmatch(r"[a-f0-9]{40}", head_sha) is None
+    ):
+        raise ReviewInputError("session reservation owner is invalid")
+    return dict(value)
+
+
 @dataclass(frozen=True)
 class SessionIdentity:
     """PR-wide ledger identity. Head SHA is not part of the key."""
@@ -600,6 +617,7 @@ class SessionRecord:
     continuation_grants: tuple[Mapping[str, object], ...] = ()
     transaction: ReviewTransaction | None = None
     convergence_history: Mapping[str, object] | None = None
+    reservation_owner: Mapping[str, object] | None = None
     # The shape is selected only while loading an existing untrusted document;
     # it is not part of the public record or its equality contract.
     _digest_shape_input: InitVar[str] = "current"
@@ -663,6 +681,21 @@ class SessionRecord:
             raise ReviewInputError("reserved_slot is invalid")
         if (self.reservation_id is None) != (self.reserved_slot is None):
             raise ReviewInputError("reservation_id and reserved_slot must be paired")
+        object.__setattr__(
+            self, "reservation_owner", _stored_reservation_owner(self.reservation_owner)
+        )
+        if self.reservation_owner is not None:
+            if self.reservation_id is None or self._digest_shape != "current":
+                raise ReviewInputError(
+                    "reservation owner requires a current held reservation"
+                )
+            if (
+                self.transaction is not None
+                and self.transaction.head_sha != self.reservation_owner["head_sha"]
+            ):
+                raise ReviewInputError(
+                    "reservation owner head does not match transaction"
+                )
         created = _parse_aware_datetime(self.created_at, label="created_at")
         updated = _parse_aware_datetime(self.updated_at, label="updated_at")
         expires = _parse_aware_datetime(self.expires_at, label="expires_at")
@@ -770,6 +803,8 @@ class SessionRecord:
             payload["failed_attempts_head_sha"] = self.failed_attempts_head_sha
         if self.continuation_grants:
             payload["continuation_grants"] = list(self.continuation_grants)
+        if self.reservation_owner is not None:
+            payload["reservation_owner"] = dict(self.reservation_owner)
         if self.transaction is not None:
             payload["transaction"] = self.transaction.to_dict()
         if self.convergence_history is not None:
@@ -824,6 +859,7 @@ class SessionRecord:
         continuation_grants: Sequence[Mapping[str, object]] = (),
         transaction: ReviewTransaction | None = None,
         convergence_history: Mapping[str, object] | None = None,
+        reservation_owner: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         normalized_dispositions = _stored_dispositions(dispositions)
         normalized_grants = _stored_continuation_grants(continuation_grants)
@@ -849,6 +885,9 @@ class SessionRecord:
             payload["failed_attempts_head_sha"] = failed_attempts_head_sha
         if normalized_grants:
             payload["continuation_grants"] = list(normalized_grants)
+        normalized_owner = _stored_reservation_owner(reservation_owner)
+        if normalized_owner is not None:
+            payload["reservation_owner"] = dict(normalized_owner)
         if transaction is not None:
             payload["transaction"] = transaction.to_dict()
         normalized_history = _stored_convergence_history(convergence_history)
@@ -884,6 +923,7 @@ class SessionRecord:
             continuation_grants=normalized_grants,
             transaction=transaction,
             convergence_history=normalized_history,
+            reservation_owner=normalized_owner,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -937,6 +977,7 @@ class SessionRecord:
         has_grants = "continuation_grants" in value
         has_transaction = "transaction" in value
         has_history = "convergence_history" in value
+        has_owner = "reservation_owner" in value
         has_attempt_head = value.get("failed_attempts_head_sha") is not None
         if has_dispositions and not has_operator_paused:
             raise ReviewInputError(
@@ -949,6 +990,7 @@ class SessionRecord:
             or has_transaction
             or has_history
             or has_attempt_head
+            or has_owner
             else "operator-paused"
             if has_operator_paused
             else "legacy"
@@ -1024,6 +1066,7 @@ class SessionRecord:
             convergence_history=_stored_convergence_history(
                 value.get("convergence_history")
             ),
+            reservation_owner=_stored_reservation_owner(value.get("reservation_owner")),
             _digest_shape_input=digest_shape,
         )
         validate_public_document(record.to_dict(), "session-record")
@@ -1049,6 +1092,7 @@ class SessionRecord:
         continuation_grants: Sequence[Mapping[str, object]] = (),
         transaction: ReviewTransaction | None = None,
         convergence_history: Mapping[str, object] | None = None,
+        reservation_owner: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         created = _aware_now(now)
         if isinstance(expires_at, str):
@@ -1084,6 +1128,7 @@ class SessionRecord:
             continuation_grants=continuation_grants,
             transaction=transaction,
             convergence_history=convergence_history,
+            reservation_owner=reservation_owner,
         )
 
     def evolve(
@@ -1103,6 +1148,7 @@ class SessionRecord:
         continuation_grants: Sequence[Mapping[str, object]] | None = None,
         transaction: ReviewTransaction | None | object = ...,
         convergence_history: Mapping[str, object] | None | object = ...,
+        reservation_owner: Mapping[str, object] | None | object = ...,
     ) -> "SessionRecord":
         updated = _format_datetime(_aware_now(now))
         return type(self)._construct(
@@ -1154,6 +1200,13 @@ class SessionRecord:
                 self.continuation_grants
                 if continuation_grants is None
                 else continuation_grants
+            ),
+            reservation_owner=(
+                None
+                if reservation_id is None
+                else self.reservation_owner
+                if reservation_owner is ...
+                else cast(Mapping[str, object] | None, reservation_owner)
             ),
             transaction=(
                 self.transaction

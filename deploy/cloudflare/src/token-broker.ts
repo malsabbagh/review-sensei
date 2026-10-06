@@ -24,6 +24,8 @@ const CAPABILITIES = {
   // Checks: write, and only the check_publish capability above requests it.
   review_session: { "pull_requests": "write" },
   review_status: { "pull_requests": "read" },
+  // Recovery proof reads cannot mutate reviews, checks, contents or sessions.
+  review_actions: { actions: "read" },
   inline_reply: { "pull_requests": "write" },
   issue_reply: { "pull_requests": "write" },
   learning_write: { contents: "write", "pull_requests": "write" },
@@ -546,6 +548,7 @@ export class TokenBroker {
     session_state?: SessionState;
     session_grant?: string;
     session_attestation?: SessionAttestation;
+    reservation_owner?: { run_id: string; head_sha: string };
   }> {
     if (!isObject(body) || typeof body.oidc_token !== "string" || body.oidc_token.length === 0) {
       throw new Error("broker_request_invalid");
@@ -666,7 +669,10 @@ export class TokenBroker {
           session_attestation: attestation,
         };
       }
-      return { token, capability: requested, session_state: enrollment };
+      return {
+        token, capability: requested, session_state: enrollment,
+        reservation_owner: { run_id: claims.run_id, head_sha: requestedSession.head_sha },
+      };
     }
     return { token, capability: requested };
   }

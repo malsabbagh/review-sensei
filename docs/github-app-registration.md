@@ -56,10 +56,18 @@ Request only the permissions needed by the features you deploy:
 | Permission | Access | Why |
 | --- | --- | --- |
 | `Metadata` | Read | Required by GitHub for App identity and repository metadata |
+| `Actions` | Read | Optional authenticated abandoned-analysis recovery: the separate `review_actions` capability reads live run/job completion evidence. Normal review and session writes keep their existing narrower capabilities |
 | `Checks` | Write | Required to publish the one stable `ReviewSensei` check run that carries the merge gate (`github.reviews: blocking` and the default `auto-approve` mode). Review publication and otherwise-eligible auto-approval can proceed without it; the missing check is reported as `check_permission`. Repositories relying on the merge gate must also grant the broker `check_publish` capability and mark this check required in branch protection |
 | `Contents` | Write | Required to create the setup branch and generated files |
 | `Pull requests` | Write | Required to open setup pull requests and publish App-identity reviews, inline replies, and top-level replies on pull-request conversations |
 | `Workflows` | Write | Required because setup always creates or updates generated files under `.github/workflows/` |
+
+GitHub's repository `Actions: read` permission also permits reading workflow
+logs; it cannot be restricted to run/job metadata within this capability. The
+reviewed recovery path fetches only bounded run/job metadata and never logs or
+artifacts. Approving this optional permission therefore accepts that residual
+token scope. Any future use of logs or artifacts needs a separate reviewed
+trust-boundary decision; the token remains limited to the requested repository.
 
 Setup provisions no repository variables, so `Variables` is not requested and
 is not needed: setup and capability token requests never name the retired

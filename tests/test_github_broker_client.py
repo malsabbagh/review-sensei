@@ -150,6 +150,52 @@ class BrokerClientTests(unittest.TestCase):
             {"oidc_token": "oidc.token", "capability": "review_status"},
         )
 
+    def test_exchange_accepts_separate_read_only_actions_capability(self):
+        client, calls = self.make_client((b'{"token":"ghs_actions_read"}', 200))
+        self.assertEqual(
+            client.exchange("oidc.token", capability="review_actions"),
+            "ghs_actions_read",
+        )
+        self.assertEqual(
+            json.loads(calls[0][3].decode()),
+            {"oidc_token": "oidc.token", "capability": "review_actions"},
+        )
+
+    def test_open_session_preserves_only_valid_broker_owner(self):
+        for owner in (
+            {"run_id": "123", "head_sha": "a" * 40},
+            {"run_id": "123", "head_sha": "b" * 40},
+            {"run_id": "invalid", "head_sha": "a" * 40},
+        ):
+            with self.subTest(owner=owner):
+                response = json.dumps(
+                    {
+                        "token": "ghs_session",
+                        "capability": "review_session",
+                        "session_state": "known",
+                        "reservation_owner": owner,
+                    }
+                ).encode()
+                client, _ = self.make_client((response, 200))
+                if owner["run_id"] == "123" and owner["head_sha"] == "a" * 40:
+                    self.assertEqual(
+                        client.open_session(
+                            "oidc.token",
+                            repository_id=99,
+                            pull_request=7,
+                            head_sha="a" * 40,
+                        ).reservation_owner,
+                        owner,
+                    )
+                else:
+                    with self.assertRaises(GitHubBrokerClientError):
+                        client.open_session(
+                            "oidc.token",
+                            repository_id=99,
+                            pull_request=7,
+                            head_sha="a" * 40,
+                        )
+
     def test_open_session_requires_a_broker_attested_scope(self):
         client, calls = self.make_client(
             (

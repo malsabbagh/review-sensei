@@ -124,8 +124,13 @@ def _reusable_group_templates() -> tuple[str, str]:
             f"expected 4 concurrency group templates, found {len(groups)}"
         )
     workflow_group, command_group, hosted_provider, local_provider = groups
-    if command_group != "reviewsensei-command-${{ github.run_id }}":
-        raise AssertionError("command group must be isolated by host run identity")
+    if (
+        command_group
+        != "reviewsensei-provider-review-${{ github.repository }}-${{ needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id }}"
+    ):
+        raise AssertionError(
+            "command group must serialize with the provider review lane"
+        )
     if hosted_provider != local_provider:
         raise AssertionError("provider group templates diverged across jobs")
     return workflow_group, hosted_provider
@@ -892,7 +897,10 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(len(group_lines), 4)
 
         top_level, command, hosted, local = group_lines
-        self.assertEqual(command, "group: reviewsensei-command-${{ github.run_id }}")
+        self.assertEqual(
+            command,
+            "group: reviewsensei-provider-review-${{ github.repository }}-${{ needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id }}",
+        )
         review_selector = "inputs.operation == 'review'"
         reply_selector = "inputs.operation == 'review' && ("
         self.assertIn(review_selector, top_level)
@@ -917,7 +925,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(local, expected_provider_group)
         hosted_job = _job_section(text, "hosted")
         local_job = _job_section(text, "local")
-        cancel_expr = "cancel-in-progress: ${{ inputs.operation == 'review' }}"
+        cancel_expr = "cancel-in-progress: false"
         for job in (hosted_job, local_job):
             self.assertEqual(
                 [
@@ -932,7 +940,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("bootstrap", hosted)
         self.assertNotIn("bootstrap", local)
         self.assertIn(
-            "The hosted and local jobs share this review group",
+            "Reviews and maintainer commands serialize writes for the same PR.",
             text,
         )
 
@@ -948,8 +956,8 @@ class ActionPinPolicyTests(unittest.TestCase):
             [
                 "cancel-in-progress: ${{ inputs.operation == 'review' && github.event.pull_request.number != null }}",
                 "cancel-in-progress: false",
-                "cancel-in-progress: ${{ inputs.operation == 'review' }}",
-                "cancel-in-progress: ${{ inputs.operation == 'review' }}",
+                "cancel-in-progress: false",
+                "cancel-in-progress: false",
             ],
         )
 
@@ -1005,7 +1013,10 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("inputs.operation == 'command'", command)
         self.assertIn("needs.bootstrap.outputs.writes == 'true'", command)
         self.assertNotIn("automatic_reviews", command)
-        self.assertIn("reviewsensei-command-${{ github.run_id }}", command)
+        self.assertIn(
+            "reviewsensei-provider-review-${{ github.repository }}-${{ needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id }}",
+            command,
+        )
         self.assertIn(
             '--github-session-ledger --oidc-token "$oidc_token" --allow-write',
             command,
@@ -1929,7 +1940,8 @@ class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
         self.assertEqual(len(group_lines), 4)
         command_group = group_lines.pop(1)
         self.assertEqual(
-            command_group, "group: reviewsensei-command-${{ github.run_id }}"
+            command_group,
+            "group: reviewsensei-provider-review-${{ github.repository }}-${{ needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id }}",
         )
         provider_lines = [line for line in group_lines if "provider" in line]
         self.assertEqual(len(provider_lines), 2)
@@ -1955,7 +1967,43 @@ class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
         )
         self.assertEqual(hosted, local)
 
-    def test_manual_and_automatic_reviews_share_the_provider_latest_wins_group(self):
+    def test_maintainer_commands_share_the_same_pr_write_lane_as_reviews(self):
+        text = _reusable_workflow_text()
+        command_template = next(
+            line.split("group:", 1)[1].strip()
+            for line in _job_section(text, "command").splitlines()
+            if line.strip().startswith("group:")
+        )
+        for pr in (7, "54"):
+            with self.subTest(pr=pr):
+                command_group = _eval_gha_group(
+                    command_template,
+                    _group_context(
+                        operation="command",
+                        repository="acme/api",
+                        preflight_pull_request=pr,
+                        event_pull_request=None,
+                        run_id="command-222",
+                    ),
+                )
+                review_group = _hosted_provider_group(
+                    operation="review",
+                    repository="acme/api",
+                    preflight_pull_request=pr,
+                    event_pull_request=pr,
+                    run_id="review-111",
+                )
+                self.assertEqual(command_group, review_group)
+                reply_group = _hosted_provider_group(
+                    operation="reply",
+                    repository="acme/api",
+                    preflight_pull_request=pr,
+                    event_pull_request=pr,
+                    run_id="reply-333",
+                )
+                self.assertNotEqual(command_group, reply_group)
+
+    def test_manual_and_automatic_reviews_share_the_serialized_provider_group(self):
         automatic = _hosted_provider_group(
             operation="review",
             repository="acme/api",
@@ -2068,8 +2116,8 @@ class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
             [
                 "cancel-in-progress: ${{ inputs.operation == 'review' && github.event.pull_request.number != null }}",
                 "cancel-in-progress: false",
-                "cancel-in-progress: ${{ inputs.operation == 'review' }}",
-                "cancel-in-progress: ${{ inputs.operation == 'review' }}",
+                "cancel-in-progress: false",
+                "cancel-in-progress: false",
             ],
         )
 

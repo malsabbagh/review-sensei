@@ -304,6 +304,27 @@ class PublicSchemaTests(unittest.TestCase):
                 {"body": "ok", "resolve": "yes"}, "conversation-reply"
             )
 
+    def test_session_record_owner_requires_a_held_reservation(self) -> None:
+        golden = json.loads(
+            (ROOT / "tests/fixtures/schemas/golden/session-record.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        owner = {"run_id": "123", "head_sha": "b" * 40}
+        held = dict(
+            golden,
+            reservation_owner=owner,
+            reservation_id="a" * 64,
+            reserved_slot="initial",
+        )
+        validate_public_document(held, "session-record")
+        for field in ("reservation_id", "reserved_slot"):
+            with self.subTest(field=field):
+                with self.assertRaises(ReviewInputError):
+                    validate_public_document(
+                        dict(held, **{field: None}), "session-record"
+                    )
+
     def test_session_record_history_limits_match_runtime_bounds(self) -> None:
         schema = json.loads(
             (SCHEMA_DIR / "session-record.schema.json").read_text(encoding="utf-8")

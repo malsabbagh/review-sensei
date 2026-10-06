@@ -82,3 +82,30 @@ operational`: it exits `1` only for the failure statuses
 (`provider_failed`, `budget_exhausted`, `publication_failed`,
 `action_required`) and `0` otherwise, including a completed review with
 required fixes.
+
+## A valid session remains paused after a failed analysis
+
+A held reservation can block admission even when `operator_paused` is false.
+After the reviewed recovery runtime and workflow are installed, an authorized
+maintainer can comment `@sensei review continue` on that PR. The command uses
+GitHub Actions reads to prove the originating run has completed, refuses an active
+owner run, rechecks ledger ownership and the current PR head, and charges
+one failed attempt to the abandoned head. Run a new review only after the
+command reports successful recovery; continuation itself performs no inference.
+
+Old records without OIDC owner metadata can recover only when exact-head PR-run
+and failed analysis-job metadata uniquely identify the origin, and the record's
+generation still matches the attached analysis transaction. Later writes can
+move the timestamp, so those legacy records fail closed rather than guessing a
+new origin. Missing, changed,
+ambiguous or truncated evidence requires investigation. Unrelated CI does not
+block recovery; only the exact owner proof and session fences authorize it. The App
+installation must accept Actions read and the broker must support the separate
+`review_actions` capability. Existing caller workflow permissions stay unchanged. Expiry,
+integrity failures and saved publication work keep their existing recovery paths.
+
+Local `review continue` cannot reclaim a held reservation: it reports
+`held reservation requires authenticated Actions recovery` and preserves the
+hold. A local ledger has no authenticated Actions completion proof. Hosted
+recovery applies only to its corresponding hosted session ledger; an abandoned
+local process requires investigation rather than a silent unpause or timer unlock.

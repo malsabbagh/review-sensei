@@ -203,6 +203,9 @@ class GitHubIssueCommentSessionLedger:
         session_grant: str | None = None,
         session_attestation: Mapping[str, object] | None = None,
         head_sha: str | None = None,
+        reservation_owner: Mapping[str, object] | None = None,
+        actions_read_token: str | None = None,
+        actions_token_provider: Callable[[], str] | None = None,
     ) -> None:
         if not isinstance(http, GitHubHttp):
             raise ReviewInputError("GitHub session ledger requires GitHubHttp")
@@ -244,6 +247,9 @@ class GitHubIssueCommentSessionLedger:
             dict(session_attestation) if session_attestation is not None else None
         )
         self._head_sha = head_sha
+        self._reservation_owner = reservation_owner
+        self._actions_read_token = actions_read_token
+        self._actions_token_provider = actions_token_provider
 
     def _require_identity(self, identity: SessionIdentity) -> int:
         if identity.repository_id is None:
@@ -683,6 +689,107 @@ class GitHubIssueCommentSessionLedger:
     ) -> SessionRecord:
         return self.replace(identity, mutate, now=now)
 
+    def _own_reservation(
+        self, previous: SessionRecord, reserved: SessionRecord
+    ) -> SessionRecord:
+        if (
+            reserved.reservation_id is None
+            or previous.reservation_id is not None
+            or self._reservation_owner is None
+        ):
+            return reserved
+        if reserved.failed_attempts_head_sha != self._reservation_owner.get("head_sha"):
+            raise ReviewInputError(
+                "broker reservation owner head does not match admission"
+            )
+        return reserved.evolve(
+            reservation_owner=self._reservation_owner,
+            now=datetime.fromisoformat(reserved.updated_at.replace("Z", "+00:00")),
+        )
+
+    def continue_after_abandoned_analysis(
+        self, identity: SessionIdentity, *, now: datetime | None = None
+    ) -> SessionRecord:
+        """One broker grant, one CAS replacement, live Actions proof twice."""
+        import hashlib
+
+        from ...session import MAX_FAILED_ATTEMPTS, _failed_attempt_scope
+        from .reservation_recovery import ActionsReservationEvidence
+
+        if (
+            self._broker is None
+            or self._session_attestation is None
+            or (
+                self._actions_read_token is None
+                and self._actions_token_provider is None
+            )
+        ):
+            raise ReviewInputError(
+                "reservation recovery requires an authenticated maintainer grant and Actions reads"
+            )
+        if self._session_attestation.get("operation") != "command":
+            raise ReviewInputError("reservation recovery requires a maintainer command")
+        loaded = self.load(identity, now=now)
+        if loaded.status != "ok" or loaded.record is None:
+            raise ReviewInputError(f"session ledger load failed: {loaded.status}")
+        expected = loaded.record
+        if expected.reservation_id is None:
+            return expected
+        actions_token = self._actions_read_token
+        if actions_token is None and self._actions_token_provider is not None:
+            actions_token = self._actions_token_provider()
+        if not isinstance(actions_token, str) or not actions_token.strip():
+            raise ReviewInputError("reservation recovery Actions token is unavailable")
+        evidence = ActionsReservationEvidence(
+            self.http,
+            token=actions_token,
+            command_run_id=str(self._session_attestation["run_id"]),
+        )
+        proof = evidence.verify(identity, expected)
+
+        def recover(current: SessionRecord) -> SessionRecord:
+            if (
+                current.record_sha256 != expected.record_sha256
+                or current.generation != expected.generation
+                or current.reservation_id != expected.reservation_id
+            ):
+                raise ReviewInputError(
+                    "abandoned reservation ownership or generation mismatch"
+                )
+            if evidence.verify(identity, current) != proof:
+                raise ReviewInputError("reservation recovery run proof is stale")
+            _, latest = self._discover(identity, now=now)
+            if latest is None or latest.record_sha256 != expected.record_sha256:
+                raise ReviewInputError(
+                    "abandoned reservation ownership or generation mismatch"
+                )
+            # Charge the abandoned head, even when the command addresses a
+            # newer live head. Recovery must not spend that new head's budget.
+            owner_head = (
+                str(current.reservation_owner["head_sha"])
+                if current.reservation_owner is not None
+                else current.transaction.head_sha
+                if current.transaction is not None
+                else None
+            )
+            scope = _failed_attempt_scope(current, owner_head)
+            attempts = int(scope.get("failed_attempts", current.failed_attempts))
+            scope["failed_attempts"] = min(attempts + 1, MAX_FAILED_ATTEMPTS)
+            return current.evolve(
+                now=now,
+                generation=current.generation + 1,
+                reservation_id=None,
+                reserved_slot=None,
+                transaction=None,
+                last_committed_reservation_id=hashlib.sha256(
+                    f"{current.reservation_id}|failed-attempt".encode()
+                ).hexdigest(),
+                operator_paused=False,
+                **scope,
+            )
+
+        return self.replace(identity, recover, now=now)
+
     def reserve(
         self,
         identity: SessionIdentity,
@@ -695,13 +802,16 @@ class GitHubIssueCommentSessionLedger:
     ) -> SessionRecord:
         return self.replace(
             identity,
-            lambda record: mutate_reserved(
+            lambda record: self._own_reservation(
                 record,
-                slot=slot,
-                reservation_id=reservation_id,
-                expected_generation=expected_generation,
-                head_sha=head_sha,
-                now=now,
+                mutate_reserved(
+                    record,
+                    slot=slot,
+                    reservation_id=reservation_id,
+                    expected_generation=expected_generation,
+                    head_sha=head_sha,
+                    now=now,
+                ),
             ),
             now=now,
         )
