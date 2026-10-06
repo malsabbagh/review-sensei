@@ -247,27 +247,9 @@ class HumanAssessmentPublisher:
             return ReplyResult(status=preflight.result.status)
         if preflight.app_authored or preflight.base_sha != inventory.base_sha:
             return ReplyResult(status="skipped_stale_base")
-        if current == refreshed and (
+        resuming = current == refreshed and (
             updated_inventory != inventory or not inventory.pending
-        ):
-            # A previous attempt durably reassessed but failed before approval.
-            # Re-enter the existing exact-head finalizer without another model
-            # decision or COMMENT. A newer/conflicting result still wins.
-            assert review_token is not None
-            finalized = self.finalizer.finalize(
-                token=review_token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=conversation.head_sha,
-                app_slug=app_slug,
-                eligibility=refreshed,
-                require_persisted=True,
-            )
-            return ReplyResult(
-                status=finalized.status
-                if finalized.status.startswith("skipped_")
-                else "already_replied"
-            )
+        )
         outcome = self.conversation.publish(
             token=token,
             repository=repository,
@@ -280,9 +262,8 @@ class HumanAssessmentPublisher:
             root_comment_id=conversation.root_comment_id,
             source_kind=conversation.source_kind,
         )
-        if (
-            outcome.status not in {"replied", "already_replied"}
-            or updated_inventory == inventory
+        if outcome.status not in {"replied", "already_replied"} or (
+            updated_inventory == inventory and inventory.pending
         ):
             return outcome
         assert review_token is not None
@@ -326,9 +307,29 @@ class HumanAssessmentPublisher:
             head_sha=conversation.head_sha,
             app_slug=app_slug,
         )
-        if current != original:
+        if current != (refreshed if resuming else original):
             return ReplyResult(
                 status="skipped_stale_head", comment_id=outcome.comment_id
+            )
+        if resuming:
+            # A previous attempt durably reassessed but failed before approval.
+            # The conversation publisher has now reconciled this source's
+            # reply (or acknowledged a new mention). Re-enter the exact-head
+            # finalizer without another assessment record or model decision.
+            finalized = self.finalizer.finalize(
+                token=review_token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=conversation.head_sha,
+                app_slug=app_slug,
+                eligibility=refreshed,
+                require_persisted=True,
+            )
+            return ReplyResult(
+                status=finalized.status
+                if finalized.status.startswith("skipped_")
+                else outcome.status,
+                comment_id=outcome.comment_id,
             )
         evidence_digest = hashlib.sha256(
             json.dumps(

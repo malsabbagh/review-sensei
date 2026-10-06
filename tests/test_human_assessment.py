@@ -152,6 +152,7 @@ class State:
         }
         self.calls = []
         self.reply_count = 0
+        self.replies = []
         self.hook = None
         self.threads = []
         self.http = GitHubHttp(api_url="https://api.github.test", opener=self.open)
@@ -199,7 +200,7 @@ class State:
             if path.endswith("/pulls/1/files"):
                 return json_response([{"filename": "src/app.py", "patch": DIFF}])
             if path.endswith("/issues/1/comments"):
-                return json_response([self.source])
+                return json_response([self.source, *self.replies])
             if path.endswith("/pulls/1/comments"):
                 return json_response([])
             if "/contents/" in path:
@@ -207,6 +208,16 @@ class State:
         if request.method == "POST":
             if path.endswith("/issues/1/comments"):
                 self.reply_count += 1
+                self.replies.append(
+                    {
+                        "id": 30,
+                        "body": body["body"],
+                        "created_at": "created",
+                        "updated_at": "replied",
+                        "user": {"login": APP, "type": "Bot"},
+                        "issue_url": self.source["issue_url"],
+                    }
+                )
                 return json_response({"id": 30}, 201)
             if path.endswith("/issues/comments/10/reactions"):
                 return json_response({"id": 99}, 201)
@@ -445,6 +456,7 @@ class HumanAssessmentTests(unittest.TestCase):
         self.assertEqual(outcome.status, "replied")
         self.assertEqual(broker.capabilities, ["issue_reply", "review_publish"])
         self.assertEqual(state.events(), ["COMMENT", "COMMENT", "APPROVE"])
+        self.assertEqual(state.reply_count, 1)
         refreshed = approval_eligibility_from_body(state.reviews[-2]["body"])
         self.assertFalse(refreshed.human_review.pending)
         self.assertEqual(refreshed.result_digest, state.eligibility.result_digest)
@@ -477,6 +489,70 @@ class HumanAssessmentTests(unittest.TestCase):
         self.assertFalse(retry_provider.calls)
         self.assertEqual(broker.capabilities, ["issue_reply", "review_publish"])
         self.assertIs(ReviewApprovalFinalizer.finalize, finalize)
+        self.assertEqual(state.reply_count, 1)
+
+    def test_resolved_inventory_new_mention_is_acknowledged_before_finalizing(self):
+        original = prior()
+        inventory = replace(
+            original.human_review,
+            resolved=tuple(f.fingerprint for f in original.human_review.findings),
+        )
+        state = State(
+            replace(
+                original,
+                human_review=inventory,
+                facts=replace(original.facts, has_human_adjudication_findings=False),
+            )
+        )
+        provider = Provider({})
+        outcome, _ = state.application_reply(provider)
+        self.assertEqual(outcome.status, "replied")
+        self.assertEqual(state.reply_count, 1)
+        self.assertFalse(provider.calls)
+        self.assertEqual(state.events(), ["APPROVE"])
+        outcome, _ = state.application_reply(provider)
+        self.assertEqual(outcome.status, "already_replied")
+        self.assertEqual(state.reply_count, 1)
+        self.assertEqual(state.events(), ["APPROVE"])
+
+    def test_failure_before_source_reply_does_not_persist_assessment_or_approve(self):
+        state = State()
+        publisher, prepared = state.bridge()
+        reply = HumanAssessmentService(Provider(response_for(state.eligibility))).reply(
+            context=prepared.conversation.context,
+            pending=prepared.eligibility.human_review,
+            source_body=HUMAN,
+        )
+        with patch.object(
+            publisher.conversation,
+            "publish",
+            side_effect=GitHubConversationError("interrupted"),
+        ):
+            with self.assertRaises(GitHubConversationError):
+                publisher.publish(
+                    token="issue",
+                    review_token="review",
+                    repository="owner/repo",
+                    pull_request=1,
+                    prepared=prepared,
+                    reply=reply,
+                    app_slug=APP,
+                )
+        self.assertEqual(state.events(), [])
+        self.assertEqual(
+            approval_eligibility_from_body(state.reviews[-1]["body"]), state.eligibility
+        )
+        outcome = publisher.publish(
+            token="issue",
+            review_token="review",
+            repository="owner/repo",
+            pull_request=1,
+            prepared=prepared,
+            reply=reply,
+            app_slug=APP,
+        )
+        self.assertEqual(outcome.status, "replied")
+        self.assertEqual(state.events(), ["COMMENT", "APPROVE"])
 
     def test_collision_assessment_clears_only_the_cited_identity(self):
         comment = ReviewComment(
@@ -621,7 +697,7 @@ class HumanAssessmentTests(unittest.TestCase):
                         app_slug=APP,
                     )
                 outcome, _ = state.application_reply(Provider({}))
-                self.assertEqual(outcome.status, "already_replied")
+                self.assertEqual(outcome.status, "replied")
                 self.assertEqual(state.events(), [])
 
     def test_resumed_approval_rechecks_stale_head_base_and_latest_result(self):

@@ -61,6 +61,9 @@ latest persisted eligibility. Finalization checks all existing static facts and
 live threads, rechecks PR identity and persisted state, and reconciles the same
 approval marker. A newer same-head result or stale base/head wins. Retry creates
 neither another reassessment COMMENT nor a second approval in sequential replay.
+The source reply is reconciled through the existing conversation publisher
+before finalization, so retries reuse the reply marker and new mentions receive
+an acknowledgment rather than a false `already_replied` result.
 
 ## Consequences and limits
 
