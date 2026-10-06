@@ -4,7 +4,7 @@
 - Date: 2026-10-06
 - Decision owner/reviewers: ReviewSensei maintainers
 - Linked GitHub Issue: User-requested feature; no issue created
-- Linked PR: Pending draft creation
+- Linked PR: [#216](https://github.com/malsabbagh/review-sensei/pull/216)
 
 ## Context
 
