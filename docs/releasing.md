@@ -220,7 +220,9 @@ operator-owned cutoff step.
 
 This cutoff includes bounded stale-baseline recovery (#209), canonical backend
 resolution for mention replies (#210), safe broker rejection diagnostics
-(#211), and evidence-backed human-reply reassessment (ADR 0061). Preparing or merging the release PR does not update installed consumers.
+(#211), evidence-backed human-reply reassessment (ADR 0061), and the validated
+`hosted_runner` reusable-workflow input. Preparing or merging the release PR
+does not update installed consumers.
 The maintainer rollout must complete these separately authorized steps:
 
 1. Build and verify the immutable 0.6.14 artifact lanes, including the Worker,
@@ -237,10 +239,15 @@ The maintainer rollout must complete these separately authorized steps:
 3. Verify that the compatibility manifest and canary binding match the completed
    published/deployed lanes, then promote `v5` to the reviewed 0.6.14 workflow commit
    under the existing publication and channel gates. Record old and new SHAs.
-4. Trigger a fresh end-to-end mention reply on the promoted channel. Retain
+4. Only after promoted `v5` declares `hosted_runner`, update opted-in downstream
+   callers to pass their trusted runner label. Older tag-pinned workflows reject
+   this unknown input. Verify actual Ubicloud routing for an opted-in caller,
+   the GitHub default for an unchanged caller, and preserved local Ollama
+   routing; source-level runner assertions alone are insufficient.
+5. Trigger a fresh end-to-end mention reply on the promoted channel. Retain
    sanitized evidence bound to the new workflow SHA, installed CLI `0.6.14`,
    configured backend/model, successful inference and posted reply. Historical
-   failed runs are not proof that the new cutoff works. Separately verify a
+   failed runs are not proof that the new cutoff works. Separately verify
    a fresh human-review finding followed by an authorized supported explanation,
    checking that only eligible exact-head approval follows. Also verify a
    valid stale-baseline full recovery and a synthetic broker rejection after

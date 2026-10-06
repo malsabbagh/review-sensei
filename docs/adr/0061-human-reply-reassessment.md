@@ -48,8 +48,8 @@ human-assessment flag changes; the original result digest, blocking findings,
 coverage, review status, qualification and auto-approval policy remain intact.
 Partial assessments accumulate only their supported fingerprints, and every
 other concern remains pending. The adapter uses the existing separate
-`review_publish` broker capability; the issue-reply grant is never used to submit an
-approval. No broker scopes or App permissions are broadened.
+`review_publish` broker capability; the issue-reply grant is never used to
+submit an approval. No broker scopes or App permissions are broadened.
 
 Finalization checks live unresolved blocking threads, exact PR identity and the
 latest persisted eligibility again after the thread scan before APPROVE. A

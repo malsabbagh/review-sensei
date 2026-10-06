@@ -29,6 +29,11 @@
   partial assessments and stale or unauthorized replies cannot grant approval.
   Existing pending reviews need a fresh review to record the bounded inventory.
 
+- Add a validated `hosted_runner` input for the three hosted reusable-workflow
+  jobs, defaulting to `ubuntu-latest`. Keep bootstrap and local Ollama routing
+  unchanged. Tag-pinned callers must wait for the released `v5` workflow before
+  sending the new input.
+
 - Align the Python package, npm launcher and five platform packages at `0.6.14`.
   Publish and verify this version before promoting the separate `v5` workflow
   channel. Moving `v5` without a new package version still allows PyPI `0.6.13`
