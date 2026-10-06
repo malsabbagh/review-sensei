@@ -763,6 +763,8 @@ class GitHubIssueCommentSessionLedger:
                 raise ReviewInputError(
                     "abandoned reservation ownership or generation mismatch"
                 )
+            # Charge the abandoned head, even when the command addresses a
+            # newer live head. Recovery must not spend that new head's budget.
             owner_head = (
                 str(current.reservation_owner["head_sha"])
                 if current.reservation_owner is not None

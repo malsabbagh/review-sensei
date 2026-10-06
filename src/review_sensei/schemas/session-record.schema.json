@@ -212,15 +212,6 @@
               "transaction_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
             },
             "allOf": [
-    {
-      "if": {"required": ["reservation_owner"]},
-      "then": {
-        "properties": {
-          "reservation_id": {"type": "string"},
-          "reserved_slot": {"type": "string"}
-        }
-      }
-    },
               {
                 "if": {"required": ["blocker_set_sha256"]},
                 "then": {
@@ -252,6 +243,15 @@
     }
   },
   "allOf": [
+    {
+      "if": {"required": ["reservation_owner"]},
+      "then": {
+        "properties": {
+          "reservation_id": {"type": "string"},
+          "reserved_slot": {"type": "string"}
+        }
+      }
+    },
     {
       "if": {
         "required": ["transaction"],

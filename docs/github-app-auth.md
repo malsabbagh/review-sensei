@@ -204,6 +204,9 @@ review-dismissal or branch-protection capability. Authenticated abandoned
 analysis recovery lazily exchanges `review_actions` for live Actions proofs;
 it requires the installation to accept Actions read and a reviewed broker
 deployment. Ordinary reviews and unpause without a hold do not request it.
+Recovery exchanges this read token once and reuses it for the bounded proof
+reads. It is not a one-use mutation grant: the separate one-use command grant
+remains the sole authority to write the session comment.
 The App requests no
 `Administration` permission.
 

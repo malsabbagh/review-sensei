@@ -58,7 +58,10 @@ a hold does not charge or rewrite. Saved publication work is never reclaimed.
 
 Command and provider review jobs share the PR's existing provider concurrency
 group without cancelling each other. Workflow-level latest-review cancellation
-is retained; reply jobs retain their run-specific isolation. GitHub comment
+is retained for automatic `pull_request` reviews. Manual `workflow_dispatch`
+reviews serialize after authoritative PR preflight instead of cancelling a
+writer in this lane; live-head publication fences still apply. Reply jobs
+retain their run-specific isolation. GitHub comment
 PATCH still has no conditional ETag/CAS primitive. Generation/digest checks and
 readbacks detect observable conflicts, while the shared Actions lane serializes
 cooperating writers. This does not claim strict CAS against external writers.
@@ -107,6 +110,8 @@ legacy PR-run recovery uses its separate read capability. No live session is cha
 merging or publishing the code; a maintainer must issue continuation explicitly.
 Rollback by reverting the code and workflow through normal review. Older engines
 fail closed on newly owner-bearing records rather than ignoring integrity fields.
+Recover or complete those holds with an owner-aware engine before rollback,
+or restore that engine afterward; an older engine cannot resume those records.
 
 ## Follow-up work
 

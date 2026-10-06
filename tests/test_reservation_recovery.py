@@ -281,6 +281,7 @@ class ReservationRecoveryTests(unittest.TestCase):
         record, _ = h.continue_review()
         self.assertIsNone(record.reservation_id)
         self.assertEqual(h.patches, 1)
+        self.assertEqual(h.reads, 4)
         self.assertFalse(any("?status=" in url for _, url, _ in h.calls))
 
     def test_rerun_between_completion_reads_invalidates_proof(self):
