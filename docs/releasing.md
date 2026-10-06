@@ -216,6 +216,94 @@ workflow above. Publishing an npm package or deploying the Worker does not move
 the public `v5` tag or replay historical App deliveries; each is a separate,
 operator-owned cutoff step.
 
+## 0.6.16 recovery and human-reassessment rollout
+
+This cutoff includes authenticated abandoned-analysis recovery (#215), the
+canonical `@reviewsensei` handle with the retained `@sensei` alias (#216), CI
+dependency updates (#217–#221), and complete human inventories, bounded pending
+evidence, safe rejection diagnostics and retryable exact-head approval (#222).
+It also fixes the release PR's reproduced retry failure: completed analysis with
+unfinished publication requires the original identity-bound result and trusted
+contexts, rather than claiming `already_published` and opening a missing result
+file. Opted-in diagnostics survive publication failure, and review-create errors
+report a bounded HTTP status or transport category. The original PR223 failure's
+exact network/API cause was not retained; this change does not assert a fix for
+that unknown upstream error. With `artifacts: none`, the discarded result cannot
+be recreated from the ledger, so a same-context retry stops for recovery. Do not
+reset its budget or apply abandoned-analysis recovery to it.
+Preparing or merging this release PR does not update installed consumers. Keep
+`v0.6.14`, `v0.6.15`, all published bytes and the separately controlled `v5`
+channel intact while preparing the cutoff.
+
+The release owner must approve and record each rollout operation separately:
+
+1. Merge the reviewed release PR after terminal CI on its exact head. From the
+   clean, reviewed merge commit, run
+   `python scripts/check_release_version.py --tag v0.6.16`, create the signed
+   immutable `v0.6.16` tag, and push only that tag. Verify the workflow's staged
+   Python files and all six npm tarballs against source-bound attestations and
+   clean installed consumers. Retain the static Intel OpenSSL audit, frozen RSA
+   sign/verify result and strict native CLI parity. Keep the protected PyPI/npm
+   gates pending until their checks and the compatibility binding below pass.
+2. Prepare the reviewed broker and App permission rollout from this cutoff,
+   preserving its installation identity, secret bindings and deployment
+   configuration. The broker must support the lazy `review_actions` capability, scoped
+   only to Actions read, OIDC reservation ownership and both mention handles.
+   Record the prior Worker identity and the verified candidate bundle. The new
+   capability requires **Actions: read** in the GitHub App's repository
+   permissions and acceptance by installation owners. This is an App
+   installation permission; do not add an Actions permission requirement to
+   consumer reusable-workflow callers.
+3. Bind the reviewed workflow SHA, verified Python/npm artifacts, current schema
+   identities, candidate Worker and canary evidence in the compatibility manifest
+   below, preserving its build → verify → canary bind → publish/promote sequence.
+   With the release owner's explicit approval bundle, approve package publication,
+   deploy the compatible broker, and update/accept the App permission. Verify
+   published registry bytes, the deployed Worker identity and effective Actions
+   read on each recovery installation. If npm is partially published, rerun only
+   its failed job with the original attested bundle; do not rebuild or move the
+   immutable tag. After all compatible lanes are verified and channel promotion
+   is authorized, move the signed `v5` channel to the reviewed cutoff and record
+   its old/new tag objects and commit SHAs. Moving `v5` while retaining the
+   `0.6.15` package version cannot deliver this engine fix: the workflow prefers
+   its exact PyPI version. Package publication alone does not promote `v5`.
+4. Upgrade opted-in consumer caller filters/resolvers through reviewed,
+   workflow-only PRs using [the mention-handle rollout](mention-handle-rollout.md).
+   Preserve runner selections, operator edits, permissions and concurrency.
+   Older callers can continue using `@sensei`; promoting `v5` alone does not let
+   their filters route `@reviewsensei`. No App rename or setup-format renumbering
+   is required.
+5. Verify a fresh end-to-end review, mention reply and human reassessment on the
+   promoted workflow and installed CLI `0.6.16`, retaining exact source/head,
+   installed version, provider/model, source receipt and final approval outcome.
+   A historical review declaring human findings without the complete inventory
+   must receive a newly authorized full review of its current head first; do
+   not reconstruct the inventory from review prose or old model output. Verify
+   that colliding findings stay distinct, insufficient evidence acknowledges
+   without inference or eligibility mutation, and a finalization retry preserves
+   all existing gates and emits no duplicate approval.
+6. For a specifically authorized abandoned session such as PR54, issue
+   authenticated `@sensei review continue` (or the canonical handle after its
+   caller upgrade) only after the recovery runtime, broker and accepted App
+   permission are live. Retain the completed-owner or constrained legacy-origin
+   proof, current-head and ledger-generation checks, one failed-attempt charge
+   and the subsequent fresh review/publication evidence. Age alone never proves
+   abandonment; active, ambiguous or unavailable evidence remains blocked.
+
+Existing records without `reservation_owner` retain their digest and remain
+readable. Legacy PR-triggered holds use bounded exact-head/PR-associated origin
+proof, so they do not need owner metadata retrofitted. They still require the
+new Actions-read broker capability and accepted App permission. New owner-bearing
+holds fail closed in older engines; recover or complete them with an owner-aware
+engine before rolling the runtime back. Publication checkpoints, completed
+counters, expiry and review budgets are preserved. Existing valid human
+inventories keep their identities and need no migration; missing inventories
+remain pending until a fresh full review establishes complete evidence.
+
+No remote state is migrated by this release PR. Publication, deployment,
+permission acceptance, channel promotion, consumer caller changes and live
+continuation/review are deferred to the release owner's explicit approval bundle.
+
 ## 0.6.15 Intel native ABI repair
 
 The `v0.6.14` cutoff published Python successfully, but its Intel macOS npm

@@ -123,11 +123,21 @@ names is ever attached to provider requests: the generated caller forwards the
 three declared secret names, and the reusable workflow fails closed if the
 trusted plan names a credential outside them.
 
-The workflow uploads `review.json`, `outcome.json`, and the recovery artifact
-as the `review-sensei-diagnostics` GitHub artifact only when the trusted
+The workflow uploads `review.json`, `outcome.json`, the recovery artifact,
+the publication outcome when available, the reviewed diff, and trusted
+configuration/admission contexts as the `review-sensei-diagnostics` GitHub
+artifact only when the trusted
 configuration enables diagnostics uploads, with a seven-day retention window.
-Artifact retention is controlled by the workflow, not by ReviewSensei. Fork
-pull request heads are rejected by the reusable workflow's preflight before any
+After successful analysis, this opted-in bundle is also uploaded on publication
+failure so a retry can reuse the original identity-bound result. It contains
+source-bearing diff/review data and credential-free configuration identities.
+The workflow does not add provider/GitHub authentication credentials, raw prompts,
+or raw provider responses. Reviewed repository content can itself contain
+sensitive data, so enable diagnostic uploads only when that content is suitable
+for GitHub artifact retention and access. With
+`artifacts: none`, no recovery bundle is uploaded and the ledger alone cannot
+reconstruct those bytes. Artifact retention is controlled by the workflow, not
+by ReviewSensei. Fork pull request heads are rejected by the reusable workflow's preflight before any
 provider call; enabling fork-triggered automation would require a separate
 security review of secrets, untrusted head behavior, and provider data egress.
 

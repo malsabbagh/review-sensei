@@ -695,7 +695,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(text.count("github review \\\n"), 2)
         self.assertEqual(text.count("--outcome outcome.json"), 2)
         self.assertEqual(text.count("--outcome publication-outcome.json"), 2)
-        self.assertEqual(text.count("recovery-artifact.json"), 4)
+        self.assertEqual(text.count("recovery-artifact.json"), 6)
         self.assertEqual(text.count("Publish or promote"), 2)
         self.assertEqual(text.count("reply_exit=$?"), 2)
         self.assertEqual(text.count("grep -E '^(replied_and_resolved|"), 2)
@@ -1805,6 +1805,72 @@ class ActionPinPolicyTests(unittest.TestCase):
 
 
 class ReusablePublishGuardTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "Linux runner script requires POSIX Bash")
+    def test_runner_result_guard_clears_stale_outputs_and_distinguishes_skip(self):
+        workflow = _reusable_workflow_text()
+        for job_id in ("hosted", "local"):
+            job = _job_section(workflow, job_id)
+            blocks = [
+                block
+                for block in _run_blocks(job)
+                if "echo 'result_ready=false'" in block
+            ]
+            self.assertEqual(len(blocks), 1)
+            script = (
+                "set -e\nreview_args=()\n"
+                + blocks[0]
+                .split("# A skipped committed attempt", 1)[1]
+                .split("\n", 1)[1]
+            )
+            for produces_result in (False, True):
+                with self.subTest(job=job_id, result=produces_result):
+                    with tempfile.TemporaryDirectory() as temporary:
+                        root = Path(temporary)
+                        executable = root / "review-sensei-venv/bin/review-sensei"
+                        executable.parent.mkdir(parents=True)
+                        executable.write_text(
+                            "#!/bin/bash\n"
+                            + (
+                                "printf 'new result' > review.json\n"
+                                if produces_result
+                                else ""
+                            )
+                            + "exit 0\n",
+                            encoding="utf-8",
+                        )
+                        executable.chmod(0o755)
+                        for name in (
+                            "review.json",
+                            "outcome.json",
+                            "recovery-artifact.json",
+                            "publication-outcome.json",
+                            "configuration-context.json",
+                            "admission-context.json",
+                        ):
+                            (root / name).write_text("stale", encoding="utf-8")
+                        output = root / "outputs"
+                        process = subprocess.run(
+                            ["bash", "-c", script],
+                            cwd=root,
+                            env={
+                                "RUNNER_TEMP": str(root),
+                                "GITHUB_OUTPUT": str(output),
+                            },
+                            capture_output=True,
+                            text=True,
+                        )
+                        self.assertEqual(process.returncode, 0, process.stderr)
+                        expected = "result_ready=false\n"
+                        if produces_result:
+                            expected += "result_ready=true\n"
+                            self.assertEqual(
+                                (root / "review.json").read_text(), "new result"
+                            )
+                        else:
+                            self.assertFalse((root / "review.json").exists())
+                        self.assertEqual(output.read_text(), expected)
+                        self.assertFalse((root / "recovery-artifact.json").exists())
+
     def test_provider_jobs_publish_only_a_current_head_after_a_successful_review(
         self,
     ):
@@ -1812,10 +1878,12 @@ class ReusablePublishGuardTests(unittest.TestCase):
         admission_if = "if: success() && !cancelled() && inputs.operation == 'review'"
         publish_if = (
             admission_if + " && steps.publish-admission.outputs.status == 'current'"
+            " && steps.provider-review.outputs.result_ready == 'true'"
         )
         upload_if = (
-            "if: inputs.operation == 'review' && needs.bootstrap.outputs.artifacts"
+            "if: always() && !cancelled() && inputs.operation == 'review' && needs.bootstrap.outputs.artifacts"
             " == 'diagnostics' && steps.provider-review.outcome == 'success'"
+            " && steps.provider-review.outputs.result_ready == 'true'"
         )
         confirm_name = "Confirm live pull-request head is still current"
         upload_name = "Upload diagnostics artifact"
@@ -1823,9 +1891,8 @@ class ReusablePublishGuardTests(unittest.TestCase):
         self.assertEqual(text.count(publish_if), 2)
         self.assertEqual(text.count(upload_if), 2)
         self.assertEqual(text.count("id: publish-admission"), 2)
-        # No budget admission and no handoff-status plumbing exists: the engine
-        # exits non-zero on a non-publishable outcome, so the publish and
-        # artifact steps are skipped by their own success guards.
+        # The engine controls budget admission. Failed publication still retains
+        # an opted-in result/context bundle; an inference skip has no result.
         for token in (
             "budget-admission",
             "outcome_status",
@@ -1850,6 +1917,15 @@ class ReusablePublishGuardTests(unittest.TestCase):
                 self.assertIn(admission_if, revalidate)
                 self.assertNotIn("steps.publish-admission.outputs.status", revalidate)
                 self.assertIn(publish_if, publish)
+                upload = _step_block(job, upload_name)
+                for artifact in (
+                    "review.json",
+                    "configuration-context.json",
+                    "admission-context.json",
+                    "pr.patch",
+                    "publication-outcome.json",
+                ):
+                    self.assertIn(artifact, upload)
                 self.assertIn("GH_TOKEN: ${{ github.token }}", revalidate)
                 self.assertIn(
                     'gh api --method GET "repos/${REPOSITORY}/pulls/${PULL_REQUEST}"',

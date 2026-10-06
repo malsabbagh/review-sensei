@@ -3731,9 +3731,21 @@ def main(argv: list[str] | None = None) -> int:
                 prepared_round.reservation_id if prepared_round.decision.admit else None
             )
             if should_skip_automation(prepared_round.decision, inference=True):
+                transaction = prepared_round.record.transaction
+                publication_recovery_required = (
+                    not getattr(args, "local_session", False)
+                    and not prepared_round.decision.handoff
+                    and prepared_round.reservation_id is None
+                    and transaction is not None
+                    and transaction.reservation_id == reservation
+                    and prepared_round.record.last_committed_reservation_id
+                    == reservation
+                    and transaction.phase
+                    in {"publication_pending", "publication_failed"}
+                )
                 status = (
                     "action_required"
-                    if prepared_round.decision.handoff
+                    if prepared_round.decision.handoff or publication_recovery_required
                     else "skipped_policy"
                 )
                 outcome = RunOutcome(
@@ -3742,10 +3754,21 @@ def main(argv: list[str] | None = None) -> int:
                     pull_request_number=args.pull_request,
                     base_sha=resolved_base_sha,
                     head_sha=head_sha,
-                    diagnostic=admission_diagnostic(prepared_round.decision),
+                    diagnostic=(
+                        "publication_recovery_required"
+                        if publication_recovery_required
+                        else admission_diagnostic(prepared_round.decision)
+                    ),
                     provider_calls=0,
                 )
                 emit_host_outcome(outcome, output_path=args.outcome)
+                if publication_recovery_required:
+                    print(
+                        "review-sensei: analysis already committed; publication "
+                        "requires the original validated result and trusted "
+                        "configuration/admission contexts; do not rerun inference",
+                        file=sys.stderr,
+                    )
                 print(f"review-sensei: {outcome.status}", file=sys.stderr)
                 return _review_exit_status(args, outcome)
         incremental = None

@@ -1,6 +1,6 @@
 {
   "name": "@reviewsensei/cli-win32-x64",
-  "version": "0.6.15",
+  "version": "0.6.16",
   "description": "ReviewSensei AI code review engine for Windows x64; native payload used by @reviewsensei/cli",
   "license": "MIT",
   "repository": {

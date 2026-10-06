@@ -3145,7 +3145,7 @@ deleted file mode 100644
                     )
         for status, error in ambiguous:
             with self.subTest(status=status):
-                with self.assertRaises(error):
+                with self.assertRaises(error) as raised:
                     self.publish(
                         [
                             json_response(pr_payload(head_sha=head)),
@@ -3156,6 +3156,8 @@ deleted file mode 100644
                             json_response([]),
                         ]
                     )
+                if status in {409, 429, 500}:
+                    self.assertIn(f"review-create HTTP {status}", str(raised.exception))
         for response in (json_response({}, 200), json_response({"id": "bad"}, 201)):
             with self.assertRaises(GitHubPublicationError):
                 self.publish(
@@ -3167,6 +3169,22 @@ deleted file mode 100644
                         response,
                     ]
                 )
+
+    def test_review_create_transport_failure_reports_only_a_safe_category(self):
+        head = "b" * 40
+        responses = [
+            json_response(pr_payload(head_sha=head)),
+            json_response([]),
+            json_response(pr_payload(head_sha=head)),
+            graphql_review_threads_response(),
+            TimeoutError("sensitive upstream error body"),
+            json_response([]),
+        ]
+        with self.assertRaises(GitHubPublicationTransientError) as raised:
+            self.publish(responses)
+        self.assertIn("review-create transport failure", str(raised.exception))
+        self.assertNotIn("sensitive", str(raised.exception))
+        self.assertEqual(responses, [])
 
     def _confirmed_snapshot(self):
         snapshot = {"src/app.py": "keep\nchange\n"}

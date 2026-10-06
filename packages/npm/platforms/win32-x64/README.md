@@ -7,7 +7,7 @@ standalone Python engine bundled for Windows x64.
 Install the public launcher, which selects the matching native package:
 
 ```console
-npm install --save-dev @reviewsensei/cli@0.6.15
+npm install --save-dev @reviewsensei/cli@0.6.16
 npx review-sensei --help
 ```
 

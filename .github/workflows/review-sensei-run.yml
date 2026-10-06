@@ -968,9 +968,17 @@ jobs:
           if [[ "$CREDENTIAL_REQUIRED" == "true" ]]; then
             review_args+=(--api-key-env "$CREDENTIAL_ENV")
           fi
+          # A skipped committed attempt produces no result. Clear runner-local
+          # outputs so it cannot accidentally publish an older file.
+          rm -f review.json outcome.json recovery-artifact.json publication-outcome.json \
+            configuration-context.json admission-context.json
+          echo 'result_ready=false' >> "$GITHUB_OUTPUT"
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --output review.json --outcome outcome.json
+          if [[ -s review.json ]]; then
+            echo 'result_ready=true' >> "$GITHUB_OUTPUT"
+          fi
 
       # success() && !cancelled() skips a pointless API call after a failed
       # provider step or cancelled run. Publish still has its own cancellation
@@ -1029,7 +1037,7 @@ jobs:
           echo 'status=current' >> "$GITHUB_OUTPUT"
 
       - name: Publish or promote validated review through the broker
-        if: success() && !cancelled() && inputs.operation == 'review' && steps.publish-admission.outputs.status == 'current'
+        if: success() && !cancelled() && inputs.operation == 'review' && steps.publish-admission.outputs.status == 'current' && steps.provider-review.outputs.result_ready == 'true'
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -1121,7 +1129,7 @@ jobs:
           exit 1
 
       - name: Upload diagnostics artifact
-        if: inputs.operation == 'review' && needs.bootstrap.outputs.artifacts == 'diagnostics' && steps.provider-review.outcome == 'success'
+        if: always() && !cancelled() && inputs.operation == 'review' && needs.bootstrap.outputs.artifacts == 'diagnostics' && steps.provider-review.outcome == 'success' && steps.provider-review.outputs.result_ready == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: review-sensei-diagnostics
@@ -1129,6 +1137,10 @@ jobs:
             review.json
             outcome.json
             recovery-artifact.json
+            publication-outcome.json
+            configuration-context.json
+            admission-context.json
+            pr.patch
           if-no-files-found: error
           retention-days: 7
 
@@ -1401,9 +1413,17 @@ jobs:
           if [[ "$CREDENTIAL_REQUIRED" == "true" ]]; then
             review_args+=(--api-key-env "$CREDENTIAL_ENV")
           fi
+          # A skipped committed attempt produces no result. Clear runner-local
+          # outputs so it cannot accidentally publish an older file.
+          rm -f review.json outcome.json recovery-artifact.json publication-outcome.json \
+            configuration-context.json admission-context.json
+          echo 'result_ready=false' >> "$GITHUB_OUTPUT"
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --output review.json --outcome outcome.json
+          if [[ -s review.json ]]; then
+            echo 'result_ready=true' >> "$GITHUB_OUTPUT"
+          fi
 
       # success() && !cancelled() skips a pointless API call after a failed
       # provider step or cancelled run. Publish still has its own cancellation
@@ -1462,7 +1482,7 @@ jobs:
           echo 'status=current' >> "$GITHUB_OUTPUT"
 
       - name: Publish or promote validated local review and learnings
-        if: success() && !cancelled() && inputs.operation == 'review' && steps.publish-admission.outputs.status == 'current'
+        if: success() && !cancelled() && inputs.operation == 'review' && steps.publish-admission.outputs.status == 'current' && steps.provider-review.outputs.result_ready == 'true'
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -1556,7 +1576,7 @@ jobs:
           exit 1
 
       - name: Upload diagnostics artifact
-        if: inputs.operation == 'review' && needs.bootstrap.outputs.artifacts == 'diagnostics' && steps.provider-review.outcome == 'success'
+        if: always() && !cancelled() && inputs.operation == 'review' && needs.bootstrap.outputs.artifacts == 'diagnostics' && steps.provider-review.outcome == 'success' && steps.provider-review.outputs.result_ready == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: review-sensei-diagnostics
@@ -1564,5 +1584,9 @@ jobs:
             review.json
             outcome.json
             recovery-artifact.json
+            publication-outcome.json
+            configuration-context.json
+            admission-context.json
+            pr.patch
           if-no-files-found: error
           retention-days: 7

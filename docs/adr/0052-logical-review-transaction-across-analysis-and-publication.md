@@ -2,7 +2,7 @@
 
 Status: Proposed
 Date: 2026-09-19
-Last amended: 2026-09-26
+Last amended: 2026-10-06
 GitHub Issue: #146
 Pull Request: not configured
 Owners/Reviewers: Maintainers
@@ -137,6 +137,51 @@ Negative or tradeoffs:
   F5/F7 work will wire the hosted workflow and perform the reviewed migration.
 - Rollback: Revert the F1 code/schema/ADR changes or omit the operator ledger;
   existing legacy/no-ledger publication remains the compatibility path.
+
+## Amendment: committed analysis is not successful publication (2026-10-06)
+
+Review: [PR223](https://github.com/malsabbagh/review-sensei/pull/223), maintainers;
+the record remains Proposed pending maintainer acceptance. The hosted review
+completed analysis but failed creating its GitHub review. A single workflow retry
+then classified the committed round as `already_published` and attempted to open
+a missing result. The original transport/HTTP cause was not retained.
+
+The existing transaction decision still applies: one completed analysis consumes
+one round, and publication retries must reuse its identity-bound result. An
+identical operator-ledger analysis retry with pending/failed publication now
+reports `action_required: publication_recovery_required`, without inference,
+ledger mutation, or budget reset. A succeeded transaction remains an idempotent
+skip, and local analysis-only sessions retain their duplicate behavior.
+Reusable runners clear their prior output files and publish only when analysis
+produces a new result. They preserve the live-head and marker-reconciliation
+gates; an ambiguous review-create response does not authorize another blind POST.
+
+Explicitly enabled diagnostics retain the result, recovery artifact, outcome,
+reviewed diff, and trusted configuration/admission contexts after publication
+failure, under the existing seven-day limit. This adds source-bearing recovery
+inputs to that opted-in bundle; `artifacts: none` still stores none. Workflow
+authentication credentials, raw provider responses, and prompts are not added;
+the reviewed source itself can contain sensitive data, so retention is an
+operator decision. The ledger stores only its
+existing bounded state and digests, never the result or diff. Missing output
+cannot be reconstructed from findings or digests. Abandoned-analysis recovery
+does not apply to completed analysis.
+
+Rejected alternatives: repeat inference or reset the session budget; reconstruct
+the result from ledger findings; unconditionally retain source artifacts; or
+loop over an ambiguous review-create POST. Each loses identity, budget, privacy,
+or single-publication guarantees. Safe cause diagnostics expose only a transport
+category or numeric HTTP status, not response bodies or exception chains.
+
+Validation covers pending/failed/succeeded retries, zero provider calls and
+unchanged ledger state, changed contexts, local-session compatibility, stale
+runner outputs in both lanes, and sanitized HTTP/transport errors. The full
+offline suite, clean installed distribution, native parity, and exact-head CI
+remain release gates. Package publication and reviewed `v5` promotion are separate
+operator actions; the old installed runtime does not execute PR source. Rolling
+back this correction restores the misleading skip/missing-file behavior and
+failure-only artifact loss, but requires no ledger migration. Rollback never
+authorizes a budget reset or retry without the original bound result.
 
 ## Follow-Up
 

@@ -86,6 +86,7 @@ PUBLIC_DIAGNOSTICS = frozenset(
         "provider_failed",
         "publication_ambiguous",
         "publication_failed",
+        "publication_recovery_required",
         "qualification_unverified",
         "recovery_artifact_expired",
         "recovery_artifact_identity_mismatch",

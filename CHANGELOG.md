@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.6.16 - 2026-10-06
+
+- Report committed analysis with unfinished publication as requiring publication
+  recovery, without another provider call or budget charge. Skip workflow
+  publication when no result was produced, retain opted-in diagnostics after
+  publication failures, and report a bounded review-create transport/HTTP cause.
+
 - Make `@reviewsensei` the canonical mention handle, including `@ReviewSensei`,
   while retaining `@sensei`. Update current caller/installer routing, commands,
   broker recognition and finding reply prompts. Existing consumer callers need
@@ -12,6 +19,26 @@
   abandoned analysis after live GitHub run proofs, without resetting session
   budgets or discarding saved publication work. Record optional OIDC run
   ownership for new reservations and serialize command/review writes.
+
+- Persist a complete bounded human-finding inventory when distinct findings
+  share a lifecycle fingerprint. Keep assessment identities stable across provider
+  ordering and preserve every distinct validated finding (#222). Existing reviews
+  missing this inventory require a fresh full review of the current head.
+- Prioritize complete current patches for pending human findings within the
+  existing evidence budget. Missing or oversized evidence produces a safe
+  acknowledgment without inference or eligibility changes. Report closed,
+  source-free rejection reasons; preserve literal evidence validation (#222).
+- Resume exact-head approval after persisted human reassessment or an interrupted
+  finalization, reconciling each source reply without duplicate assessment,
+  acknowledgment or approval. Keep all authorization, freshness, coverage,
+  qualification and blocker gates (#222).
+- Refresh pinned CI tools to Ruff `0.16.10`, coverage `7.16.2`, mypy `2.4.0`
+  and cryptography `50.0.2` (#217–#220), plus sbom-action `0.24.3` (#221).
+  Retain the declared cryptography range and the static Intel OpenSSL/RSA gate.
+- Align Python, the npm launcher, all five platform manifests and current install
+  examples at `0.6.16`. Package publication, broker deployment, App Actions-read
+  permission acceptance, `v5` promotion and consumer mention-handle patches remain
+  separately authorized rollout steps; preserve immutable `0.6.14` and `0.6.15`.
 
 ## 0.6.15 - 2026-10-06
 

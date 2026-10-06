@@ -89,6 +89,18 @@ One structural-correction retry remains distinct from transport retry. Opt-in
 model or rewriting trusted learnings or configuration. See
 [ADR 0043](adr/0043-structured-run-outcomes-budgets-and-publication-recovery.md).
 
+An operator-ledger analysis checkpoint commits the logical review round before
+GitHub publication. An identical retry whose publication is pending or failed
+reports `publication_recovery_required` without another provider call or ledger
+charge. It requires the original validated result and trusted admission contexts;
+the ledger's baseline and digests cannot reconstruct them. Reusable runners
+publish only a newly produced result and retain an explicitly enabled diagnostics
+bundle after publication failure. That bundle includes the reviewed diff and
+trusted configuration/admission contexts, retains the existing seven-day limit,
+and remains disabled for `artifacts: none`. Local analysis-only sessions retain
+their existing duplicate behavior. See the PR223 amendment to
+[ADR 0052](adr/0052-logical-review-transaction-across-analysis-and-publication.md).
+
 The review service owns the business invariants. Provider adapters own protocol,
 authentication, timeout, and response-envelope details. Publishers own GitHub
 API authentication and comment/review delivery. `prepare_publishable_review`

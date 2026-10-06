@@ -325,6 +325,28 @@ For an identity-bound result whose local ledger already records
 `publication_succeeded`, `github review` may return `already_published`
 before broker exchange; this is an idempotent local-ledger recovery signal,
 not a fresh publication.
+An operator-ledger analysis retry for an identical committed transaction in
+`publication_pending` or `publication_failed` returns
+`action_required: publication_recovery_required`, with zero provider calls and
+no ledger/budget mutation. A committed analysis does not prove a GitHub review
+exists. Publication-only recovery must supply the original validated result,
+matching trusted configuration/admission contexts, and reviewed diff to
+`github review`; the ordinary freshness, ledger identity, policy, and marker
+reconciliation gates still apply. Missing output is not reconstructed from
+baseline findings or digests, and abandoned-analysis `review continue` does not
+recover a completed analysis.
+Local `--local-session` reviews retain their existing analysis-only duplicate
+behavior; they do not promise GitHub publication.
+
+Reusable runners publish only when analysis produced a result file. When
+diagnostic retention is explicitly enabled, they retain the result, recovery
+artifact, configuration/admission contexts, reviewed diff, and publication
+outcome even after publication failure. Retention remains disabled for
+`artifacts: none`; a plain workflow rerun cannot restore those discarded bytes.
+Review-create failures report only a bounded HTTP status or transport category,
+never response bodies, credentials, or raw exception details. A transport
+failure remains ambiguous; reconciliation does not authorize a blind POST loop.
+
 Closed diagnostic tokens are enumerated by `PUBLIC_DIAGNOSTICS` in
 `review_sensei.outcomes`; `cancelled` is reserved for host-layer cancellation
 and is not emitted by `ReviewService` today. Structural correction remains one

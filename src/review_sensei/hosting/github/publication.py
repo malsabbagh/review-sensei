@@ -1844,7 +1844,7 @@ class ReviewPublisher:
                 transient=True,
             )
             raise GitHubPublicationTransientError(
-                "review publication failed temporarily"
+                "review publication failed temporarily (review-create transport failure)"
             ) from exc
         if status == 200 and isinstance(payload, dict):
             review_id = payload.get("id")
@@ -1939,7 +1939,7 @@ class ReviewPublisher:
                 transient=True,
             )
             raise GitHubPublicationTransientError(
-                "review publication failed temporarily"
+                f"review publication failed temporarily (review-create HTTP {status})"
             )
         self._complete_failed_check(
             check_token=check_token,
