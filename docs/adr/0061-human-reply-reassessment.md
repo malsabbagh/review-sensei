@@ -4,7 +4,8 @@ Status: Proposed
 Date: 2026-10-06
 Owners/Reviewers: Maintainers
 Approved by: not applicable
-GitHub Issue: release 0.6.14
+GitHub Issue: release request tracked in PR #212
+GitHub PR: [#212](https://github.com/malsabbagh/review-sensei/pull/212)
 
 ## Context
 
@@ -68,6 +69,29 @@ another head or bypass pause/review budgets. A later source review is a new
 eligibility record and can reopen uncertainty; explicit maintainer dispositions
 retain their existing separate session contract.
 
+## Scope
+
+This change covers bounded finding inventory, provider assessment validation,
+authenticated conversation publication and approval finalization. It does not
+change review checks, session baselines, dispositions, provider selection or
+broker permissions.
+
+## Consequences
+
+New reviews expose already-public human findings in a hidden complete inventory.
+Supported human explanations can remove uncertainty without another full review;
+large or legacy inventories continue withholding. Model judgment can still be
+wrong, so conservative prompts, provenance validation and the preserved gates
+remain necessary. GitHub has no atomic compare-and-publish operation; bounded
+freshness checks reduce races, and a later review can restore withholding.
+
+## Alternatives considered
+
+Clearing a flag from arbitrary text or thread resolution was rejected because
+neither proves assessment. Always requiring another full review preserves the
+old behavior but discards a useful human explanation. Persisting session-ledger
+dispositions would grant broader cross-head authority than this feature needs.
+
 ## Validation and rollout
 
 Synthetic tests begin with a real needs_human result and original publication,
@@ -82,3 +106,9 @@ without inventories need a fresh review before the new flow can reassess them.
 Rollback to the prior package withholds on the additive inventory. Publication,
 Worker deployment, v5 promotion and live end-to-end verification remain separate
 maintainer operations documented in the release runbook.
+
+## Follow-up work
+
+After separately approved publication, verify a fresh real needs_human review,
+a supported explanation and a partial/unrelated reply against the released
+workflow and package. Keep ADR status Proposed until maintainer review.
