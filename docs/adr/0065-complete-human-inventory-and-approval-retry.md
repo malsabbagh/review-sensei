@@ -45,8 +45,8 @@ An authenticated mention with a latest App review declaring pending human
 findings but no inventory fails with an actionable request to rerun a full review
 for the current head. Malformed or contradictory latest records also fail
 explicitly; they cannot reveal an older clean record. Preparation rejects stale
-base/head, changed or unauthorized source, and missing current diff rather than
-falling through to ordinary chat. Legacy documents remain readable by other
+base/head and changed or unauthorized source rather than falling through to
+ordinary chat. Missing current evidence produces the bounded outcome below. Legacy documents remain readable by other
 approval paths and continue withholding.
 
 No available hosted artifact binds the full legacy finding set and original base
@@ -72,6 +72,40 @@ diagnostic for initial and resumed assessment. The generated-reply CLI keeps the
 receipt on stdout and emits the approval outcome on stderr. A withheld approval
 or finalizer exception is never described as successful approval.
 
+## Bounded reassessment evidence and diagnostics
+
+The released 0.6.14 reply on this PR exhausted its 12 KiB diff context on earlier
+files and supplied no patch for the pending finding's path. This makes every
+accepted decision fail the strict evidence check; without retained raw output,
+it does not establish the actual rejected field of that provider response.
+
+Human reassessment uses a separate current-files selector. Validated pending
+paths are deduplicated and sorted, and their entire supplied API patches are
+admitted first within the existing 12 KiB UTF-8 budget, including headers and
+separators. Missing/blank, conflicting or individually/collectively oversized
+required patches produce an insufficient-evidence result. Inventory stores no
+authoritative hunk locations; selecting a fragment would misrepresent the
+available evidence. Optional current patches may use remaining budget only when
+their path header fits completely. Historical inline hunks are never substituted.
+Ordinary conversation selection remains unchanged.
+
+On insufficient evidence, the application skips inference and review-write
+capability exchange. It reconciles a deterministic source acknowledgment with no
+decisions through the same authorization, latest-authority and freshness fences.
+No eligibility or approval is changed. `ReplyResult.assessment_status` and
+`assessment_diagnostic` report this outcome separately from source delivery, and
+the CLI emits it on stderr. Direct service callers also reject missing pending
+file evidence before inference. Missing evidence never authorizes accepted
+provider decisions, including callers that bypass service inference.
+
+Provider response rejection reports only a closed, source-free reason code:
+invalid JSON, reply/decision fields or values, text bounds, reserved marker,
+unknown/duplicate identity, short rationale, or human/diff evidence mismatch.
+The public error message suppresses payload-bearing exception chains. Provider
+JSON remains the closed body/assessments shape; model content cannot set a reason
+code. Evidence requirements and all context/provider budgets remain unchanged.
+There is no corrective provider retry in this decision.
+
 ## Scope
 
 This decision covers construction and publication of complete human inventories,
@@ -86,6 +120,12 @@ oversized inventory would misrepresent completeness. Reconstructing legacy state
 from public prose lacks the original full findings, base and digest authority.
 These alternatives are rejected in favor of complete validated identities and
 explicit recovery through a fresh review.
+
+Extending the ordinary conversation loader with priority/completeness flags would
+couple general replies to reassessment admission. The separate selector keeps
+complete required-patch admission local. Heuristic hunk selection is rejected
+because the inventory lacks an authoritative location, and enlarging budgets or
+weakening quote validation would change existing privacy/evidence fences.
 
 ## Consequences and limits
 
@@ -108,6 +148,11 @@ publication through authenticated reply/reassessment/one approval, partial
 collision decisions, malformed/contradictory/legacy authority, capability
 separation, interruption/replay and stale/newer-result races. Existing approval,
 coverage, qualification, blocking-thread and authorization tests remain required.
+Additional regressions cover late pending files behind overflowing docs, multiple
+required paths, UTF-8/header/separator boundaries, absent/binary/conflicting and
+collectively oversized patches, no-inference/no-mutation insufficient outcomes,
+accepted-decision bypass rejection, and safe diagnostics with synthetic payload
+sentinels.
 
 This is a source change only. Package publication, released workflow/v5 promotion,
 deployment and live verification require separate authorization. After that
@@ -118,4 +163,7 @@ before reassessment. Rollback withholds on colliding or missing inventories.
 
 Maintainers review this proposed decision and authorize any package/workflow
 rollout separately. After rollout, verify reassessment on a fresh exact-head
-review and rerun full reviews for legacy missing-inventory cases.
+review and rerun full reviews for legacy missing-inventory cases. The failed
+0.6.14 mention must not be replayed against the old runtime. After package/channel
+rollout, a fresh exact-head full review and new authorized mention establish
+current inventory/evidence before verifying the repaired path.

@@ -11,7 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
-| [0065](0065-complete-human-inventory-and-approval-retry.md) | Proposed | Persist complete human inventories and retry exact-head approval | PR #216; [PR #222](https://github.com/malsabbagh/review-sensei/pull/222) | Distinct collision identities, explicit legacy recovery and preserved approval gates |
+| [0065](0065-complete-human-inventory-and-approval-retry.md) | Proposed | Persist complete human inventories and retry exact-head approval | PR #216; [PR #222](https://github.com/malsabbagh/review-sensei/pull/222) | Distinct collision identities, bounded pending-patch priority, safe diagnostics and preserved approval gates |
 | [0063](0063-authenticated-reservation-recovery.md) | Proposed | Recover abandoned analysis through authenticated live run evidence | Pending triage | Owned cleanup, constrained legacy proof and preserved session budgets |
 | [0062](0062-optional-hosted-runner-label.md) | Proposed | Allow one trusted hosted runner label | PR #212 | Validated label, GitHub default, preserved local lane and channel dependency |
 | [0061](0061-human-reply-reassessment.md) | Proposed | Reassess human-review findings from authorized replies | Release 0.6.14 | Exact-head evidence, complete concern inventory and preserved approval gates |

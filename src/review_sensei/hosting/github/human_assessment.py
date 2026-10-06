@@ -33,6 +33,7 @@ class PreparedHumanAssessment:
     eligibility: ReviewApprovalEligibility
     source_body: str
     source_actor: str
+    evidence_diagnostic: str | None = None
 
 
 class HumanAssessmentPublisher:
@@ -140,25 +141,22 @@ class HumanAssessmentPublisher:
             raise GitHubConversationError(
                 "human reassessment source changed or is unauthorized; submit a new authorized mention"
             )
-        # Inline comment hunks can belong to a historical commit. For human
-        # reassessment always read the current PR diff rather than that hunk.
-        diff, _paths = self.conversation._load_diff_context(
+        # Pending inventory paths are authoritative; historical inline hunks
+        # and unrelated file order must not consume their evidence budget.
+        selected = self.conversation.load_human_assessment_diff(
             token=token,
             repository=repository,
             pull_request=pull_request,
-            source=source,
-            source_kind="issue",
+            pending_paths=tuple(item.path for item in eligibility.human_review.pending),
         )
-        if not diff and eligibility.human_review.pending:
-            raise GitHubConversationError(
-                "human reassessment current diff is missing; rerun a full review before reassessment"
-            )
+        diff = selected.diff_context
         context = replace(prepared.context, diff_context=diff)
         return PreparedHumanAssessment(
             conversation=replace(prepared, context=context),
             eligibility=eligibility,
             source_body=source["body"],
             source_actor=source["user"]["login"],
+            evidence_diagnostic=selected.diagnostic,
         )
 
     def publish(
@@ -177,6 +175,10 @@ class HumanAssessmentPublisher:
         inventory = original.human_review
         if inventory is None or not isinstance(reply, HumanAssessmentReply):
             raise GitHubConversationError("human assessment evidence is missing")
+        if prepared.evidence_diagnostic and any(
+            item.decision != "unresolved" for item in reply.decisions
+        ):
+            raise GitHubConversationError("human assessment evidence is insufficient")
         try:
             updated_inventory = inventory.apply(reply.decisions)
         except ReviewInputError as exc:
@@ -262,6 +264,12 @@ class HumanAssessmentPublisher:
             root_comment_id=conversation.root_comment_id,
             source_kind=conversation.source_kind,
         )
+        if prepared.evidence_diagnostic:
+            outcome = replace(
+                outcome,
+                assessment_status="insufficient_evidence",
+                assessment_diagnostic=prepared.evidence_diagnostic,
+            )
         if outcome.status not in {"replied", "already_replied"} or (
             updated_inventory == inventory and inventory.pending
         ):

@@ -2445,6 +2445,20 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             source_kind=args.source_kind,
         )
         print(reply_outcome.status)
+        assessment_status = getattr(reply_outcome, "assessment_status", None)
+        if assessment_status is not None:
+            assessment_diagnostic = getattr(
+                reply_outcome, "assessment_diagnostic", None
+            )
+            print(
+                f"review-sensei: assessment={assessment_status}"
+                + (
+                    f" diagnostic={assessment_diagnostic}"
+                    if assessment_diagnostic
+                    else ""
+                ),
+                file=sys.stderr,
+            )
         approval_status = getattr(reply_outcome, "approval_status", None)
         if approval_status is not None:
             reply_approval_diagnostic = getattr(

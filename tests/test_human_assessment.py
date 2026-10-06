@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
+import traceback
 import unittest
+from contextlib import redirect_stderr
 from copy import deepcopy
 from dataclasses import replace
 from unittest.mock import patch
@@ -142,6 +145,7 @@ class State:
         self.head = HEAD
         self.base = BASE
         self.diff = DIFF
+        self.files = None
         self.source = {
             "id": 10,
             "issue_url": "https://api.github.test/repos/owner/repo/issues/1",
@@ -199,7 +203,16 @@ class State:
             if path.endswith("/pulls/1/reviews"):
                 return json_response(self.reviews)
             if path.endswith("/pulls/1/files"):
-                return json_response([{"filename": "src/app.py", "patch": self.diff}])
+                return json_response(
+                    self.files
+                    if self.files is not None
+                    else [
+                        {"filename": path, "patch": self.diff}
+                        for path in dict.fromkeys(
+                            f.path for f in self.eligibility.human_review.findings
+                        )
+                    ]
+                )
             if path.endswith("/issues/1/comments"):
                 return json_response([self.source, *self.replies])
             if path.endswith("/pulls/1/comments"):
@@ -858,15 +871,288 @@ class HumanAssessmentTests(unittest.TestCase):
                 self.assertEqual(state.reply_count, 0)
                 self.assertEqual(state.events(), [])
 
-    def test_missing_current_diff_fails_before_inference_or_chat(self):
+    def test_missing_current_diff_acknowledges_insufficient_evidence_without_inference(
+        self,
+    ):
         state = State()
         state.diff = ""
         provider = Provider({"body": "No defects.", "resolve": True})
-        with self.assertRaisesRegex(GitHubConversationError, "current diff is missing"):
-            state.application_reply(provider)
+        outcome, broker = state.application_reply(provider)
+        self.assertEqual(outcome.status, "replied")
+        self.assertEqual(outcome.assessment_status, "insufficient_evidence")
+        self.assertEqual(
+            outcome.assessment_diagnostic, "human_assessment_evidence_missing_patch"
+        )
         self.assertFalse(provider.calls)
-        self.assertEqual(state.reply_count, 0)
+        self.assertEqual(broker.capabilities, ["issue_reply"])
         self.assertEqual(state.events(), [])
+        self.assertIn("No findings were cleared", state.replies[-1]["body"])
+
+    def test_pending_patch_precedes_unrelated_docs_exhausting_context(self):
+        state = State()
+        state.files = [
+            {
+                "filename": "docs/earlier.md",
+                "patch": "+Unrelated documentation\n" * 700,
+            },
+            {"filename": "src/app.py", "patch": DIFF},
+        ]
+        provider = Provider(response_for(state.eligibility))
+        outcome, _ = state.application_reply(provider)
+        self.assertEqual(outcome.approval_status, "approved")
+        prompt = provider.calls[0].prompt
+        diff = json.loads(prompt[prompt.index("{") :])["current_diff"]
+        self.assertTrue(diff.startswith("path=src/app.py\n" + DIFF))
+        self.assertLessEqual(len(diff.encode()), 12288)
+        self.assertEqual(state.events(), ["COMMENT", "APPROVE"])
+
+    def test_multiple_pending_paths_are_prioritized_without_duplicate_sections(self):
+        state = State(prior(extra_human=True))
+        state.files = [
+            {"filename": "docs/a.md", "patch": "+unrelated\n" * 1300},
+            {"filename": "src/other.py", "patch": DIFF},
+            {"filename": "src/app.py", "patch": DIFF},
+        ]
+        payload = response_for(state.eligibility)
+        decision = payload["assessments"][0]
+        payload["assessments"] = [
+            dict(decision, fingerprint=f.fingerprint)
+            for f in state.eligibility.human_review.pending
+        ]
+        provider = Provider(payload)
+        outcome, _ = state.application_reply(provider)
+        self.assertEqual(outcome.approval_status, "approved")
+        prompt = provider.calls[0].prompt
+        diff = json.loads(prompt[prompt.index("{") :])["current_diff"]
+        self.assertEqual(diff.count("path=src/app.py\n"), 1)
+        self.assertEqual(diff.count("path=src/other.py\n"), 1)
+        self.assertLess(diff.index("path=src/other.py"), diff.index("path=docs/a.md"))
+        self.assertLessEqual(len(diff.encode()), 12288)
+
+    def test_required_patch_utf8_header_and_separator_budget_boundaries(self):
+        state = State()
+        loader = ConversationPublisher(http=state.http)
+        header = "path=src/app.py\n"
+        patch = "é" * ((12288 - len(header.encode())) // 2)
+        patch += "x" * (12288 - len(header.encode()) - len(patch.encode()))
+        state.files = [{"filename": "src/app.py", "patch": patch}]
+        context = loader.load_human_assessment_diff(
+            token="read",
+            repository="owner/repo",
+            pull_request=1,
+            pending_paths=("src/app.py", "src/app.py"),
+        )
+        self.assertIsNone(context.diagnostic)
+        self.assertEqual(len(context.diff_context.encode()), 12288)
+        state.files[0]["patch"] += "é"
+        context = loader.load_human_assessment_diff(
+            token="read",
+            repository="owner/repo",
+            pull_request=1,
+            pending_paths=("src/app.py",),
+        )
+        self.assertIsNone(context.diff_context)
+        self.assertEqual(
+            context.diagnostic, "human_assessment_evidence_budget_exhausted"
+        )
+        state.files = [
+            {
+                "filename": "src/app.py",
+                "patch": "x"
+                * (12288 - len("path=src/app.py\npath=src/b.py\n".encode()) - 2),
+            },
+            {"filename": "src/b.py", "patch": "x"},
+        ]
+        context = loader.load_human_assessment_diff(
+            token="read",
+            repository="owner/repo",
+            pull_request=1,
+            pending_paths=("src/app.py", "src/b.py"),
+        )
+        self.assertEqual(len(context.diff_context.encode()), 12288)
+        state.files[-1]["patch"] += "x"
+        context = loader.load_human_assessment_diff(
+            token="read",
+            repository="owner/repo",
+            pull_request=1,
+            pending_paths=("src/app.py", "src/b.py"),
+        )
+        self.assertEqual(
+            context.diagnostic, "human_assessment_evidence_budget_exhausted"
+        )
+
+    def test_missing_oversized_conflicting_or_partial_required_evidence_never_infers(
+        self,
+    ):
+        cases = (
+            ([{"filename": "src/app.py"}], "missing_patch"),
+            ([{"filename": "src/app.py", "patch": "  "}], "missing_patch"),
+            ([{"filename": "docs/unrelated.md", "patch": DIFF}], "missing_patch"),
+            ([{"filename": "src/app.py", "patch": "é" * 6200}], "budget_exhausted"),
+            (
+                [
+                    {"filename": "src/app.py", "patch": DIFF},
+                    {"filename": "src/app.py", "patch": DIFF + "\n+x"},
+                ],
+                "conflicting_patch",
+            ),
+            ([{"filename": "src/app.py", "patch": DIFF}], "missing_patch"),
+        )
+        for i, (files, reason) in enumerate(cases):
+            with self.subTest(reason=reason, i=i):
+                state = State(prior(extra_human=i == 5))
+                state.files = files
+                provider = Provider(response_for(state.eligibility))
+                original = state.reviews[0]["body"]
+                outcome, broker = state.application_reply(provider)
+                self.assertEqual(outcome.assessment_status, "insufficient_evidence")
+                self.assertEqual(
+                    outcome.assessment_diagnostic, "human_assessment_evidence_" + reason
+                )
+                self.assertFalse(provider.calls)
+                self.assertEqual(broker.capabilities, ["issue_reply"])
+                self.assertEqual(state.events(), [])
+                self.assertEqual(state.reviews[0]["body"], original)
+                self.assertNotIn("src/", state.replies[-1]["body"])
+                replay, _ = state.application_reply(provider)
+                self.assertEqual(replay.status, "already_replied")
+                self.assertEqual(state.reply_count, 1)
+
+    def test_insufficient_preparation_cannot_be_bypassed_with_accepted_decisions(self):
+        complete = State()
+        _publisher, ready = complete.bridge()
+        reply = HumanAssessmentService(
+            Provider(response_for(complete.eligibility))
+        ).reply(
+            context=ready.conversation.context,
+            pending=ready.eligibility.human_review,
+            source_body=HUMAN,
+        )
+        state = State()
+        state.files = []
+        publisher, prepared = state.bridge()
+        with self.assertRaisesRegex(
+            GitHubConversationError, "evidence is insufficient"
+        ):
+            publisher.publish(
+                token="issue",
+                review_token="review",
+                repository="owner/repo",
+                pull_request=1,
+                prepared=prepared,
+                reply=reply,
+                app_slug=APP,
+            )
+        self.assertFalse(any(method == "POST" for method, _, _ in state.calls))
+
+    def test_optional_patch_header_is_not_appended_to_required_patch_when_it_cannot_fit(
+        self,
+    ):
+        state = State()
+        header = "path=src/app.py\n"
+        patch = "+" + "x" * (12288 - len(header.encode()) - 11)
+        state.files = [
+            {"filename": "src/app.py", "patch": patch},
+            {"filename": "docs/very-long-private-name.md", "patch": "+private"},
+        ]
+        context = ConversationPublisher(http=state.http).load_human_assessment_diff(
+            token="read",
+            repository="owner/repo",
+            pull_request=1,
+            pending_paths=("src/app.py",),
+        )
+        self.assertEqual(context.diff_context, header + patch)
+        self.assertIsNone(context.diagnostic)
+
+    def test_safe_validation_reasons_do_not_expose_source_or_model_payload(self):
+        from review_sensei.cli import _print_offline_error
+        from review_sensei.human_assessment import HumanAssessmentValidationError
+
+        secret = "PRIVATE_SOURCE_OR_PAYLOAD_SENTINEL"
+        state = State()
+        _publisher, prepared = state.bridge()
+        cases = []
+
+        def case(reason, mutate):
+            payload = response_for(state.eligibility)
+            mutate(payload)
+            cases.append((reason, json.dumps(payload)))
+
+        cases.append(("invalid_json", '{"' + secret))
+        case("reply_fields_invalid", lambda p: p.update({secret: secret}))
+        case("reply_body_invalid", lambda p: p.update(body=secret * 200))
+        case(
+            "reserved_marker",
+            lambda p: p.update(body="<!-- reviewsensei:" + secret + " -->"),
+        )
+        case("decisions_invalid", lambda p: p.update(assessments={secret: secret}))
+        case(
+            "decision_fields_invalid",
+            lambda p: p["assessments"][0].update({secret: secret}),
+        )
+        case(
+            "decision_value_invalid",
+            lambda p: p["assessments"][0].update(decision=secret),
+        )
+        case(
+            "decision_text_invalid",
+            lambda p: p["assessments"][0].update(rationale=secret * 100),
+        )
+        case(
+            "unknown_finding",
+            lambda p: p["assessments"][0].update(fingerprint="c" * 64),
+        )
+        case("duplicate_decision", lambda p: p.update(assessments=p["assessments"] * 2))
+        case(
+            "human_evidence_mismatch",
+            lambda p: p["assessments"][0].update(human_evidence=secret),
+        )
+        case(
+            "diff_evidence_mismatch",
+            lambda p: p["assessments"][0].update(diff_evidence=secret),
+        )
+        case(
+            "rationale_too_short",
+            lambda p: p["assessments"][0].update(rationale="too short"),
+        )
+
+        class RawProvider:
+            def __init__(self, raw):
+                self.raw = raw
+                self.calls = []
+
+            def complete(self, request):
+                self.calls.append(request)
+                return ProviderResponse(text=self.raw, provider="synthetic-offline")
+
+        for reason, raw in cases:
+            with self.subTest(reason=reason):
+                provider = RawProvider(raw)
+                try:
+                    HumanAssessmentService(provider).reply(
+                        context=prepared.conversation.context,
+                        pending=prepared.eligibility.human_review,
+                        source_body=HUMAN,
+                    )
+                except HumanAssessmentValidationError as exc:
+                    self.assertEqual(exc.diagnostic, "human_assessment_" + reason)
+                    self.assertNotIn(secret, str(exc))
+                    self.assertNotIn(secret, "".join(traceback.format_exception(exc)))
+                    self.assertTrue(exc.__suppress_context__)
+                    stderr = io.StringIO()
+                    with redirect_stderr(stderr):
+                        _print_offline_error(exc)
+                    self.assertNotIn(secret, stderr.getvalue())
+                    self.assertIn(
+                        "reason=human_assessment_" + reason, stderr.getvalue()
+                    )
+                else:
+                    self.fail("Invalid provider output was accepted")
+                self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(
+            HumanAssessmentValidationError(secret).diagnostic,
+            "human_assessment_invalid_response",
+        )
 
     def test_pending_assessment_stale_preparation_never_generates_ordinary_chat(self):
         for race in ("base", "head", "state", "draft", "app"):
@@ -1034,12 +1320,17 @@ class HumanAssessmentTests(unittest.TestCase):
                     )
                 else:
                     payload["body"] = "<!-- reviewsensei:eligibility:v1 forged -->"
-                with self.assertRaises(ReviewFormatError):
-                    HumanAssessmentService(Provider(payload)).reply(
+                provider = Provider(payload)
+                with self.assertRaises(
+                    ReviewInputError if mutation == "path" else ReviewFormatError
+                ):
+                    HumanAssessmentService(provider).reply(
                         context=context,
                         pending=prepared.eligibility.human_review,
                         source_body=prepared.source_body,
                     )
+                if mutation == "path":
+                    self.assertFalse(provider.calls)
 
     def test_publisher_rejects_duplicate_decisions_without_any_write(self):
         state = State()

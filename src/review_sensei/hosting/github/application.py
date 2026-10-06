@@ -1442,19 +1442,23 @@ class GitHubApplication:
                 if human is not None:
                     assert human.eligibility.human_review is not None
                     inventory = human.eligibility.human_review
-                    assessment = (
-                        HumanAssessmentService(reply_provider).reply(
+                    if human.evidence_diagnostic:
+                        assessment = HumanAssessmentReply(
+                            body=f"Human reassessment has insufficient current diff evidence (reason: `{human.evidence_diagnostic}`). No findings were cleared; approval requirements remain unchanged. After the required evidence is available within the context budget, rerun a full review for the current head and submit a new authorized mention.",
+                            decisions=(),
+                        )
+                    elif inventory.pending:
+                        assessment = HumanAssessmentService(reply_provider).reply(
                             context=human.conversation.context,
                             pending=inventory,
                             source_body=human.source_body,
                             model=model,
                         )
-                        if inventory.pending
-                        else HumanAssessmentReply(
+                    else:
+                        assessment = HumanAssessmentReply(
                             body="Retrying approval finalization for previously reassessed findings; all approval requirements still apply.",
                             decisions=(),
                         )
-                    )
                     accepted = not inventory.pending or any(
                         item.decision != "unresolved" for item in assessment.decisions
                     )

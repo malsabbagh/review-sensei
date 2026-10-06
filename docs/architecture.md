@@ -842,6 +842,15 @@ finalizer without another inference or reassessment review. All other eligibilit
 facts, current authorization, live thread checks and approval markers remain
 authoritative.
 
+Reassessment prioritizes the complete supplied current patches for validated
+pending paths within the existing 12 KiB budget. Missing, conflicting or
+oversized required evidence produces a deterministic acknowledgment and a
+separate insufficient-evidence outcome, with no inference, review capability or
+eligibility/approval mutation. Ordinary conversation selection remains unchanged.
+Provider output rejection exposes a closed reason code without source or model
+payload, and accepted decisions still require verbatim human and relevant current
+diff evidence. No corrective provider retry is added.
+
 This architecture preserves the provider-neutral core: GitHub transport,
 Actions OIDC, broker capabilities, setup lifecycle, publication markers, and
 conversation authorization remain under `src/review_sensei/hosting/github/`
