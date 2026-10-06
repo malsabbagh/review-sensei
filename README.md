@@ -666,7 +666,7 @@ ReviewSensei's own repository workflows retain their existing runner routing.
 After the public `v5` channel includes this input, an operator can opt a trusted
 caller into Ubicloud with its existing repository variable:
 
-```yaml
+```yml
     with:
       hosted_runner: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
       # Keep the caller's existing invocation inputs and named secrets.
