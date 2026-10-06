@@ -652,6 +652,32 @@ policy commit. Every other policy decision is a field of `.reviewsensei.yml`:
 requests no Variables permission and never creates the customer-owned
 `OLLAMA_API_KEY` secret.
 
+Reusable-workflow callers can optionally set `with.hosted_runner` to one
+Ubuntu-compatible Linux runner label, such as `ubicloud-standard-2` or an
+operator-owned label. Omitted and empty inputs use `ubuntu-latest`. Labels must
+contain 1-128 letters, digits, dots, underscores, or hyphens and start with a
+letter or digit; JSON arrays, runner groups, spaces, and expressions are not
+supported. The read-only bootstrap stays on `ubuntu-latest` and validates the
+input before scheduling preflight, command, and hosted-provider jobs on that
+runner. The local Ollama job keeps `[self-hosted, linux, x64, ollama]`; this
+infrastructure input does not select an inference backend or grant permissions.
+ReviewSensei's own repository workflows retain their existing runner routing.
+
+After the public `v5` channel includes this input, an operator can opt a trusted
+caller into Ubicloud with its existing repository variable:
+
+```yaml
+    with:
+      hosted_runner: ${{ vars.ENABLE_UBICLOUD_HOSTED == 'true' && 'ubicloud-standard-2' || 'ubuntu-latest' }}
+      # Keep the caller's existing invocation inputs and named secrets.
+```
+
+Do not add this argument to a caller of an older reusable workflow that does
+not declare it: GitHub rejects unknown workflow inputs. Updating `main` alone
+does not activate tag-pinned callers; the approved `v5` release and broker
+workflow identity must advance together. No setup variable or credential is
+created by this feature.
+
 When explicitly enabled, same-repository pull requests can run automatic review
 with either provider mode: cloud on a GitHub-hosted runner or local Ollama on
 the labelled self-hosted runner. ReviewSensei checks out only trusted base

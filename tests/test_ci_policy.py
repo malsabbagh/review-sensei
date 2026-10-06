@@ -701,7 +701,14 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(text.count("Verify mention reply completed"), 2)
         self.assertEqual(text.count("always() && inputs.operation == 'reply' &&"), 2)
         self.assertEqual(text.count("steps.reply.outcome != 'success'"), 2)
-        self.assertEqual(text.count("runs-on: ubuntu-latest"), 4)
+        # Validate the infrastructure label on a free GitHub bootstrap before
+        # scheduling any custom hosted job. Local inference routing is separate.
+        self.assertEqual(text.count("runs-on: ubuntu-latest"), 1)
+        self.assertEqual(
+            text.count("runs-on: ${{ needs.bootstrap.outputs.hosted_runner }}"), 3
+        )
+        self.assertIn("hosted_runner: ${{ steps.hosted-runner.outputs.label }}", text)
+        self.assertIn("HOSTED_RUNNER: ${{ inputs.hosted_runner }}", text)
         self.assertEqual(text.count("runs-on: [self-hosted, linux, x64, ollama]"), 1)
 
     def test_reusable_workflow_has_no_profile_or_custom_url_surface(self):
@@ -1213,15 +1220,15 @@ class ActionPinPolicyTests(unittest.TestCase):
 
     def test_provider_jobs_run_the_planned_runner_kind(self):
         # The plan's runner requirement selects the job, and only one provider
-        # job can run for one plan. No input and no repository variable picks
-        # the runner: a repository cannot promote its own pull request onto the
+        # job can run for one plan. The infrastructure label never picks
+        # the inference route: a repository cannot promote its own pull request onto the
         # hosted path or pin an unapproved backend.
         workflow_text = _reusable_workflow_text()
         hosted = _job_section(workflow_text, "hosted")
         local = _job_section(workflow_text, "local")
         self.assertIn("needs.bootstrap.outputs.runner_kind == 'hosted'", hosted)
         self.assertIn("needs.bootstrap.outputs.runner_kind == 'local'", local)
-        self.assertIn("runs-on: ubuntu-latest", hosted)
+        self.assertIn("runs-on: ${{ needs.bootstrap.outputs.hosted_runner }}", hosted)
         self.assertIn("runs-on: [self-hosted, linux, x64, ollama]", local)
         self.assertNotIn("inputs.provider_mode", workflow_text)
         self.assertNotIn("inputs.provider", workflow_text)
@@ -1355,7 +1362,11 @@ class ActionPinPolicyTests(unittest.TestCase):
                 r"needs\.bootstrap\.outputs\.([a-z_]+)", workflow_text
             )
         }
-        self.assertLessEqual(consumed, declared | identity)
+        infrastructure = set(
+            re.findall(r"^      ([a-z_]+): \$\{\{ steps\.hosted-runner", job, re.M)
+        )
+        self.assertEqual(infrastructure, {"hosted_runner"})
+        self.assertLessEqual(consumed, declared | identity | infrastructure)
         self.assertIn("git init --bare", job)
         self.assertIn("importlib.metadata.version", job)
         self.assertIn("pip check", job)
@@ -1728,6 +1739,7 @@ class ActionPinPolicyTests(unittest.TestCase):
                     if workflow.name == "review-sensei-run.yml":
                         self.assertTrue(
                             line == "runs-on: ubuntu-latest"
+                            or line == "runs-on: ${{ needs.bootstrap.outputs.hosted_runner }}"
                             or ollama_self_hosted.match(line),
                             msg=f"{workflow.name} has unrecognized runner: {line}",
                         )

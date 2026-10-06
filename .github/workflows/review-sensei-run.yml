@@ -35,6 +35,11 @@ on:
         required: false
         default: review
         type: string
+      hosted_runner:
+        description: Single Linux runner label for hosted jobs; empty uses ubuntu-latest
+        required: false
+        default: ubuntu-latest
+        type: string
       repository:
         required: true
         type: string
@@ -131,6 +136,7 @@ jobs:
     permissions:
       contents: read
     outputs:
+      hosted_runner: ${{ steps.hosted-runner.outputs.label }}
       backend: ${{ steps.plan.outputs.backend }}
       model: ${{ steps.plan.outputs.model }}
       base_url: ${{ steps.plan.outputs.base_url }}
@@ -150,6 +156,19 @@ jobs:
       workflow_commit: ${{ steps.release-identity.outputs.workflow_commit }}
       policy_commit: ${{ steps.policy.outputs.commit }}
     steps:
+      - name: Resolve hosted runner label
+        id: hosted-runner
+        env:
+          HOSTED_RUNNER: ${{ inputs.hosted_runner }}
+        run: |
+          set -euo pipefail
+          runner="${HOSTED_RUNNER:-ubuntu-latest}"
+          if [[ ! "$runner" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo '::error::hosted_runner must be one Linux runner label (1-128 letters, digits, dots, underscores, or hyphens); arrays and runner groups are unsupported' >&2
+            exit 1
+          fi
+          printf 'label=%s\n' "$runner" >> "$GITHUB_OUTPUT"
+
       - name: Reject unsupported invocation inputs
         id: reject-unsupported-invocation
         env:
@@ -426,7 +445,7 @@ jobs:
       pull_request_title_b64: ${{ steps.fetch-pr.outputs.pull_request_title_b64 }}
       base_sha: ${{ steps.fetch-pr.outputs.base_sha }}
       pull_request_number: ${{ steps.fetch-pr.outputs.pull_request_number }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.bootstrap.outputs.hosted_runner }}
     permissions:
       contents: read
       pull-requests: read
@@ -549,7 +568,7 @@ jobs:
     concurrency:
       group: reviewsensei-command-${{ github.run_id }}
       cancel-in-progress: false
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.bootstrap.outputs.hosted_runner }}
     # The session-comment mutation is authorized by the OIDC broker's
     # `review_session` capability (pull_requests: write); GITHUB_TOKEN keeps no
     # write scope, matching ADR 0022/0050.
@@ -681,7 +700,7 @@ jobs:
       # reviews; event PR metadata is only a host-provided fallback.
       group: reviewsensei-provider-${{ inputs.operation == 'review' && 'review' || 'reply' }}-${{ github.repository }}-${{ inputs.operation == 'review' && (needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id) || github.run_id }}
       cancel-in-progress: ${{ inputs.operation == 'review' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.bootstrap.outputs.hosted_runner }}
     permissions:
       contents: read
       pull-requests: read
