@@ -4,6 +4,11 @@
 
 ## 0.6.16 - 2026-10-06
 
+- Report committed analysis with unfinished publication as requiring publication
+  recovery, without another provider call or budget charge. Skip workflow
+  publication when no result was produced, retain opted-in diagnostics after
+  publication failures, and report a bounded review-create transport/HTTP cause.
+
 - Make `@reviewsensei` the canonical mention handle, including `@ReviewSensei`,
   while retaining `@sensei`. Update current caller/installer routing, commands,
   broker recognition and finding reply prompts. Existing consumer callers need

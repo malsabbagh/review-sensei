@@ -222,6 +222,15 @@ This cutoff includes authenticated abandoned-analysis recovery (#215), the
 canonical `@reviewsensei` handle with the retained `@sensei` alias (#216), CI
 dependency updates (#217–#221), and complete human inventories, bounded pending
 evidence, safe rejection diagnostics and retryable exact-head approval (#222).
+It also fixes the release PR's reproduced retry failure: completed analysis with
+unfinished publication requires the original identity-bound result and trusted
+contexts, rather than claiming `already_published` and opening a missing result
+file. Opted-in diagnostics survive publication failure, and review-create errors
+report a bounded HTTP status or transport category. The original PR223 failure's
+exact network/API cause was not retained; this change does not assert a fix for
+that unknown upstream error. With `artifacts: none`, the discarded result cannot
+be recreated from the ledger, so a same-context retry stops for recovery. Do not
+reset its budget or apply abandoned-analysis recovery to it.
 Preparing or merging this release PR does not update installed consumers. Keep
 `v0.6.14`, `v0.6.15`, all published bytes and the separately controlled `v5`
 channel intact while preparing the cutoff.

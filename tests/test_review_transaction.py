@@ -1033,6 +1033,59 @@ diff --git a/src/helper.py b/src/helper.py
                 ReviewResult.from_dict(rendered).content_digest(),
             )
             initial_history = record.convergence_history
+            original_transaction = record.transaction
+            # A new runner has the durable analysis checkpoint but none of the
+            # first runner's output files. Pending/failed publication must not
+            # claim a review exists or charge another analysis round.
+            for phase in (
+                "publication_pending",
+                "publication_failed",
+                "publication_succeeded",
+            ):
+                with self.subTest(retry_phase=phase):
+                    LocalSessionLedger(ledger_path).replace(
+                        IDENTITY,
+                        lambda current: current.evolve(
+                            transaction=original_transaction.with_phase(phase)
+                        ),
+                    )
+                    before_retry = LocalSessionLedger(ledger_path).load(IDENTITY).record
+                    output_path.unlink(missing_ok=True)
+                    stderr = io.StringIO()
+                    with (
+                        patch(
+                            "review_sensei.cli.default_registry",
+                            return_value=RecordingRegistry(provider),
+                        ),
+                        redirect_stderr(stderr),
+                    ):
+                        retry_exit = main(argv + ["--exit-semantics", "operational"])
+                    retry_outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+                    validate_public_document(retry_outcome, "run-outcome")
+                    if phase == "publication_succeeded":
+                        self.assertEqual(retry_exit, 0)
+                        self.assertEqual(retry_outcome["status"], "skipped_policy")
+                        self.assertEqual(
+                            retry_outcome["diagnostic"], "already_published"
+                        )
+                    else:
+                        self.assertEqual(retry_exit, 1)
+                        self.assertEqual(retry_outcome["status"], "action_required")
+                        self.assertEqual(
+                            retry_outcome["diagnostic"], "publication_recovery_required"
+                        )
+                        self.assertIn("original validated result", stderr.getvalue())
+                    self.assertEqual(provider.calls, 1)
+                    self.assertEqual(retry_outcome["provider_calls"], 0)
+                    self.assertFalse(output_path.exists())
+                    self.assertEqual(
+                        LocalSessionLedger(ledger_path).load(IDENTITY).record,
+                        before_retry,
+                    )
+            LocalSessionLedger(ledger_path).replace(
+                IDENTITY,
+                lambda current: current.evolve(transaction=original_transaction),
+            )
             malformed_argv = list(argv)
             malformed_argv[malformed_argv.index("--head-sha") + 1] = "c" * 40
             with (

@@ -206,8 +206,9 @@ class BaselineRecoveryTests(unittest.TestCase):
         self.assertEqual(self.baseline().cache_key.base_sha, "c" * 40)
         generation = self.record().generation
         code, _, outcome = self.run_cli(base="c")
-        self.assertEqual(code, 0)
-        self.assertEqual(outcome["status"], "skipped_policy")
+        self.assertEqual(code, 1)
+        self.assertEqual(outcome["status"], "action_required")
+        self.assertEqual(outcome["diagnostic"], "publication_recovery_required")
         self.assertEqual(self.provider.calls, 2)
         self.assertEqual(self.record().generation, generation)
 
@@ -335,7 +336,11 @@ class BaselineRecoveryTests(unittest.TestCase):
                 outcome["stage_summary"]["baseline_refresh"],
                 "prompt-or-stage-digest-change",
             )
-            self.assertEqual(self.run_cli()[0], 0)
+            retry_code, _, retry_outcome = self.run_cli()
+            self.assertEqual(retry_code, 1)
+            self.assertEqual(
+                retry_outcome["diagnostic"], "publication_recovery_required"
+            )
             self.assertEqual(self.provider.calls, 2)
 
     def test_fresh_fallback_findings_keep_human_adjudication(self):
