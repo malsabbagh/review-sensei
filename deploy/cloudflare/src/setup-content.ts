@@ -1044,7 +1044,7 @@ jobs:
                   ):
                       token = None
                   resolved_head = choose_head(token)
-              elif isinstance(comment_body, str) and len(comment_body.encode("utf-8")) <= 4096 and re.search(r"(?m)(?<!\S)@(?:reviewsensei|sensei)\s+(?:review\s+(?:status|pause|continue|reenroll)|verify|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}\s+--reason\s+\S.*)\s*\Z", comment_body, re.IGNORECASE):
+              elif isinstance(comment_body, str) and len(comment_body.encode("utf-8")) <= 4096 and re.search(r"(?m)(?<!\S)@(?:(?ai:reviewsensei)|sensei)\s+(?:review\s+(?:status|pause|continue|reenroll)|verify|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}\s+--reason\s+\S.*)\s*\Z", comment_body, re.IGNORECASE):
                   operation = "command"
               else:
                   operation = "reply"

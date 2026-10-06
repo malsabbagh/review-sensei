@@ -45,6 +45,8 @@ const MAX_COMMAND_REASON_BYTES = 512;
 const COMMAND_WHITESPACE = "[ \\t\\r\\n]";
 const COMMAND_WHITESPACE_RUN = `${COMMAND_WHITESPACE}+`;
 const COMMAND_TRIM = /^[ \t\r\n]+|[ \t\r\n]+$/g;
+// Equivalent to Python's scoped (?ai:@reviewsensei): canonical ASCII case
+// variants qualify, Unicode lookalikes do not, and the legacy gate stays lowercase.
 const RECOGNIZED_COMMAND = new RegExp(
   `(?:^|${COMMAND_WHITESPACE})@(?:sensei|[rR][eE][vV][iI][eE][wW][sS][eE][nN][sS][eE][iI])${COMMAND_WHITESPACE_RUN}([\\s\\S]*?)${COMMAND_WHITESPACE}*$`,
 );

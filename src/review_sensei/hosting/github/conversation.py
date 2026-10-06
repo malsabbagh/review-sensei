@@ -47,6 +47,8 @@ MAX_CONTEXT_FINDING_BYTES = 512
 MAX_CONTEXT_LEARNINGS_BYTES = 6 * 1024
 CONVERSATION_COMMENT_PAGE_SIZES = (20, 10, 5, 1)
 MAX_REVIEW_THREAD_PAGES = 10
+# Preserve Unicode whitespace as a conversation boundary for both handles.
+# Only canonical letter matching is ASCII-scoped; commands use ASCII separators.
 MENTION_PATTERN = re.compile(
     r"(?i)(?:^|\s)(?:@sensei|(?a:@reviewsensei))(?:$|\s|[.,!?])"
 )

@@ -37,7 +37,9 @@ const INLINE_COMMAND_PREFILTER_START =
  * dropped and its `\Z` anchor becomes a JavaScript end-of-input `$` without
  * the `m` flag. That translation is only equivalent while the pattern uses
  * neither anchor itself, so an inner `^` or `$` is rejected below instead of
- * silently changing what the pattern matches.
+ * silently changing what the pattern matches. The canonical `(?ai:...)` group
+ * becomes a literal: JavaScript's non-Unicode `i` flag has the same ASCII case
+ * behavior for these letters. Python tests execute the actual caller regex.
  */
 function inlineCommandPrefilter(text: string): string {
   const start = text.indexOf(INLINE_COMMAND_PREFILTER_START);
@@ -55,7 +57,13 @@ function inlineCommandPrefilter(text: string): string {
       "inline command prefilter anchors changed; update the JavaScript translation",
     );
   }
-  const translated = literal.slice("(?m)".length, -"\\Z".length);
+  const canonical = "(?ai:reviewsensei)";
+  if (literal.split(canonical).length !== 2) {
+    throw new Error("canonical ASCII case scope changed; update the JavaScript translation");
+  }
+  const translated = literal
+    .slice("(?m)".length, -"\\Z".length)
+    .replace(canonical, "reviewsensei");
   if (/[\^$]/.test(translated)) {
     throw new Error(
       "inline command prefilter uses an inner anchor; the JavaScript translation is not equivalent",
@@ -215,6 +223,8 @@ describe("setup-v4 public boundary", () => {
       .filter((item) => item.accepted && !prefilter.test(item.body))
       .map((item) => item.body);
     expect(missed).toEqual([]);
+    expect(prefilter.test("@reviewſensei review pause")).toBe(false);
+    expect(prefilter.test("@revıewsensei review pause")).toBe(false);
   });
 
   it("does not invent a SHA-based concurrency key; hosted reviews use the reusable workflow", () => {

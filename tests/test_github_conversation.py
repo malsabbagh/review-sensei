@@ -970,6 +970,19 @@ class ConversationPublisherTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertFalse(has_standalone_sensei_mention(body))
 
+    def test_conversation_keeps_unicode_whitespace_for_both_handles(self):
+        for alias in ("@sensei", "@SENSEI", "@reviewsensei", "@ReviewSensei"):
+            for separator in ("\u00a0", "\u2003", "\u3000"):
+                with self.subTest(alias=alias, separator=separator):
+                    self.assertTrue(
+                        has_standalone_sensei_mention(
+                            f"{separator}{alias}{separator}help"
+                        )
+                    )
+        for body in ("@reviewſensei help", "@revıewsensei help"):
+            with self.subTest(body=body):
+                self.assertFalse(has_standalone_sensei_mention(body))
+
     def test_mention_and_authorization_helpers_are_strict(self):
         self.assertTrue(has_standalone_sensei_mention("please @sensei help"))
         self.assertTrue(has_standalone_sensei_mention("please @SENSEI help"))

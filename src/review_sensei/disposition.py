@@ -48,6 +48,9 @@ _COMMAND_NON_WS = r"[^ \t\r\n]"
 # A command mention must start at the beginning of a line or after whitespace.
 # This keeps prose/markdown prefixes valid while rejecting punctuation-adjacent
 # text such as ``!@sensei`` and ``(@sensei``.
+# Scope ASCII case folding to the canonical handle: legacy commands keep their
+# lowercase gate, while ``a`` rejects Unicode lookalikes such as long-s/dotless-i.
+# The broker spells the same canonical rule with explicit ASCII letter pairs.
 _SENSEI = re.compile(
     r"(?m)(?<![^ \t\r\n])(?:@sensei|(?ai:@reviewsensei))(?=[ \t\r\n]+)"
 )

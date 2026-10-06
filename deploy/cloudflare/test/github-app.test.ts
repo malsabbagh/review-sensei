@@ -690,6 +690,16 @@ describe("setup repository reconciliation", () => {
     expect(await serviceWith(fake).process(delivery())).toEqual([
       { repository: "acme/widgets", status: edited ? "skipped_unknown_setup" : "created", ...(edited ? {} : { pull_request_number: 42 }) },
     ]);
+    if (edited) {
+      expect(mutationRequests(fake)).toEqual([]);
+    } else {
+      const tree = fake.requests.find(({ path }) => path.endsWith("/git/trees"));
+      const entries = tree?.body?.tree as Array<{ path: string; content: string }>;
+      const caller = entries.find(({ path }) => path === SETUP_FILE_PATHS[0])?.content;
+      expect(caller).toEqual(buildSetupFiles(TAG)[0].content);
+      expect(caller).toContain("contains(github.event.comment.body, '@reviewsensei')");
+      expect(caller).not.toEqual(senseiOnlyV5WorkflowTemplate(TAG));
+    }
   });
 
   it("migrates a managed v5 setup following an older public tag", async () => {

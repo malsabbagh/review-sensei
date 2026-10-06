@@ -1103,6 +1103,16 @@ class SetupPullRequestServiceTests(unittest.TestCase):
             delivery(), installation_token="ghs_opaque"
         )
         self.assertEqual(results[0].status, "created")
+        branch_request = next(
+            r for r in transport.requests if r[0] == "create_or_update_branch"
+        )
+        written = {file.path: file.content for file in branch_request[6]}
+        self.assertEqual(written[WORKFLOW_PATH], plan.files[0].content)
+        self.assertIn(
+            "contains(github.event.comment.body, '@reviewsensei')",
+            written[WORKFLOW_PATH],
+        )
+        self.assertNotEqual(written[WORKFLOW_PATH], previous)
         files[WORKFLOW_PATH] = previous + "# operator-owned edit\n"
         self.assertEqual(setup_module._classify_setup_files(files), "unknown")
         worker_fixture = (

@@ -8,6 +8,14 @@ workflow. Older callers filter `contains(..., '@sensei')` and their embedded
 resolver recognizes only that alias. Updating `@v5` alone cannot make the new
 handle work in those installations.
 
+Keep the established separator rules when patching: conversations and re-scan
+mention gates accept Unicode whitespace (`\s`); commands require ASCII space,
+tab, CR or LF. Caller command routing is deliberately broader than execution:
+it may accept case variants of the legacy token, a later mention, Unicode
+whitespace or a reason the final parser rejects. The broker and full parser
+recheck those cases before any command write. Do not tighten conversation
+boundaries or edit frozen historical fixtures as part of an alias upgrade.
+
 ## Bounded consumer patch
 
 After a separately authorized product/runtime and broker promotion, prepare one

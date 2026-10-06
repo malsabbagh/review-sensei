@@ -1127,6 +1127,14 @@ such as `@review-sensei`, `@review sensei`, and `@reviewsensei-bot` do not quali
 Caller `contains` filters are intentionally broad routing gates, followed by the
 authoritative syntax and actor checks. See [caller rollout](mention-handle-rollout.md).
 
+Conversation and re-scan mention boundaries preserve Python's Unicode whitespace
+semantics (`\s`), including U+00A0, U+2003 and U+3000. Command separators remain
+the explicit ASCII set space, tab, CR and LF. The stdlib trigger resolver and
+embedded caller command prefilter may route Unicode-separated command-shaped
+text, but the full command parser and broker reject it before any command write.
+The canonical handle's `(?ai:...)` scope changes only letter matching, not these
+boundaries: ASCII case variants qualify, Unicode lookalikes do not.
+
 Conversation replies require a standalone case-insensitive `@reviewsensei` mention
 from a human OWNER, MEMBER, or COLLABORATOR. Reply bodies are bounded and
 validated before marker append; source update time, exact head, root-thread
