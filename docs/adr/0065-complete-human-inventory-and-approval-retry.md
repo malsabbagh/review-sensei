@@ -4,7 +4,8 @@ Status: Proposed
 Date: 2026-10-06
 Owners/Reviewers: Maintainers
 Approved by: not applicable
-GitHub Issue: follow-up to the human reassessment state demonstrated on PR #216
+GitHub Issue: follow-up to the human reassessment state demonstrated on [PR #216](https://github.com/malsabbagh/review-sensei/pull/216)
+GitHub PR: [#222](https://github.com/malsabbagh/review-sensei/pull/222)
 
 ## Context
 
@@ -65,6 +66,21 @@ The source reply is reconciled through the existing conversation publisher
 before finalization, so retries reuse the reply marker and new mentions receive
 an acknowledgment rather than a false `already_replied` result.
 
+## Scope
+
+This decision covers construction and publication of complete human inventories,
+authenticated exact-head reassessment and retry of the existing approval
+finalizer. It does not authorize live state repair or alter release configuration.
+
+## Alternatives considered
+
+Coalescing every lifecycle collision would lose distinct findings. Weakening the
+persisted uniqueness validator would make decisions ambiguous. Truncating an
+oversized inventory would misrepresent completeness. Reconstructing legacy state
+from public prose lacks the original full findings, base and digest authority.
+These alternatives are rejected in favor of complete validated identities and
+explicit recovery through a fresh review.
+
 ## Consequences and limits
 
 New human reviews remain reassessable even when lifecycle identities collide.
@@ -91,3 +107,9 @@ This is a source change only. Package publication, released workflow/v5 promotio
 deployment and live verification require separate authorization. After that
 rollout, legacy missing-inventory cases require a fresh exact-head full review
 before reassessment. Rollback withholds on colliding or missing inventories.
+
+## Follow-up work
+
+Maintainers review this proposed decision and authorize any package/workflow
+rollout separately. After rollout, verify reassessment on a fresh exact-head
+review and rerun full reviews for legacy missing-inventory cases.
