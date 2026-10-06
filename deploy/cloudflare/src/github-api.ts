@@ -20,6 +20,7 @@ const RETURNED_CONTENTS_READ_PERMISSION = "read";
 // `variables` permission (payload spelling `actions_variables`) stays excluded:
 // setup no longer provisions repository variables and no capability requests it.
 const KNOWN_PERMISSION_NAMES = new Set([
+  "actions",
   "checks",
   "contents",
   "metadata",

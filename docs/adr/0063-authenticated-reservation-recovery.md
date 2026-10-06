@@ -3,7 +3,7 @@
 Status: Proposed
 Date: 2026-10-06
 GitHub Issue: Pending triage
-Pull Request: Pending
+Pull Request: [#215](https://github.com/malsabbagh/review-sensei/pull/215)
 Owners/Reviewers: Maintainers
 Approved by: not applicable
 

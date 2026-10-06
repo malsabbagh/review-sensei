@@ -16,6 +16,42 @@ function api() {
   return client;
 }
 
+describe("GitHubApi recovery evidence scope", () => {
+  it.each([
+    ["exact Actions read", { actions: "read", metadata: "read" }, true],
+    ["Actions write escalation", { actions: "write", metadata: "read" }, false],
+    ["extra Checks write", { actions: "read", metadata: "read", checks: "write" }, false],
+    ["extra Contents read", { actions: "read", metadata: "read", contents: "read" }, false],
+    ["missing metadata", { actions: "read" }, false],
+  ])("accepts only the requested read grant: %s", async (_name, permissions, accepted) => {
+    const client = api();
+    const request = vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: { token: "ghs_actions_read", expires_at: new Date(Date.now() + 60_000).toISOString(), permissions },
+    });
+    const result = client.capabilityToken(2468, "acme/widgets", { actions: "read" });
+    if (accepted) {
+      await expect(result).resolves.toBe("ghs_actions_read");
+    } else {
+      await expect(result).rejects.toThrow("github_capability_permissions_invalid");
+    }
+    expect(request).toHaveBeenCalledWith("POST", "/app/installations/2468/access_tokens", "app-jwt", {
+      repositories: ["widgets"], permissions: { actions: "read" },
+    });
+  });
+
+  it("rejects an unrequested Actions read grant for review publication", async () => {
+    const client = api();
+    vi.spyOn(client, "request").mockResolvedValue({
+      status: 201,
+      data: { token: "ghs_wrong_scope", expires_at: new Date(Date.now() + 60_000).toISOString(),
+        permissions: { pull_requests: "write", metadata: "read", actions: "read" } },
+    });
+    await expect(client.capabilityToken(2468, "acme/widgets", { pull_requests: "write" }))
+      .rejects.toThrow("github_capability_permissions_invalid");
+  });
+});
+
 describe("GitHubApi public workflow resolution", () => {
   it("omits bearer authentication for public GitHub requests", async () => {
     const client = api();
