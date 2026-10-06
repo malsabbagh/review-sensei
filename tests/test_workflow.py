@@ -124,6 +124,7 @@ class WorkflowValidationTests(unittest.TestCase):
                 f"{name} must not appear in the workflow",
             )
 
+    @unittest.skipIf(sys.platform == "win32", "hosted Linux script requires POSIX Bash")
     def test_hosted_runner_label_validation_defaults_and_rejects_invalid_shapes(self):
         workflow = _reusable_workflow()
         step = workflow.split("      - name: Resolve hosted runner label\n", 1)[1]
