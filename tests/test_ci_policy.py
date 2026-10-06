@@ -1805,6 +1805,7 @@ class ActionPinPolicyTests(unittest.TestCase):
 
 
 class ReusablePublishGuardTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "Linux runner script requires POSIX Bash")
     def test_runner_result_guard_clears_stale_outputs_and_distinguishes_skip(self):
         workflow = _reusable_workflow_text()
         for job_id in ("hosted", "local"):
