@@ -250,6 +250,45 @@ jobs:
         shell: bash
         run: bash scripts/build_linux_standalone_in_container.sh "${{ matrix.target }}"
 
+  intel-standalone:
+    name: Intel macOS standalone ABI and parity
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          # Keep the actual failing framework/OpenSSL combination as a regression.
+          python-version: '3.11.9'
+      - name: Install statically linked native oracle
+        run: python scripts/install_standalone_oracle.py --target darwin-x64
+      - name: Install pinned PyInstaller
+        run: python -m pip install --disable-pip-version-check -r packaging/standalone/requirements.txt
+      - name: Build Intel standalone
+        run: python scripts/build_standalone.py --target darwin-x64 --output dist/standalone/darwin-x64
+      - name: Verify frozen crypto linkage and RSA signing
+        run: python scripts/check_standalone_crypto.py --bundle dist/standalone/darwin-x64/review-sensei --report "$RUNNER_TEMP/frozen-crypto.json"
+      - name: Retain strict native CLI parity
+        env:
+          PYTHONPATH: src
+        run: |
+          python scripts/standalone_smoke.py \
+            --executable dist/standalone/darwin-x64/review-sensei/review-sensei \
+            --repository "$GITHUB_WORKSPACE" \
+            --diff evaluation/v1/diffs/off-by-one.patch \
+            --fixture-response evaluation/v1/responses/off-by-one.json \
+            --base-ref "$(git rev-parse HEAD^)" \
+            --head-ref "$(git rev-parse HEAD)"
+      - name: Retain verified native ABI evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: frozen-intel-crypto-check
+          path: ${{ runner.temp }}/frozen-crypto.json
+          if-no-files-found: warn
+
   workers:
     name: Cloudflare Worker
     runs-on: ubuntu-latest
@@ -318,7 +357,7 @@ jobs:
   required-checks:
     name: Required checks
     if: ${{ !cancelled() }}
-    needs: [compatibility, quality, schemas, package, npm, linux-standalone, workers, codeql]
+    needs: [compatibility, quality, schemas, package, npm, linux-standalone, intel-standalone, workers, codeql]
     runs-on: ubuntu-latest
     steps:
       - name: Require every gate
@@ -337,5 +376,6 @@ jobs:
           require_success "${{ needs.package.result }}"
           require_success "${{ needs.npm.result }}"
           require_success "${{ needs.linux-standalone.result }}"
+          require_success "${{ needs.intel-standalone.result }}"
           require_success "${{ needs.workers.result }}"
           require_success "${{ needs.codeql.result }}"

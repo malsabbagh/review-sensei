@@ -216,6 +216,38 @@ workflow above. Publishing an npm package or deploying the Worker does not move
 the public `v5` tag or replay historical App deliveries; each is a separate,
 operator-owned cutoff step.
 
+## 0.6.15 Intel native ABI repair
+
+The `v0.6.14` cutoff published Python successfully, but its Intel macOS npm
+bundle failed strict native/direct error-output parity. The retained
+[diagnostic run](https://github.com/malsabbagh/review-sensei/actions/runs/37404551425)
+verified the unchanged source and showed `_rust.abi3.so` expecting
+`_SSL_get0_group_name` from a bundled `libssl.3.dylib` that lacks that symbol.
+Direct Python returned the documented invalid-input exit 2; the frozen CLI
+crashed with exit 1. Preserve that immutable tag and all already-published bytes.
+
+Cryptography removed Intel macOS wheels in version 49. The native installer
+now builds its declared cryptography dependency with `OPENSSL_STATIC=1` and
+architecture-matched Homebrew static archives, bypassing cached/shared wheels.
+This is the [upstream macOS static-build procedure](https://cryptography.io/en/latest/installation/#building-cryptography-on-macos);
+it does not downgrade the dependency. Both `Release` and manual npm builds use
+`scripts/install_standalone_oracle.py` for the same installation contract.
+
+Before release, required PR CI reproduces the actual Intel / Python 3.11.9
+framework environment. `scripts/check_standalone_crypto.py` rejects shared
+OpenSSL dependencies in the frozen Rust binding, then loads that exact frozen
+extension and signs/verifies a temporary in-memory RSA message. The original
+standalone smoke still requires exact exits and output. A lazy import alone
+would hide the error-path trigger without fixing native hosted authentication.
+
+Prepare and review the `0.6.15` package cut. After human merge and separate
+release-owner authorization, sign `v0.6.15` from that reviewed commit and publish
+through the normal workflow, verifying the Python files and all six npm
+packages against their attestations. Do not rewrite or overwrite `0.6.14`.
+The current `v5` promotion remains at the published `0.6.14` commit until a
+separately authorized channel move. This repair changes no Worker runtime,
+capability, secret, or ledger contract and performs no Worker deployment.
+
 ## 0.6.14 rollout verification
 
 This cutoff includes bounded stale-baseline recovery (#209), canonical backend

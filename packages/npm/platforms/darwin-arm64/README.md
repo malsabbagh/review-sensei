@@ -7,7 +7,7 @@ standalone Python engine bundled for macOS Apple Silicon.
 Install the public launcher, which selects the matching native package:
 
 ```console
-npm install --save-dev @reviewsensei/cli@0.6.14
+npm install --save-dev @reviewsensei/cli@0.6.15
 npx review-sensei --help
 ```
 
