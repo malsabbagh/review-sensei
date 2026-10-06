@@ -100,3 +100,9 @@ block recovery; only the exact owner proof and session fences authorize it. The 
 installation must accept Actions read and the broker must support the separate
 `review_actions` capability. Existing caller workflow permissions stay unchanged. Expiry,
 integrity failures and saved publication work keep their existing recovery paths.
+
+Local `review continue` cannot reclaim a held reservation: it reports
+`held reservation requires authenticated Actions recovery` and preserves the
+hold. A local ledger has no authenticated Actions completion proof. Hosted
+recovery applies only to its corresponding hosted session ledger; an abandoned
+local process requires investigation rather than a silent unpause or timer unlock.

@@ -385,6 +385,10 @@ class ReservationRecoveryTests(unittest.TestCase):
         self.assertEqual(SessionRecord.from_dict(record.to_dict()), record)
         with self.assertRaisesRegex(ReviewInputError, "current held reservation"):
             SessionRecord.create(IDENTITY, now=NOW, reservation_owner=OWNER)
+        with self.assertRaisesRegex(ReviewInputError, "current held reservation"):
+            SessionRecord.from_dict(
+                {**record.to_dict(), "reservation_id": None, "reserved_slot": None}
+            )
         with self.assertRaisesRegex(ReviewInputError, "head does not match"):
             record.evolve(reservation_owner={**OWNER, "head_sha": LIVE_HEAD}, now=NOW)
         payload = record.to_dict()

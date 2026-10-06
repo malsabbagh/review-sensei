@@ -62,6 +62,13 @@ Request only the permissions needed by the features you deploy:
 | `Pull requests` | Write | Required to open setup pull requests and publish App-identity reviews, inline replies, and top-level replies on pull-request conversations |
 | `Workflows` | Write | Required because setup always creates or updates generated files under `.github/workflows/` |
 
+GitHub's repository `Actions: read` permission also permits reading workflow
+logs; it cannot be restricted to run/job metadata within this capability. The
+reviewed recovery path fetches only bounded run/job metadata and never logs or
+artifacts. Approving this optional permission therefore accepts that residual
+token scope. Any future use of logs or artifacts needs a separate reviewed
+trust-boundary decision; the token remains limited to the requested repository.
+
 Setup provisions no repository variables, so `Variables` is not requested and
 is not needed: setup and capability token requests never name the retired
 scope, and a token response that still reports it fails closed.
