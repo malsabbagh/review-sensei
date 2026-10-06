@@ -94,7 +94,10 @@ one failed attempt to the abandoned head. Run a new review only after the
 command reports successful recovery; continuation itself performs no inference.
 
 Old records without OIDC owner metadata can recover only when exact-head PR-run
-and failed analysis-job metadata uniquely identify the origin. Missing, changed,
+and failed analysis-job metadata uniquely identify the origin, and the record's
+generation still matches the attached analysis transaction. Later writes can
+move the timestamp, so those legacy records fail closed rather than guessing a
+new origin. Missing, changed,
 ambiguous or truncated evidence requires investigation. Unrelated CI does not
 block recovery; only the exact owner proof and session fences authorize it. The App
 installation must accept Actions read and the broker must support the separate

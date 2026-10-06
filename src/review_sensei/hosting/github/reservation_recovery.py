@@ -133,6 +133,13 @@ class ActionsReservationEvidence:
                 raise ReviewInputError(
                     "legacy reservation has no provable analysis origin"
                 )
+            if record.generation != record.transaction.generation:
+                # Only the unchanged analysis attachment identifies this
+                # legacy write timestamp. Later command/disposition writes
+                # can move updated_at into an unrelated run's interval.
+                raise ReviewInputError(
+                    "legacy reservation origin timestamp was changed by a later mutation"
+                )
             head = record.transaction.head_sha
             candidates = []
             at = _stamp(record.updated_at)

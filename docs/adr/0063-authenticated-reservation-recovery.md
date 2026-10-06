@@ -43,10 +43,12 @@ record checks reject observable changes from older or external writers.
 For legacy records without an owner, recovery requires an analysis transaction,
 an exact-head `pull_request` run associated with the same PR, the recognized
 ReviewSensei caller path, one unique run interval containing the ledger write,
-and one completed failed/cancelled/timed-out hosted or local analysis job whose
+and an unchanged analysis transaction generation matching the record generation,
+plus one completed failed/cancelled/timed-out hosted or local analysis job whose
 interval contains that write. Manual, unknown, successful, ambiguous or
 truncated legacy evidence stays blocked. Timestamp containment identifies the
-origin; elapsed age never grants recovery authority.
+origin only while that analysis attachment is unchanged. Later mutations invalidate
+the legacy timestamp proof; elapsed age never grants recovery authority.
 
 Evidence is re-collected in the mutation seam. The exact record digest,
 generation and reservation must still match. The existing adapter rechecks the

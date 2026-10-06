@@ -5,7 +5,7 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -323,6 +323,31 @@ class ReservationRecoveryTests(unittest.TestCase):
         self.assertTrue(result.applied)
         self.assertIsNone(record.reservation_id)
         self.assertEqual(record.failed_attempts, 1)
+
+    def test_legacy_later_mutation_cannot_rebind_timestamp_to_another_run(self):
+        original = analysis_record(owner=False)
+        # A later pause/disposition write moves updated_at but leaves the
+        # analysis transaction's generation unchanged. The new timestamp
+        # could overlap another failed PR run, so it is no longer origin proof.
+        later = NOW + timedelta(minutes=2)
+        h = Harness(original.evolve(generation=original.generation + 1, now=later))
+        h.run.update(
+            run_started_at="2026-10-06T12:01:00Z",
+            updated_at="2026-10-06T12:03:00Z",
+        )
+        h.jobs[0].update(
+            started_at="2026-10-06T12:01:00Z",
+            completed_at="2026-10-06T12:03:00Z",
+        )
+        with self.assertRaisesRegex(ReviewInputError, "origin timestamp"):
+            apply_session_command(
+                h.ledger,
+                IDENTITY,
+                MaintainerCommand("continue", actor="maintainer", head_sha=LIVE_HEAD),
+                now=later,
+            )
+        self.assertEqual(h.patches, 0)
+        self.assertIsNotNone(h.record.reservation_id)
 
     def test_legacy_ambiguous_or_unbound_evidence_never_mutates(self):
         for defect in (
