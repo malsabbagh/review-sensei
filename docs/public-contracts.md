@@ -1186,3 +1186,15 @@ unknown ReviewSensei roots fail closed. Inline comments and review summaries
 render that same effective merge-impact classification. The policy exposes stable
 blocker reasons for diagnostics while the GraphQL query requests only bounded
 `isResolved` fields.
+
+
+### Human-reply reassessment eligibility
+
+The hidden App-authored eligibility document may add `human_review` to its
+strict version-1 shape: `base_sha`, complete bounded `findings` (fingerprint,
+path, body) and `resolved` fingerprints. Its human-adjudication flag must equal
+whether any inventoried concern remains pending. Old documents are readable
+but cannot clear human findings without this inventory. The document is not a
+provider-controlled public result; only the App publisher records it. Literal
+evidence validation and authenticated source/base/head checks precede every
+update. See [ADR 0061](adr/0061-human-reply-reassessment.md).

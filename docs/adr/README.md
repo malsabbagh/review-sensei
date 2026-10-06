@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0061](0061-human-reply-reassessment.md) | Proposed | Reassess human-review findings from authorized replies | Release 0.6.14 | Exact-head evidence, complete concern inventory and preserved approval gates |
 | [0060](0060-stale-baseline-full-review-recovery.md) | Proposed | Recover valid stale baselines through bounded full review | Sanitized 0.6.13 reproduction | Exact-context idempotency, preserved history and human gates |
 | [0058](0058-budgeted-document-context.md) | Proposed | Rank and budget supplemental documents across active lenses | Pending triage | Full mandatory guidance, deterministic verbatim excerpts, visible omissions |
 | [0001](0001-provider-neutral-review-engine.md) | Accepted | Keep review behavior behind a provider-neutral service and protocol | Initial architecture | GitHub and model transports remain adapters |

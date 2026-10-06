@@ -1585,6 +1585,18 @@ class ReviewPublisherTests(unittest.TestCase):
         # The pending assessment is body feedback, never an enforcement thread.
         self.assertEqual(body["comments"], [])
 
+        review_body = next(
+            json.loads(data.decode("utf-8"))["body"]
+            for method, url, data in calls
+            if method == "POST" and url.endswith("/pulls/2/reviews")
+        )
+        eligibility = approval_eligibility_from_body(review_body)
+        self.assertIsNotNone(eligibility)
+        self.assertTrue(eligibility.facts.has_human_adjudication_findings)
+        self.assertEqual(eligibility.human_review.base_sha, "a" * 40)
+        self.assertEqual(len(eligibility.human_review.pending), 1)
+        self.assertEqual(eligibility.human_review.pending[0].body, comment.body)
+
     def test_partial_coverage_review_is_published_without_an_approval(self):
         head = "b" * 40
         http, calls = make_http(
