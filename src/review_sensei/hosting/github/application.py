@@ -22,7 +22,7 @@ from ...coverage import coverage_approval_state
 from ...diff import analyze_diff
 from ...disposition import MaintainerCommand
 from ...errors import ReviewInputError
-from ...human_assessment import HumanAssessmentService
+from ...human_assessment import HumanAssessmentReply, HumanAssessmentService
 from ...models import ReviewResult, ReviewTransaction
 from ...outcomes import RecoveryArtifact
 from ...planning import related_paths_for_change
@@ -1441,13 +1441,25 @@ class GitHubApplication:
                 )
                 if human is not None:
                     assert human.eligibility.human_review is not None
-                    assessment = HumanAssessmentService(reply_provider).reply(
-                        context=human.conversation.context,
-                        pending=human.eligibility.human_review,
-                        source_body=human.source_body,
-                        model=model,
-                    )
-                    accepted = any(
+                    inventory = human.eligibility.human_review
+                    if human.evidence_diagnostic:
+                        assessment = HumanAssessmentReply(
+                            body=f"Human reassessment has insufficient current diff evidence (reason: `{human.evidence_diagnostic}`). No findings were cleared; approval requirements remain unchanged. After the required evidence is available within the context budget, rerun a full review for the current head and submit a new authorized mention.",
+                            decisions=(),
+                        )
+                    elif inventory.pending:
+                        assessment = HumanAssessmentService(reply_provider).reply(
+                            context=human.conversation.context,
+                            pending=inventory,
+                            source_body=human.source_body,
+                            model=model,
+                        )
+                    else:
+                        assessment = HumanAssessmentReply(
+                            body="Retrying approval finalization for previously reassessed findings; all approval requirements still apply.",
+                            decisions=(),
+                        )
+                    accepted = not inventory.pending or any(
                         item.decision != "unresolved" for item in assessment.decisions
                     )
                     review_token = None

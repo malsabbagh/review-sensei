@@ -472,7 +472,11 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
 
             def generate_and_publish_reply(self, **kwargs):
                 self.calls.append(kwargs)
-                return SimpleNamespace(status="replied")
+                return SimpleNamespace(
+                    status="replied",
+                    approval_status="approval_withheld",
+                    approval_diagnostic="approval_withheld_qualification",
+                )
 
         class FakeRegistry:
             def create(self, settings):
@@ -480,6 +484,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 return FakeProvider()
 
         registry = FakeRegistry()
+        stdout, stderr = io.StringIO(), io.StringIO()
         with patch.multiple(
             github_module,
             BrokerClient=lambda: object(),
@@ -494,7 +499,11 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 {"REVIEW_SENSEI_READ_TOKEN": "read-token"},
                 clear=True,
             ):
-                with patch("review_sensei.cli.default_registry", return_value=registry):
+                with (
+                    patch("review_sensei.cli.default_registry", return_value=registry),
+                    redirect_stdout(stdout),
+                    redirect_stderr(stderr),
+                ):
                     status = main(
                         [
                             "github",
@@ -518,6 +527,84 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                     )
 
         self.assertEqual(status, 0)
+        self.assertEqual(stdout.getvalue(), "replied\n")
+        self.assertEqual(
+            stderr.getvalue(),
+            "review-sensei: approval=approval_withheld diagnostic=approval_withheld_qualification\n",
+        )
+        self.assertEqual(FakeApplication.instance.calls[0]["read_token"], "read-token")
+        self.assertEqual(registry.settings.api_key, None)
+
+    def test_github_generated_reply_cli_exposes_insufficient_evidence(self):
+        from review_sensei.hosting import github as github_module
+
+        class FakeApplication:
+            def __init__(self, **kwargs):
+                self.calls = []
+                self.__class__.instance = self
+
+            def generate_and_publish_reply(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(
+                    status="replied",
+                    assessment_status="insufficient_evidence",
+                    assessment_diagnostic="human_assessment_evidence_missing_patch",
+                )
+
+        class FakeRegistry:
+            def create(self, settings):
+                self.settings = settings
+                return FakeProvider()
+
+        registry = FakeRegistry()
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.multiple(
+            github_module,
+            BrokerClient=lambda: object(),
+            GitHubHttp=lambda: object(),
+            ReviewPublisher=lambda **kwargs: object(),
+            LearningPRPublisher=lambda **kwargs: object(),
+            ConversationPublisher=lambda **kwargs: object(),
+            GitHubApplication=FakeApplication,
+        ):
+            with patch.dict(
+                "os.environ",
+                {"REVIEW_SENSEI_READ_TOKEN": "read-token"},
+                clear=True,
+            ):
+                with (
+                    patch("review_sensei.cli.default_registry", return_value=registry),
+                    redirect_stdout(stdout),
+                    redirect_stderr(stderr),
+                ):
+                    status = main(
+                        [
+                            "github",
+                            "reply",
+                            "--generate",
+                            "--repository",
+                            "owner/repo",
+                            "--pull-request",
+                            "2",
+                            "--source-comment-id",
+                            "10",
+                            "--source-updated-at",
+                            "2026-08-19T00:00:00Z",
+                            "--source-kind",
+                            "issue",
+                            "--github-token-env",
+                            "REVIEW_SENSEI_READ_TOKEN",
+                            "--allow-write",
+                            "--enable-reply",
+                        ]
+                    )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(stdout.getvalue(), "replied\n")
+        self.assertEqual(
+            stderr.getvalue(),
+            "review-sensei: assessment=insufficient_evidence diagnostic=human_assessment_evidence_missing_patch\n",
+        )
         self.assertEqual(FakeApplication.instance.calls[0]["read_token"], "read-token")
         self.assertEqual(registry.settings.api_key, None)
 

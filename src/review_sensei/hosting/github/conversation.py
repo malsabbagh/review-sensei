@@ -241,6 +241,31 @@ class ReplyResult:
     status: str
     comment_id: int | None = None
     resolved: bool = False
+    # Source receipt and approval finalization are separate outcomes. Ordinary
+    # conversations do not finalize approval and leave these fields unset.
+    approval_status: str | None = None
+    approval_diagnostic: str | None = None
+    assessment_status: str | None = None
+    assessment_diagnostic: str | None = None
+
+
+@dataclass(frozen=True)
+class HumanAssessmentDiffContext:
+    """Whole current patches for every required path, or a safe diagnostic."""
+
+    diff_context: str | None
+    diagnostic: str | None = None
+
+    def __post_init__(self) -> None:
+        from ...human_assessment import HUMAN_ASSESSMENT_EVIDENCE_DIAGNOSTICS
+
+        if self.diagnostic is not None and (
+            self.diagnostic not in HUMAN_ASSESSMENT_EVIDENCE_DIAGNOSTICS
+            or self.diff_context is not None
+        ):
+            raise GitHubConversationError(
+                "human assessment evidence diagnostic is invalid"
+            )
 
 
 @dataclass(frozen=True)
@@ -707,6 +732,91 @@ class ConversationPublisher:
         if not messages:
             raise GitHubConversationError("conversation context was empty")
         return messages
+
+    def load_human_assessment_diff(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        pending_paths: Sequence[str],
+    ) -> HumanAssessmentDiffContext:
+        """Admit required current file patches first, without truncating them.
+
+        The inventory has no authoritative hunk locations, so a fragment of a
+        required patch cannot represent complete evidence. Unrelated files may
+        use only the remaining budget. This leaves ordinary conversations and
+        their historical inline-hunk selection unchanged.
+        """
+        from ...human_assessment import MAX_HUMAN_FINDINGS
+
+        if isinstance(pending_paths, str) or len(pending_paths) > MAX_HUMAN_FINDINGS:
+            raise GitHubConversationError("human assessment paths are invalid")
+        try:
+            for path in pending_paths:
+                validate_repository_path(path, label="human assessment path")
+        except ReviewInputError as exc:
+            raise GitHubConversationError("human assessment paths are invalid") from exc
+        required = sorted(set(pending_paths))
+        if not required:
+            return HumanAssessmentDiffContext(None)
+        try:
+            files = self.http.paginate(
+                path=self.http.repository_path(
+                    repository, f"/pulls/{pull_request}/files"
+                ),
+                token=token,
+            )
+        except GitHubHTTPError as exc:
+            raise GitHubConversationError(
+                "human assessment diff lookup failed"
+            ) from exc
+        required_patches: dict[str, str | None] = {}
+        optional: list[tuple[str, str]] = []
+        for item in files:
+            if not isinstance(item, dict) or not isinstance(item.get("filename"), str):
+                continue
+            filename = item["filename"]
+            validate_repository_path(filename, label="conversation diff path")
+            raw_patch = item.get("patch")
+            patch = (
+                raw_patch if isinstance(raw_patch, str) and raw_patch.strip() else None
+            )
+            if filename in required:
+                if filename in required_patches and required_patches[filename] != patch:
+                    return HumanAssessmentDiffContext(
+                        None, "human_assessment_evidence_conflicting_patch"
+                    )
+                required_patches[filename] = patch
+            elif patch is not None:
+                optional.append((filename, patch))
+        if any(required_patches.get(path) is None for path in required):
+            return HumanAssessmentDiffContext(
+                None, "human_assessment_evidence_missing_patch"
+            )
+        parts: list[str] = []
+        used = 0
+        for path in required:
+            part = f"path={path}\n{required_patches[path]}"
+            size = len(part.encode("utf-8")) + bool(parts)
+            if used + size > MAX_CONTEXT_DIFF_BYTES:
+                return HumanAssessmentDiffContext(
+                    None, "human_assessment_evidence_budget_exhausted"
+                )
+            parts.append(part)
+            used += size
+        for path, patch in optional:
+            remaining = MAX_CONTEXT_DIFF_BYTES - used - 1
+            if remaining < 1:
+                break
+            header = f"path={path}\n"
+            if remaining <= len(header.encode("utf-8")):
+                continue
+            optional_part = _bounded_text(header + patch, remaining)
+            if optional_part:
+                parts.append(optional_part)
+                used += len(optional_part.encode("utf-8")) + 1
+        return HumanAssessmentDiffContext("\n".join(parts))
 
     def _load_diff_context(
         self,

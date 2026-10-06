@@ -829,6 +829,28 @@ inventories keep withholding; no session baseline or cross-head disposition
 changes. Supported resolution uses the existing review publication capability,
 with the issue-reply token kept on conversation operations.
 
+[ADR 0065](adr/0065-complete-human-inventory-and-approval-retry.md) distinguishes
+assessment identities from lifecycle concern fingerprints. Colliding concerns
+retain separate identities derived from their validated v1 comments;
+identical comments coalesce. Invalid or oversized inventories fail before
+publication instead of silently disappearing. A missing legacy inventory or a
+malformed latest authority record returns an actionable full-review error,
+without generating ordinary chat. Published prose and short finding IDs do not
+prove a complete inventory bound to the original result digest. Once a complete
+inventory is durably reassessed, retries re-enter the existing exact-head
+finalizer without another inference or reassessment review. All other eligibility
+facts, current authorization, live thread checks and approval markers remain
+authoritative.
+
+Reassessment prioritizes the complete supplied current patches for validated
+pending paths within the existing 12 KiB budget. Missing, conflicting or
+oversized required evidence produces a deterministic acknowledgment and a
+separate insufficient-evidence outcome, with no inference, review capability or
+eligibility/approval mutation. Ordinary conversation selection remains unchanged.
+Provider output rejection exposes a closed reason code without source or model
+payload, and accepted decisions still require verbatim human and relevant current
+diff evidence. No corrective provider retry is added.
+
 This architecture preserves the provider-neutral core: GitHub transport,
 Actions OIDC, broker capabilities, setup lifecycle, publication markers, and
 conversation authorization remain under `src/review_sensei/hosting/github/`
