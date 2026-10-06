@@ -177,6 +177,7 @@ JSON body containing an OIDC assertion plus one of the fixed capability names:
 | --- | --- |
 | `review_publish` | `pull_requests: write` |
 | `review_status` | `pull_requests: read` |
+| `review_actions` | `actions: read` |
 | `check_publish` | `checks: write` |
 | `review_session` | `pull_requests: write` |
 | `inline_reply` | `pull_requests: write` |
@@ -199,7 +200,11 @@ check required, and GitHub does not run required checks on App-authored pull
 requests, so those are reported as `app_authored` instead of gated. The
 `review_session` capability (the durable session ledger, ADR 0050) asks for no
 permission beyond `pull_requests: write`; no capability here is a
-review-dismissal or branch-protection capability, and the App requests no
+review-dismissal or branch-protection capability. Authenticated abandoned
+analysis recovery lazily exchanges `review_actions` for live Actions proofs;
+it requires the installation to accept Actions read and a reviewed broker
+deployment. Ordinary reviews and unpause without a hold do not request it.
+The App requests no
 `Administration` permission.
 
 Automatic approval is the `github.reviews: auto-approve` default. A completed

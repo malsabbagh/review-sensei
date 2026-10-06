@@ -187,7 +187,10 @@ class GateReconciliationTests(unittest.TestCase):
         permissions = {
             entry.split(": ", 1)[0] for row in worker.values() for entry in row
         }
-        self.assertEqual(permissions, {"pull_requests", "checks", "contents"})
+        self.assertEqual(
+            permissions, {"pull_requests", "checks", "contents", "actions"}
+        )
+        self.assertEqual(worker["review_actions"], {"actions: read"})
         self.assertNotIn("administration", permissions)
 
         # The product holds no dismissal surface at all: no source, Worker, or

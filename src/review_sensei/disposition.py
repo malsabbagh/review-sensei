@@ -366,6 +366,19 @@ def apply_session_command(
             ),
         )
     if command.action == "continue":
+        if record.reservation_id is not None:
+            recover = getattr(ledger, "continue_after_abandoned_analysis", None)
+            if not callable(recover):
+                raise ReviewInputError(
+                    "held reservation requires authenticated Actions recovery"
+                )
+            record = recover(identity, now=now)
+            return record, MaintainerCommandResult(
+                action="continue",
+                applied=True,
+                operator_paused=False,
+                summary="abandoned analysis recovered; one failed attempt recorded; automated review may continue",
+            )
         if not initialized_with_mutation:
             record = _set_operator_paused(
                 ledger, identity, record, paused=False, now=now

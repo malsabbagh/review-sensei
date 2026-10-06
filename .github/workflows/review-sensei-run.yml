@@ -566,7 +566,7 @@ jobs:
     # conversational replies being enabled.
     if: inputs.operation == 'command' && needs.bootstrap.outputs.writes == 'true'
     concurrency:
-      group: reviewsensei-command-${{ github.run_id }}
+      group: reviewsensei-provider-review-${{ github.repository }}-${{ needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id }}
       cancel-in-progress: false
     runs-on: ${{ needs.bootstrap.outputs.hosted_runner }}
     # The session-comment mutation is authorized by the OIDC broker's
@@ -693,13 +693,13 @@ jobs:
       ((inputs.operation == 'review' && (inputs.mode == 'manual' || needs.bootstrap.outputs.automatic_reviews == 'true')) ||
       (inputs.operation == 'reply' && needs.bootstrap.outputs.mentions == 'true'))
     concurrency:
-      # The hosted and local jobs share this review group, so a newer review
-      # cancels an older one for the same PR regardless of where it runs. Reply
+      # Reviews and maintainer commands serialize writes for the same PR.
+      # Workflow-level cancellation still supersedes older review runs. Reply
       # operations intentionally use the triggering run id and never cancel a
       # sibling reply. The preflight output is authoritative for manual
       # reviews; event PR metadata is only a host-provided fallback.
       group: reviewsensei-provider-${{ inputs.operation == 'review' && 'review' || 'reply' }}-${{ github.repository }}-${{ inputs.operation == 'review' && (needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id) || github.run_id }}
-      cancel-in-progress: ${{ inputs.operation == 'review' }}
+      cancel-in-progress: false
     runs-on: ${{ needs.bootstrap.outputs.hosted_runner }}
     permissions:
       contents: read
@@ -1147,7 +1147,7 @@ jobs:
       # of where it runs, while each mention reply remains isolated to its
       # triggering run.
       group: reviewsensei-provider-${{ inputs.operation == 'review' && 'review' || 'reply' }}-${{ github.repository }}-${{ inputs.operation == 'review' && (needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id) || github.run_id }}
-      cancel-in-progress: ${{ inputs.operation == 'review' }}
+      cancel-in-progress: false
     runs-on: [self-hosted, linux, x64, ollama]
     permissions:
       contents: read

@@ -25,6 +25,7 @@ class BrokerSession:
 
     token: str = field(repr=False)
     state: str
+    reservation_owner: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,7 @@ class BrokerClient:
             if capability not in {
                 "review_publish",
                 "review_status",
+                "review_actions",
                 "check_publish",
                 "inline_reply",
                 "issue_reply",
@@ -194,7 +196,16 @@ class BrokerClient:
             raise GitHubHTTPTransientError("broker session enrollment is rate limited")
         if state not in {"enrolled", "known"}:
             raise GitHubBrokerClientError("Broker session response was invalid")
-        return BrokerSession(token=token, state=state)
+        from ...errors import ReviewInputError
+        from ...session import _stored_reservation_owner
+
+        try:
+            owner = _stored_reservation_owner(parsed.get("reservation_owner"))
+        except ReviewInputError as exc:
+            raise GitHubBrokerClientError("Broker session owner was invalid") from exc
+        if owner is not None and owner["head_sha"] != head_sha:
+            raise GitHubBrokerClientError("Broker session owner head was stale")
+        return BrokerSession(token=token, state=state, reservation_owner=owner)
 
     def authorize_session_mutation(
         self,

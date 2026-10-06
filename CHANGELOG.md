@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Clean up owned analysis reservations when context construction or other
+  pre-inference work fails. Authenticated `@sensei review continue` can recover
+  abandoned analysis after live GitHub run proofs, without resetting session
+  budgets or discarding saved publication work. Record optional OIDC run
+  ownership for new reservations and serialize command/review writes.
+
 ## 0.6.15 - 2026-10-06
 
 - Fix Intel macOS native packaging's OpenSSL ABI mismatch. Source-built

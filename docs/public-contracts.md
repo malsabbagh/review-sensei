@@ -394,6 +394,13 @@ operator `--review-mode`; a session whose broker verdict is `known` but whose
 marker is absent fails closed and requires a maintainer
 `@sensei review reenroll` rather than silently re-enrolling.
 The local `--session-ledger` file stays the default for operator diagnostics.
+An optional `reservation_owner` object carries the broker-authenticated
+`run_id` and reviewed `head_sha` only while a reservation is held. It is covered
+by the record digest and omitted for legacy records. Authenticated continuation
+can reclaim abandoned analysis using the separate read-only `review_actions`
+capability and live completion proof; it preserves PR-wide completed counters,
+records one failure on the abandoned head, and cannot discard saved publication
+work. See [ADR 0063](adr/0063-authenticated-reservation-recovery.md).
 
 `ReviewResult.to_dict()` produces a JSON-compatible document that validates
 against `review-result.schema.json`.

@@ -119,6 +119,13 @@ beforeEach(() => {
 });
 
 describe("token broker authorization", () => {
+  it("issues recovery evidence authority with Actions read only", async () => {
+    const { broker, github } = harness();
+    const result = await broker.exchange({ oidc_token: "oidc.token", capability: "review_actions" });
+    expect(result).toEqual({ token: "ghs_scoped_token", capability: "review_actions" });
+    expect(github.capabilityToken).toHaveBeenCalledWith(2468, "acme/widgets", { actions: "read" }, false);
+  });
+
   it("exchanges check_publish through the real GitHub adapter with exact Checks write scope", async () => {
     const { env, ledgerFetch } = harness();
     const github = new GitHubApi({
@@ -233,6 +240,7 @@ describe("token broker authorization", () => {
       token: "ghs_scoped_token",
       capability: "review_session",
       session_state: "enrolled",
+      reservation_owner: { run_id: "10000000001", head_sha: SHA },
     });
     expect(github.pullRequestHead).toHaveBeenCalledWith(
       "acme/widgets",
