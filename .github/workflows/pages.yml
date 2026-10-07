@@ -110,17 +110,20 @@ jobs:
         id: deployment
 
   update-main:
+    if: github.ref == 'refs/heads/main'
     name: Commit generated release documentation to main
     needs: qualify
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release-docs-main
     permissions:
-      contents: write
+      contents: read
       actions: read
     concurrency:
       group: release-docs-main
       cancel-in-progress: false
     steps:
-      # Only trusted default-branch helpers execute with Contents write.
+      # The environment releases its key only to main; the default token is read-only.
       # Downloaded HTML/JSON is data, never a script or a workflow checkout.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -138,9 +141,23 @@ jobs:
           github-token: ${{ github.token }}
           digest-mismatch: error
           path: ${{ runner.temp }}/release-docs
+      - name: Mint a repository-only dedicated release docs token
+        id: docs-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.RELEASE_DOCS_APP_ID }}
+          private-key: ${{ secrets.RELEASE_DOCS_APP_PRIVATE_KEY }}
+          owner: malsabbagh
+          repositories: review-sensei
+          permission-contents: write
+          permission-actions: read
+          permission-metadata: read
+          skip-token-revoke: false
       - name: Integrate generated docs with fresh main under repository rules
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.docs-token.outputs.token }}
+          RELEASE_DOCS_APP_ID: ${{ vars.RELEASE_DOCS_APP_ID }}
+          RELEASE_DOCS_APP_SLUG: ${{ steps.docs-token.outputs.app-slug }}
           RELEASE_SELECTION: ${{ needs.qualify.outputs.selection }}
           GIT_TERMINAL_PROMPT: "0"
         run: >-

@@ -1,0 +1,45 @@
+name: Check release documentation bot
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-docs-main
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release-docs-main
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Mint a repository-only dedicated release docs token
+        id: docs-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.RELEASE_DOCS_APP_ID }}
+          private-key: ${{ secrets.RELEASE_DOCS_APP_PRIVATE_KEY }}
+          owner: malsabbagh
+          repositories: review-sensei
+          permission-contents: write
+          permission-actions: read
+          permission-metadata: read
+          skip-token-revoke: false
+      - name: Verify identity, repository scope and effective main rules without writing
+        env:
+          GH_TOKEN: ${{ steps.docs-token.outputs.token }}
+          RELEASE_DOCS_APP_ID: ${{ vars.RELEASE_DOCS_APP_ID }}
+          RELEASE_DOCS_APP_SLUG: ${{ steps.docs-token.outputs.app-slug }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: python scripts/sync_release_docs.py --check-bot

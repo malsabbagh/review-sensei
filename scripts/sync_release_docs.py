@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import release_docs as docs
+import release_docs_bot as bot
 
 SNAPSHOT = "docs/releases/latest"
 INDEX = "docs/releases/latest.md"
@@ -175,22 +176,20 @@ def recheck(selection: dict[str, Any]) -> None:
     docs.assert_latest(selection)
 
 
-def check_main_rules() -> None:
-    rules = docs.api("rules/branches/main")
-    if any(rule.get("type") == "pull_request" for rule in rules):
-        raise ValueError(
-            "main requires a pull request: direct docs writeback is blocked by "
-            "repository protection. No bypass, token or settings change is attempted"
-        )
+def check_main_rules() -> dict[str, str]:
+    return bot.check(
+        os.environ.get("RELEASE_DOCS_APP_ID", ""),
+        os.environ.get("RELEASE_DOCS_APP_SLUG", ""),
+    )
 
 
 def sync(root: Path, bundle: Path, selection: dict[str, Any]) -> bool:
     """Integrate with fresh main, retrying only a verified branch advance."""
     docs.verify_bundle(bundle, selection)
     recheck(selection)
-    # Read active rules, including rulesets (classic protection alone is not
-    # sufficient). Even an actor with a bypass grant must obey this contract.
-    check_main_rules()
+    # Only the approved App's PR-only exception is allowed. Ordinary source
+    # review and main's deletion/non-force/linear-history rules remain enforced.
+    committer = check_main_rules()
     with tempfile.TemporaryDirectory(prefix="release-docs-main-") as temporary:
         checkout = Path(temporary) / "main"
         for attempt in range(MAX_ATTEMPTS):
@@ -209,15 +208,16 @@ def sync(root: Path, bundle: Path, selection: dict[str, Any]) -> bool:
                 git(
                     checkout,
                     "-c",
-                    "user.name=github-actions[bot]",
+                    f"user.name={committer['name']}",
                     "-c",
-                    "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+                    f"user.email={committer['email']}",
                     "commit",
                     "-m",
                     f"docs: record released {selection['tag']}",
                 )
                 recheck(selection)
-                check_main_rules()
+                if check_main_rules() != committer:
+                    raise ValueError("dedicated docs App identity changed before push")
                 push = subprocess.run(
                     [
                         "git",
@@ -246,8 +246,8 @@ def sync(root: Path, bundle: Path, selection: dict[str, Any]) -> bool:
                 if git(root, "rev-parse", "FETCH_HEAD") == base:
                     raise ValueError(
                         "direct main docs push rejected; check repository rules and "
-                        "GITHUB_TOKEN Contents write permission. No bypass attempted. "
-                        + push.stderr.strip()
+                        "the dedicated App exception and Contents write permission. "
+                        "No other bypass attempted. " + push.stderr.strip()
                     )
                 if attempt + 1 == MAX_ATTEMPTS:
                     raise ValueError(
@@ -261,14 +261,25 @@ def sync(root: Path, bundle: Path, selection: dict[str, Any]) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("."))
-    parser.add_argument("--bundle", type=Path, required=True)
-    parser.add_argument("--selection-json", required=True)
+    parser.add_argument("--bundle", type=Path)
+    parser.add_argument("--selection-json")
+    parser.add_argument("--check-bot", action="store_true")
     args = parser.parse_args()
     try:
         if not os.environ.get("GH_TOKEN"):
             raise ValueError(
                 "GH_TOKEN is required for release qualification and docs writeback"
             )
+        if args.check_bot:
+            if args.bundle is not None or args.selection_json is not None:
+                raise ValueError(
+                    "bot readiness check does not accept release artifacts"
+                )
+            committer = check_main_rules()
+            print(f"Dedicated release docs App ready: {committer['name']}")
+            return 0
+        if args.bundle is None or args.selection_json is None:
+            raise ValueError("docs writeback requires --bundle and --selection-json")
         sync(
             args.root.resolve(), args.bundle.resolve(), json.loads(args.selection_json)
         )

@@ -150,23 +150,36 @@ class ReleaseDocsSnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "differ from the verified artifact"):
             SYNC.prepare(self.root, self.bundle, self.selection)
 
-    def test_rule_gate_never_uses_actor_bypass_or_creates_a_pull_request(self):
-        with patch.object(
-            SYNC.docs,
-            "api",
-            return_value=[
-                {
-                    "type": "pull_request",
-                    "parameters": {"required_approving_review_count": 1},
-                }
-            ],
+    def test_rule_gate_uses_only_dedicated_app_contract(self):
+        with (
+            patch.dict(
+                SYNC.os.environ,
+                {"RELEASE_DOCS_APP_ID": "123", "RELEASE_DOCS_APP_SLUG": "docs-bot"},
+            ),
+            patch.object(
+                SYNC.bot,
+                "check",
+                return_value={"name": "docs-bot[bot]", "email": "docs@example.test"},
+            ) as check,
         ):
-            with self.assertRaisesRegex(ValueError, "main requires a pull request"):
-                SYNC.check_main_rules()
-        with patch.object(
-            SYNC.docs, "api", return_value=[{"type": "non_fast_forward"}]
+            self.assertEqual(SYNC.check_main_rules()["name"], "docs-bot[bot]")
+            check.assert_called_once_with("123", "docs-bot")
+
+    def test_readiness_cli_does_not_qualify_a_release_or_write_git(self):
+        with (
+            patch.dict(SYNC.os.environ, {"GH_TOKEN": "test-token"}),
+            patch.object(sys, "argv", ["sync_release_docs.py", "--check-bot"]),
+            patch.object(
+                SYNC, "check_main_rules", return_value={"name": "docs-bot[bot]"}
+            ),
+            patch.object(SYNC, "sync") as sync,
+            patch.object(SYNC, "recheck") as recheck,
+            patch.object(SYNC, "git") as git,
         ):
-            SYNC.check_main_rules()
+            self.assertEqual(SYNC.main(), 0)
+            sync.assert_not_called()
+            recheck.assert_not_called()
+            git.assert_not_called()
 
 
 class ReleaseDocsMainIntegrationTests(unittest.TestCase):
@@ -201,7 +214,12 @@ class ReleaseDocsMainIntegrationTests(unittest.TestCase):
         self.selection = make_bundle(self.bundle)
         for name in ("recheck", "check_main_rules"):
             mocked = patch.object(SYNC, name)
-            mocked.start()
+            started = mocked.start()
+            if name == "check_main_rules":
+                started.return_value = {
+                    "name": "docs-bot[bot]",
+                    "email": "docs@example.test",
+                }
             self.addCleanup(mocked.stop)
 
     def advance_main(self, content):
@@ -297,7 +315,7 @@ class ReleaseDocsMainIntegrationTests(unittest.TestCase):
 
         with patch.object(SYNC.subprocess, "run", side_effect=run):
             before = SYNC.git(self.origin, "rev-parse", "main")
-            with self.assertRaisesRegex(ValueError, "No bypass attempted"):
+            with self.assertRaisesRegex(ValueError, "No other bypass attempted"):
                 SYNC.sync(self.root, self.bundle, self.selection)
             self.assertEqual(len(pushes), 1)
             self.assertEqual(SYNC.git(self.origin, "rev-parse", "main"), before)

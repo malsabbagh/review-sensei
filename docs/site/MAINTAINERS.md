@@ -75,6 +75,9 @@ The post-tag writeback job also maintains the complete generated snapshot under
 `docs/releases/latest/` and its `docs/releases/latest.md` index on main. It uses
 fresh-main, non-force integration and no per-release docs PR. Source site
 release metadata may lag package preparation; the build derives the actual tag
-version in its staging copy. Main's existing PR/approval rules currently block
-direct writeback, and the helper refuses to bypass them. See the activation
-blocker and pre-tag packaging contract in `docs/releasing.md` before first use.
+version in its staging copy. A dedicated repository-only App has an explicitly
+approved exception only for the isolated main PR rule; deletion, non-force and
+linear-history protections retain no App exception. Its environment key is
+main-only, and ordinary source PR requirements remain unchanged. Complete
+`docs/release-docs-bot.md` and the real App readiness probe before first use;
+keep 0.6.17 held until that succeeds and release PR #226 is requalified.

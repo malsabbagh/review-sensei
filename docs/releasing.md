@@ -585,10 +585,13 @@ metadata. After `github-pages` environment approval, a separate deploy job reche
 selected tag/run/artifact identity and high-water mark immediately before Pages
 deployment. It grants Pages/OIDC write plus the Contents/Actions read needed
 for that check, executing only the pinned trusted default-branch helper. It
-never downloads or executes released code. No long-lived
-credential is introduced. The separate docs writeback job grants Contents write
-and Actions read solely to integrate generated documentation with main. Existing environment
-rules/reviewers remain the deployment gate; no settings are changed by this PR.
+never downloads or executes released code. The separate docs writeback job uses
+a dedicated release docs App installed only on this repository. Its private key
+lives only in the main-only `release-docs-main` environment. The pinned token
+Action requests Contents write, Actions read and mandatory Metadata read for
+this repository, then revokes the short-lived token after the job. The default
+GITHUB_TOKEN remains read-only. Existing Pages environment rules/reviewers
+remain the deployment gate.
 
 After the same successful Release qualification, a separate trusted-main job
 verifies the exact artifact and commits only `docs/releases/latest/` (the complete
@@ -610,21 +613,30 @@ are terminal. Same-tag/source retries retain the first verified snapshot and
 make no additional commit, even if a docs rebuild changes its attempt/artifact
 ID. Workflow runs are serialized without cancellation. Only a completed Release
 or explicit run-ID retry triggers writeback; neither the docs commit nor main CI
-starts another release or docs cycle. GITHUB_TOKEN pushes do not trigger ordinary
-push workflows, so artifact hashes and staged-path checks run before the push.
+starts another release or docs cycle. App pushes do trigger ordinary main CI;
+that CI does not start another Release or Pages writeback. Artifact hashes and
+staged-path checks run before the push.
 
-**Current activation blocker:** main's active ruleset requires a pull request,
-code-owner review and approval from someone other than the last pusher. Direct
-writeback cannot satisfy that policy. The helper reads active branch rules
-(including rulesets) and stops if a PR is required, even for an actor with bypass
-rights. It never creates a per-release docs PR, changes protection/settings,
-installs credentials or uses an admin bypass. The existing GITHUB_TOKEN is the
-only write credential. Keep v0.6.17 held until the user explicitly resolves this
-policy incompatibility; merging the code alone does not make direct writeback
-operational. Pages publication remains separately qualified and gated by its
-existing environment. A main-writeback failure cannot undo published packages
-or the separately deployed site. Once policy legitimately permits the operation,
-retry Pages from main with the same successful `release_run_id`.
+**Dedicated App exception and bootstrap:** ordinary main changes still require
+one independent approval, code-owner review and last-push-independent approval.
+Owner setup isolates that unchanged PR rule in a main-only ruleset whose only
+new bypass actor is the dedicated docs App. Main's existing deletion, non-force
+and linear-history rules stay in the original ruleset, without an App bypass.
+The helper verifies repository-scoped App identity/permissions and GitHub's
+effective bypass decision: `always` only for the isolated PR rule, `never` for
+applicable non-PR protections. Omitted decisions fail closed; no Administration
+permission is added to expose them. This is the explicitly approved App
+exception, not an admin bypass or per-release docs PR.
+
+Follow [the secure App setup and read-only readiness procedure](release-docs-bot.md).
+Keep v0.6.17 held until the implementation is reviewed and merged, owner setup
+is complete, and the `Check release documentation bot` workflow succeeds on
+main using the real narrow App token. Code CI alone does not establish readiness.
+The key is entered by the owner directly in GitHub; never send it through chat
+or commit it. Runtime never changes protections, installs credentials or moves a
+tag. Pages remains separately qualified and gated. A main-writeback failure
+cannot undo published packages or the separately deployed site. After repairing
+configuration, retry Pages from main with the same successful `release_run_id`.
 
 A failed, cancelled or partial release leaves both the previous generated main
 snapshot and published site in place, even if one registry or GitHub release
