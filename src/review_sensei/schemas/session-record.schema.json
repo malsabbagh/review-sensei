@@ -143,7 +143,7 @@
     },
     "convergence_history": {
       "type": "object",
-      "description": "Bounded convergence envelope. The field caps below bound each member; the validation seam additionally rejects an envelope whose canonical UTF-8 encoding exceeds MAX_CONVERGENCE_HISTORY_BYTES (4096), which JSON Schema cannot express.",
+      "description": "Bounded convergence envelope. The field caps below bound each member; the validation seam additionally rejects canonical UTF-8 JSON above 12288 history bytes or 20480 record bytes, which JSON Schema cannot express. Writers allocate less history when the surrounding lifecycle state requires it. Older readers reject expanded records; upgrade all shared-ledger readers before enabling new writes.",
       "additionalProperties": false,
       "required": ["state", "progress", "provenance"],
       "properties": {
@@ -194,7 +194,7 @@
               }
             },
             "reviewed_paths": {"type": "array", "maxItems": 512, "items": {"type": "string", "maxLength": 256}},
-            "related_paths": {"type": "array", "maxItems": 32, "items": {"type": "string", "maxLength": 256}}
+            "related_paths": {"type": "array", "maxItems": 64, "items": {"type": "string", "maxLength": 256}}
           }
         },
         "progress": {

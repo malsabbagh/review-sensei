@@ -29,7 +29,10 @@ from .validation import (
     validate_repository_path,
 )
 
-MAX_RELATED_PATHS = 32
+# Related names use the existing per-request metadata item ceiling. This is
+# an admission policy, not a claim that every 64-path payload fits: the normal
+# instruction/prompt limits and the durable byte-fit check still apply.
+MAX_RELATED_PATHS = DEFAULT_REVIEW_LIMITS.max_metadata_items
 
 GENERATED_SUFFIXES = (".min.js", ".min.css", ".min.map", ".map")
 GENERATED_PATH_PREFIXES = ("dist/", "vendor/", "node_modules/", "generated/")

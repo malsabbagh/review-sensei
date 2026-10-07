@@ -17,7 +17,6 @@ from .baseline import (
     admission_context_document,
     admission_context_from_document,
     baseline_from_history_document,
-    baseline_history_document,
     plan_verification_scope,
     reconcile_overflow_review,
 )
@@ -3254,6 +3253,7 @@ def main(argv: list[str] | None = None) -> int:
             SessionIdentity,
             SessionLedger,
             admission_diagnostic,
+            checkpoint_baseline_capacity,
             checkpoint_review_analysis,
             prepare_review_transaction,
             prepare_session_round,
@@ -3825,6 +3825,7 @@ def main(argv: list[str] | None = None) -> int:
                 baseline=persisted_baseline,
                 current_key=current_key,
                 changed_paths=analysis.changed_paths,
+                baseline_bytes=checkpoint_baseline_capacity(prepared_round.record),
             )
             if scope.status != "verify" or scope.incremental is None:
                 if not (
@@ -3858,9 +3859,17 @@ def main(argv: list[str] | None = None) -> int:
                 run.result is not None
                 and admission_baseline is not None
                 and verification_scope is not None
-                and verification_scope.invalidation_reason == "related-context-overflow"
+                and (
+                    verification_scope.coverage_mode == "incremental"
+                    or verification_scope.invalidation_reason
+                    == "related-context-overflow"
+                )
             ):
-                reconciled = reconcile_overflow_review(run.result, admission_baseline)
+                reconciled = reconcile_overflow_review(
+                    run.result,
+                    admission_baseline,
+                    coverage_mode=verification_scope.coverage_mode,
+                )
                 status, diagnostic = service._run_outcome_for_result(reconciled)
                 run = replace(
                     run,
@@ -4035,27 +4044,17 @@ def main(argv: list[str] | None = None) -> int:
                             prior_baseline=(
                                 admission_baseline
                                 if verification_scope is not None
-                                and verification_scope.invalidation_reason
-                                == "related-context-overflow"
+                                and (
+                                    verification_scope.coverage_mode == "incremental"
+                                    or verification_scope.invalidation_reason
+                                    == "related-context-overflow"
+                                )
                                 else None
                             ),
                         )
                         if cache_key is not None
                         else None
                     )
-                    if (
-                        checkpoint_baseline is not None
-                        and checkpoint_baseline.complete
-                        and verification_scope is not None
-                        and verification_scope.invalidation_reason
-                        == "related-context-overflow"
-                        and not baseline_history_document(checkpoint_baseline)[
-                            "complete"
-                        ]
-                    ):
-                        raise ReviewInputError(
-                            "full overflow review evidence exceeds the persisted bound"
-                        )
                     result = checkpoint_review_analysis(
                         ledger,
                         identity,

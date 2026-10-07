@@ -125,7 +125,7 @@ LINEAGE_REASONS = frozenset(
 )
 COVERAGE_MODES = frozenset({"full", "incremental", "fallback-full", "unscoped"})
 MAX_VERIFICATION_CONCERNS = MAX_CACHE_METADATA_ITEMS
-# ADR 0053 reserves room in the 4096-byte envelope for three trusted blocker-set
+# ADR 0053 reserves room in the history envelope for three trusted blocker-set
 # identities, so the persisted baseline retains at most two findings. The
 # runtime baseline keeps the wider shared metadata budget; only its persisted
 # projection is narrowed here.
@@ -134,14 +134,14 @@ MAX_HISTORY_FINDINGS = 2
 # readers accept the three-finding F2 envelope during rolling upgrades. A
 # later checkpoint rewrites the bounded projection using MAX_HISTORY_FINDINGS.
 MAX_HISTORY_READ_FINDINGS = 3
-# The persisted projection must fit the session envelope's 4096-byte bound
+# The persisted projection must fit the session envelope's 12288-byte bound
 # (ADR 0053) beside the framing a checkpoint also carries: the lifecycle state,
 # up to three blocker-bearing progress markers, and the provenance digest.
 # Measured with three maximal markers and a populated cache key that framing
-# costs 846 bytes, so 1024 is reserved and the projection may use 3072. A
-# parity test pins both constants against the session envelope bound.
+# costs 846 bytes, so 1024 remains reserved. The remaining 11264 bytes are a
+# ceiling: the writer reduces this allocation to fit the surrounding record.
 MAX_HISTORY_ENVELOPE_RESERVE_BYTES = 1024
-MAX_HISTORY_BASELINE_BYTES = 3072
+MAX_HISTORY_BASELINE_BYTES = 11_264
 # The verification-scope and session-record schemas mirror these bounds; update
 # their parity tests whenever the shared metadata budget changes.
 
@@ -378,7 +378,12 @@ def _history_path_projection(
     return tuple(reviewed), tuple(related)
 
 
-def baseline_history_document(baseline: ReviewBaseline) -> dict[str, object]:
+def baseline_history_document(
+    baseline: ReviewBaseline,
+    *,
+    max_bytes: int = MAX_HISTORY_BASELINE_BYTES,
+    require_complete: bool = False,
+) -> dict[str, object]:
     """Return the closed metadata needed to rebuild a completed baseline.
 
     This is deliberately identity and evidence metadata only: it never carries
@@ -396,6 +401,13 @@ def baseline_history_document(baseline: ReviewBaseline) -> dict[str, object]:
 
     if not isinstance(baseline, ReviewBaseline):
         raise ReviewInputError("review baseline is invalid")
+    _require_bool(require_complete, label="require_complete")
+    if (
+        isinstance(max_bytes, bool)
+        or not isinstance(max_bytes, int)
+        or not 0 <= max_bytes <= MAX_HISTORY_BASELINE_BYTES
+    ):
+        raise ReviewInputError("baseline byte allowance is invalid")
     if len(baseline.reviewed_paths) > MAX_CACHE_METADATA_ITEMS:
         raise ReviewInputError("baseline reviewed paths exceed the persisted bound")
     if len(baseline.related_paths) > MAX_RELATED_PATHS:
@@ -408,6 +420,23 @@ def baseline_history_document(baseline: ReviewBaseline) -> dict[str, object]:
     findings = sorted(baseline.findings, key=lambda item: item.fingerprint)[
         :MAX_HISTORY_FINDINGS
     ]
+    if any(
+        len(value) > 256
+        for value in (
+            baseline.cache_key.repository,
+            baseline.cache_key.engine,
+            baseline.cache_key.model,
+            baseline.cache_key.profile,
+            *baseline.reviewed_paths,
+            *baseline.related_paths,
+        )
+    ) or any(
+        (finding.path is not None and len(finding.path) > 256)
+        or (finding.symbol is not None and len(finding.symbol) > 256)
+        or len(finding.defect_kind) > 128
+        for finding in findings
+    ):
+        raise ReviewInputError("baseline evidence exceeds persisted field bounds")
     document: dict[str, object] = {
         "cache_key": baseline_cache_key_document(baseline.cache_key),
         "policy_digest": baseline.policy_digest,
@@ -430,7 +459,23 @@ def baseline_history_document(baseline: ReviewBaseline) -> dict[str, object]:
         "reviewed_paths": [],
         "related_paths": [],
     }
-    available = MAX_HISTORY_BASELINE_BYTES - _history_encoding_size(document)
+    if require_complete:
+        # Mandatory evidence uses its exact canonical encoding, including both
+        # arrays. Optional legacy projection below retains its conservative
+        # separator allowance and explicit incomplete flags.
+        document["reviewed_paths"] = sorted(baseline.reviewed_paths)
+        document["related_paths"] = sorted(baseline.related_paths)
+        if (
+            not baseline.complete
+            or not baseline.coverage_complete
+            or len(findings) != len(baseline.findings)
+            or _history_encoding_size(document) > max_bytes
+        ):
+            raise ReviewInputError(
+                "complete review evidence exceeds the persisted bound"
+            )
+        return document
+    available = max_bytes - _history_encoding_size(document)
     if available < 0:
         raise ReviewInputError("baseline identity exceeds the persisted envelope bound")
     reviewed, related = _history_path_projection(baseline, available=available)
@@ -909,12 +954,19 @@ def plan_verification_scope(
     related_paths: Sequence[str] | None = None,
     confirmed_concerns: Sequence[str] = (),
     context_complete: bool = True,
+    baseline_bytes: int = MAX_HISTORY_BASELINE_BYTES,
 ) -> VerificationScope:
     """Plan the next pass against a stored complete baseline."""
 
     if not isinstance(policy, ReviewConvergencePolicy):
         raise ReviewInputError("review convergence policy is invalid")
     _require_bool(context_complete, label="context_complete")
+    if (
+        isinstance(baseline_bytes, bool)
+        or not isinstance(baseline_bytes, int)
+        or not 0 <= baseline_bytes <= MAX_HISTORY_BASELINE_BYTES
+    ):
+        raise ReviewInputError("baseline byte allowance is invalid")
     changed = _bounded_paths(changed_paths, label="changed")
     if policy.mode not in OPERATOR_REVIEW_MODES:
         raw_extra_related = (
@@ -985,7 +1037,9 @@ def plan_verification_scope(
         )
     if not context_complete:
         if related_paths is not None:
-            _bounded_paths(related_paths, label="related")
+            _bounded_related_paths(related_paths, label="related")
+        for item in confirmed_concerns:
+            _require_sha256(item, label="confirmed concern")
         return _scope(
             status="incomplete-baseline",
             round_kind="initial",
@@ -1020,6 +1074,32 @@ def plan_verification_scope(
         )
     related = _merge_related_paths(baseline.related_paths, extra_related)
     reviewed = _unique_paths(existing_paths, baseline.reviewed_paths, changed, related)
+    # Count admission is only the first bound. A complete incremental scope
+    # must preserve its prior findings and every reviewed/related evidence path
+    # in the actual ledger allocation; long/escaped names are not truncated.
+    candidate = replace(
+        baseline,
+        cache_key=current_key,
+        generation=baseline.generation + 1,
+        reviewed_paths=reviewed,
+        related_paths=related,
+    )
+    try:
+        baseline_history_document(
+            candidate, max_bytes=baseline_bytes, require_complete=True
+        )
+    except ReviewInputError:
+        return _scope(
+            status="incompatible",
+            round_kind="initial",
+            late_admission_required=False,
+            coverage_mode="fallback-full",
+            invalidation_reason="related-context-overflow",
+            reviewed_paths=changed,
+            related_paths=(),
+            changed_paths=changed,
+            existing_concerns=len(baseline.findings),
+        )
     try:
         incremental = IncrementalReviewPlan(
             previous_key=baseline.cache_key,
@@ -1170,7 +1250,10 @@ def match_baseline_finding(
 
 
 def reconcile_overflow_review(
-    result: ReviewResult, baseline: ReviewBaseline
+    result: ReviewResult,
+    baseline: ReviewBaseline,
+    *,
+    coverage_mode: str = "fallback-full",
 ) -> ReviewResult:
     """Reconcile fresh overflow analysis without treating omission as a fix.
 
@@ -1194,6 +1277,13 @@ def reconcile_overflow_review(
     omitted = tuple(
         finding for finding in baseline.findings if finding.fingerprint not in matched
     )
+    # Multiple current comments claiming one historical identity are ambiguous;
+    # neither comment supplies a unique rediscovery witness for checkpointing.
+    multiply_claimed = tuple(
+        finding
+        for finding in baseline.findings
+        if matches.count(finding.fingerprint) > 1
+    )
     current = {
         finding_lifecycle_for_comment(comment).fingerprint
         for comment in result.comments
@@ -1205,13 +1295,13 @@ def reconcile_overflow_review(
         lifecycles.setdefault(
             fingerprint, FindingLifecycleRecord(fingerprint, "still-present")
         )
-    for finding in (*omitted, *downgraded):
+    for finding in (*omitted, *downgraded, *multiply_claimed):
         lifecycles[finding.fingerprint] = FindingLifecycleRecord(
             finding.fingerprint, "uncertain"
         )
     return replace(
         result,
-        coverage_mode="fallback-full",
+        coverage_mode=coverage_mode,
         review_status=(
             "partial"
             if result.review_status == "complete"

@@ -25,7 +25,7 @@ from review_sensei.hosting.github.approval import (
 from review_sensei.hosting.github.publication import prepare_publication_review
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.outcomes import ResourceBudget
-from review_sensei.planning import related_paths_for_change
+from review_sensei.planning import MAX_RELATED_PATHS, related_paths_for_change
 from review_sensei.providers.base import ProviderResponse
 from review_sensei.service import DEFAULT_STAGES
 from review_sensei.session import (
@@ -162,7 +162,7 @@ class BaselineRecoveryTests(unittest.TestCase):
             self.record().convergence_history["baseline"]
         )
 
-    def seed_overflow(self, *, finding=False, long_paths=False):
+    def seed_overflow(self, *, finding=False, long_paths=False, fits=False):
         if finding:
             self.provider.comments = [
                 {
@@ -183,12 +183,14 @@ class BaselineRecoveryTests(unittest.TestCase):
         self.ledger.replace(
             self.identity, lambda record: record.evolve(convergence_history=history)
         )
-        current = prior[:8] + tuple(
-            f"{'x' * 100 if long_paths else 'n'}{i}.py" for i in range(39)
+        current = prior[: 7 if fits else 8] + tuple(
+            f"{'x' * 240 if long_paths else 'n'}{i}.py"
+            for i in range(25 if fits else MAX_RELATED_PATHS + 7)
         )
         related = related_paths_for_change(current)
         self.assertEqual(
-            (len(prior), len(related), len(set(prior) | set(related))), (16, 32, 41)
+            (len(prior), len(related), len(set(prior) | set(related))),
+            (16, 32, 41) if fits else (16, MAX_RELATED_PATHS, MAX_RELATED_PATHS + 9),
         )
         (self.root / "diff.patch").write_text(
             "".join(
@@ -211,7 +213,7 @@ class BaselineRecoveryTests(unittest.TestCase):
             json.loads((self.root / "result.json").read_text())
         )
         self.assertEqual(result.coverage_mode, "fallback-full")
-        self.assertEqual(len(result.coverage.enumerated_paths), 47)
+        self.assertEqual(len(result.coverage.enumerated_paths), MAX_RELATED_PATHS + 15)
         self.assertTrue(result.coverage.fully_reviewed)
         self.assertEqual(self.baseline().cache_key.head_sha, "d" * 40)
         self.assertEqual(
@@ -229,6 +231,79 @@ class BaselineRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(self.provider.calls, 2)
         self.assertEqual(self.record().generation, generation)
+
+    def test_original_41_path_case_runs_incremental_once_and_exact_retry_skips(self):
+        before = self.seed_overflow(fits=True)
+        code, stderr, outcome = self.run_cli(head="d")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(self.provider.calls, 2)
+        self.assertNotIn("baseline_refresh", outcome["stage_summary"])
+        result = ReviewResult.from_dict(
+            json.loads((self.root / "result.json").read_text())
+        )
+        self.assertEqual(result.coverage_mode, "incremental")
+        self.assertEqual(len(self.baseline().related_paths), 41)
+        self.assertTrue(self.baseline().complete)
+        self.assertEqual(
+            self.record().completed_verification_rounds,
+            before.completed_verification_rounds + 1,
+        )
+        self.assertEqual(
+            self.run_cli(head="d")[2]["diagnostic"], "publication_recovery_required"
+        )
+        self.assertEqual(self.provider.calls, 2)
+
+    def test_incremental_41_omitted_blocker_retains_exact_history_and_holds_approval(
+        self,
+    ):
+        before = self.seed_overflow(finding=True, fits=True)
+        code, stderr, outcome = self.run_cli(head="d")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(outcome["status"], "partial")
+        self.assertEqual(self.provider.calls, 2)
+        result = ReviewResult.from_dict(
+            json.loads((self.root / "result.json").read_text())
+        )
+        self.assertEqual(result.coverage_mode, "incremental")
+        self.assertIn(
+            self.baseline().findings[0].fingerprint,
+            {
+                item.fingerprint
+                for item in result.finding_lifecycles
+                if item.state == "uncertain"
+            },
+        )
+        self.assertEqual(self.record().convergence_history, before.convergence_history)
+        self.assertEqual(self.record().failed_attempts, 1)
+        self.assertFalse(
+            evaluate_approval_facts(
+                approval_facts_from_result(
+                    result,
+                    enabled=True,
+                    app_authored=False,
+                    check_published=True,
+                    has_open_review_threads=False,
+                )
+            ).approved
+        )
+
+    def test_incremental_41_downgraded_blocker_cannot_replace_history(self):
+        before = self.seed_overflow(finding=True, fits=True)
+        self.provider.comments = [
+            {
+                "path": "app.py",
+                "line": 2,
+                "body": "Reworded authorization concern.",
+                "blocking": False,
+                "severity": "low",
+                "defect_kind": "authz-failure",
+            }
+        ]
+        code, stderr, outcome = self.run_cli(head="d")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(outcome["status"], "partial")
+        self.assertEqual(self.record().convergence_history, before.convergence_history)
+        self.assertEqual(self.provider.calls, 2)
 
     def test_overflow_omitted_blocker_stays_uncertain_and_history_survives_replay(self):
         before = self.seed_overflow(finding=True)
@@ -281,9 +356,7 @@ class BaselineRecoveryTests(unittest.TestCase):
         before = self.seed_overflow(long_paths=True)
         code, stderr, _ = self.run_cli(head="d")
         self.assertEqual(code, 1, stderr)
-        self.assertIn(
-            "full overflow review evidence exceeds the persisted bound", stderr
-        )
+        self.assertIn("complete review evidence exceeds the persisted bound", stderr)
         self.assertEqual(self.provider.calls, 2)
         self.assertEqual(self.record().convergence_history, before.convergence_history)
         self.assertEqual(self.record().failed_attempts, 1)

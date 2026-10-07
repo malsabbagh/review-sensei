@@ -183,13 +183,13 @@ class PreviewScopeTests(unittest.TestCase):
 
 
 class BaselinePlanTests(unittest.TestCase):
-    def test_related_union_at_32_is_incremental_and_33_falls_back(self):
+    def test_related_union_at_limit_is_incremental_and_next_falls_back(self):
         policy = ReviewConvergencePolicy(mode="merge-focused")
         prior = tuple(f"src/p{i}.py" for i in range(16))
         baseline = baseline_from_review(
             _result(_comment()), cache_key=_key(), policy=policy, related_paths=prior
         )
-        for count in (16, 17):
+        for count in (MAX_RELATED_PATHS - 16, MAX_RELATED_PATHS - 15):
             scope = plan_verification_scope(
                 policy=policy,
                 baseline=baseline,
@@ -198,9 +198,12 @@ class BaselinePlanTests(unittest.TestCase):
                 related_paths=tuple(f"src/n{i}.py" for i in range(count)),
             )
             self.assertEqual(
-                scope.coverage_mode, "incremental" if count == 16 else "fallback-full"
+                scope.coverage_mode,
+                "incremental" if count == MAX_RELATED_PATHS - 16 else "fallback-full",
             )
-            self.assertEqual(scope.incremental is not None, count == 16)
+            self.assertEqual(
+                scope.incremental is not None, count == MAX_RELATED_PATHS - 16
+            )
         # Duplicate entries do not make a valid union overflow.
         scope = plan_verification_scope(
             policy=policy,
@@ -219,7 +222,7 @@ class BaselinePlanTests(unittest.TestCase):
         for related in (
             ("../escape.py",),
             "src/a.py",
-            tuple(f"src/n{i}.py" for i in range(33)),
+            tuple(f"src/n{i}.py" for i in range(MAX_RELATED_PATHS + 1)),
         ):
             with self.subTest(related=related), self.assertRaises(ReviewInputError):
                 plan_verification_scope(
@@ -305,8 +308,22 @@ class BaselinePlanTests(unittest.TestCase):
         self.assertEqual(
             reconcile_overflow_review(too_many, baseline).review_status, "partial"
         )
+        multiply_claimed = reconcile_overflow_review(
+            _result(_comment(), _comment(body="A second claim for the same concern")),
+            baseline,
+            coverage_mode="incremental",
+        )
+        self.assertEqual(multiply_claimed.review_status, "partial")
+        self.assertIn(
+            baseline.findings[0].fingerprint,
+            {
+                item.fingerprint
+                for item in multiply_claimed.finding_lifecycles
+                if item.state == "uncertain"
+            },
+        )
 
-    def test_valid_16_and_32_related_paths_with_union_41_use_full_review(self):
+    def test_valid_16_and_32_related_paths_with_union_41_stay_incremental(self):
         policy = ReviewConvergencePolicy(mode="merge-focused")
         prior = tuple(f"src/prior{i}.py" for i in range(16))
         current = prior[:7] + tuple(f"src/current{i}.py" for i in range(25))
@@ -321,13 +338,13 @@ class BaselinePlanTests(unittest.TestCase):
             changed_paths=current,
             related_paths=current,
         )
-        self.assertEqual(scope.coverage_mode, "fallback-full")
-        self.assertEqual(scope.invalidation_reason, "related-context-overflow")
-        self.assertIsNone(scope.incremental)
-        self.assertEqual(scope.related_paths, ())
+        self.assertEqual(scope.coverage_mode, "incremental")
+        self.assertIsNone(scope.invalidation_reason)
+        self.assertIsNotNone(scope.incremental)
+        self.assertEqual(len(scope.related_paths), 41)
         self.assertEqual(scope.existing_concerns, 1)
-        self.assertFalse(scope.late_admission_required)
-        self.assertEqual(scope.to_dict()["reviewed_paths"], list(current))
+        self.assertTrue(scope.late_admission_required)
+        self.assertTrue(set(current).issubset(scope.reviewed_paths))
 
     def test_complete_baseline_builds_incremental_plan(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")

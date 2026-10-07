@@ -951,6 +951,10 @@ def admit_review_result(
             changed_paths=verification_changed,
             related_paths=related_paths,
             confirmed_concerns=evidence_confirmed_concerns,
+            # Analysis may have a smaller per-ledger byte allocation than
+            # this publication process can reconstruct. Its identity-bound
+            # fallback result must never regain incremental authority here.
+            context_complete=result.coverage_mode != "fallback-full",
         )
     if verification_scope is not None:
         from .baseline import (
