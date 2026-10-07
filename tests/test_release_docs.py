@@ -350,6 +350,9 @@ class ReleaseDocsBuildTests(unittest.TestCase):
         for filename in ("pyproject.toml", "CHANGELOG.md", "README.md", ".gitignore"):
             shutil.copy(ROOT / filename, cls.root / filename)
         version = DOCS.load_script(ROOT, "check_release_version").project_version(ROOT)
+        site_version = json.loads(
+            (ROOT / "docs/site/data/site-manifest.json").read_text(encoding="utf-8")
+        )["release_facts"]["version"]
         paths = [
             cls.root / "pyproject.toml",
             cls.root / "CHANGELOG.md",
@@ -358,8 +361,11 @@ class ReleaseDocsBuildTests(unittest.TestCase):
             *list((cls.root / "packages/npm").rglob("package.json")),
         ]
         for path in paths:
+            source_version = (
+                site_version if path.is_relative_to(cls.root / "docs/site") else version
+            )
             path.write_text(
-                path.read_text(encoding="utf-8").replace(version, "0.6.17"),
+                path.read_text(encoding="utf-8").replace(source_version, "0.6.17"),
                 encoding="utf-8",
             )
         builder = DOCS.load_script(cls.root, "build_site_pages")
