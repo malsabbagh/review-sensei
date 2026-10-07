@@ -237,6 +237,28 @@ class ReleaseDocsMainIntegrationTests(unittest.TestCase):
         SYNC.git(self.root, "config", "core.autocrlf", "true")
         self.test_real_non_force_push_uses_fresh_main_and_retry_is_a_noop()
 
+    def test_verified_crlf_artifact_is_committed_byte_for_byte_and_retry_is_a_noop(
+        self,
+    ):
+        html = self.bundle / "site/index.html"
+        content = b"<main>v0.6.17</main> \r\n"
+        html.write_bytes(content)
+        (self.bundle / "files.json").write_text(
+            json.dumps(SYNC.docs.file_inventory(self.bundle / "site")), encoding="utf-8"
+        )
+        self.assertTrue(SYNC.sync(self.root, self.bundle, self.selection))
+        committed = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(self.origin),
+                "show",
+                f"main:{SYNC.SNAPSHOT}/site/index.html",
+            ]
+        )
+        self.assertEqual(committed, content)
+        self.assertFalse(SYNC.sync(self.root, self.bundle, self.selection))
+
     def test_actual_main_advance_during_push_is_reintegrated_with_no_force(self):
         real_run = subprocess.run
         pushes = []
