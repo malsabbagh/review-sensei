@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -38,10 +40,51 @@ def run_record(tag="v0.6.17"):
 
 
 def successful_jobs():
-    return [{"name": name, "conclusion": "success"} for name in DOCS.REQUIRED_JOBS]
+    return [
+        {"name": name, "conclusion": "success", "run_attempt": 1}
+        for name in DOCS.REQUIRED_JOBS
+    ]
 
 
 class ReleaseDocsQualificationTests(unittest.TestCase):
+    def test_post_approval_recheck_rejects_changed_identity_or_newer_release(self):
+        selection = {"release_run_id": 42, "artifact_id": 99, "tag": "v0.6.17"}
+        argv = ["release_docs.py", "recheck", "--selection-json", json.dumps(selection)]
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(DOCS, "qualify", return_value=selection),
+            patch.object(DOCS, "assert_latest"),
+        ):
+            self.assertEqual(DOCS.main(), 0)
+        for kind in ("changed-artifact", "newer-release"):
+            current = dict(selection)
+            if kind == "changed-artifact":
+                current["artifact_id"] = 100
+            with (
+                self.subTest(kind=kind),
+                patch.object(sys, "argv", argv),
+                patch.object(DOCS, "qualify", return_value=current),
+                patch.object(
+                    DOCS,
+                    "assert_latest",
+                    side_effect=ValueError("newer release")
+                    if kind == "newer-release"
+                    else None,
+                ),
+                patch.object(sys, "stderr", io.StringIO()),
+            ):
+                self.assertEqual(DOCS.main(), 1)
+
+    def test_publisher_only_retry_retains_earlier_docs_and_other_publications(self):
+        jobs = successful_jobs()
+        name = "Publish npm packages with Trusted Publishing"
+        next(job for job in jobs if job["name"] == name)["conclusion"] = "failure"
+        jobs.append({"name": name, "conclusion": "success", "run_attempt": 2})
+        DOCS.validate_run(run_record(), jobs)
+        jobs[-1]["conclusion"] = "failure"
+        with self.assertRaises(ValueError):
+            DOCS.validate_run(run_record(), jobs)
+
     def test_successful_tag_run_requires_all_publication_lanes(self):
         DOCS.validate_run(run_record(), successful_jobs())
         for name in DOCS.REQUIRED_JOBS:
@@ -463,8 +506,15 @@ class ReleaseDocsWorkflowTests(unittest.TestCase):
         self.assertNotIn("id-token: write", qualifier)
         self.assertIn("ref: ${{ github.sha }}", qualifier)
         self.assertIn("artifact-ids:", qualifier)
-        self.assertNotIn("checkout@", deploy)
-        self.assertNotIn("run:", deploy)
+        self.assertIn("ref: ${{ github.sha }}", deploy)
+        self.assertNotIn("head_sha", deploy)
+        self.assertNotIn("download-artifact@", deploy)
+        self.assertNotIn("release_docs.py build", deploy)
+        self.assertIn("release_docs.py recheck", deploy)
+        self.assertLess(
+            deploy.index("release_docs.py recheck"),
+            deploy.index("actions/deploy-pages@"),
+        )
         self.assertIn("needs: qualify", deploy)
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertNotIn("git push", workflow)

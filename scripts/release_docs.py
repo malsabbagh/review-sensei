@@ -96,6 +96,14 @@ def validate_run(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
         raise ValueError("invalid release source SHA")
     for name in REQUIRED_JOBS:
         matches = [job for job in jobs if job.get("name") == name]
+        attempts = [job.get("run_attempt") for job in matches]
+        if not attempts or any(
+            type(attempt) is not int or not 1 <= attempt <= run["run_attempt"]
+            for attempt in attempts
+        ):
+            raise ValueError(f"required release job attempt is invalid: {name}")
+        latest_attempt = max(attempts)
+        matches = [job for job in matches if job["run_attempt"] == latest_attempt]
         if len(matches) != 1 or matches[0].get("conclusion") != "success":
             raise ValueError(f"required release job did not succeed: {name}")
 
@@ -104,7 +112,9 @@ def qualify(run_id: int) -> dict[str, Any]:
     run = api(f"actions/runs/{run_id}")
     if run.get("id") != run_id:
         raise ValueError("release run identity does not match the request")
-    jobs = api_pages(f"actions/runs/{run_id}/jobs?filter=latest", "jobs")
+    # A publisher-only retry does not rerun successful build/docs jobs. Read
+    # all attempts and validate the newest execution of each required job.
+    jobs = api_pages(f"actions/runs/{run_id}/jobs?filter=all", "jobs")
     validate_run(run, jobs)
     tag = run["head_branch"]
     tag_sha, source_sha = tag_identity(tag)
@@ -154,7 +164,7 @@ def assert_latest(selection: dict[str, Any]) -> None:
         for run in runs:
             # A successful newer Release is a high-water mark even if its
             # artifact expired or its tag was subsequently moved/deleted.
-            jobs = api_pages(f"actions/runs/{run['id']}/jobs?filter=latest", "jobs")
+            jobs = api_pages(f"actions/runs/{run['id']}/jobs?filter=all", "jobs")
             validate_run(run, jobs)
             raise ValueError(f"docs cannot replace newer successful release {tag}")
 
@@ -337,6 +347,8 @@ def main() -> int:
     verify = sub.add_parser("verify")
     verify.add_argument("--bundle", type=Path, required=True)
     verify.add_argument("--selection", type=Path, required=True)
+    recheck = sub.add_parser("recheck")
+    recheck.add_argument("--selection-json", required=True)
     args = parser.parse_args()
     try:
         if args.command == "build":
@@ -357,13 +369,21 @@ def main() -> int:
                 "a", encoding="utf-8"
             ) as handle:
                 handle.write(f"artifact_id={selection['artifact_id']}\n")
+                handle.write(
+                    f"selection={json.dumps(selection, separators=(',', ':'))}\n"
+                )
         else:
-            selection = json.loads(args.selection.read_text(encoding="utf-8"))
+            selection = json.loads(
+                args.selection_json
+                if args.command == "recheck"
+                else args.selection.read_text(encoding="utf-8")
+            )
             # Re-check the remote cutoff immediately before staging a deployment.
             if qualify(selection["release_run_id"]) != selection:
                 raise ValueError("release identity changed during docs qualification")
             assert_latest(selection)
-            verify_bundle(args.bundle, selection)
+            if args.command == "verify":
+                verify_bundle(args.bundle, selection)
     except (ValueError, OSError, KeyError, subprocess.CalledProcessError) as exc:
         print(f"release docs failed: {exc}", file=sys.stderr)
         return 1

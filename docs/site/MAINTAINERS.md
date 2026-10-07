@@ -60,7 +60,10 @@ Pages consumes only the static artifact after the entire `Release` run succeeds,
 including Python, npm and GitHub publication. Its trusted main-branch helper
 rechecks the run, jobs, tag signature/object/SHA, source ancestry, stable GitHub
 release and artifact inventory. It never executes a downloaded artifact or
-checks out released code in the job granted Pages/OIDC permissions. Main and
+checks out released code in the job granted Pages/OIDC permissions. After
+environment approval, that job uses the pinned trusted default-branch helper
+to recheck the cutoff and newer-release high-water mark immediately before
+deploying. Main and
 released docs may intentionally differ: provider facts on the site describe
 the released source, even when their source manifest label is
 `implemented-on-main`.

@@ -573,8 +573,11 @@ GitHub-release jobs, a published non-draft/non-prerelease GitHub release, a
 verified signed annotated tag still pointing to the run SHA, source ancestry
 on main, and exactly one retained artifact from that run. It downloads that
 artifact by ID, rechecks the remote cutoff, and validates all file hashes and
-metadata. A separate `github-pages` environment job grants only Pages write and
-OIDC write, with no source checkout or downloaded-code execution. No long-lived
+metadata. After `github-pages` environment approval, a separate deploy job rechecks the
+selected tag/run/artifact identity and high-water mark immediately before Pages
+deployment. It grants Pages/OIDC write plus the Contents/Actions read needed
+for that check, executing only the pinned trusted default-branch helper. It
+never downloads or executes released code. No long-lived
 credential or extra publication permission is introduced. Existing environment
 rules/reviewers remain the deployment gate; no settings are changed by this PR.
 
