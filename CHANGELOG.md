@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Admit up to 64 related paths under the existing metadata item ceiling and
+  allocate up to 12 KiB of history inside a coordinated 20 KiB record / 40 KiB
+  comment envelope. Check actual escaped bytes and reserve future lifecycle
+  growth; keep one bounded full-review fallback when evidence cannot fit.
+  Preserve omitted or downgraded prior findings as uncertain/partial on both
+  incremental and fallback reviews. Shared-ledger readers must be upgraded
+  before expanded writes; existing installed/pinned consumers reject them.
+
 ## 0.6.16 - 2026-10-06
 
 - Report committed analysis with unfinished publication as requiring publication

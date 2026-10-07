@@ -52,6 +52,7 @@
         "incomplete-baseline",
         "missing-baseline",
         "coverage-incomplete",
+        "related-context-overflow",
         "ledger-untrusted",
         null
       ]
@@ -63,7 +64,7 @@
     },
     "related_paths": {
       "type": "array",
-      "maxItems": 32,
+      "maxItems": 64,
       "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
     },
     "changed_paths": {

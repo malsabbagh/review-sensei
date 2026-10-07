@@ -50,20 +50,12 @@ DEFAULT_SESSION_TTL = timedelta(days=30)
 # still in the future, so a writable v0.1 file cannot force an immediate reset.
 MIN_SESSION_TTL = timedelta(minutes=1)
 MAX_SESSION_TTL = timedelta(days=90)
-# The record bound stays twice the envelope bound. The largest members that
-# are not the envelope (a publication transaction, four maximal dispositions,
-# and four retained continuation-grant records) measured 5704 bytes, so a
-# realistic record still binds on the envelope while a pathological
-# combination of both is refused rather than silently truncated.
-MAX_SESSION_RECORD_BYTES = 8192
-# ADR 0053 reserves room in the envelope for two findings and three trusted
-# blocker-set identities. Measured with repository-realistic identity content
-# that reserved shape needs 2294 bytes with no path evidence and 3202 bytes for
-# a twenty-four path checkpoint (see
-# test_repository_realistic_checkpoint_fits_the_component_bound), so the
-# original 2048-byte bound refused every realistic completion. 4096 holds the
-# reserved shape with recorded headroom and keeps the envelope metadata-only.
-MAX_CONVERGENCE_HISTORY_BYTES = 4096
+# ADR 0066 compares 8 and 12 KiB against canonical checkpoint fixtures.
+# Twelve KiB admits the 64-path repository-style fixture with duplicate path
+# evidence, where eight does not. Keep the former 8 KiB record allowance for
+# surrounding state; allocate less history for larger retained/escaped fields.
+MAX_CONVERGENCE_HISTORY_BYTES = 12_288
+MAX_SESSION_RECORD_BYTES = MAX_CONVERGENCE_HISTORY_BYTES + 8192
 MAX_CONVERGENCE_PROGRESS_ENTRIES = 3
 SESSION_SHA256_PATTERN = r"^[a-f0-9]{64}$"
 # This is a deliberately coarse structural ceiling, independent of the byte
@@ -1221,6 +1213,70 @@ class SessionRecord:
         )
 
 
+def checkpoint_baseline_capacity(record: SessionRecord) -> int:
+    """Allocate history within the record, including future lifecycle growth.
+
+    Serialize a conservative superset of the analysis/publication shells.
+    Existing dispositions, grants, identities and timestamps are kept exactly;
+    fixed-width future counters, ownership, reservation and transaction fields
+    are reserved at their largest supported encoding. The superset intentionally
+    includes mutually exclusive fields, so no phase can exceed this allowance.
+    New operator commands still validate their actual complete record before CAS.
+    """
+
+    from .baseline import (
+        MAX_HISTORY_BASELINE_BYTES,
+        MAX_HISTORY_ENVELOPE_RESERVE_BYTES,
+    )
+
+    shell = record.to_dict()
+    shell.pop("convergence_history", None)
+    shell.update(
+        generation=MAX_GENERATION,
+        completed_initial_reviews=DIAGNOSTIC_ROUND_CEILING,
+        completed_verification_rounds=DIAGNOSTIC_ROUND_CEILING,
+        failed_attempts=MAX_FAILED_ATTEMPTS,
+        failed_attempts_head_sha="a" * 64,
+        operator_paused=False,
+        reservation_id="a" * 64,
+        reserved_slot="failed-attempt",
+        last_committed_reservation_id="b" * 64,
+        reservation_owner={"run_id": "9" * 19, "head_sha": "a" * 40},
+        convergence_history={},
+    )
+    # Internal timestamps are normalized by _format_datetime. Retained longer
+    # legacy spellings are charged at their actual size rather than shortened.
+    updated = "9999-12-31T23:59:59.999999Z"
+    if len(updated) > len(str(shell["updated_at"])):
+        shell["updated_at"] = updated
+    transaction = ReviewTransaction.create(
+        repository=record.repository,
+        pull_request=record.pull_request,
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        policy_digest="c" * 64,
+        configuration_digest="d" * 64,
+        evidence_digest="e" * 64,
+        reservation_id="f" * 64,
+        generation=MAX_GENERATION,
+    ).to_dict()
+    transaction.update(phase="publication_suppressed", result_sha256="a" * 64)
+    shell["transaction"] = transaction
+    # Subtract the empty object's two bytes; key/colon/comma and the record
+    # digest remain included. Nested JSON is an object, not an escaped string.
+    outside = len(json.dumps(shell, sort_keys=True, separators=(",", ":")).encode()) - 2
+    history_bytes = min(
+        MAX_CONVERGENCE_HISTORY_BYTES, MAX_SESSION_RECORD_BYTES - outside
+    )
+    return max(
+        0,
+        min(
+            MAX_HISTORY_BASELINE_BYTES,
+            history_bytes - MAX_HISTORY_ENVELOPE_RESERVE_BYTES,
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class SessionLoadResult:
     """Result of a fail-closed ledger load. Missing state is explicit."""
@@ -1755,7 +1811,11 @@ def _checkpoint_transaction_record(
                 ]
         convergence_history = {
             "state": "completed",
-            "baseline": baseline_history_document(baseline),
+            "baseline": baseline_history_document(
+                baseline,
+                max_bytes=checkpoint_baseline_capacity(record),
+                require_complete=True,
+            ),
             "progress": [
                 *prior_progress,
                 {"event": "completed", "generation": next_generation},

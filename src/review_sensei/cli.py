@@ -18,6 +18,7 @@ from .baseline import (
     admission_context_from_document,
     baseline_from_history_document,
     plan_verification_scope,
+    reconcile_overflow_review,
 )
 from .configuration import (
     BACKEND_DEFAULTS,
@@ -3252,6 +3253,7 @@ def main(argv: list[str] | None = None) -> int:
             SessionIdentity,
             SessionLedger,
             admission_diagnostic,
+            checkpoint_baseline_capacity,
             checkpoint_review_analysis,
             prepare_review_transaction,
             prepare_session_round,
@@ -3823,6 +3825,7 @@ def main(argv: list[str] | None = None) -> int:
                 baseline=persisted_baseline,
                 current_key=current_key,
                 changed_paths=analysis.changed_paths,
+                baseline_bytes=checkpoint_baseline_capacity(prepared_round.record),
             )
             if scope.status != "verify" or scope.incremental is None:
                 if not (
@@ -3852,6 +3855,27 @@ def main(argv: list[str] | None = None) -> int:
                 profile=effective_profile,
                 budget=ResourceBudget.for_limits(limits),
             )
+            if (
+                run.result is not None
+                and admission_baseline is not None
+                and verification_scope is not None
+                and (
+                    verification_scope.coverage_mode == "incremental"
+                    or verification_scope.invalidation_reason
+                    == "related-context-overflow"
+                )
+            ):
+                reconciled = reconcile_overflow_review(
+                    run.result,
+                    admission_baseline,
+                    coverage_mode=verification_scope.coverage_mode,
+                )
+                status, diagnostic = service._run_outcome_for_result(reconciled)
+                run = replace(
+                    run,
+                    result=reconciled,
+                    outcome=replace(run.outcome, status=status, diagnostic=diagnostic),
+                )
         except (KeyboardInterrupt, SystemExit) as analysis_error:
             cleanup_analysis_error(analysis_error, charge_failed_attempt=False)
             raise
@@ -4017,6 +4041,16 @@ def main(argv: list[str] | None = None) -> int:
                             policy=policy,
                             related_paths=verification_related_paths,
                             generation=next_session_generation(prepared_round.record),
+                            prior_baseline=(
+                                admission_baseline
+                                if verification_scope is not None
+                                and (
+                                    verification_scope.coverage_mode == "incremental"
+                                    or verification_scope.invalidation_reason
+                                    == "related-context-overflow"
+                                )
+                                else None
+                            ),
                         )
                         if cache_key is not None
                         else None

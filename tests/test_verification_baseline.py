@@ -19,6 +19,7 @@ from review_sensei.baseline import (
     evaluate_baseline_compatibility,
     plan_verification_scope,
     preview_verification_scope,
+    reconcile_overflow_review,
 )
 from review_sensei.context import (
     MAX_CACHE_METADATA_ITEMS,
@@ -182,6 +183,169 @@ class PreviewScopeTests(unittest.TestCase):
 
 
 class BaselinePlanTests(unittest.TestCase):
+    def test_related_union_at_limit_is_incremental_and_next_falls_back(self):
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        prior = tuple(f"src/p{i}.py" for i in range(16))
+        baseline = baseline_from_review(
+            _result(_comment()), cache_key=_key(), policy=policy, related_paths=prior
+        )
+        for count in (MAX_RELATED_PATHS - 16, MAX_RELATED_PATHS - 15):
+            scope = plan_verification_scope(
+                policy=policy,
+                baseline=baseline,
+                current_key=_key(head_sha=SHA_C),
+                changed_paths=("src/app.py",),
+                related_paths=tuple(f"src/n{i}.py" for i in range(count)),
+            )
+            self.assertEqual(
+                scope.coverage_mode,
+                "incremental" if count == MAX_RELATED_PATHS - 16 else "fallback-full",
+            )
+            self.assertEqual(
+                scope.incremental is not None, count == MAX_RELATED_PATHS - 16
+            )
+        # Duplicate entries do not make a valid union overflow.
+        scope = plan_verification_scope(
+            policy=policy,
+            baseline=baseline,
+            current_key=_key(head_sha=SHA_C),
+            related_paths=prior + prior,
+        )
+        self.assertEqual(scope.coverage_mode, "incremental")
+
+    def test_malformed_and_individually_oversized_context_do_not_recover(self):
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        prior = tuple(f"src/p{i}.py" for i in range(32))
+        baseline = baseline_from_review(
+            _result(_comment()), cache_key=_key(), policy=policy, related_paths=prior
+        )
+        for related in (
+            ("../escape.py",),
+            "src/a.py",
+            tuple(f"src/n{i}.py" for i in range(MAX_RELATED_PATHS + 1)),
+        ):
+            with self.subTest(related=related), self.assertRaises(ReviewInputError):
+                plan_verification_scope(
+                    policy=policy,
+                    baseline=baseline,
+                    current_key=_key(head_sha=SHA_C),
+                    related_paths=related,
+                )
+        with self.assertRaises(ReviewInputError):
+            plan_verification_scope(
+                policy=policy,
+                baseline=baseline,
+                current_key=_key(head_sha=SHA_C),
+                related_paths=("src/new.py",),
+                confirmed_concerns=("invalid",),
+            )
+        for context_complete in (1, "yes"):
+            with self.assertRaises(ReviewInputError):
+                plan_verification_scope(
+                    policy=policy,
+                    baseline=baseline,
+                    current_key=_key(head_sha=SHA_C),
+                    related_paths=("src/new.py",),
+                    context_complete=context_complete,
+                )
+
+    def test_overflow_omission_retains_prior_and_refuses_clean_refresh(self):
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = baseline_from_review(
+            _result(_comment()), cache_key=_key(), policy=policy
+        )
+        result = reconcile_overflow_review(_result(), baseline)
+        self.assertEqual(result.review_status, "partial")
+        self.assertEqual(
+            result.finding_lifecycles[0].fingerprint, baseline.findings[0].fingerprint
+        )
+        self.assertEqual(result.finding_lifecycles[0].state, "uncertain")
+        # A narrow lifecycle budget must refuse, never truncate.
+        with self.assertRaises(ReviewInputError):
+            reconcile_overflow_review(
+                replace(
+                    _result(_comment(path="src/new.py", defect_kind="different")),
+                    limits=replace(_result().limits, max_comments=1),
+                ),
+                baseline,
+            )
+
+    def test_overflow_rediscovery_preserves_original_criterion_and_blocking(self):
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        baseline = baseline_from_review(
+            _result(_comment()), cache_key=_key(), policy=policy
+        )
+        rediscovered = _result(
+            _comment(
+                body="Reworded concern",
+                blocking=True,
+                severity="high",
+                evidence_id="new-evidence",
+            )
+        )
+        reconciled = reconcile_overflow_review(rediscovered, baseline)
+        self.assertEqual(reconciled.review_status, "complete")
+        refreshed = baseline_from_review(
+            reconciled,
+            cache_key=_key(head_sha=SHA_C),
+            policy=policy,
+            prior_baseline=baseline,
+        )
+        self.assertEqual(
+            refreshed.findings[0].resolution_criterion,
+            baseline.findings[0].resolution_criterion,
+        )
+        self.assertTrue(refreshed.findings[0].blocking)
+        downgraded = _result(
+            _comment(body="Reworded concern", blocking=False, severity="low")
+        )
+        self.assertEqual(
+            reconcile_overflow_review(downgraded, baseline).review_status, "partial"
+        )
+        too_many = _result(
+            _comment(), _comment(path="src/one.py"), _comment(path="src/two.py")
+        )
+        self.assertEqual(
+            reconcile_overflow_review(too_many, baseline).review_status, "partial"
+        )
+        multiply_claimed = reconcile_overflow_review(
+            _result(_comment(), _comment(body="A second claim for the same concern")),
+            baseline,
+            coverage_mode="incremental",
+        )
+        self.assertEqual(multiply_claimed.review_status, "partial")
+        self.assertIn(
+            baseline.findings[0].fingerprint,
+            {
+                item.fingerprint
+                for item in multiply_claimed.finding_lifecycles
+                if item.state == "uncertain"
+            },
+        )
+
+    def test_valid_16_and_32_related_paths_with_union_41_stay_incremental(self):
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        prior = tuple(f"src/prior{i}.py" for i in range(16))
+        current = prior[:7] + tuple(f"src/current{i}.py" for i in range(25))
+        self.assertEqual(len(set(prior) | set(current)), 41)
+        baseline = baseline_from_review(
+            _result(_comment()), cache_key=_key(), policy=policy, related_paths=prior
+        )
+        scope = plan_verification_scope(
+            policy=policy,
+            baseline=baseline,
+            current_key=_key(head_sha=SHA_C),
+            changed_paths=current,
+            related_paths=current,
+        )
+        self.assertEqual(scope.coverage_mode, "incremental")
+        self.assertIsNone(scope.invalidation_reason)
+        self.assertIsNotNone(scope.incremental)
+        self.assertEqual(len(scope.related_paths), 41)
+        self.assertEqual(scope.existing_concerns, 1)
+        self.assertTrue(scope.late_admission_required)
+        self.assertTrue(set(current).issubset(scope.reviewed_paths))
+
     def test_complete_baseline_builds_incremental_plan(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")
         previous = _key()
@@ -471,14 +635,15 @@ class BaselinePlanTests(unittest.TestCase):
                 f"src/base-{index}.py" for index in range(MAX_RELATED_PATHS)
             ),
         )
-        with self.assertRaises(ReviewInputError):
-            plan_verification_scope(
-                policy=policy,
-                baseline=baseline,
-                current_key=_key(head_sha=SHA_C),
-                changed_paths=("src/app.py",),
-                related_paths=("src/overflow.py",),
-            )
+        scope = plan_verification_scope(
+            policy=policy,
+            baseline=baseline,
+            current_key=_key(head_sha=SHA_C),
+            changed_paths=("src/app.py",),
+            related_paths=("src/overflow.py",),
+        )
+        self.assertEqual(scope.coverage_mode, "fallback-full")
+        self.assertEqual(scope.related_paths, ())
 
     def test_reviewed_context_never_truncates_silently(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")

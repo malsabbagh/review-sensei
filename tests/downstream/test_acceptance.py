@@ -20,8 +20,15 @@ assert_distribution_import()
 
 from fake_github_http import make_http  # noqa: E402
 
+from review_sensei.baseline import (  # noqa: E402
+    ReviewBaseline,
+    baseline_history_document,
+    plan_verification_scope,
+)
 from review_sensei.cli import main  # noqa: E402
 from review_sensei.concurrency import ReviewConcurrencyPlan  # noqa: E402
+from review_sensei.context import ReviewContextCacheKey  # noqa: E402
+from review_sensei.convergence import ReviewConvergencePolicy  # noqa: E402
 from review_sensei.hosting.github import (  # noqa: E402
     GitHubApplication,
     GitHubWriteOptions,
@@ -41,6 +48,11 @@ from review_sensei.models import (  # noqa: E402
     ReviewResult,
 )
 from review_sensei.service import ReviewService  # noqa: E402
+from review_sensei.session import (  # noqa: E402
+    LocalSessionLedger,
+    SessionIdentity,
+    SessionRecord,
+)
 from review_sensei.workflow import plan_review_execution  # noqa: E402
 
 DIFF = """diff --git a/src/app.py b/src/app.py
@@ -53,6 +65,59 @@ DIFF = """diff --git a/src/app.py b/src/app.py
 
 HEAD_SHA = "b" * 40
 BASE_SHA = "a" * 40
+
+
+class ExpandedInstalledContextTests(unittest.TestCase):
+    def test_installed_reader_round_trips_complete_41_path_history(self):
+        policy = ReviewConvergencePolicy(mode="merge-focused")
+        key = ReviewContextCacheKey(
+            repository="owner/repo",
+            pull_request=76,
+            base_sha=BASE_SHA,
+            head_sha=HEAD_SHA,
+            engine="fixture",
+            model="fixture-model",
+            profile="default",
+            stage_digest="a" * 64,
+            context_digest="b" * 64,
+            learning_digest="c" * 64,
+        )
+        paths = tuple(f"src/package_{index:03d}/{'m' * 30}.py" for index in range(41))
+        baseline = ReviewBaseline(
+            cache_key=key,
+            policy_digest=policy.digest(),
+            complete=True,
+            coverage_complete=True,
+            reviewed_paths=paths,
+            related_paths=paths,
+        )
+        history = {
+            "state": "completed",
+            "baseline": baseline_history_document(baseline, require_complete=True),
+            "progress": [{"event": "completed", "generation": 1}],
+            "provenance": {"ledger_digest": "d" * 64},
+        }
+        self.assertGreater(
+            len(json.dumps(history, separators=(",", ":")).encode()), 4096
+        )
+        identity = SessionIdentity("owner/repo", 76)
+        record = SessionRecord.create(identity, convergence_history=history)
+        with tempfile.TemporaryDirectory() as temp:
+            ledger = LocalSessionLedger(Path(temp))
+            ledger.initialize(identity)
+            ledger.replace(identity, lambda _previous: record)
+            self.assertEqual(
+                LocalSessionLedger(Path(temp)).load(identity).record, record
+            )
+        scope = plan_verification_scope(
+            policy=policy,
+            baseline=baseline,
+            current_key=key,
+            changed_paths=paths,
+            related_paths=paths,
+        )
+        self.assertEqual(scope.coverage_mode, "incremental")
+        self.assertEqual(len(scope.related_paths), 41)
 
 
 class FakeProvider:

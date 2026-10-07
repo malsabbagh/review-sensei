@@ -194,7 +194,7 @@ class SessionRecordTests(unittest.TestCase):
         baseline = history["baseline"]
         assert isinstance(baseline, dict)
         baseline["reviewed_paths"] = [
-            f"src/{'a' * 200}_{index}.py" for index in range(40)
+            f"src/{'a' * 200}_{index}.py" for index in range(80)
         ]
         record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
         document = record.to_dict()
@@ -1086,7 +1086,8 @@ class LocalSessionLedgerTests(unittest.TestCase):
             )
         )
         self.assertLessEqual(size, MAX_SESSION_RECORD_BYTES)
-        self.assertGreater(size, MAX_SESSION_RECORD_BYTES - 1024)
+        # The history component can bind before the larger record wrapper.
+        self.assertGreater(size, MAX_CONVERGENCE_HISTORY_BYTES)
 
         self.ledger._write(IDENTITY, record)
         restarted = LocalSessionLedger(Path(self.temp.name))
