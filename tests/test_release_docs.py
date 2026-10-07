@@ -370,10 +370,16 @@ class ReleaseDocsBuildTests(unittest.TestCase):
             )
         builder = DOCS.load_script(cls.root, "build_site_pages")
         builder.build_site_pages()
+        # Temporary repositories must not launch detached maintenance that can
+        # recreate object files while TemporaryDirectory removes the fixture.
         for args in (
             ("init", "-q"),
             ("add", "."),
             (
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "gc.auto=0",
                 "-c",
                 "user.name=Docs Test",
                 "-c",
@@ -483,6 +489,10 @@ class ReleaseDocsBuildTests(unittest.TestCase):
                     ("add", "."),
                     (
                         "-c",
+                        "maintenance.auto=false",
+                        "-c",
+                        "gc.auto=0",
+                        "-c",
                         "user.name=Docs Test",
                         "-c",
                         "user.email=docs@example.test",
@@ -551,6 +561,10 @@ class ReleaseDocsBuildTests(unittest.TestCase):
                 ("init", "-q"),
                 ("add", "."),
                 (
+                    "-c",
+                    "maintenance.auto=false",
+                    "-c",
+                    "gc.auto=0",
                     "-c",
                     "user.name=Docs Test",
                     "-c",
