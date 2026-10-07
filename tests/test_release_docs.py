@@ -302,7 +302,10 @@ class ReleaseDocsBuildTests(unittest.TestCase):
             *list((cls.root / "packages/npm").rglob("package.json")),
         ]
         for path in paths:
-            path.write_text(path.read_text().replace(version, "0.6.17"))
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(version, "0.6.17"),
+                encoding="utf-8",
+            )
         builder = DOCS.load_script(cls.root, "build_site_pages")
         builder.build_site_pages()
         for args in (
@@ -364,17 +367,21 @@ class ReleaseDocsBuildTests(unittest.TestCase):
         )
         DOCS.verify_bundle(self.bundle, self.selection)
         for path in (self.bundle / "site").rglob("*.html"):
-            html = path.read_text()
+            html = path.read_text(encoding="utf-8")
             self.assertNotIn(f"https://github.com/{DOCS.REPOSITORY}/blob/main/", html)
             self.assertNotIn(f"https://github.com/{DOCS.REPOSITORY}/tree/main/", html)
             self.assertIn("Released docs:", html)
             self.assertIn("v0.6.17", html)
-        home = (self.bundle / "site/index.html").read_text()
+        home = (self.bundle / "site/index.html").read_text(encoding="utf-8")
         self.assertIn("pip install review-sensei==0.6.17", home)
-        onboarding = (self.bundle / "site/getting-started/index.html").read_text()
+        onboarding = (self.bundle / "site/getting-started/index.html").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("@reviewsensei/cli@0.6.17", onboarding)
         self.assertIn("review-sensei-run.yml@v5", onboarding)
-        examples = (self.bundle / "site/examples/index.html").read_text()
+        examples = (self.bundle / "site/examples/index.html").read_text(
+            encoding="utf-8"
+        )
         self.assertIn(f"blob/{self.sha}/docs/public-contracts.md", examples)
         self.assertEqual(before, "")
         self.assertEqual(
@@ -386,10 +393,14 @@ class ReleaseDocsBuildTests(unittest.TestCase):
 
     def test_provenance_schema_rejects_missing_identity_or_mutable_source(self):
         schema = json.loads(
-            (self.bundle / "site/schemas/release-provenance.schema.json").read_text()
+            (self.bundle / "site/schemas/release-provenance.schema.json").read_text(
+                encoding="utf-8"
+            )
         )
         provenance = json.loads(
-            (self.bundle / "site/data/release-provenance.json").read_text()
+            (self.bundle / "site/data/release-provenance.json").read_text(
+                encoding="utf-8"
+            )
         )
         validator = Draft202012Validator(schema)
         validator.validate(provenance)
@@ -412,13 +423,13 @@ class ReleaseDocsBuildTests(unittest.TestCase):
                 bundle = Path(temp) / "bundle"
                 shutil.copytree(self.bundle, bundle)
                 if kind == "changed":
-                    (bundle / "site/index.html").write_text("changed")
+                    (bundle / "site/index.html").write_text("changed", encoding="utf-8")
                 elif kind == "missing":
                     (bundle / "site/index.html").unlink()
                 elif kind == "extra":
-                    (bundle / "site/extra.js").write_text("extra")
+                    (bundle / "site/extra.js").write_text("extra", encoding="utf-8")
                 elif kind == "extra-root":
-                    (bundle / "extra").write_text("extra")
+                    (bundle / "extra").write_text("extra", encoding="utf-8")
                 else:
                     (bundle / "site/link").symlink_to(bundle / "site/index.html")
                 with self.assertRaises(ValueError):
@@ -452,7 +463,7 @@ class ReleaseDocsBuildTests(unittest.TestCase):
             )
         dirty = self.root / "docs/site/unreviewed.html"
         try:
-            dirty.write_text("unreviewed")
+            dirty.write_text("unreviewed", encoding="utf-8")
             with (
                 tempfile.TemporaryDirectory() as temp,
                 self.assertRaisesRegex(ValueError, "clean source"),
@@ -476,7 +487,7 @@ class ReleaseDocsBuildTests(unittest.TestCase):
                 "npx --yes @reviewsensei/cli@0.6.16",
                 "Release 0.6.16",
             ):
-                (site / "index.html").write_text(snippet)
+                (site / "index.html").write_text(snippet, encoding="utf-8")
                 with (
                     self.subTest(snippet=snippet),
                     self.assertRaisesRegex(ValueError, "installation version"),
@@ -486,7 +497,7 @@ class ReleaseDocsBuildTests(unittest.TestCase):
 
 class ReleaseDocsWorkflowTests(unittest.TestCase):
     def test_release_docs_build_is_read_only_and_uses_event_sha(self):
-        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         docs_job = workflow.split("  docs-build:\n", 1)[1].split("\n  build:\n", 1)[0]
         self.assertIn("ref: ${{ github.sha }}", docs_job)
         self.assertIn("persist-credentials: false", docs_job)
@@ -496,7 +507,7 @@ class ReleaseDocsWorkflowTests(unittest.TestCase):
         self.assertIn("include-hidden-files: true", docs_job)
 
     def test_pages_never_executes_released_code_or_grants_build_oidc(self):
-        workflow = (ROOT / ".github/workflows/pages.yml").read_text()
+        workflow = (ROOT / ".github/workflows/pages.yml").read_text(encoding="utf-8")
         self.assertIn("workflows: [Release]", workflow)
         self.assertNotIn("workflows: [CI]", workflow)
         self.assertNotIn("branches: [main]", workflow)
