@@ -165,6 +165,22 @@ class ReleaseDocsSnapshotTests(unittest.TestCase):
             self.assertEqual(SYNC.check_main_rules()["name"], "docs-bot[bot]")
             check.assert_called_once_with("123", "docs-bot")
 
+    def test_verified_and_rehashed_stored_attribute_overrides_are_rejected(self):
+        SYNC.prepare(self.root, self.bundle, self.selection)
+        for directory in (self.bundle, self.root / SYNC.SNAPSHOT):
+            with self.subTest(directory=directory):
+                override = directory / "site/.gitattributes"
+                override.write_text("*.html text eol=lf\n")
+                (directory / "files.json").write_text(
+                    json.dumps(SYNC.docs.file_inventory(directory / "site"))
+                )
+                with self.assertRaisesRegex(ValueError, "storage attributes"):
+                    SYNC.prepare(self.root, self.bundle, self.selection)
+                override.unlink()
+                (directory / "files.json").write_text(
+                    json.dumps(SYNC.docs.file_inventory(directory / "site"))
+                )
+
     def test_readiness_cli_does_not_qualify_a_release_or_write_git(self):
         with (
             patch.dict(SYNC.os.environ, {"GH_TOKEN": "test-token"}),
@@ -334,6 +350,30 @@ class ReleaseDocsMainIntegrationTests(unittest.TestCase):
         SYNC.git(self.root, "add", "runtime.py")
         with self.assertRaisesRegex(ValueError, "non-generated"):
             SYNC.validate_staged_paths(self.root)
+
+    def test_ignored_snapshot_payload_cannot_be_partially_committed(self):
+        (self.bundle / "site/.gitignore").write_text("index.html\n")
+        (self.bundle / "files.json").write_text(
+            json.dumps(SYNC.docs.file_inventory(self.bundle / "site"))
+        )
+        before = SYNC.git(self.origin, "rev-parse", "main")
+        with self.assertRaisesRegex(ValueError, "omitted part"):
+            SYNC.sync(self.root, self.bundle, self.selection)
+        self.assertEqual(SYNC.git(self.origin, "rev-parse", "main"), before)
+
+    def test_git_filter_changed_payload_is_rejected_before_commit(self):
+        # info/attributes has higher precedence than tracked storage policy.
+        # Simulate a runner override and retain the original verified CRLF data.
+        attributes = self.root / ".git/info/attributes"
+        attributes.write_text(f"{SYNC.SNAPSHOT}/site/index.html text eol=lf\n")
+        (self.bundle / "site/index.html").write_bytes(b"<main>v0.6.17</main>\r\n")
+        (self.bundle / "files.json").write_text(
+            json.dumps(SYNC.docs.file_inventory(self.bundle / "site"))
+        )
+        before = SYNC.git(self.origin, "rev-parse", "main")
+        with self.assertRaisesRegex(ValueError, "changed verified"):
+            SYNC.sync(self.root, self.bundle, self.selection)
+        self.assertEqual(SYNC.git(self.origin, "rev-parse", "main"), before)
 
     def test_three_concurrent_advances_stop_with_no_docs_push(self):
         real_run = subprocess.run

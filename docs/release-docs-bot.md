@@ -30,6 +30,9 @@ GitHub does not restrict Contents write by file path. It permits repository
 content/ref/release operations, subject to existing rules. The trusted workflow
 enforces the generated-docs allowlist and never updates source, workflows, tags
 or release objects. The App receives no permission to edit workflows or rules.
+The integration rejects nested Git storage-attribute files and proves that the
+Git index contains the complete snapshot with byte-identical blobs before
+committing; ignored files or filter transformations fail without a push.
 A compromised key therefore remains a repository-content risk; the main-only
 environment and ordinary independent source review protect its trusted use.
 

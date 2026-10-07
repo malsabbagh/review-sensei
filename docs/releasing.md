@@ -602,6 +602,9 @@ or the operator-managed `v5` channel. The index and snapshot are machine-owned;
 hand edits, symlinks, byte tampering and incomplete prior snapshots fail closed.
 The reviewed `docs/releases/.gitattributes` policy preserves the artifact's exact
 bytes during Git checkout, including on systems with line-ending conversion.
+Nested `.gitattributes` files are rejected, and the complete indexed snapshot
+must match the verified bytes before commit; ignored or transformed files stop
+writeback without a push.
 Current main source docs may include unreleased work; the generated snapshot is
 explicitly bound to the released SHA.
 
