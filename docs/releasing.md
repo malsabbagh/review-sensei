@@ -595,7 +595,10 @@ The same full qualification applies to dispatches. This does not rebuild or
 republish packages.
 
 Automatic deployment and manual retry accept only the latest numerically ordered
-successful stable release at or above 0.6.17. A higher version whose entire
+successful stable release with the required docs job and retained artifact.
+There is no minimum version in the script: its tag input selects the version,
+and signed source, completed release jobs and artifact provenance determine
+eligibility. A higher version whose entire
 Release did not succeed does not suppress the prior good cutoff. A successfully
 published newer release is a high-water mark even after its artifact expires or
 its tag is moved/deleted: rerunning an older release cannot roll back the site.
@@ -612,8 +615,9 @@ repair published docs, prefer a reviewed higher patch release. An emergency
 rollback requires a separately reviewed change to this explicit policy and
 maintainer authorization; this dispatch path has no rollback bypass. Never move
 an immutable tag or silently publish main as released docs. Before the 0.6.17
-first-use cutoff, the existing live site remains unchanged; old release runs
-are intentionally ineligible.
+first-use cutoff, the existing live site remains unchanged. Historical release
+runs lack the required documentation job/artifact and fail qualification on
+that evidence, rather than on their version number.
 
 Local qualification includes:
 

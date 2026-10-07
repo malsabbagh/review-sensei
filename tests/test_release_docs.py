@@ -47,6 +47,63 @@ def successful_jobs():
 
 
 class ReleaseDocsQualificationTests(unittest.TestCase):
+    def test_any_valid_version_with_required_release_evidence_qualifies(self):
+        for tag in ("v0.0.0", "v0.1.2", "v0.6.16", "v0.6.17", "v1.2.3"):
+
+            def release_api(path):
+                if path == "actions/runs/42":
+                    return run_record(tag)
+                if path == f"releases/tags/{tag}":
+                    return {"tag_name": tag, "draft": False, "prerelease": False}
+                return self.qualify_api(path)
+
+            with (
+                self.subTest(tag=tag),
+                patch.object(DOCS, "api", side_effect=release_api),
+                patch.object(DOCS, "api_pages", side_effect=self.qualify_pages),
+                patch.object(DOCS, "tag_identity", return_value=("b" * 40, "a" * 40)),
+            ):
+                selection = DOCS.qualify(42)
+                self.assertEqual(selection["tag"], tag)
+                self.assertEqual(selection["version"], tag[1:])
+
+    def test_historical_run_without_docs_job_or_artifact_fails_on_evidence(self):
+        tag = "v0.6.16"
+        for missing in ("docs-job", "docs-artifact"):
+
+            def release_api(path):
+                if path == "actions/runs/42":
+                    return run_record(tag)
+                if path == f"releases/tags/{tag}":
+                    return {"tag_name": tag, "draft": False, "prerelease": False}
+                return self.qualify_api(path)
+
+            def release_pages(path, key=None):
+                entries = self.qualify_pages(path, key)
+                if missing == "docs-job" and key == "jobs":
+                    return [
+                        job
+                        for job in entries
+                        if job["name"] != "Build release documentation"
+                    ]
+                if missing == "docs-artifact" and key == "artifacts":
+                    return []
+                return entries
+
+            expected = (
+                "Build release documentation"
+                if missing == "docs-job"
+                else "retained release docs artifact"
+            )
+            with (
+                self.subTest(missing=missing),
+                patch.object(DOCS, "api", side_effect=release_api),
+                patch.object(DOCS, "api_pages", side_effect=release_pages),
+                patch.object(DOCS, "tag_identity", return_value=("b" * 40, "a" * 40)),
+                self.assertRaisesRegex(ValueError, expected),
+            ):
+                DOCS.qualify(42)
+
     def test_post_approval_recheck_rejects_changed_identity_or_newer_release(self):
         selection = {"release_run_id": 42, "artifact_id": 99, "tag": "v0.6.17"}
         argv = ["release_docs.py", "recheck", "--selection-json", json.dumps(selection)]
@@ -108,7 +165,6 @@ class ReleaseDocsQualificationTests(unittest.TestCase):
             ("event", "workflow_dispatch"),
             ("head_branch", "main"),
             ("head_branch", "v5"),
-            ("head_branch", "v0.6.16"),
             ("head_branch", "v0.6.17-rc1"),
             ("head_branch", "v00.6.17"),
             ("head_sha", "main"),
@@ -390,6 +446,82 @@ class ReleaseDocsBuildTests(unittest.TestCase):
             ),
             "",
         )
+
+    def test_actual_builder_uses_arbitrary_input_tag_without_version_floor(self):
+        for version in ("0.1.2", "0.6.16", "1.2.3"):
+            with (
+                self.subTest(version=version),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary) / "source"
+                shutil.copytree(
+                    self.root,
+                    root,
+                    ignore=shutil.ignore_patterns(".git", "__pycache__"),
+                )
+                paths = [
+                    root / "pyproject.toml",
+                    root / "CHANGELOG.md",
+                    root / "docs/site/data/site-manifest.json",
+                    root / "docs/site/getting-started/index.html",
+                    *list((root / "packages/npm").rglob("package.json")),
+                ]
+                for path in paths:
+                    path.write_text(
+                        path.read_text(encoding="utf-8").replace("0.6.17", version),
+                        encoding="utf-8",
+                    )
+                DOCS.load_script(root, "build_site_pages").build_site_pages()
+                for args in (
+                    ("init", "-q"),
+                    ("add", "."),
+                    (
+                        "-c",
+                        "user.name=Docs Test",
+                        "-c",
+                        "user.email=docs@example.test",
+                        "commit",
+                        "-qm",
+                        "Synthetic tagged source",
+                    ),
+                ):
+                    subprocess.run(
+                        ["git", "-C", str(root), *args], check=True, capture_output=True
+                    )
+                source_sha = subprocess.check_output(
+                    ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+                ).strip()
+                tag = f"v{version}"
+                real_check = subprocess.check_output
+
+                def git_output(args, **kwargs):
+                    if args[-1] == f"refs/tags/{tag}":
+                        return self.tag_sha + "\n"
+                    return real_check(args, **kwargs)
+
+                output = Path(temporary) / "bundle"
+                with (
+                    patch.dict(os.environ, {"GITHUB_SHA": source_sha}),
+                    patch.object(
+                        DOCS, "tag_identity", return_value=(self.tag_sha, source_sha)
+                    ),
+                    patch.object(
+                        DOCS.subprocess, "check_output", side_effect=git_output
+                    ),
+                ):
+                    DOCS.build(root, output, tag, 42, 1)
+                provenance = json.loads(
+                    (output / "site/data/release-provenance.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                self.assertEqual(provenance["tag"], tag)
+                self.assertEqual(provenance["version"], version)
+                self.assertEqual(provenance["source_sha"], source_sha)
+                self.assertIn(
+                    f"pip install review-sensei=={version}",
+                    (output / "site/index.html").read_text(encoding="utf-8"),
+                )
 
     def test_provenance_schema_rejects_missing_identity_or_mutable_source(self):
         schema = json.loads(

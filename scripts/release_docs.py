@@ -17,7 +17,6 @@ from typing import Any
 from urllib.parse import urlencode
 
 REPOSITORY = "malsabbagh/review-sensei"
-FIRST_VERSION = (0, 6, 17)
 TAG = re.compile(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 ARTIFACT = "review-sensei-release-docs"
@@ -90,8 +89,7 @@ def validate_run(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
         or run.get("pull_requests")
     ):
         raise ValueError("docs require a successful same-repository tag Release run")
-    if version_tuple(run.get("head_branch", "")) < FIRST_VERSION:
-        raise ValueError("tag-driven docs start at v0.6.17")
+    version_tuple(run.get("head_branch", ""))
     if not SHA.fullmatch(run.get("head_sha", "")):
         raise ValueError("invalid release source SHA")
     for name in REQUIRED_JOBS:
@@ -207,7 +205,7 @@ def validate_installation_versions(site: Path, version: str) -> None:
 
 def build(root: Path, output: Path, tag: str, run_id: int, attempt: int) -> None:
     version = load_script(root, "check_release_version").validate_release_tag(tag, root)
-    if version_tuple(tag) < FIRST_VERSION or run_id < 1 or attempt < 1:
+    if run_id < 1 or attempt < 1:
         raise ValueError("invalid release docs build identity")
     source_sha = subprocess.check_output(
         ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
