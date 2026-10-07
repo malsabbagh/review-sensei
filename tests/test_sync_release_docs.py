@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,10 @@ class ReleaseDocsSnapshotTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name) / "main"
         self.root.mkdir()
+        (self.root / "docs/releases").mkdir(parents=True)
+        (self.root / "docs/releases/.gitattributes").write_text(
+            SYNC.STORAGE_POLICY, encoding="utf-8"
+        )
         (self.root / "pyproject.toml").write_text("future development is preserved\n")
         self.bundle = Path(self.temporary.name) / "bundle"
         self.selection = make_bundle(self.bundle)
@@ -121,12 +126,16 @@ class ReleaseDocsSnapshotTests(unittest.TestCase):
     def test_symlink_parent_and_partial_snapshot_are_rejected(self):
         elsewhere = Path(self.temporary.name) / "outside"
         elsewhere.mkdir()
+        shutil.rmtree(self.root / "docs")
         (self.root / "docs").symlink_to(elsewhere, target_is_directory=True)
         with self.assertRaisesRegex(ValueError, "symlink"):
             SYNC.prepare(self.root, self.bundle, self.selection)
         self.assertEqual(list(elsewhere.iterdir()), [])
         (self.root / "docs").unlink()
         (self.root / "docs/releases").mkdir(parents=True)
+        (self.root / "docs/releases/.gitattributes").write_text(
+            SYNC.STORAGE_POLICY, encoding="utf-8"
+        )
         (self.root / SYNC.INDEX).write_text("orphan")
         with self.assertRaisesRegex(ValueError, "incomplete"):
             SYNC.prepare(self.root, self.bundle, self.selection)
@@ -178,6 +187,11 @@ class ReleaseDocsMainIntegrationTests(unittest.TestCase):
         )
         SYNC.git(self.seed, "config", "user.name", "Docs Test")
         SYNC.git(self.seed, "config", "user.email", "docs@example.test")
+        (self.seed / "docs/releases").mkdir(parents=True)
+        (self.seed / "docs/releases/.gitattributes").write_text(
+            SYNC.STORAGE_POLICY, encoding="utf-8"
+        )
+        SYNC.git(self.seed, "add", "docs/releases/.gitattributes")
         self.advance_main("before")
         self.root = self.directory / "controller"
         subprocess.run(
@@ -216,6 +230,12 @@ class ReleaseDocsMainIntegrationTests(unittest.TestCase):
             - 1,
             1,
         )
+
+    def test_snapshot_bytes_survive_checkout_with_git_line_ending_conversion_enabled(
+        self,
+    ):
+        SYNC.git(self.root, "config", "core.autocrlf", "true")
+        self.test_real_non_force_push_uses_fresh_main_and_retry_is_a_noop()
 
     def test_actual_main_advance_during_push_is_reintegrated_with_no_force(self):
         real_run = subprocess.run
@@ -292,7 +312,7 @@ class ReleaseDocsMainIntegrationTests(unittest.TestCase):
         self.assertEqual(count, 3)
         self.assertEqual(self.remote_file("README.md"), "advance 3")
         self.assertNotIn(
-            "docs/releases",
+            SYNC.INDEX,
             SYNC.git(self.origin, "ls-tree", "-r", "--name-only", "main"),
         )
 

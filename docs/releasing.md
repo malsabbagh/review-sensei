@@ -597,6 +597,8 @@ static site snapshot, provenance and file inventory) and
 rewrite runtime source, package versions, workflows, reviewed source docs, tags
 or the operator-managed `v5` channel. The index and snapshot are machine-owned;
 hand edits, symlinks, byte tampering and incomplete prior snapshots fail closed.
+The reviewed `docs/releases/.gitattributes` policy preserves the artifact's exact
+bytes during Git checkout, including on systems with line-ending conversion.
 Current main source docs may include unreleased work; the generated snapshot is
 explicitly bound to the released SHA.
 

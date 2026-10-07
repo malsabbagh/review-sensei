@@ -583,9 +583,13 @@ class ReleaseDocsBuildTests(unittest.TestCase):
             )
             self.assertIn(
                 "@reviewsensei/cli@0.6.17",
-                (output / "site/getting-started/index.html").read_text(),
+                (output / "site/getting-started/index.html").read_text(
+                    encoding="utf-8"
+                ),
             )
-            self.assertIn("@reviewsensei/cli@0.6.16", onboarding.read_text())
+            self.assertIn(
+                "@reviewsensei/cli@0.6.16", onboarding.read_text(encoding="utf-8")
+            )
             self.assertEqual(
                 subprocess.check_output(
                     ["git", "-C", str(root), "status", "--porcelain"], text=True

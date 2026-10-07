@@ -17,6 +17,7 @@ import release_docs as docs
 
 SNAPSHOT = "docs/releases/latest"
 INDEX = "docs/releases/latest.md"
+STORAGE_POLICY = "# Preserve the verified artifact bytes on every platform.\nlatest/** -text\nlatest.md -text\n"
 MAX_ATTEMPTS = 3
 
 
@@ -84,9 +85,20 @@ def stored_selection(snapshot: Path) -> dict[str, Any]:
 
 def safe_paths(root: Path) -> None:
     # Never follow a tracked symlink into source, workflows or outside the clone.
-    for relative in ("docs", "docs/releases", SNAPSHOT, INDEX):
+    for relative in (
+        "docs",
+        "docs/releases",
+        "docs/releases/.gitattributes",
+        SNAPSHOT,
+        INDEX,
+    ):
         if (root / relative).is_symlink():
             raise ValueError(f"generated docs path is a symlink: {relative}")
+    policy = root / "docs/releases/.gitattributes"
+    if not policy.is_file() or policy.read_text(encoding="utf-8") != STORAGE_POLICY:
+        raise ValueError(
+            "generated docs byte-preserving Git storage policy is missing or changed"
+        )
 
 
 def prepare(root: Path, bundle: Path, selection: dict[str, Any]) -> bool:
