@@ -533,3 +533,110 @@ file or reuse a version for a different build.
 Record the incident timeline and final decision in the maintainer's private
 security process. Public issue or release notes must contain only sanitized
 details.
+
+## Tag-driven documentation starting with 0.6.17
+
+**0.6.17 is the first tag using this automation.** Merge the reviewed automation
+PR before creating `v0.6.17`. The release owner must then update/rebase the
+0.6.17 release PR onto main containing both `scripts/release_docs.py` and the
+`Release` docs-build / Pages qualification jobs. Re-run final qualification and
+terminal CI on that exact release PR head before its reviewed merge and signed
+tag. Do not tag the earlier release PR head or retrofit the automation onto an
+existing immutable tag. Preparing this automation PR does not authorize release,
+publication, a `v5` move, Worker deployment or repository-setting changes.
+
+The release PR still owns tracked content: Python and all npm versions, dated
+changelog, site manifest, onboarding installation pins, README examples and any
+updated docs/contracts. Run the version, site, schemas and Action-pin checks,
+then `python scripts/build_site_pages.py` and commit generated pages with their
+manifest before review. A tag cannot invent or approve new prose or provider
+claims; it selects the reviewed source and drives the published version and
+source metadata. Generation after the tag writes only a static artifact, never
+a commit, branch push or tag mutation. There is no recursive docs/release loop.
+
+The read-only `Release` documentation job checks the exact event SHA and clean
+checkout against the signed annotated tag object as verified by GitHub. It
+validates Python/npm/changelog/version and the manifest/schema/evidence,
+checks tracked generation, then builds the entire static site under runner
+staging. It pins repository docs and example links to the immutable source SHA,
+pins previously unversioned pip snippets, and records tag, version, tag object,
+source SHA, release run and build attempt in public provenance. A file inventory
+covers the site's exact bytes. The static bundle is retained as
+`review-sensei-release-docs` for 90 days (subject to repository retention limits).
+It is a source-bound build record, not a package attestation or a registry
+verification receipt.
+
+Pages wakes only after `Release` completes successfully, not after main CI or
+on a PR. Its helper executes from the trusted default-branch SHA and has only
+Contents/Actions read. It requires successful documentation, PyPI, npm and
+GitHub-release jobs, a published non-draft/non-prerelease GitHub release, a
+verified signed annotated tag still pointing to the run SHA, source ancestry
+on main, and exactly one retained artifact from that run. It downloads that
+artifact by ID, rechecks the remote cutoff, and validates all file hashes and
+metadata. After `github-pages` environment approval, a separate deploy job rechecks the
+selected tag/run/artifact identity and high-water mark immediately before Pages
+deployment. It grants Pages/OIDC write plus the Contents/Actions read needed
+for that check, executing only the pinned trusted default-branch helper. It
+never downloads or executes released code. No long-lived
+credential or extra publication permission is introduced. Existing environment
+rules/reviewers remain the deployment gate; no settings are changed by this PR.
+
+A failed, cancelled or partial release leaves the previously published site in
+place, even if one registry or GitHub release already contains the new version.
+Recover the original release jobs/bundles under the existing package procedures;
+never retag. Re-running a failed publisher may reuse docs built on an earlier
+attempt of the same release run. If the docs build itself failed, rerun that job;
+a successful rebuild replaces the named artifact with a new artifact ID. The
+site is deterministic for the same tag, source and build attempt. Concurrent
+Pages runs are serialized without cancelling the active deployment. GitHub may
+replace a pending run; if the desired deployment was not delivered, dispatch
+Pages from main with `release_run_id` set to the successful release run ID.
+The same full qualification applies to dispatches. This does not rebuild or
+republish packages.
+
+Automatic deployment and manual retry accept only the latest numerically ordered
+successful stable release with the required docs job and retained artifact.
+There is no minimum version in the script: its tag input selects the version,
+and signed source, completed release jobs and artifact provenance determine
+eligibility. A higher version whose entire
+Release did not succeed does not suppress the prior good cutoff. A successfully
+published newer release is a high-water mark even after its artifact expires or
+its tag is moved/deleted: rerunning an older release cannot roll back the site.
+The selector paginates release/run history and fails closed on incomplete
+history, missing artifacts, ambiguous runs/jobs or changed tag identity. Public
+Pages therefore describes the released cutoff; current main documentation may
+include unreleased features and remains available through GitHub.
+
+Historical docs are the immutable GitHub source/docs/examples links, release
+notes and retained per-run static bundles; this workflow does not promise a
+permanent `/versions/` archive on Pages. Preserve any historical bundle needed
+past artifact expiry in an operator-controlled archive before it expires. To
+repair published docs, prefer a reviewed higher patch release. An emergency
+rollback requires a separately reviewed change to this explicit policy and
+maintainer authorization; this dispatch path has no rollback bypass. Never move
+an immutable tag or silently publish main as released docs. Before the 0.6.17
+first-use cutoff, the existing live site remains unchanged. Historical release
+runs lack the required documentation job/artifact and fail qualification on
+that evidence, rather than on their version number.
+
+Local qualification includes:
+
+```bash
+python scripts/check_release_version.py --tag v0.6.17
+python scripts/check_action_pins.py
+python scripts/validate_json_contracts.py
+python scripts/validate_public_schemas.py
+python scripts/validate_site_manifest.py
+python scripts/build_site_pages.py --check
+python -m unittest tests.test_release_docs tests.test_release tests.test_site_manifest \
+  tests.test_site_examples tests.test_site_getting_started tests.test_site_claims -v
+```
+
+The credential-free release-docs tests execute the real site builder on a
+synthetic 0.6.17 tree and verify schema, immutable source/example links,
+versioned installation snippets, deterministic bytes and unchanged source.
+They also cover fork/PR/dispatch rejection, failed/skipped publication lanes,
+unsigned/lightweight/moved tags, unmerged source, missing/expired/duplicate
+artifacts, byte tampering/symlinks, retries and newer-release supersession.
+The first live tag/deployment remains a release-owner gate after this PR merges;
+a PR test run must not dispatch Pages or create a release as a smoke test.

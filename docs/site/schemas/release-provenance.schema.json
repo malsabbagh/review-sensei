@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/release-provenance.schema.json",
+  "title": "ReviewSensei released documentation provenance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "repository", "tag", "version", "source_sha", "tag_object_sha", "release_run_id", "build_run_attempt", "source_docs", "source_examples", "workflow_channel"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "repository": {"const": "malsabbagh/review-sensei"},
+    "tag": {"type": "string", "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+    "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+    "source_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "tag_object_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "release_run_id": {"type": "integer", "minimum": 1},
+    "build_run_attempt": {"type": "integer", "minimum": 1},
+    "source_docs": {"type": "string", "pattern": "^https://github.com/malsabbagh/review-sensei/tree/[0-9a-f]{40}/docs$"},
+    "source_examples": {"type": "string", "pattern": "^https://github.com/malsabbagh/review-sensei/tree/[0-9a-f]{40}/examples$"},
+    "workflow_channel": {"const": "v5"}
+  }
+}

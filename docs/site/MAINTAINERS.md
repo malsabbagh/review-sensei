@@ -41,5 +41,32 @@ manifest whenever provider or release boundaries change.
 6. Commit the manifest and regenerated HTML pages together.
 
 CI validates the manifest and checks that committed HTML matches the manifest in
-the `Schemas and Action pins` job. GitHub Pages rebuilds the static pages
-after CI succeeds on `main`.
+the `Schemas and Action pins` job. These are reviewable source files, including
+on `main` when it contains work for a future release. Merging a docs change does
+not publish it immediately.
+
+Starting with **v0.6.17**, `Release` builds the site from the exact release event
+SHA, validates the tag against Python/npm/changelog and the site manifest,
+checks the committed generated pages, and confirms the annotated tag's GitHub
+signature verification and commit identity. It stages generated pages in an
+artifact without changing tracked files. Public documentation and example
+source links are pinned to that SHA; unversioned pip installation snippets are
+pinned to that release version. Every HTML page shows the cutoff and links to
+`data/release-provenance.json`, whose schema lives at
+`schemas/release-provenance.schema.json`. The separate `@v5` workflow channel
+remains operator-managed and is not promoted by documentation publication.
+
+Pages consumes only the static artifact after the entire `Release` run succeeds,
+including Python, npm and GitHub publication. Its trusted main-branch helper
+rechecks the run, jobs, tag signature/object/SHA, source ancestry, stable GitHub
+release and artifact inventory. It never executes a downloaded artifact or
+checks out released code in the job granted Pages/OIDC permissions. After
+environment approval, that job uses the pinned trusted default-branch helper
+to recheck the cutoff and newer-release high-water mark immediately before
+deploying. Main and
+released docs may intentionally differ: provider facts on the site describe
+the released source, even when their source manifest label is
+`implemented-on-main`.
+
+See [the release docs procedure](../releasing.md#tag-driven-documentation-starting-with-0617)
+for bootstrap, retry, supersession, historical snapshots and rollback policy.
