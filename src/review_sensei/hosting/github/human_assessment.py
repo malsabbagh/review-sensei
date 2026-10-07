@@ -7,7 +7,9 @@ import json
 from dataclasses import dataclass, replace
 from typing import Any
 
+from ...budgets import ReviewWorkBudgets
 from ...errors import ReviewInputError
+from ...evidence import EvidenceBundle, evidence_digest
 from ...human_assessment import (
     HUMAN_ASSESSMENT_EVIDENCE_DIAGNOSTICS,
     MAX_HUMAN_SOURCE_BYTES,
@@ -15,6 +17,8 @@ from ...human_assessment import (
     validate_assessment_evidence,
 )
 from ...models import ConversationReply
+from ...outcomes import ResourceBudgetTracker
+from ...reassessment_work import HumanAssessmentWork, validate_work
 from .approval import ReviewApprovalEligibility
 from .conversation import (
     ConversationPublisher,
@@ -35,8 +39,37 @@ class PreparedHumanAssessment:
     source_body: str
     source_actor: str
     evidence_diagnostic: str | None = None
+    evidence_bundle: EvidenceBundle | None = None
+
+    @property
+    def authority_digest(self) -> str:
+        return evidence_digest(
+            {
+                "repository": self.evidence_bundle.snapshot.repository
+                if self.evidence_bundle is not None
+                else None,
+                "head": self.conversation.head_sha,
+                "eligibility": self.eligibility.to_dict(),
+                "source_kind": self.conversation.source_kind,
+                "source_id": self.conversation.source_comment_id,
+                "source_updated_at": self.conversation.source_updated_at,
+                "source_body_sha256": hashlib.sha256(
+                    self.source_body.encode()
+                ).hexdigest(),
+                "source_actor": self.source_actor,
+            }
+        )
 
     def __post_init__(self) -> None:
+        if self.evidence_bundle is not None and (
+            self.evidence_bundle.snapshot.head_sha != self.conversation.head_sha
+            or self.evidence_bundle.snapshot.base_sha
+            != self.conversation.context.base_sha
+            or self.conversation.context.diff_context is not None
+        ):
+            raise GitHubConversationError(
+                "human assessment aggregate snapshot is invalid"
+            )
         if self.evidence_diagnostic is not None and (
             self.evidence_diagnostic not in HUMAN_ASSESSMENT_EVIDENCE_DIAGNOSTICS
             or self.conversation.context.diff_context is not None
@@ -104,6 +137,8 @@ class HumanAssessmentPublisher:
         pull_request: int,
         prepared: PreparedConversation,
         app_slug: str,
+        work_budgets: ReviewWorkBudgets | None = None,
+        work_tracker: ResourceBudgetTracker | None = None,
     ) -> PreparedHumanAssessment | None:
         eligibility = self.finalizer.load_eligibility(
             token=token,
@@ -153,6 +188,35 @@ class HumanAssessmentPublisher:
             )
         # Pending inventory paths are authoritative; historical inline hunks
         # and unrelated file order must not consume their evidence budget.
+        if work_budgets is not None and work_budgets.mode == "unified":
+            bundle = self.conversation.load_review_evidence(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                base_sha=eligibility.human_review.base_sha,
+                head_sha=prepared.head_sha,
+                required_paths=tuple(
+                    path
+                    for item in eligibility.human_review.pending
+                    for path in item.evidence_paths
+                ),
+                timeout_seconds=work_tracker.remaining_seconds()
+                if work_tracker is not None
+                else 120,
+            )
+            return PreparedHumanAssessment(
+                conversation=replace(
+                    prepared, context=replace(prepared.context, diff_context=None)
+                ),
+                eligibility=eligibility,
+                source_body=source["body"],
+                source_actor=source["user"]["login"],
+                evidence_bundle=bundle,
+            )
+        if any(item.required_paths for item in eligibility.human_review.pending):
+            raise GitHubConversationError(
+                "cross-file human review inventory requires the unified work mechanism"
+            )
         selected = self.conversation.load_human_assessment_diff(
             token=token,
             repository=repository,
@@ -177,12 +241,38 @@ class HumanAssessmentPublisher:
         repository: str,
         pull_request: int,
         prepared: PreparedHumanAssessment,
-        reply: HumanAssessmentReply,
+        reply: HumanAssessmentReply | HumanAssessmentWork,
         app_slug: str,
     ) -> ReplyResult:
         conversation = prepared.conversation
         original = prepared.eligibility
         inventory = original.human_review
+        work = reply if isinstance(reply, HumanAssessmentWork) else None
+        if work is not None:
+            if inventory is None or prepared.evidence_bundle is None:
+                raise GitHubConversationError(
+                    "human assessment aggregate evidence is missing"
+                )
+            if (
+                prepared.evidence_bundle.snapshot.repository != repository
+                or prepared.evidence_bundle.snapshot.pull_request != pull_request
+            ):
+                raise GitHubConversationError(
+                    "human assessment aggregate repository is invalid"
+                )
+            try:
+                validate_work(
+                    work,
+                    pending=inventory,
+                    bundle=prepared.evidence_bundle,
+                    source_body=prepared.source_body,
+                    authority_digest=prepared.authority_digest,
+                )
+            except ReviewInputError as exc:
+                raise GitHubConversationError(
+                    "human assessment aggregate evidence is unsupported"
+                ) from exc
+            reply = work.reply
         if inventory is None or not isinstance(reply, HumanAssessmentReply):
             raise GitHubConversationError("human assessment evidence is missing")
         if prepared.evidence_diagnostic and any(
@@ -214,7 +304,7 @@ class HumanAssessmentPublisher:
             )
         findings = {item.fingerprint: item for item in inventory.pending}
         try:
-            for decision in reply.decisions:
+            for decision in reply.decisions if work is None else ():
                 validate_assessment_evidence(
                     decision,
                     findings[decision.fingerprint],
@@ -359,9 +449,24 @@ class HumanAssessmentPublisher:
                         prepared.source_body.encode()
                     ).hexdigest(),
                     "source_actor": prepared.source_actor,
-                    "diff_sha256": hashlib.sha256(
+                    "diff_sha256": prepared.evidence_bundle.digest
+                    if work is not None and prepared.evidence_bundle is not None
+                    else hashlib.sha256(
                         (conversation.context.diff_context or "").encode()
                     ).hexdigest(),
+                    "plan_id": work.execution.plan.plan_id
+                    if work is not None
+                    else None,
+                    "batch_evidence": [
+                        {
+                            "batch_id": batch.batch.batch_id,
+                            "evidence_ids": batch.batch.evidence_ids,
+                            "requirement_ids": batch.batch.requirement_ids,
+                        }
+                        for batch in work.execution.completed
+                    ]
+                    if work is not None
+                    else [],
                 },
                 sort_keys=True,
                 separators=(",", ":"),

@@ -2277,7 +2277,14 @@ def build_review_context_cache_key(
         provider_name,
         model,
         profile,
-        stage_configuration_digest(stages),
+        _configuration_digest(
+            {
+                "stages": stage_configuration_digest(stages),
+                "work_policy": request.work_policy_digest,
+            }
+        )
+        if request.work_policy_digest is not None
+        else stage_configuration_digest(stages),
         context_configuration_digest(request.lens_contexts),
         learning_configuration_digest(request.learnings),
     )

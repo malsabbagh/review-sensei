@@ -8,8 +8,9 @@ those per-request limits or silently truncating work.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Sequence
+from typing import Callable, Sequence
 
+from .budgets import EffectiveWorkBudget
 from .coverage import (
     COVERAGE_OUTCOMES,
     CoverageManifest,
@@ -20,14 +21,314 @@ from .coverage import (
 from .dependencies import lockfile_kind
 from .diff import DiffAnalysis, DiffFileRecord, DiffHunk, analyze_diff
 from .errors import ReviewInputError
+from .evidence import EvidenceBundle, EvidenceRecord, evidence_digest
 from .validation import (
     DEFAULT_REVIEW_LIMITS,
     DEFAULT_TOTAL_WORK_BUDGET,
     ReviewLimits,
     TotalWorkBudget,
     utf8_size,
+    validate_bounded_text,
     validate_repository_path,
 )
+
+
+@dataclass(frozen=True)
+class WorkRequirement:
+    identity: str
+    evidence_ids: tuple[str, ...]
+    hunk_indexes: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        validate_bounded_text(
+            self.identity, 4096, label="work requirement identity", allow_empty=False
+        )
+        if (
+            not isinstance(self.evidence_ids, tuple)
+            or not 1 <= len(self.evidence_ids) <= 64
+        ):
+            raise ReviewInputError("work requirement evidence is invalid")
+        if any(
+            not isinstance(item, str)
+            or len(item) != 64
+            or any(c not in "0123456789abcdef" for c in item)
+            for item in self.evidence_ids
+        ):
+            raise ReviewInputError("work requirement evidence identity is invalid")
+        if len(set(self.evidence_ids)) != len(self.evidence_ids):
+            raise ReviewInputError("work requirement evidence is duplicated")
+        if (
+            not isinstance(self.hunk_indexes, tuple)
+            or len(self.hunk_indexes) > DEFAULT_TOTAL_WORK_BUDGET.max_total_hunks
+            or any(
+                isinstance(index, bool) or not isinstance(index, int) or index < 1
+                for index in self.hunk_indexes
+            )
+        ):
+            raise ReviewInputError("work requirement hunk identity is invalid")
+        if len(set(self.hunk_indexes)) != len(self.hunk_indexes):
+            raise ReviewInputError("work requirement hunk identities are duplicated")
+
+
+@dataclass(frozen=True)
+class WorkBatch:
+    mode: str
+    requirements: tuple[WorkRequirement, ...]
+    records: tuple[EvidenceRecord, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            self.mode not in {"discovery", "reassessment"}
+            or not isinstance(self.requirements, tuple)
+            or not isinstance(self.records, tuple)
+            or not self.requirements
+        ):
+            raise ReviewInputError("work batch is invalid")
+        if any(
+            not isinstance(item, WorkRequirement) for item in self.requirements
+        ) or any(not isinstance(item, EvidenceRecord) for item in self.records):
+            raise ReviewInputError("work batch types are invalid")
+        if len(set(self.requirement_ids)) != len(self.requirements) or len(
+            set(self.evidence_ids)
+        ) != len(self.records):
+            raise ReviewInputError("work batch identities conflict")
+        if {key for item in self.requirements for key in item.evidence_ids} != set(
+            self.evidence_ids
+        ) or len({record.snapshot for record in self.records}) != 1:
+            raise ReviewInputError("work batch evidence identity is invalid")
+
+    @property
+    def requirement_ids(self) -> tuple[str, ...]:
+        return tuple(item.identity for item in self.requirements)
+
+    @property
+    def evidence_ids(self) -> tuple[str, ...]:
+        return tuple(record.evidence_id for record in self.records)
+
+    @property
+    def paths(self) -> tuple[str, ...]:
+        return tuple(sorted({record.path for record in self.records}))
+
+    @property
+    def hunk_indexes(self) -> tuple[int, ...]:
+        return tuple(
+            sorted({index for item in self.requirements for index in item.hunk_indexes})
+        )
+
+    @property
+    def diff_context(self) -> str:
+        if self.mode == "reassessment":
+            return "\n".join(
+                f"path={record.path}\n{record.patch}" for record in self.records
+            )
+        return "".join(record.diff for record in self.records)
+
+    @property
+    def batch_id(self) -> str:
+        return evidence_digest(
+            {
+                "domain": "reviewsensei:work-batch:v1",
+                "mode": self.mode,
+                "requirements": self.requirement_ids,
+                "evidence": self.evidence_ids,
+                "hunks": self.hunk_indexes,
+            }
+        )
+
+
+@dataclass(frozen=True)
+class ReviewWorkPlan:
+    mode: str
+    bundle: EvidenceBundle
+    requirements: tuple[WorkRequirement, ...]
+    batches: tuple[WorkBatch, ...]
+    unprocessed: tuple[tuple[str, str], ...]
+    authority_digest: str = ""
+    budget_digest: str = ""
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"discovery", "reassessment"} or not isinstance(
+            self.bundle, EvidenceBundle
+        ):
+            raise ReviewInputError("work plan is invalid")
+        if (
+            not isinstance(self.requirements, tuple)
+            or len(self.requirements) > DEFAULT_TOTAL_WORK_BUDGET.max_total_hunks
+            or any(not isinstance(item, WorkRequirement) for item in self.requirements)
+        ):
+            raise ReviewInputError("work plan requirements are invalid")
+        expected = {item.identity: item for item in self.requirements}
+        evidence = self.bundle.by_id()
+        assigned: list[str] = []
+        for batch in self.batches:
+            if (
+                batch.mode != self.mode
+                or any(
+                    expected.get(item.identity) != item for item in batch.requirements
+                )
+                or any(
+                    evidence.get(record.evidence_id) != record
+                    for record in batch.records
+                )
+            ):
+                raise ReviewInputError("work plan batches are invalid")
+            assigned.extend(batch.requirement_ids)
+        assigned.extend(identity for identity, _ in self.unprocessed)
+        if (
+            len(expected) != len(self.requirements)
+            or len(set(assigned)) != len(assigned)
+            or set(assigned) != set(expected)
+        ):
+            raise ReviewInputError(
+                "work plan does not account for every requirement exactly once"
+            )
+
+    @property
+    def plan_id(self) -> str:
+        return evidence_digest(
+            {
+                "domain": "reviewsensei:work-plan:v1",
+                "mode": self.mode,
+                "evidence": self.bundle.digest,
+                "requirements": [
+                    (item.identity, item.evidence_ids, item.hunk_indexes)
+                    for item in self.requirements
+                ],
+                "batches": [batch.batch_id for batch in self.batches],
+                "unprocessed": self.unprocessed,
+                "authority": self.authority_digest,
+                "budgets": self.budget_digest,
+            }
+        )
+
+
+def plan_work(
+    mode: str,
+    bundle: EvidenceBundle,
+    requirements: Sequence[WorkRequirement],
+    *,
+    budgets: EffectiveWorkBudget,
+    render: Callable[[WorkBatch], object],
+    max_batches: int = 8,
+    correction: str = "",
+    authority_digest: str = "",
+) -> ReviewWorkPlan:
+    """Pack both modes with one deterministic, rendered-request admission loop.
+
+    Each requirement is atomic: discovery may supply exhaustive hunk requirements;
+    reassessment must supply complete file groups. Missing work stays represented.
+    """
+    from .models import ProviderRequest
+
+    if mode not in {"discovery", "reassessment"} or not isinstance(
+        bundle, EvidenceBundle
+    ):
+        raise ReviewInputError("work plan mode or evidence is invalid")
+    if (
+        isinstance(max_batches, bool)
+        or not isinstance(max_batches, int)
+        or not 1 <= max_batches <= 8
+    ):
+        raise ReviewInputError("work plan batch budget is invalid")
+    if budgets.resource_budget is not None:
+        max_batches = min(max_batches, budgets.resource_budget.max_provider_calls)
+    items = tuple(requirements)
+    if any(not isinstance(item, WorkRequirement) for item in items) or len(
+        {item.identity for item in items}
+    ) != len(items):
+        raise ReviewInputError("work requirement identities conflict")
+    records = bundle.by_id()
+    items = tuple(
+        sorted(
+            items,
+            key=lambda item: (
+                tuple(
+                    sorted(
+                        records[key].path if key in records else key
+                        for key in item.evidence_ids
+                    )
+                ),
+                item.identity,
+            ),
+        )
+    )
+    batches: list[WorkBatch] = []
+    unprocessed: list[tuple[str, str]] = []
+    current: tuple[WorkRequirement, ...] = ()
+
+    def batch_for(candidates: tuple[WorkRequirement, ...]) -> WorkBatch:
+        ids = {key for item in candidates for key in item.evidence_ids}
+        selected = tuple(
+            sorted(
+                (records[key] for key in ids),
+                key=lambda record: (record.path, record.evidence_id),
+            )
+        )
+        return WorkBatch(mode, candidates, selected)
+
+    def fits(candidates: tuple[WorkRequirement, ...]) -> bool:
+        batch = batch_for(candidates)
+        if (
+            mode == "reassessment"
+            and sum(len(item.evidence_ids) for item in candidates)
+            > budgets.max_findings_per_batch
+        ):
+            return False
+        if (
+            utf8_size(batch.diff_context, label="batch evidence")
+            > budgets.batch_diff_bytes
+        ):
+            return False
+        try:
+            request = render(batch)
+        except ReviewInputError:
+            return False
+        if not isinstance(request, ProviderRequest):
+            raise ReviewInputError("work renderer must return a ProviderRequest")
+        prompt = request.prompt + ("\n\n" + correction if correction else "")
+        return budgets.fits_prompt(prompt, output_tokens=request.max_output_tokens)
+
+    def flush() -> None:
+        nonlocal current
+        if current:
+            if len(batches) < max_batches:
+                batches.append(batch_for(current))
+            else:
+                unprocessed.extend(
+                    (item.identity, "provider-call-budget") for item in current
+                )
+            current = ()
+
+    for item in items:
+        required = [records.get(key) for key in item.evidence_ids]
+        if any(record is None for record in required) or (
+            mode == "reassessment"
+            and (
+                not bundle.enumeration_complete
+                or any(
+                    record is not None and not record.complete for record in required
+                )
+            )
+        ):
+            unprocessed.append((item.identity, "required-evidence-missing"))
+            continue
+        if not fits((item,)):
+            unprocessed.append((item.identity, "required-evidence-oversized"))
+            continue
+        if current and not fits(current + (item,)):
+            flush()
+        current += (item,)
+    flush()
+    return ReviewWorkPlan(
+        mode,
+        bundle,
+        items,
+        tuple(batches),
+        tuple(sorted(unprocessed)),
+        authority_digest,
+        budgets.digest,
+    )
+
 
 # Related names use the existing per-request metadata item ceiling. This is
 # an admission policy, not a claim that every 64-path payload fits: the normal
@@ -639,6 +940,10 @@ def apply_chunk_outcomes(
 __all__ = [
     "DEFAULT_TOTAL_WORK_BUDGET",
     "LargeChangePlan",
+    "ReviewWorkPlan",
+    "WorkBatch",
+    "WorkRequirement",
+    "plan_work",
     "ReviewChunk",
     "TotalWorkBudget",
     "apply_chunk_outcomes",

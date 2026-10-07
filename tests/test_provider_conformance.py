@@ -67,6 +67,45 @@ def _openrouter(opener, **kwargs):
 class ProviderConformanceTests(unittest.TestCase):
     """Shared adapter contracts for fixture, Ollama, openai-compatible, and openrouter."""
 
+    def test_per_request_output_and_deadline_caps_do_not_expand_adapter_defaults(self):
+        for factory in (_ollama, _openai, _openrouter):
+            with self.subTest(adapter=factory.__name__):
+                calls = []
+
+                def opener(request, timeout, context):
+                    calls.append((json.loads(request.data), timeout))
+                    return _Response(
+                        b'{"response":"ok"}'
+                        if factory is _ollama
+                        else b'{"choices":[{"message":{"content":"ok"}}]}'
+                    )
+
+                provider = factory(opener)
+                provider.complete(
+                    ProviderRequest(
+                        prompt="review", max_output_tokens=512, timeout_seconds=2
+                    )
+                )
+                payload, timeout = calls[-1]
+                self.assertEqual(timeout, 2)
+                self.assertEqual(
+                    payload["options"]["num_predict"]
+                    if factory is _ollama
+                    else payload["max_tokens"],
+                    512,
+                )
+                provider.complete(ProviderRequest(prompt="review"))
+                self.assertEqual(calls[-1][1], provider.timeout_seconds)
+                if factory is _ollama:
+                    self.assertNotIn("options", calls[-1][0])
+                else:
+                    provider.complete(
+                        ProviderRequest(prompt="review", max_output_tokens=16384)
+                    )
+                    self.assertEqual(
+                        calls[-1][0]["max_tokens"], provider.max_output_tokens
+                    )
+
     def test_successful_complete_returns_provider_and_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "ok.json"

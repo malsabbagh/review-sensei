@@ -8,6 +8,7 @@ from hashlib import sha256
 from typing import Any, Mapping, Sequence
 
 from ...baseline import ReviewBaseline, baseline_from_history_document
+from ...budgets import ReviewWorkBudgets
 from ...context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from ...convergence import (
     OPERATOR_REVIEW_MODES,
@@ -24,9 +25,10 @@ from ...disposition import MaintainerCommand
 from ...errors import ReviewInputError
 from ...human_assessment import HumanAssessmentReply, HumanAssessmentService
 from ...models import ReviewResult, ReviewTransaction
-from ...outcomes import RecoveryArtifact
+from ...outcomes import RecoveryArtifact, ResourceBudget, ResourceBudgetTracker
 from ...planning import related_paths_for_change
 from ...providers.base import ReviewProvider
+from ...reassessment_work import reassess
 from ...session import (
     SessionIdentity,
     SessionLedger,
@@ -1397,6 +1399,8 @@ class GitHubApplication:
         app_slug: str,
         root_comment_id: int | None,
         source_kind: str = "inline",
+        work_budgets: ReviewWorkBudgets | None = None,
+        budget: ResourceBudget | None = None,
     ) -> ReplyResult:
         """Authorize, generate, validate, and publish one mention reply."""
 
@@ -1431,6 +1435,7 @@ class GitHubApplication:
             # Adapter test seams may implement only the original conversation
             # interface. The real GitHub adapter shares one bounded transport.
             if isinstance(self.replier, ConversationPublisher):
+                work_tracker = ResourceBudgetTracker(budget or ResourceBudget.create())
                 assessor = HumanAssessmentPublisher(http=self.replier.http)
                 human = assessor.prepare(
                     token=read_token,
@@ -1438,6 +1443,8 @@ class GitHubApplication:
                     pull_request=pull_request,
                     prepared=prepared,
                     app_slug=app_slug,
+                    work_budgets=work_budgets,
+                    work_tracker=work_tracker,
                 )
                 if human is not None:
                     assert human.eligibility.human_review is not None
@@ -1447,6 +1454,18 @@ class GitHubApplication:
                             body=f"Human reassessment has insufficient current diff evidence (reason: `{human.evidence_diagnostic}`). No findings were cleared; approval requirements remain unchanged. After the required evidence is available within the context budget, rerun a full review for the current head and submit a new authorized mention.",
                             decisions=(),
                         )
+                    elif inventory.pending and human.evidence_bundle is not None:
+                        work_assessment = reassess(
+                            provider=reply_provider,
+                            pending=inventory,
+                            bundle=human.evidence_bundle,
+                            source_body=human.source_body,
+                            authority_digest=human.authority_digest,
+                            work_budgets=work_budgets or ReviewWorkBudgets(),
+                            model=model,
+                            tracker=work_tracker,
+                        )
+                        assessment = work_assessment.reply
                     elif inventory.pending:
                         assessment = HumanAssessmentService(reply_provider).reply(
                             context=human.conversation.context,
@@ -1474,7 +1493,9 @@ class GitHubApplication:
                         repository=repository,
                         pull_request=pull_request,
                         prepared=human,
-                        reply=assessment,
+                        reply=work_assessment
+                        if inventory.pending and human.evidence_bundle is not None
+                        else assessment,
                         app_slug=app_slug,
                     )
             reply = ConversationService(reply_provider).reply(

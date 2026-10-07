@@ -2427,6 +2427,16 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         _validate_live_profile_gates(args, argv)
         provider_settings, _ = resolve_review_inference(args, argv)
         provider = default_registry().create(provider_settings)
+        work_configuration = load_configuration(getattr(args, "config", None))
+        reply_budget = ResourceBudget.create()
+        if (
+            work_configuration.advanced.review_work.mode == "unified"
+            and work_configuration.advanced.resources.max_provider_calls is not None
+        ):
+            reply_budget = replace(
+                reply_budget,
+                max_provider_calls=work_configuration.advanced.resources.max_provider_calls,
+            )
         reply_outcome = application.generate_and_publish_reply(
             options=GitHubWriteOptions(
                 github_writes=True,
@@ -2444,6 +2454,8 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             app_slug=args.app_slug,
             root_comment_id=args.root_comment_id or None,
             source_kind=args.source_kind,
+            work_budgets=work_configuration.advanced.review_work,
+            budget=reply_budget,
         )
         print(reply_outcome.status)
         assessment_status = getattr(reply_outcome, "assessment_status", None)
@@ -3201,7 +3213,21 @@ def main(argv: list[str] | None = None) -> int:
         if args.categories_dir and not args.stages_dir:
             raise ReviewInputError("--categories-dir requires --stages-dir")
         limits = DEFAULT_REVIEW_LIMITS
-        orchestrate = bool(getattr(args, "orchestrate_large_changes", False))
+        work_configuration = load_configuration(getattr(args, "config", None))
+        work_budgets = work_configuration.advanced.review_work
+        resource_budget = ResourceBudget.for_limits(limits)
+        if (
+            work_budgets.mode == "unified"
+            and work_configuration.advanced.resources.max_provider_calls is not None
+        ):
+            resource_budget = replace(
+                resource_budget,
+                max_provider_calls=work_configuration.advanced.resources.max_provider_calls,
+            )
+        orchestrate = (
+            bool(getattr(args, "orchestrate_large_changes", False))
+            or work_budgets.mode == "unified"
+        )
         # Read and preflight before loading any provider adapter.  The helper
         # performs a bounded ``maximum + 1`` read and strict UTF-8
         # decoding; the shared analysis validates all diff/path dimensions.
@@ -3214,9 +3240,20 @@ def main(argv: list[str] | None = None) -> int:
                 maximum=work_budget.max_total_diff_bytes,
                 label="diff",
             )
-            analysis = plan_change(
-                diff, limits=limits, orchestrate=True, work_budget=work_budget
-            ).analysis
+            if work_budgets.mode == "unified":
+                analysis = analyze_diff(
+                    diff,
+                    limits=limits,
+                    allow_incomplete=True,
+                    max_bytes=work_budget.max_total_diff_bytes,
+                    max_lines=work_budget.max_total_diff_lines,
+                    max_files=work_budget.max_total_files,
+                    max_hunks=work_budget.max_total_hunks,
+                )
+            else:
+                analysis = plan_change(
+                    diff, limits=limits, orchestrate=True, work_budget=work_budget
+                ).analysis
         else:
             diff = read_bounded_utf8(
                 args.diff,
@@ -3499,6 +3536,8 @@ def main(argv: list[str] | None = None) -> int:
             provider,
             stages=stages,
             stage_providers=stage_providers,
+            work_budgets=work_budgets,
+            budget=resource_budget,
         )
         context_root = args.context_root or args.learning_root
         context_store = (
@@ -3597,6 +3636,7 @@ def main(argv: list[str] | None = None) -> int:
             untrusted_head_sha=untrusted_head_sha,
             orchestrate_large_changes=orchestrate,
             work_budget=work_budget,
+            work_policy_digest=service.work_policy_digest,
         )
         current_key = build_review_context_cache_key(
             _checkpoint_cache_request(
@@ -3647,6 +3687,7 @@ def main(argv: list[str] | None = None) -> int:
                         category_policy=category_policy,
                         publication_mode=policy.mode,
                         orchestration_enabled=orchestrate,
+                        work_policy_digest=service.work_policy_digest,
                     )
                 )
                 transaction_configuration_digest = (
@@ -3853,7 +3894,7 @@ def main(argv: list[str] | None = None) -> int:
                 trusted_base_sha=resolved_base_sha,
                 trusted_head_sha=resolved_head_sha,
                 profile=effective_profile,
-                budget=ResourceBudget.for_limits(limits),
+                budget=resource_budget,
             )
             if (
                 run.result is not None

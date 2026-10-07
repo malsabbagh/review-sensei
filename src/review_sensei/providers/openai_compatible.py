@@ -310,14 +310,14 @@ class OpenAICompatibleProvider:
             return self.base_url
         return f"{self.base_url}/chat/completions"
 
-    def _call_custom_opener(self, http_request: Request) -> Any:
+    def _call_custom_opener(self, http_request: Request, *, timeout: float) -> Any:
         """Invoke an injected opener with the verified TLS context."""
 
         opener = getattr(self._opener, "open", self._opener)
         try:
             return opener(
                 http_request,
-                timeout=self.timeout_seconds,
+                timeout=timeout,
                 context=self._ssl_context,
             )
         except TypeError as exc:
@@ -326,6 +326,11 @@ class OpenAICompatibleProvider:
             ) from exc
 
     def complete(self, request: ProviderRequest) -> ProviderResponse:
+        timeout = (
+            min(self.timeout_seconds, request.timeout_seconds)
+            if request.timeout_seconds is not None
+            else self.timeout_seconds
+        )
         model = (request.model if self.allow_model_override else None) or self.model
         try:
             validate_bounded_text(
@@ -343,7 +348,9 @@ class OpenAICompatibleProvider:
             "model": model,
             "messages": [{"role": "user", "content": request.prompt}],
             "stream": False,
-            "max_tokens": self.max_output_tokens,
+            "max_tokens": min(self.max_output_tokens, request.max_output_tokens)
+            if request.max_output_tokens is not None
+            else self.max_output_tokens,
         }
         if request.json_mode:
             # The adapter returns message.content as text; ReviewService validates JSON.
@@ -360,11 +367,9 @@ class OpenAICompatibleProvider:
 
         try:
             if self._opener is urlopen:
-                response_ctx = self._safe_opener.open(
-                    http_request, timeout=self.timeout_seconds
-                )
+                response_ctx = self._safe_opener.open(http_request, timeout=timeout)
             else:
-                response_ctx = self._call_custom_opener(http_request)
+                response_ctx = self._call_custom_opener(http_request, timeout=timeout)
             with response_ctx as response:
                 body = read_bounded_body(
                     response,

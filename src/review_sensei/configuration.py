@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
+from .budgets import MAX_TOTAL_OUTPUT_BYTES, MAX_TOTAL_PROMPT_BYTES, ReviewWorkBudgets
 from .errors import ReviewInputError
 from .provider_config import (
     DEFAULT_CLOUD_BASE_URL,
@@ -97,6 +98,7 @@ ADVANCED_FIELDS = (
     "egress",
     "large_changes",
     "resources",
+    "review_work",
 )
 ENDPOINT_FIELDS = ("base_url", "allow_custom_endpoint", "credential_env")
 ROUTING_FIELDS = ("upstream_provider",)
@@ -111,6 +113,13 @@ SYMBOL_CONTEXT_FIELDS = (
 EGRESS_FIELDS = ("allow_data_egress",)
 LARGE_CHANGE_FIELDS = ("orchestrate",)
 RESOURCE_FIELDS = ("timeout_seconds", "max_provider_calls")
+REVIEW_WORK_FIELDS = (
+    "mode",
+    "batch_diff_bytes",
+    "batch_prompt_bytes",
+    "max_total_prompt_bytes",
+    "max_total_output_bytes",
+)
 
 RETIRED_FIELDS: Mapping[str, str] = {
     "provider": "inference.backend",
@@ -408,6 +417,7 @@ class AdvancedSection:
     egress: EgressSection = field(default_factory=EgressSection)
     large_changes: LargeChangeSection = field(default_factory=LargeChangeSection)
     resources: ResourceSection = field(default_factory=ResourceSection)
+    review_work: ReviewWorkBudgets = field(default_factory=ReviewWorkBudgets)
 
 
 @dataclass(frozen=True)
@@ -1170,6 +1180,9 @@ def _build_advanced(
         resources=_build_resources(
             mapping.get("resources"), lines, source=source, fail=fail
         ),
+        review_work=_build_review_work(
+            mapping.get("review_work"), lines, source=source, fail=fail
+        ),
     )
 
 
@@ -1351,6 +1364,45 @@ def _build_large_changes(
             False,
             fail=fail,
         )
+    )
+
+
+def _build_review_work(
+    value: Any, lines: Mapping[str, int], *, source: str, fail: Any
+) -> ReviewWorkBudgets:
+    mapping = _mapping_field(value, "advanced.review_work", source=source, fail=fail)
+    _reject_unknown_fields(
+        mapping,
+        ("advanced", "review_work"),
+        lines,
+        source=source,
+        supported=REVIEW_WORK_FIELDS,
+    )
+    defaults = ReviewWorkBudgets()
+    fields = {
+        name: _positive_int_field(
+            mapping.get(name),
+            f"advanced.review_work.{name}",
+            getattr(defaults, name),
+            ceiling=ceiling,
+            fail=fail,
+        )
+        for name, ceiling in (
+            ("batch_diff_bytes", 1_048_576),
+            ("batch_prompt_bytes", 4_194_304),
+            ("max_total_prompt_bytes", MAX_TOTAL_PROMPT_BYTES),
+            ("max_total_output_bytes", MAX_TOTAL_OUTPUT_BYTES),
+        )
+    }
+    return ReviewWorkBudgets(
+        mode=_enum_field(
+            mapping.get("mode"),
+            "advanced.review_work.mode",
+            ("legacy", "unified"),
+            "legacy",
+            fail=fail,
+        ),
+        **fields,
     )
 
 
@@ -2476,6 +2528,11 @@ def _advanced_rows(configuration: ProductConfiguration) -> list[str]:
         rows.append(
             f"resources.max_provider_calls: {advanced.resources.max_provider_calls}"
         )
+    for field_name in REVIEW_WORK_FIELDS:
+        if configuration.is_declared(f"advanced.review_work.{field_name}"):
+            rows.append(
+                f"review_work.{field_name}: {getattr(advanced.review_work, field_name)}"
+            )
     return rows
 
 
@@ -2499,6 +2556,10 @@ _DEFAULT_FIELD_VALUES: Mapping[str, Any] = {
     "advanced.large_changes.orchestrate": False,
     "advanced.resources.timeout_seconds": ("packaged default for the selected backend"),
     "advanced.resources.max_provider_calls": DEFAULT_TOTAL_WORK_MAX_PROVIDER_CALLS,
+    **{
+        f"advanced.review_work.{name}": getattr(ReviewWorkBudgets(), name)
+        for name in REVIEW_WORK_FIELDS
+    },
 }
 
 

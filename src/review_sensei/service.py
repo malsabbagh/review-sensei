@@ -5,10 +5,11 @@ import logging
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from .budgets import ProviderCapabilities, ReviewWorkBudgets
 from .concurrency import ReviewConcurrencyPlan
 from .context import (
     FindingLifecycle,
@@ -206,6 +207,23 @@ class ReviewService:
     calls would race on the per-run ``_provider_calls`` budget counter.
     """
 
+    @property
+    def work_policy_digest(self) -> str | None:
+        if self.work_budgets.mode != "unified":
+            return None
+        from .evidence import evidence_digest
+
+        return evidence_digest(
+            {
+                "mechanism": "unified:v1",
+                "budgets": asdict(self.work_budgets),
+                "resource_budget": asdict(self.budget),
+                "capabilities": asdict(self.capabilities)
+                if self.capabilities
+                else None,
+            }
+        )
+
     def __init__(
         self,
         provider: ReviewProvider,
@@ -215,6 +233,8 @@ class ReviewService:
         stage_providers: Mapping[str, ReviewProvider] | None = None,
         budget: ResourceBudget | None = None,
         cache: ReviewContextCache | None = None,
+        work_budgets: ReviewWorkBudgets | None = None,
+        capabilities: ProviderCapabilities | None = None,
     ) -> None:
         self.provider = provider
         self.enforce_locations = enforce_locations
@@ -223,6 +243,13 @@ class ReviewService:
         self.budget = budget if budget is not None else ResourceBudget.create()
         self._provider_calls = 0
         self.cache = cache
+        self.work_budgets = work_budgets or ReviewWorkBudgets()
+        self.capabilities = capabilities
+        if not isinstance(self.work_budgets, ReviewWorkBudgets) or (
+            capabilities is not None
+            and not isinstance(capabilities, ProviderCapabilities)
+        ):
+            raise ReviewInputError("review work configuration is invalid")
         if not self.stages:
             raise ReviewInputError("review must contain at least one configured stage")
         if any(not isinstance(stage, Stage) for stage in self.stages):
@@ -664,8 +691,40 @@ class ReviewService:
         mismatched key before change orchestration or any provider/cache work.
         """
 
+        if self.work_budgets.mode == "unified":
+            if (
+                request.work_policy_digest is not None
+                and request.work_policy_digest != self.work_policy_digest
+            ):
+                raise ReviewInputError("review request work policy identity is invalid")
+            request = replace(request, work_policy_digest=self.work_policy_digest)
+        elif request.work_policy_digest is not None:
+            raise ReviewInputError("review work policy requires the unified mechanism")
         active_provider = provider_override or self.provider
         key_request = request
+        if (
+            self.work_budgets.mode == "unified"
+            and current_key is None
+            and (trusted_base_sha is not None or trusted_head_sha is not None)
+        ):
+            if (
+                trusted_base_sha is None
+                or trusted_head_sha is None
+                or (
+                    request.base_sha is not None
+                    and request.base_sha != trusted_base_sha
+                )
+                or (
+                    request.head_sha is not None
+                    and request.head_sha != trusted_head_sha
+                )
+            ):
+                raise ReviewInputError(
+                    "review work requires a consistent trusted snapshot"
+                )
+            key_request = replace(
+                request, base_sha=trusted_base_sha, head_sha=trusted_head_sha
+            )
         if (
             current_key is not None
             and request.base_sha is None
@@ -732,6 +791,20 @@ class ReviewService:
         executed_comment_stage = False
         self._provider_calls = 0 if tracker is None else tracker.provider_calls
         stage_summary: dict[str, str] = {}
+
+        if self.work_budgets.mode == "unified":
+            from .discovery_work import discover
+
+            return discover(
+                self,
+                request,
+                snapshot_request=key_request,
+                tracker=tracker,
+                incremental=incremental,
+                current_key=current_key,
+                profile=profile,
+                provider=active_provider,
+            )
 
         try:
             change_plan = plan_change(

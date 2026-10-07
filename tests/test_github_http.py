@@ -23,6 +23,22 @@ class FakeResponse(io.BytesIO):
 
 
 class GitHubHttpTests(unittest.TestCase):
+    def test_adaptive_pagination_still_obeys_request_and_deadline_budgets(self):
+        for request_cap, seconds in ((1, 60), (10, 0.5)):
+            with self.subTest(request_cap=request_cap, seconds=seconds):
+                ticks = iter((0.0, 0.0, 1.0))
+                http, calls = self.make_http((200, b"[1]"))
+                with self.assertRaises(GitHubHTTPPaginationLimitError):
+                    http.paginate(
+                        path="/files",
+                        token="t",
+                        page_sizes=(1,),
+                        max_requests=request_cap,
+                        timeout_seconds=seconds,
+                        monotonic=lambda: next(ticks),
+                    )
+                self.assertEqual(len(calls), 1)
+
     def make_http(self, responses, **kwargs):
         calls = []
 
