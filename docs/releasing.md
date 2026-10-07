@@ -539,26 +539,34 @@ details.
 **0.6.17 is the first tag using this automation.** Merge the reviewed automation
 PR before creating `v0.6.17`. The release owner must then update/rebase the
 0.6.17 release PR onto main containing both `scripts/release_docs.py` and the
-`Release` docs-build / Pages qualification jobs. Re-run final qualification and
+`Release` docs-build / Pages qualification and docs writeback jobs. Re-run final qualification and
 terminal CI on that exact release PR head before its reviewed merge and signed
 tag. Do not tag the earlier release PR head or retrofit the automation onto an
 existing immutable tag. Preparing this automation PR does not authorize release,
 publication, a `v5` move, Worker deployment or repository-setting changes.
 
-The release PR still owns tracked content: Python and all npm versions, dated
-changelog, site manifest, onboarding installation pins, README examples and any
-updated docs/contracts. Run the version, site, schemas and Action-pin checks,
-then `python scripts/build_site_pages.py` and commit generated pages with their
-manifest before review. A tag cannot invent or approve new prose or provider
-claims; it selects the reviewed source and drives the published version and
-source metadata. Generation after the tag writes only a static artifact, never
-a commit, branch push or tag mutation. There is no recursive docs/release loop.
+The release PR owns Python and all six npm versions, exact npm optional
+dependencies, packaged README pins, the dated changelog, and reviewed prose or
+provider claims. The package source must already agree with the intended tag:
+post-tag documentation generation does not turn 0.6.16 source into a 0.6.17
+package. Keep the existing 0.6.17 release PR (#226) for that preparation; no
+additional release PR is needed. Rebase it after this correction merges and
+requalify its exact head. A tag-derived package-version refactor is outside this
+documentation change.
+
+Source site metadata may record an older version than current Python/npm
+metadata, but never a future version or an inconsistent tag. Source generated
+pages still agree with their reviewed manifest. The tag build updates a staged
+manifest's version/tag and all recognized installation snippets automatically;
+there is no required pre-tag bump of site metadata, onboarding snippets or
+generated release pages. A tag cannot invent new prose or provider claims.
+Ordinary content changes still need review and source generation checks.
 
 The read-only `Release` documentation job checks the exact event SHA and clean
 checkout against the signed annotated tag object as verified by GitHub. It
 validates Python/npm/changelog/version and the manifest/schema/evidence,
-checks tracked generation, then builds the entire static site under runner
-staging. It pins repository docs and example links to the immutable source SHA,
+checks reviewed source generation, then derives the tagged version in the staged
+manifest/snippets and builds the entire static site under runner staging. It pins repository docs and example links to the immutable source SHA,
 pins previously unversioned pip snippets, and records tag, version, tag object,
 source SHA, release run and build attempt in public provenance. A file inventory
 covers the site's exact bytes. The static bundle is retained as
@@ -578,11 +586,47 @@ selected tag/run/artifact identity and high-water mark immediately before Pages
 deployment. It grants Pages/OIDC write plus the Contents/Actions read needed
 for that check, executing only the pinned trusted default-branch helper. It
 never downloads or executes released code. No long-lived
-credential or extra publication permission is introduced. Existing environment
+credential is introduced. The separate docs writeback job grants Contents write
+and Actions read solely to integrate generated documentation with main. Existing environment
 rules/reviewers remain the deployment gate; no settings are changed by this PR.
 
-A failed, cancelled or partial release leaves the previously published site in
-place, even if one registry or GitHub release already contains the new version.
+After the same successful Release qualification, a separate trusted-main job
+verifies the exact artifact and commits only `docs/releases/latest/` (the complete
+static site snapshot, provenance and file inventory) and
+`docs/releases/latest.md` (release/version/source and example links). It does not
+rewrite runtime source, package versions, workflows, reviewed source docs, tags
+or the operator-managed `v5` channel. The index and snapshot are machine-owned;
+hand edits, symlinks, byte tampering and incomplete prior snapshots fail closed.
+Current main source docs may include unreleased work; the generated snapshot is
+explicitly bound to the released SHA.
+
+The job integrates with freshly fetched main using a disposable worktree and a
+non-force push. It rechecks tag/run/artifact identity and the newer successful
+release high-water mark before pushing. A genuine concurrent main advance is
+retried at most three times; permission/policy failures on an unchanged branch
+are terminal. Same-tag/source retries retain the first verified snapshot and
+make no additional commit, even if a docs rebuild changes its attempt/artifact
+ID. Workflow runs are serialized without cancellation. Only a completed Release
+or explicit run-ID retry triggers writeback; neither the docs commit nor main CI
+starts another release or docs cycle. GITHUB_TOKEN pushes do not trigger ordinary
+push workflows, so artifact hashes and staged-path checks run before the push.
+
+**Current activation blocker:** main's active ruleset requires a pull request,
+code-owner review and approval from someone other than the last pusher. Direct
+writeback cannot satisfy that policy. The helper reads active branch rules
+(including rulesets) and stops if a PR is required, even for an actor with bypass
+rights. It never creates a per-release docs PR, changes protection/settings,
+installs credentials or uses an admin bypass. The existing GITHUB_TOKEN is the
+only write credential. Keep v0.6.17 held until the user explicitly resolves this
+policy incompatibility; merging the code alone does not make direct writeback
+operational. Pages publication remains separately qualified and gated by its
+existing environment. A main-writeback failure cannot undo published packages
+or the separately deployed site. Once policy legitimately permits the operation,
+retry Pages from main with the same successful `release_run_id`.
+
+A failed, cancelled or partial release leaves both the previous generated main
+snapshot and published site in place, even if one registry or GitHub release
+already contains the new version.
 Recover the original release jobs/bundles under the existing package procedures;
 never retag. Re-running a failed publisher may reuse docs built on an earlier
 attempt of the same release run. If the docs build itself failed, rerun that job;

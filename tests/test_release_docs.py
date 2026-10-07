@@ -523,6 +523,76 @@ class ReleaseDocsBuildTests(unittest.TestCase):
                     (output / "site/index.html").read_text(encoding="utf-8"),
                 )
 
+    def test_tag_build_derives_release_metadata_and_pins_from_older_source_docs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "source"
+            shutil.copytree(
+                self.root, root, ignore=shutil.ignore_patterns(".git", "__pycache__")
+            )
+            manifest_path = root / "docs/site/data/site-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["release_facts"].update(version="0.6.16", tag="v0.6.16")
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+            )
+            onboarding = root / "docs/site/getting-started/index.html"
+            onboarding.write_text(
+                onboarding.read_text(encoding="utf-8").replace("0.6.17", "0.6.16"),
+                encoding="utf-8",
+            )
+            DOCS.load_script(root, "build_site_pages").build_site_pages()
+            for args in (
+                ("init", "-q"),
+                ("add", "."),
+                (
+                    "-c",
+                    "user.name=Docs Test",
+                    "-c",
+                    "user.email=docs@example.test",
+                    "commit",
+                    "-qm",
+                    "Versioned package with older source docs",
+                ),
+            ):
+                subprocess.run(
+                    ["git", "-C", str(root), *args], check=True, capture_output=True
+                )
+            sha = subprocess.check_output(
+                ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+            ).strip()
+            real_check = subprocess.check_output
+
+            def git_output(args, **kwargs):
+                if args[-1] == "refs/tags/v0.6.17":
+                    return self.tag_sha + "\n"
+                return real_check(args, **kwargs)
+
+            output = Path(temporary) / "bundle"
+            with (
+                patch.dict(os.environ, {"GITHUB_SHA": sha}),
+                patch.object(DOCS, "tag_identity", return_value=(self.tag_sha, sha)),
+                patch.object(DOCS.subprocess, "check_output", side_effect=git_output),
+            ):
+                DOCS.build(root, output, "v0.6.17", 42, 1)
+            DOCS.verify_bundle(output, dict(self.selection, source_sha=sha))
+            staged = json.loads((output / "site/data/site-manifest.json").read_text())
+            self.assertEqual(staged["release_facts"]["version"], "0.6.17")
+            self.assertEqual(
+                json.loads(manifest_path.read_text())["release_facts"]["version"],
+                "0.6.16",
+            )
+            self.assertIn(
+                "@reviewsensei/cli@0.6.17",
+                (output / "site/getting-started/index.html").read_text(),
+            )
+            self.assertIn("@reviewsensei/cli@0.6.16", onboarding.read_text())
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(root), "status", "--porcelain"], text=True
+                ),
+                "",
+            )
+
     def test_provenance_schema_rejects_missing_identity_or_mutable_source(self):
         schema = json.loads(
             (self.bundle / "site/schemas/release-provenance.schema.json").read_text(
@@ -644,7 +714,8 @@ class ReleaseDocsWorkflowTests(unittest.TestCase):
         self.assertNotIn("workflows: [CI]", workflow)
         self.assertNotIn("branches: [main]", workflow)
         self.assertNotIn("secrets.", workflow)
-        qualifier, deploy = workflow.split("\n  deploy:\n", 1)
+        qualifier, remaining = workflow.split("\n  deploy:\n", 1)
+        deploy, update = remaining.split("\n  update-main:\n", 1)
         self.assertNotIn("pages: write", qualifier)
         self.assertNotIn("id-token: write", qualifier)
         self.assertIn("ref: ${{ github.sha }}", qualifier)
@@ -661,6 +732,14 @@ class ReleaseDocsWorkflowTests(unittest.TestCase):
         self.assertIn("needs: qualify", deploy)
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertNotIn("git push", workflow)
+        self.assertIn("contents: write", update)
+        self.assertIn("actions: read", update)
+        self.assertNotIn("pages: write", update)
+        self.assertNotIn("id-token: write", update)
+        self.assertIn("digest-mismatch: error", update)
+        self.assertIn("ref: ${{ github.sha }}", update)
+        self.assertIn("persist-credentials: false", update)
+        self.assertIn("sync_release_docs.py", update)
 
 
 if __name__ == "__main__":

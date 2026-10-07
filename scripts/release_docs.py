@@ -227,14 +227,23 @@ def build(root: Path, output: Path, tag: str, run_id: int, attempt: int) -> None
     pages = load_script(root, "build_site_pages")
     pages.check_site_pages(root=root)
     file_inventory(root / "docs/site")
-    validate_installation_versions(root / "docs/site", version)
     if output.exists():
         raise ValueError("docs build output must be absent")
     output.mkdir(parents=True)
     site = output / "site"
     shutil.copytree(root / "docs/site", site)
+    # Package source is already versioned before tagging. Site release metadata
+    # and installation snippets are generated after the tag, without editing
+    # the immutable source or requiring a pre-tag documentation bump.
+    manifest_path = site / "data/site-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["release_facts"].update(version=version, tag=tag)
+    load_script(root, "validate_site_manifest").validate_site_manifest(
+        manifest, root=root
+    )
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     pages.build_site_pages(
-        manifest_path=site / "data/site-manifest.json",
+        manifest_path=manifest_path,
         providers_output=site / "providers/index.html",
         releases_output=site / "releases/index.html",
     )
@@ -258,6 +267,14 @@ def build(root: Path, output: Path, tag: str, run_id: int, attempt: int) -> None
         content = content.replace(
             ">implemented on main<", ">implemented in this release<"
         )
+        for pattern in (
+            r"(pip install review-sensei==)([0-9]+\.[0-9]+\.[0-9]+)",
+            r"(@reviewsensei/cli@)([0-9]+\.[0-9]+\.[0-9]+)",
+            r"(REVIEWSENSEI_VERSION=)([0-9]+\.[0-9]+\.[0-9]+)",
+            r"(review-sensei\s+)([0-9]+\.[0-9]+\.[0-9]+)",
+            r"(Release )([0-9]+\.[0-9]+\.[0-9]+)",
+        ):
+            content = re.sub(pattern, lambda match: match[1] + version, content)
         banner = (
             f'<p class="release-provenance" style="padding:12px;text-align:center">'
             f'Released docs: <a href="{prefix}releases/tag/{tag}">{tag}</a> · '
@@ -266,6 +283,7 @@ def build(root: Path, output: Path, tag: str, run_id: int, attempt: int) -> None
         )
         content = content.replace("</main>", banner + "</main>")
         path.write_text(content, encoding="utf-8")
+    validate_installation_versions(site, version)
     provenance = {
         "schema_version": "1.0",
         "repository": REPOSITORY,

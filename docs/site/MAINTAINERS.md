@@ -70,3 +70,11 @@ the released source, even when their source manifest label is
 
 See [the release docs procedure](../releasing.md#tag-driven-documentation-starting-with-0617)
 for bootstrap, retry, supersession, historical snapshots and rollback policy.
+
+The post-tag writeback job also maintains the complete generated snapshot under
+`docs/releases/latest/` and its `docs/releases/latest.md` index on main. It uses
+fresh-main, non-force integration and no per-release docs PR. Source site
+release metadata may lag package preparation; the build derives the actual tag
+version in its staging copy. Main's existing PR/approval rules currently block
+direct writeback, and the helper refuses to bypass them. See the activation
+blocker and pre-tag packaging contract in `docs/releasing.md` before first use.
