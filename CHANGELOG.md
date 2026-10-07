@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.17 - 2026-10-08
+
 - Admit up to 64 related paths under the existing metadata item ceiling and
   allocate up to 12 KiB of history inside a coordinated 20 KiB record / 40 KiB
   comment envelope. Check actual escaped bytes and reserve future lifecycle
@@ -9,6 +11,24 @@
   Preserve omitted or downgraded prior findings as uncertain/partial on both
   incremental and fallback reviews. Shared-ledger readers must be upgraded
   before expanded writes; existing installed/pinned consumers reject them.
+
+- Derive released documentation from the signed immutable tag and exact source
+  SHA after the complete Release workflow succeeds (#225, #227). Validate the
+  static artifact inventory and provenance, publish Pages, and integrate only
+  the generated release snapshot/index into fresh main through the dedicated
+  docs App. Preserve historical examples and newer successful cutoffs.
+  `0.6.17` is the first use, requiring real App readiness before tagging.
+- Include the explicitly opt-in shared discovery/reassessment work engine
+  merged in #228. Existing routing remains the default; richer evidence, bounded
+  budgets and private recovery receipts require explicit configuration. Retain
+  approval/authorization gates and upgrade shared readers before richer writes.
+  Refuse oversized latest session comments rather than treating them as absent
+  (ADR 0067); old readers have an unsafe downgrade boundary.
+- Align Python, all six npm packages, packaged install examples at
+  `0.6.17`. Reviewed source site labels may remain at the previous released
+  version; the tagged docs build derives the new snapshot automatically. Preserve the published `0.6.16` artifacts and tag.
+  Publication does not authorize expanded shared-ledger writes until every
+  reader is upgraded; see the staged rollout in `docs/releasing.md`.
 
 ## 0.6.16 - 2026-10-06
 

@@ -7,7 +7,7 @@ standalone Python engine bundled for macOS Intel.
 Install the public launcher, which selects the matching native package:
 
 ```console
-npm install --save-dev @reviewsensei/cli@0.6.16
+npm install --save-dev @reviewsensei/cli@0.6.17
 npx review-sensei --help
 ```
 

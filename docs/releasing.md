@@ -377,6 +377,52 @@ Use the rollback and yank policy below if verification fails. Never overwrite a
 published version; workflow rollback uses the previous immutable target, and
 Worker rollback uses the prior recorded deployment.
 
+## 0.6.17 expanded-context rollout
+
+PR #224 retains the version-1 session field shape and accepts older records,
+but readers from 0.6.16 and earlier reject records above their former limits.
+The new limits are 64 related paths, 12288 canonical history bytes, 20480
+canonical record bytes and 40960 comment bytes (ADR 0066). A schema-version
+match alone does not establish reader compatibility.
+
+Before enabling expanded writes to a shared ledger:
+
+1. Quiesce review, publication, command and recovery writers, including in-flight
+   runs. Inventory every installed CLI, standalone/npm installation and pinned
+   reusable workflow that reads that ledger.
+2. Publish and verify the exact 0.6.17 Python and all six npm artifacts through
+   the normal signed-tag release. Qualify merged tag-driven docs
+   writeback and the dedicated App on main before creating `v0.6.17`; this
+   release is its first use. Keep source-site labels unchanged so the tag build
+   demonstrates automatic derivation in the generated snapshot.
+3. Upgrade all shared-ledger readers, including analysis, publication, commands,
+   recovery and local/standalone entry points. Verify exact installed versions
+   and workflow SHAs. An old immutable workflow pin or old installation remains
+   an incompatible reader even after the movable `v5` channel is promoted.
+4. Verify the broker and Worker separately. They receive bounded attestations
+   and digests rather than convergence history, so PR #224 introduces no Worker
+   code or Durable Object schema migration. Compare the final release source
+   with the deployed Worker before deciding whether a matching deployment is
+   required; retain its identity and compatibility evidence.
+5. Promote `v5` only through the separately approved channel procedure after
+   complete artifact verification and required canary binding. Recheck all
+   consumer pins and in-flight runs, then enable expanded writes only after
+   the complete reader inventory is compatible. A fresh authorized end-to-end
+   review must bind the installed version, exact workflow SHA and successful
+   publication; historical runs do not qualify the new release.
+
+PR #228 also adds richer opt-in review-work readers and fixes an unsafe older
+comment-marker boundary (ADR 0067). Old readers may misclassify oversized latest
+comments as absent. Existing routing remains the default; do not enable unified
+work, richer inventory or expanded writes until every shared reader is upgraded.
+
+Do not reset counters, reinitialize a ledger, truncate old evidence or restore
+an old reader to a ledger containing expanded records. Rollback must retain an
+expanded-capacity reader for those ledgers. Package publication can proceed
+while consumers are quiesced; mixed old/new readers after expanded writes are
+unsupported. Release preparation does not change consumer settings, channel
+pins, App permissions or production ledgers.
+
 ## Compatibility manifest and release sequencing
 
 A supported cutoff binds workflow commit, Python distribution, npm artifacts,
