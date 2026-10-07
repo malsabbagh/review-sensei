@@ -14,6 +14,7 @@ from unittest.mock import patch
 from review_sensei.baseline import (
     admission_context_from_document,
     baseline_from_history_document,
+    baseline_history_document,
 )
 from review_sensei.cli import main
 from review_sensei.convergence import ReviewConvergencePolicy
@@ -23,6 +24,8 @@ from review_sensei.hosting.github.approval import (
 )
 from review_sensei.hosting.github.publication import prepare_publication_review
 from review_sensei.models import ReviewComment, ReviewResult
+from review_sensei.outcomes import ResourceBudget
+from review_sensei.planning import related_paths_for_change
 from review_sensei.providers.base import ProviderResponse
 from review_sensei.service import DEFAULT_STAGES
 from review_sensei.session import (
@@ -42,6 +45,7 @@ class Provider:
         self.calls = 0
         self.error = None
         self.hook = None
+        self.comments = []
 
     def complete(self, request):
         self.calls += 1
@@ -51,7 +55,9 @@ class Provider:
         if self.error:
             raise self.error
         return ProviderResponse(
-            text=json.dumps({"summary": "Reviewed synthetic change", "comments": []}),
+            text=json.dumps(
+                {"summary": "Reviewed synthetic change", "comments": self.comments}
+            ),
             provider=self.name,
             model=self.model,
         )
@@ -155,6 +161,227 @@ class BaselineRecoveryTests(unittest.TestCase):
         return baseline_from_history_document(
             self.record().convergence_history["baseline"]
         )
+
+    def seed_overflow(self, *, finding=False, long_paths=False):
+        if finding:
+            self.provider.comments = [
+                {
+                    "path": "app.py",
+                    "line": 2,
+                    "body": "Authorization failure; reject the unauthorized request.",
+                    "blocking": True,
+                    "severity": "high",
+                    "defect_kind": "authz-failure",
+                }
+            ]
+        self.assertEqual(self.run_cli()[0], 0)
+        self.provider.comments = []
+        prior = tuple(f"p{i}.py" for i in range(16))
+        baseline = replace(self.baseline(), related_paths=prior)
+        history = dict(self.record().convergence_history)
+        history["baseline"] = baseline_history_document(baseline)
+        self.ledger.replace(
+            self.identity, lambda record: record.evolve(convergence_history=history)
+        )
+        current = prior[:8] + tuple(
+            f"{'x' * 100 if long_paths else 'n'}{i}.py" for i in range(39)
+        )
+        related = related_paths_for_change(current)
+        self.assertEqual(
+            (len(prior), len(related), len(set(prior) | set(related))), (16, 32, 41)
+        )
+        (self.root / "diff.patch").write_text(
+            "".join(
+                f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1,2 @@\n keep\n+change\n"
+                for path in current
+            )
+        )
+        return self.record()
+
+    def test_overflow_runs_one_full_analysis_then_exact_retry_skips(self):
+        before = self.seed_overflow()
+        prior = self.baseline()
+        code, stderr, outcome = self.run_cli(head="d")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(self.provider.calls, 2)
+        self.assertEqual(
+            outcome["stage_summary"]["baseline_refresh"], "related-context-overflow"
+        )
+        result = ReviewResult.from_dict(
+            json.loads((self.root / "result.json").read_text())
+        )
+        self.assertEqual(result.coverage_mode, "fallback-full")
+        self.assertEqual(len(result.coverage.enumerated_paths), 47)
+        self.assertTrue(result.coverage.fully_reviewed)
+        self.assertEqual(self.baseline().cache_key.head_sha, "d" * 40)
+        self.assertEqual(
+            self.record().completed_verification_rounds,
+            before.completed_verification_rounds + 1,
+        )
+        restored, key = admission_context_from_document(
+            json.loads((self.root / "admission.json").read_text())
+        )
+        self.assertEqual(restored, prior)
+        self.assertEqual(key.head_sha, "d" * 40)
+        generation = self.record().generation
+        self.assertEqual(
+            self.run_cli(head="d")[2]["diagnostic"], "publication_recovery_required"
+        )
+        self.assertEqual(self.provider.calls, 2)
+        self.assertEqual(self.record().generation, generation)
+
+    def test_overflow_omitted_blocker_stays_uncertain_and_history_survives_replay(self):
+        before = self.seed_overflow(finding=True)
+        code, stderr, outcome = self.run_cli(head="d")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(outcome["status"], "partial")
+        self.assertEqual(self.provider.calls, 2)
+        result = ReviewResult.from_dict(
+            json.loads((self.root / "result.json").read_text())
+        )
+        self.assertEqual(result.review_status, "partial")
+        self.assertEqual(result.finding_lifecycles[0].state, "uncertain")
+        self.assertEqual(
+            result.finding_lifecycles[0].fingerprint,
+            self.baseline().findings[0].fingerprint,
+        )
+        self.assertEqual(self.record().convergence_history, before.convergence_history)
+        self.assertEqual(self.record().failed_attempts, 1)
+        eligibility = evaluate_approval_facts(
+            approval_facts_from_result(
+                result,
+                enabled=True,
+                app_authored=False,
+                check_published=True,
+                has_open_review_threads=False,
+            )
+        )
+        self.assertFalse(eligibility.approved)
+        self.assertIn("review-partial", eligibility.blockers)
+        tx = result.transaction
+        for _ in range(2):
+            loaded = load_review_transaction_for_publication(
+                self.ledger,
+                self.identity,
+                result,
+                base_sha="a" * 40,
+                head_sha="d" * 40,
+                policy_digest=tx.policy_digest,
+                configuration_digest=tx.configuration_digest,
+                evidence_digest=tx.evidence_digest,
+            )
+            complete_review_publication(
+                self.ledger, self.identity, loaded.transaction, published=True
+            )
+        self.assertEqual(self.provider.calls, 2)
+        self.assertEqual(self.record().failed_attempts, 1)
+        self.assertEqual(self.record().convergence_history, before.convergence_history)
+
+    def test_overflow_full_evidence_that_cannot_fit_keeps_prior_history(self):
+        before = self.seed_overflow(long_paths=True)
+        code, stderr, _ = self.run_cli(head="d")
+        self.assertEqual(code, 1, stderr)
+        self.assertIn(
+            "full overflow review evidence exceeds the persisted bound", stderr
+        )
+        self.assertEqual(self.provider.calls, 2)
+        self.assertEqual(self.record().convergence_history, before.convergence_history)
+        self.assertEqual(self.record().failed_attempts, 1)
+        self.assertIsNone(self.record().reservation_id)
+
+    def test_overflow_chunked_review_obeys_budget_without_restarting_analysis(self):
+        before = self.seed_overflow()
+        calls = self.provider.calls
+        with patch(
+            "review_sensei.cli.ResourceBudget.for_limits",
+            return_value=replace(
+                ResourceBudget.for_limits(DEFAULT_REVIEW_LIMITS), max_provider_calls=2
+            ),
+        ):
+            code, stderr, outcome = self.run_cli(
+                head="d", extra=("--orchestrate-large-changes",)
+            )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(outcome["status"], "partial")
+        self.assertEqual(self.provider.calls - calls, 2)
+        self.assertEqual(self.record().convergence_history, before.convergence_history)
+        self.assertEqual(self.record().failed_attempts, 1)
+
+    def test_overflow_provider_downgrade_cannot_clear_prior_blocker(self):
+        before = self.seed_overflow(finding=True)
+        self.provider.comments = [
+            {
+                "path": "app.py",
+                "line": 2,
+                "body": "Reworded authorization concern.",
+                "blocking": False,
+                "severity": "low",
+                "defect_kind": "authz-failure",
+            }
+        ]
+        code, stderr, outcome = self.run_cli(head="d")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(outcome["status"], "partial")
+        result = ReviewResult.from_dict(
+            json.loads((self.root / "result.json").read_text())
+        )
+        self.assertIn(
+            self.baseline().findings[0].fingerprint,
+            {
+                item.fingerprint
+                for item in result.finding_lifecycles
+                if item.state == "uncertain"
+            },
+        )
+        self.assertEqual(self.record().convergence_history, before.convergence_history)
+
+    def test_overflow_failed_or_partial_analysis_cannot_replace_history(self):
+        before = self.seed_overflow()
+        self.provider.error = RuntimeError("synthetic provider failure")
+        self.assertNotEqual(self.run_cli(head="d")[0], 0)
+        self.assertEqual(self.record().convergence_history, before.convergence_history)
+        self.assertEqual(self.record().failed_attempts, 1)
+        self.provider.error = None
+        with (self.root / "diff.patch").open("a") as handle:
+            handle.write(
+                "diff --git a/logo.bin b/logo.bin\nBinary files a/logo.bin and b/logo.bin differ\n"
+            )
+        code, stderr, outcome = self.run_cli(head="e")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(outcome["status"], "partial")
+        self.assertEqual(self.record().convergence_history, before.convergence_history)
+
+    def test_overflow_publication_new_finding_still_requires_human(self):
+        self.seed_overflow()
+        prior = self.baseline()
+        self.provider.comments = [
+            {
+                "path": "n0.py",
+                "line": 2,
+                "body": "An unchecked request bypasses authorization; reject unauthorized input.",
+                "severity": "high",
+                "defect_kind": "authz-failure",
+                "fix_effort": "small",
+            }
+        ]
+        code, stderr, _ = self.run_cli(head="d")
+        self.assertEqual(code, 0, stderr)
+        _, key = admission_context_from_document(
+            json.loads((self.root / "admission.json").read_text())
+        )
+        result = ReviewResult.from_dict(
+            json.loads((self.root / "result.json").read_text())
+        )
+        prepared = prepare_publication_review(
+            result=result,
+            diff=(self.root / "diff.patch").read_text(),
+            head_sha="d" * 40,
+            baseline=prior,
+            current_key=key,
+            related_paths=related_paths_for_change(result.coverage.enumerated_paths),
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        )
+        self.assertTrue(prepared.result.comments[0].needs_human)
 
     def test_base_change_runs_full_and_refreshes_only_after_checkpoint(self):
         for orchestrate in (False, True):

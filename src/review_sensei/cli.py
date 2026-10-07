@@ -17,7 +17,9 @@ from .baseline import (
     admission_context_document,
     admission_context_from_document,
     baseline_from_history_document,
+    baseline_history_document,
     plan_verification_scope,
+    reconcile_overflow_review,
 )
 from .configuration import (
     BACKEND_DEFAULTS,
@@ -3852,6 +3854,19 @@ def main(argv: list[str] | None = None) -> int:
                 profile=effective_profile,
                 budget=ResourceBudget.for_limits(limits),
             )
+            if (
+                run.result is not None
+                and admission_baseline is not None
+                and verification_scope is not None
+                and verification_scope.invalidation_reason == "related-context-overflow"
+            ):
+                reconciled = reconcile_overflow_review(run.result, admission_baseline)
+                status, diagnostic = service._run_outcome_for_result(reconciled)
+                run = replace(
+                    run,
+                    result=reconciled,
+                    outcome=replace(run.outcome, status=status, diagnostic=diagnostic),
+                )
         except (KeyboardInterrupt, SystemExit) as analysis_error:
             cleanup_analysis_error(analysis_error, charge_failed_attempt=False)
             raise
@@ -4017,10 +4032,30 @@ def main(argv: list[str] | None = None) -> int:
                             policy=policy,
                             related_paths=verification_related_paths,
                             generation=next_session_generation(prepared_round.record),
+                            prior_baseline=(
+                                admission_baseline
+                                if verification_scope is not None
+                                and verification_scope.invalidation_reason
+                                == "related-context-overflow"
+                                else None
+                            ),
                         )
                         if cache_key is not None
                         else None
                     )
+                    if (
+                        checkpoint_baseline is not None
+                        and checkpoint_baseline.complete
+                        and verification_scope is not None
+                        and verification_scope.invalidation_reason
+                        == "related-context-overflow"
+                        and not baseline_history_document(checkpoint_baseline)[
+                            "complete"
+                        ]
+                    ):
+                        raise ReviewInputError(
+                            "full overflow review evidence exceeds the persisted bound"
+                        )
                     result = checkpoint_review_analysis(
                         ledger,
                         identity,

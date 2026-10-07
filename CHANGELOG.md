@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Recover valid incremental related-context unions above 32 paths through one
+  bounded full review. Preserve omitted prior findings as uncertain/partial,
+  retain original resolution criteria and blocking facts on rediscovery, and
+  fail closed when complete evidence cannot fit existing durable bounds.
+
 ## 0.6.16 - 2026-10-06
 
 - Report committed analysis with unfinished publication as requiring publication

@@ -37,7 +37,7 @@ from .convergence import (
 )
 from .coverage import coverage_approval_state
 from .errors import ContextLoadError, ReviewInputError
-from .models import ReviewComment, ReviewResult
+from .models import FindingLifecycleRecord, ReviewComment, ReviewResult
 from .planning import MAX_RELATED_PATHS, related_paths_for_change
 from .schemas import validate_public_document
 from .validation import validate_repository_path
@@ -68,6 +68,7 @@ INVALIDATION_REASONS = frozenset(
         "incomplete-baseline",
         "missing-baseline",
         "coverage-incomplete",
+        "related-context-overflow",
         "ledger-untrusted",
     }
 )
@@ -85,6 +86,7 @@ RECOVERABLE_FALLBACK_REASONS = frozenset(
         "context-digest-change",
         "learning-digest-change",
         "coverage-incomplete",
+        "related-context-overflow",
     }
 )
 BASELINE_RECOVERY_REASONS = INVALIDATION_REASONS | frozenset(
@@ -599,6 +601,7 @@ def baseline_from_review(
     related_paths: Sequence[str] = (),
     reviewed_paths: Sequence[str] | None = None,
     generation: int = 0,
+    prior_baseline: ReviewBaseline | None = None,
 ) -> ReviewBaseline:
     """Build a baseline from a prior review. Incomplete reviews stay incomplete."""
 
@@ -612,6 +615,19 @@ def baseline_from_review(
         baseline_finding_from_comment(comment, generation=generation)
         for comment in result.comments
     )
+    if prior_baseline is not None:
+        # Overflow refreshes preserve the original resolution contract and
+        # blocking fact even when a rediscovered comment changes its wording.
+        findings = tuple(
+            replace(
+                finding,
+                resolution_criterion=prior.resolution_criterion,
+                blocking=finding.blocking or prior.blocking,
+            )
+            if (prior := match_baseline_finding(comment, prior_baseline)) is not None
+            else finding
+            for comment, finding in zip(result.comments, findings)
+        )
     if reviewed_paths is None:
         paths = [finding.path for finding in findings if finding.path is not None]
         if result.coverage is not None:
@@ -898,6 +914,7 @@ def plan_verification_scope(
 
     if not isinstance(policy, ReviewConvergencePolicy):
         raise ReviewInputError("review convergence policy is invalid")
+    _require_bool(context_complete, label="context_complete")
     changed = _bounded_paths(changed_paths, label="changed")
     if policy.mode not in OPERATOR_REVIEW_MODES:
         raw_extra_related = (
@@ -984,11 +1001,25 @@ def plan_verification_scope(
         related_paths_for_change(changed) if related_paths is None else related_paths
     )
     extra_related = _bounded_related_paths(raw_extra_related, label="related")
-    related = _merge_related_paths(baseline.related_paths, extra_related)
-    reviewed = _unique_paths(existing_paths, baseline.reviewed_paths, changed, related)
     confirmed = tuple(
         _require_sha256(item, label="confirmed concern") for item in confirmed_concerns
     )
+    # Both groups passed their individual syntax and size checks. Only union
+    # overflow may recover; malformed/oversized input still fails above.
+    if len(set(baseline.related_paths) | set(extra_related)) > MAX_RELATED_PATHS:
+        return _scope(
+            status="incompatible",
+            round_kind="initial",
+            late_admission_required=False,
+            coverage_mode="fallback-full",
+            invalidation_reason="related-context-overflow",
+            reviewed_paths=changed,
+            related_paths=(),
+            changed_paths=changed,
+            existing_concerns=len(baseline.findings),
+        )
+    related = _merge_related_paths(baseline.related_paths, extra_related)
+    reviewed = _unique_paths(existing_paths, baseline.reviewed_paths, changed, related)
     try:
         incremental = IncrementalReviewPlan(
             previous_key=baseline.cache_key,
@@ -1136,6 +1167,64 @@ def match_baseline_finding(
 
     matched, _ambiguous = _baseline_match_candidates(comment, baseline)
     return matched
+
+
+def reconcile_overflow_review(
+    result: ReviewResult, baseline: ReviewBaseline
+) -> ReviewResult:
+    """Reconcile fresh overflow analysis without treating omission as a fix.
+
+    Missing priors remain uncertain and make the result partial. Existing
+    partial checkpoint and approval gates preserve exact prior history and
+    withhold approval. No prior finding is injected into provider discovery.
+    """
+
+    pairs = tuple(
+        (comment, prior)
+        for comment in result.comments
+        if (prior := match_baseline_finding(comment, baseline)) is not None
+    )
+    matches = tuple(prior.fingerprint for _comment, prior in pairs)
+    matched = set(matches)
+    downgraded = tuple(
+        prior
+        for comment, prior in pairs
+        if prior.blocking and not comment.blocks_approval
+    )
+    omitted = tuple(
+        finding for finding in baseline.findings if finding.fingerprint not in matched
+    )
+    current = {
+        finding_lifecycle_for_comment(comment).fingerprint
+        for comment in result.comments
+    }
+    # Never use the ordinary narrowed history projection to drop findings
+    # during this recovery. A refresh must fit the existing durable bound.
+    lifecycles = {item.fingerprint: item for item in result.finding_lifecycles}
+    for fingerprint in sorted(current):
+        lifecycles.setdefault(
+            fingerprint, FindingLifecycleRecord(fingerprint, "still-present")
+        )
+    for finding in (*omitted, *downgraded):
+        lifecycles[finding.fingerprint] = FindingLifecycleRecord(
+            finding.fingerprint, "uncertain"
+        )
+    return replace(
+        result,
+        coverage_mode="fallback-full",
+        review_status=(
+            "partial"
+            if result.review_status == "complete"
+            and (
+                omitted
+                or downgraded
+                or len(result.comments) + len(omitted) > MAX_HISTORY_FINDINGS
+                or len(matches) != len(matched)
+            )
+            else result.review_status
+        ),
+        finding_lifecycles=tuple(lifecycles.values()),
+    )
 
 
 def _shares_lineage_identity(comment: ReviewComment, finding: BaselineFinding) -> bool:

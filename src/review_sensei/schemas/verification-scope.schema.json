@@ -52,6 +52,7 @@
         "incomplete-baseline",
         "missing-baseline",
         "coverage-incomplete",
+        "related-context-overflow",
         "ledger-untrusted",
         null
       ]
