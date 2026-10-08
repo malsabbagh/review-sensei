@@ -202,6 +202,16 @@ def sign(root: Path, sha: str, version: str, date: str) -> dict[str, str]:
             if verified.returncode:
                 raise ValueError("dedicated tag signature failed local verification")
             valid_signature(verified.stderr, fingerprint)
+            print(
+                json.dumps(
+                    {
+                        "prepared_tag": tag,
+                        "tag_object_sha": tag_object,
+                        "source_sha": sha,
+                        "fingerprint": fingerprint,
+                    }
+                )
+            )
             # Refresh every authority after importing/signing, just before write.
             qualify(root, sha, version, date)
             prep.unused(version)
@@ -235,8 +245,13 @@ def sign(root: Path, sha: str, version: str, date: str) -> dict[str, str]:
                 raise ValueError(
                     "remote signed tag does not match the exact created object"
                 )
-            if pushed.returncode and remote_object != tag_object:
-                raise ValueError("immutable signed tag push failed")
+            # Both success and a dropped/error response require the identical
+            # freshly created locally verified object; an existing different
+            # object fails above regardless of the push return code.
+            if pushed.returncode:
+                print(
+                    "Tag push response was unsuccessful; exact GitHub-verified object reconciled"
+                )
             return {
                 "tag": tag,
                 "source_sha": sha,

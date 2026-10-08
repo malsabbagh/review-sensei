@@ -276,6 +276,7 @@ class SigningOperationTests(unittest.TestCase):
 
     def test_dropped_push_response_reconciles_only_exact_github_verified_object(self):
         self.exercise(fail_push=True)
+        self.exercise(fail_push=True, bad_remote=True)
 
 
 @unittest.skipUnless(os.name == "posix", "secure local key setup targets macOS/Linux")
