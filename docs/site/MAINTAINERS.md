@@ -50,11 +50,22 @@ SHA, validates the tag against Python/npm/changelog and the site manifest,
 checks the committed generated pages, and confirms the annotated tag's GitHub
 signature verification and commit identity. It stages generated pages in an
 artifact without changing tracked files. Public documentation and example
-source links are pinned to that SHA; unversioned pip installation snippets are
+source links are pinned to that SHA; unversioned current pip installation snippets are
 pinned to that release version. Every HTML page shows the cutoff and links to
 `data/release-provenance.json`, whose schema lives at
 `schemas/release-provenance.schema.json`. The separate `@v5` workflow channel
 remains operator-managed and is not promoted by documentation publication.
+
+Current installation snippets are explicitly delimited by paired HTML comments
+`<!-- release-installation:NAME:start -->` and
+`<!-- release-installation:NAME:end -->`. The reviewed target names/pages live
+in `INSTALLATION_TARGETS` in `scripts/release_docs.py`. Keep the markers narrow:
+one current command, command group or release heading, including the home CLI
+command's JS string. Missing, nested, duplicated or mismatched targets fail the
+tag build. Add new current targets and their markers together in a reviewed PR.
+Only those spans are version-rewritten and validated. Historical examples and
+prose outside them retain their original version references, even on the same
+page; an archived page must not be added as a current-installation target.
 
 Pages consumes only the static artifact after the entire `Release` run succeeds,
 including Python, npm and GitHub publication. Its trusted main-branch helper

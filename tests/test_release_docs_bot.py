@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import io
 import subprocess
 import sys
 import unittest
@@ -221,7 +222,7 @@ class DocsAppConfigurationTests(unittest.TestCase):
         self.values[21068957].update(copy.deepcopy(data))
         return self.values[21068957]
 
-    def configure(self, apply=True):
+    def configure(self, apply=True, exclusive_owner_setup=True):
         with (
             patch.object(BOT, "api", return_value=self.app),
             patch.object(BOT.docs, "api", side_effect=self.api),
@@ -230,7 +231,62 @@ class DocsAppConfigurationTests(unittest.TestCase):
             ),
             patch.object(SETUP, "write", side_effect=self.write),
         ):
-            return SETUP.configure(APP_ID, SLUG, apply)
+            return SETUP.configure(
+                APP_ID, SLUG, apply, exclusive_owner_setup=exclusive_owner_setup
+            )
+
+    def test_apply_requires_exclusive_owner_confirmation_before_any_api_call(self):
+        before = copy.deepcopy(self.values)
+        with (
+            patch.object(BOT, "api") as api,
+            patch.object(BOT.docs, "api") as repository_api,
+            patch.object(BOT.docs, "api_pages") as pages,
+            patch.object(SETUP, "write") as write,
+            self.assertRaisesRegex(ValueError, "--exclusive-owner-setup"),
+        ):
+            SETUP.configure(APP_ID, SLUG, True)
+        for operation in (api, repository_api, pages, write):
+            operation.assert_not_called()
+        self.assertEqual(self.values, before)
+
+    def test_apply_cli_without_exclusive_window_fails_without_api_or_writes(self):
+        with (
+            patch.object(
+                sys,
+                "argv",
+                ["configure", "--app-id", str(APP_ID), "--app-slug", SLUG, "--apply"],
+            ),
+            patch.object(BOT, "api") as api,
+            patch.object(SETUP, "write") as write,
+            patch.object(sys, "stderr", io.StringIO()) as stderr,
+        ):
+            self.assertEqual(SETUP.main(), 1)
+            self.assertIn("updates are not atomic", stderr.getvalue())
+        api.assert_not_called()
+        write.assert_not_called()
+
+    def test_plan_without_exclusive_confirmation_does_not_write(self):
+        self.configure(False, exclusive_owner_setup=False)
+        self.assertEqual(self.writes, [])
+
+    def test_edit_violating_exclusive_window_can_still_race_the_put(self):
+        # The confirmation is operational, not CAS. Readback cannot identify
+        # an edit overwritten between the final read and the actual PUT.
+        original_write = self.write
+        injected = []
+
+        def violating_write(path, method, data):
+            if method == "PUT":
+                self.values[21068957]["rules"].append({"type": "required_signatures"})
+                injected.append(True)
+            return original_write(path, method, data)
+
+        with patch.object(self, "write", side_effect=violating_write):
+            self.configure()
+        self.assertEqual(injected, [True])
+        self.assertNotIn(
+            {"type": "required_signatures"}, self.values[21068957]["rules"]
+        )
 
     def test_plan_preserves_source_reviews_core_rules_and_existing_admin(self):
         before = copy.deepcopy(self.original)

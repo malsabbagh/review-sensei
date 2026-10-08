@@ -92,7 +92,16 @@ def check_other_grants(
             raise ValueError("dedicated App already bypasses another active ruleset")
 
 
-def configure(app_id: int, slug: str, apply: bool) -> dict[str, Any]:
+def configure(
+    app_id: int, slug: str, apply: bool, *, exclusive_owner_setup: bool = False
+) -> dict[str, Any]:
+    # GitHub does not document conditional ruleset PUTs. A read is not a lock:
+    # the owner must exclude other policy writers through the final readback.
+    if apply and not exclusive_owner_setup:
+        raise ValueError(
+            "--apply requires --exclusive-owner-setup: confirm all other owner "
+            "policy writers are paused for the entire setup; updates are not atomic"
+        )
     # App registration/install/key upload are the owner's secure UI handoff.
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,99}", slug):
         raise ValueError("dedicated App slug is missing or invalid")
@@ -133,8 +142,9 @@ def configure(app_id: int, slug: str, apply: bool) -> dict[str, Any]:
         raise ValueError(
             "new review protection readback differs; keep original rules intact"
         )
-    # Do not clobber a concurrent policy edit. An extra stricter ruleset is safe
-    # if this fails; no automatic rollback removes either source review rule.
+    # Detect edits visible before the write, not edits racing the PUT itself.
+    # The explicit exclusive-owner contract covers that remaining window.
+    # On a detected edit, keep both PR rules; never roll protections back.
     if payload(docs.api(f"rulesets/{MAIN_RULESET_ID}")) != payload(original):
         raise ValueError("main policy advanced; original protections were not changed")
     if payload(original) != change["protect_main"]:
@@ -155,9 +165,19 @@ def main() -> int:
     parser.add_argument(
         "--apply", action="store_true", help="apply the explicitly approved exception"
     )
+    parser.add_argument(
+        "--exclusive-owner-setup",
+        action="store_true",
+        help="confirm all other policy writers are paused through final readback; not an atomic update",
+    )
     args = parser.parse_args()
     try:
-        result = configure(bot.validate_app_id(args.app_id), args.app_slug, args.apply)
+        result = configure(
+            bot.validate_app_id(args.app_id),
+            args.app_slug,
+            args.apply,
+            exclusive_owner_setup=args.exclusive_owner_setup,
+        )
         print(json.dumps(result, indent=2))
     except (ValueError, OSError, KeyError, subprocess.CalledProcessError) as exc:
         print(f"docs bot configuration failed: {exc}", file=sys.stderr)

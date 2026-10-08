@@ -556,6 +556,23 @@ class ReleaseDocsBuildTests(unittest.TestCase):
                 onboarding.read_text(encoding="utf-8").replace("0.6.17", "0.6.16"),
                 encoding="utf-8",
             )
+            history = (
+                '<aside class="historical">Release 0.6.15: '
+                "pip install review-sensei==0.6.15; @reviewsensei/cli@0.6.15; "
+                "REVIEWSENSEI_VERSION=0.6.15; review-sensei 0.6.15; "
+                "pip install review-sensei; dependency Release 1.0.0; @v5</aside>"
+            )
+            # Historical instructions may share a current installation page.
+            for page in (root / "docs/site/index.html", onboarding):
+                page.write_text(
+                    page.read_text(encoding="utf-8").replace(
+                        "</main>", history + "</main>"
+                    ),
+                    encoding="utf-8",
+                )
+            archive = root / "docs/site/history/v0.6.15/index.html"
+            archive.parent.mkdir(parents=True)
+            archive.write_text("<main>" + history + "</main>", encoding="utf-8")
             DOCS.load_script(root, "build_site_pages").build_site_pages()
             for args in (
                 ("init", "-q"),
@@ -595,6 +612,14 @@ class ReleaseDocsBuildTests(unittest.TestCase):
             ):
                 DOCS.build(root, output, "v0.6.17", 42, 1)
             DOCS.verify_bundle(output, dict(self.selection, source_sha=sha))
+            for relative in (
+                "index.html",
+                "getting-started/index.html",
+                "history/v0.6.15/index.html",
+            ):
+                self.assertIn(
+                    history, (output / "site" / relative).read_text(encoding="utf-8")
+                )
             staged = json.loads((output / "site/data/site-manifest.json").read_text())
             self.assertEqual(staged["release_facts"]["version"], "0.6.17")
             self.assertEqual(
@@ -708,17 +733,52 @@ class ReleaseDocsBuildTests(unittest.TestCase):
     def test_stale_onboarding_installation_pins_fail(self):
         with tempfile.TemporaryDirectory() as temporary:
             site = Path(temporary)
+            for relative in DOCS.INSTALLATION_TARGETS:
+                path = site / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(ROOT / "docs/site" / relative, path)
+            DOCS.rewrite_installation_versions(site, "0.6.17")
+            original = (site / "index.html").read_text(encoding="utf-8")
             for snippet in (
                 "pip install review-sensei==0.6.16",
                 "npx --yes @reviewsensei/cli@0.6.16",
+                "REVIEWSENSEI_VERSION=0.6.16",
+                "review-sensei 0.6.16",
                 "Release 0.6.16",
+                "pip install review-sensei",
             ):
-                (site / "index.html").write_text(snippet, encoding="utf-8")
+                (site / "index.html").write_text(
+                    original.replace("pip install review-sensei==0.6.17", snippet),
+                    encoding="utf-8",
+                )
                 with (
                     self.subTest(snippet=snippet),
                     self.assertRaisesRegex(ValueError, "installation version"),
                 ):
                     DOCS.validate_installation_versions(site, "0.6.17")
+
+    def test_missing_nested_duplicate_or_unknown_installation_targets_fail(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            site = Path(temporary)
+            for relative in DOCS.INSTALLATION_TARGETS:
+                path = site / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(ROOT / "docs/site" / relative, path)
+            home = site / "index.html"
+            original = home.read_text(encoding="utf-8")
+            start = "<!-- release-installation:home-cli:start -->"
+            end = "<!-- release-installation:home-cli:end -->"
+            for malformed in (
+                original.replace(end, ""),
+                original.replace(start, start + start),
+                original + start + "pip install review-sensei" + end,
+                original.replace("home-cli:end", "unknown:end"),
+                original.replace(end, start),
+            ):
+                with self.subTest(malformed=malformed[-100:]):
+                    home.write_text(malformed, encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "installation target"):
+                        DOCS.rewrite_installation_versions(site, "0.6.17")
 
 
 class ReleaseDocsWorkflowTests(unittest.TestCase):

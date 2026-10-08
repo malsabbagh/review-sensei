@@ -65,11 +65,30 @@ read, upload or transmit the private key. Supply only the public App ID/slug:
 
 ```bash
 python scripts/configure_release_docs_bot.py --app-id APP_ID --app-slug APP_SLUG
-python scripts/configure_release_docs_bot.py --app-id APP_ID --app-slug APP_SLUG --apply
+python scripts/configure_release_docs_bot.py --app-id APP_ID --app-slug APP_SLUG --apply --exclusive-owner-setup
 ```
 
 The first command prints the exact proposed ruleset payloads without writes.
-The second verifies the current policy and applies only the approved exception:
+Before the second command, establish an **exclusive owner setup window**: pause
+all other owner tooling and arrange that no administrator edits repository
+rules through GitHub's UI or API until the final readback completes. The
+`--exclusive-owner-setup` flag confirms this operational prerequisite; without
+it, `--apply` stops before any API call or write. Plan-only reads do not require
+exclusivity. The flag is an owner declaration, not a server lock or a guarantee
+against another writer that ignores the window.
+
+GitHub's [conditional-request guidance](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api#use-conditional-requests)
+does not support conditional `PUT` unless the endpoint documents an exception;
+the [ruleset-update endpoint](https://docs.github.com/en/rest/repos/rules#update-a-repository-ruleset)
+documents none. This helper's read/check/write sequence is **not atomic**.
+An edit between its final read and `PUT` can be overwritten even if the final
+readback matches the plan. Another GET, ETag comparison or local process lock
+does not close that window. If exclusivity cannot be established, do not apply
+the plan and keep the release tag held. No extra permission or disabled
+protection is a workaround.
+
+With that window in place, the second command verifies the current policy and
+applies only the approved exception:
 
 1. Create and read back an active main-only `main-reviewed-source` ruleset
    retaining the complete existing PR rule: one approval, stale approvals
@@ -82,8 +101,8 @@ The second verifies the current policy and applies only the approved exception:
    bypass on this ruleset or any other active repository ruleset.
 3. Read both policies back and check all other active rulesets. Retry is a no-op
    when the exact configuration already exists. Unexpected parameters, actors
-   or concurrent owner edits stop setup; a failed second operation leaves the
-   original PR requirement enforced. Never disable protections to recover.
+   or owner edits detected by a read stop setup; a failed second operation leaves
+   the original PR requirement enforced. Never disable protections to recover.
 
 This owner setup uses pre-existing administration authority; the runtime App
 does not gain Administration access. Record the public App ID, installation

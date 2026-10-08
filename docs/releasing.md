@@ -557,9 +557,11 @@ documentation change.
 Source site metadata may record an older version than current Python/npm
 metadata, but never a future version or an inconsistent tag. Source generated
 pages still agree with their reviewed manifest. The tag build updates a staged
-manifest's version/tag and all recognized installation snippets automatically;
+manifest's version/tag and explicitly marked current-installation snippets automatically;
 there is no required pre-tag bump of site metadata, onboarding snippets or
-generated release pages. A tag cannot invent new prose or provider claims.
+generated release pages. Historical examples and version references outside
+those marked snippets retain their reviewed values, including on current pages.
+A tag cannot invent new prose or provider claims.
 Ordinary content changes still need review and source generation checks.
 
 The read-only `Release` documentation job checks the exact event SHA and clean
@@ -567,7 +569,7 @@ checkout against the signed annotated tag object as verified by GitHub. It
 validates Python/npm/changelog/version and the manifest/schema/evidence,
 checks reviewed source generation, then derives the tagged version in the staged
 manifest/snippets and builds the entire static site under runner staging. It pins repository docs and example links to the immutable source SHA,
-pins previously unversioned pip snippets, and records tag, version, tag object,
+pins previously unversioned current-installation pip snippets, and records tag, version, tag object,
 source SHA, release run and build attempt in public provenance. A file inventory
 covers the site's exact bytes. The static bundle is retained as
 `review-sensei-release-docs` for 90 days (subject to repository retention limits).
@@ -632,6 +634,10 @@ permission is added to expose them. This is the explicitly approved App
 exception, not an admin bypass or per-release docs PR.
 
 Follow [the secure App setup and read-only readiness procedure](release-docs-bot.md).
+Owner setup requires an exclusive policy-editing window and the explicit
+`--exclusive-owner-setup` declaration before applying changes. Ruleset updates
+are not atomic: a writer that violates that window can have its edit overwritten
+between the final read and PUT. If exclusivity is unavailable, keep the tag held.
 Keep v0.6.17 held until the implementation is reviewed and merged, owner setup
 is complete, and the `Check release documentation bot` workflow succeeds on
 main using the real narrow App token. Code CI alone does not establish readiness.
