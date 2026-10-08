@@ -374,6 +374,7 @@ class ReleaseDocsBuildTests(unittest.TestCase):
         # recreate object files while TemporaryDirectory removes the fixture.
         for args in (
             ("init", "-q"),
+            ("config", "--local", "maintenance.auto", "false"),
             ("add", "."),
             (
                 "-c",
@@ -486,6 +487,7 @@ class ReleaseDocsBuildTests(unittest.TestCase):
                 DOCS.load_script(root, "build_site_pages").build_site_pages()
                 for args in (
                     ("init", "-q"),
+                    ("config", "--local", "maintenance.auto", "false"),
                     ("add", "."),
                     (
                         "-c",
@@ -576,6 +578,7 @@ class ReleaseDocsBuildTests(unittest.TestCase):
             DOCS.load_script(root, "build_site_pages").build_site_pages()
             for args in (
                 ("init", "-q"),
+                ("config", "--local", "maintenance.auto", "false"),
                 ("add", "."),
                 (
                     "-c",
