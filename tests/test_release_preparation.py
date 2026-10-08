@@ -63,10 +63,15 @@ class PreparationRenderingTests(unittest.TestCase):
         self.root = Path(self.temporary.name) / "source"
         shutil.copytree(self.fixture, self.root)
         self.run_git("init", "-q")
-        # Production uses a Linux checkout with no storage normalization.
-        # Isolate this byte-identity fixture from Windows/global autocrlf;
-        # the explicit attributes test still proves filters are rejected.
+        # Model production's Linux checkout even when ROOT is checked out with
+        # Windows CRLF. The explicit filter test still rejects changed blobs.
         self.run_git("config", "core.autocrlf", "false")
+        for relative in PREP.ALLOWED_PATHS:
+            path = self.root / relative
+            if path.is_file():
+                path.write_text(
+                    path.read_text(encoding="utf-8"), encoding="utf-8", newline="\n"
+                )
         self.run_git("add", ".")
         self.run_git("commit", "-qm", "Reviewed source")
         self.base = self.run_git("rev-parse", "HEAD")
@@ -140,6 +145,23 @@ class PreparationRenderingTests(unittest.TestCase):
         self.run_git("commit", "--allow-empty", "-qm", "Different source")
         with self.assertRaisesRegex(ValueError, "exact reviewed parent"):
             PREP.verify_commit(self.root, self.run_git("rev-parse", "HEAD"))
+
+    def test_native_newline_defaults_generate_identical_lf_payload(self):
+        write_text = Path.write_text
+
+        def windows_write_text(path, text, *args, **kwargs):
+            if kwargs.get("newline") is None:
+                kwargs["newline"] = "\r\n"
+            return write_text(path, text, *args, **kwargs)
+
+        with patch.object(Path, "write_text", new=windows_write_text):
+            receipt = self.generated()
+        for relative in PREP.ALLOWED_PATHS:
+            with self.subTest(path=relative):
+                self.assertNotIn(b"\r\n", (self.root / relative).read_bytes())
+        sha = self.commit_generated()
+        self.run_git("checkout-index", "--force", "--all")
+        self.assertEqual(PREP.verify_commit(self.root, sha), receipt)
 
     def test_same_generated_intent_is_deterministic_and_refreshed_reviewed_notes_are_admitted(
         self,

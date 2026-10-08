@@ -248,7 +248,9 @@ def generate(root: Path, version: str, date: str, base: str) -> dict[str, Any]:
             raise ValueError("release version already occurs in the changelog")
         notes = pending
         rest = f"## {version} - {date}\n\n{notes}\n\n" + rest
-    (root / "CHANGELOG.md").write_text(prefix + "\n\n" + rest, encoding="utf-8")
+    (root / "CHANGELOG.md").write_text(
+        prefix + "\n\n" + rest, encoding="utf-8", newline="\n"
+    )
     project = root / "pyproject.toml"
     source = project.read_text(encoding="utf-8")
     section = re.search(r"(?ms)^\[project\]\n.*?(?=^\[|\Z)", source)
@@ -263,7 +265,9 @@ def generate(root: Path, version: str, date: str, base: str) -> dict[str, Any]:
     if count != 1:
         raise ValueError("project version declaration is ambiguous")
     project.write_text(
-        source[: section.start()] + updated + source[section.end() :], encoding="utf-8"
+        source[: section.start()] + updated + source[section.end() :],
+        encoding="utf-8",
+        newline="\n",
     )
     for relative in NPM_MANIFESTS:
         path = root / relative
@@ -273,14 +277,18 @@ def generate(root: Path, version: str, date: str, base: str) -> dict[str, Any]:
             value["optionalDependencies"] = {
                 name: version for name in versions.NPM_TARGETS
             }
-        path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+        path.write_text(
+            json.dumps(value, indent=2) + "\n", encoding="utf-8", newline="\n"
+        )
     for relative, targets in MARKDOWN_TARGETS.items():
         rewrite_marked(root / relative, targets, version)
     manifest_path = root / "docs/site/data/site-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["release_facts"].update(version=version, tag="v" + version)
     manifest["last_updated"] = date
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n"
+    )
     docs.load_script(TRUSTED_ROOT, "build_site_pages").build_site_pages(
         manifest_path=manifest_path,
         providers_output=root / "docs/site/providers/index.html",
@@ -299,7 +307,9 @@ def generate(root: Path, version: str, date: str, base: str) -> dict[str, Any]:
     }
     (root / RECEIPT).parent.mkdir(parents=True, exist_ok=True)
     (root / RECEIPT).write_text(
-        json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
     )
     return validate_payload(root)
 

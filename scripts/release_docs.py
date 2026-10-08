@@ -248,7 +248,7 @@ def rewrite_installation_versions(site: Path, version: str) -> None:
             for pattern in INSTALLATION_PATTERNS:
                 snippet = re.sub(pattern, lambda match: match[1] + version, snippet)
             content = content[:start] + snippet + content[end:]
-        path.write_text(content, encoding="utf-8")
+        path.write_text(content, encoding="utf-8", newline="\n")
 
 
 def validate_installation_versions(site: Path, version: str) -> None:
