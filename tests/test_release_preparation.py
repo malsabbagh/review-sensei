@@ -501,7 +501,6 @@ class PreparationWorkflowTests(unittest.TestCase):
             "git tag",
             "npm publish",
             "gh release",
-            "SIGNING_KEY",
         ):
             self.assertNotIn(forbidden, text)
         for key in ("RELEASE_VERSION", "RELEASE_DATE", "SOURCE_SHA", "PREPARED_SHA"):

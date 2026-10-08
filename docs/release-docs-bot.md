@@ -30,8 +30,9 @@ GitHub does not restrict Contents write by file path. It permits repository
 content/ref/release operations, subject to existing rules. The trusted workflow
 enforces separate allowlists: preparation changes only version metadata, reviewed
 changelog headings/notes and marked/generated source documentation; successful
-release writeback changes only the generated released snapshot. Neither path
-changes runtime source, workflows, tags or release objects. The App receives no permission to edit workflows or rules.
+release writeback changes only the generated released snapshot. Neither docs-writing path
+changes runtime source, workflows, tags or release objects. The separately
+opted-in signed-tag job uses Contents write to create only its immutable tag. The App receives no permission to edit workflows or rules.
 The integration rejects nested Git storage-attribute files and proves that the
 Git index contains the complete snapshot with byte-identical blobs before
 committing; ignored files or filter transformations fail without a push.
@@ -150,8 +151,9 @@ reference; it is not the source to merge or tag.** Preparation is owner-dispatch
 on main, pins its reviewed base and full CI, verifies an explicit file allowlist
 and exact indexed bytes, and refuses a stale main or existing version. The App
 pushes without force, and ordinary main CI runs on the generated commit. The
-owner signs that exact source only after CI and reader/publication qualification.
-No new signing key or permission is introduced. Preparation has no push, CI,
+owner signs that exact source only after CI and reader/publication qualification,
+or explicitly selects [dedicated-key signing](release-signing.md) after user-run
+key setup. The App permissions and main exception remain unchanged. Preparation has no push, CI,
 release or tag trigger, so these commits do not start another preparation cycle.
 
 If readiness rejects identity/permissions, its diagnostic reports only the

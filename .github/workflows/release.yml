@@ -30,6 +30,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/prepare_release.py qualify-tag --tag "$GITHUB_REF_NAME"
+      - name: Require unchanged Mo approval gates before release builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/sign_release.py --check-publication-gates
 
   docs-build:
     name: Build release documentation
@@ -449,7 +453,7 @@ jobs:
 
   github-release:
     name: Create GitHub release assets
-    needs: build
+    needs: [build, publish, publish-npm]
     runs-on: ubuntu-latest
     permissions:
       contents: write
