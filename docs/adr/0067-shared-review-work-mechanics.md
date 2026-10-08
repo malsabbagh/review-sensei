@@ -78,7 +78,9 @@ Its continuation marker binds the original authority; normal result replay
 cannot reconstruct eligibility in a way that drops retained obligations.
 
 An optional HMAC-authenticated v2 work receipt store supports cross-process
-continuation. It saves consumed admission before dispatch and retains normalized
+continuation. As a separate v2 schema family under ADR0008, its authenticated
+payload deliberately carries `schema_version: "2.0"`; existing v1 shapes are
+unchanged. It saves consumed admission before dispatch and retains normalized
 receipts and exact evidence, not prompts or raw responses. Reuse requires the
 current exact plan, evidence, provider/routing/request identity, budgets, expiry
 and semantic validation. Calls, retries, bytes and elapsed wall time survive

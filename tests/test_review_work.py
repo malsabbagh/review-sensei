@@ -6,7 +6,7 @@ from dataclasses import replace
 
 from review_sensei.budgets import ProviderCapabilities, ReviewWorkBudgets
 from review_sensei.configuration import parse_configuration_text
-from review_sensei.errors import ProviderError, ReviewInputError
+from review_sensei.errors import ProviderError, ReviewFormatError, ReviewInputError
 from review_sensei.evidence import EvidenceBundle, EvidenceRecord, EvidenceSnapshot
 from review_sensei.execution import execute_plan
 from review_sensei.human_assessment import HumanReviewFinding, PendingHumanReview
@@ -87,6 +87,48 @@ class EvidenceTests(unittest.TestCase):
 
 
 class SharedWorkTests(unittest.TestCase):
+    def test_adapter_structural_and_nontransient_errors_stay_pending_and_charged(self):
+        bundle, requirements, resource, budgets, render = self.fixture()
+        plan = plan_work(
+            "reassessment",
+            bundle,
+            requirements[:1],
+            budgets=budgets,
+            render=render,
+            authority_digest="f" * 64,
+        )
+        for error, diagnostic in (
+            (ReviewFormatError("synthetic format failure"), "invalid_provider_output"),
+            (ReviewInputError("synthetic input failure"), "invalid_provider_output"),
+            (ProviderError("synthetic provider failure"), "provider_failed"),
+        ):
+            with self.subTest(error=type(error).__name__):
+
+                class Provider:
+                    name = "fixture"
+                    model = "fixture"
+                    calls = 0
+
+                    def complete(self, request):
+                        self.calls += 1
+                        raise error
+
+                provider = Provider()
+                tracker = ResourceBudgetTracker(resource)
+                result = execute_plan(
+                    plan,
+                    provider=provider,
+                    render=render,
+                    validate=lambda response, batch: response.text,
+                    tracker=tracker,
+                    budgets=budgets,
+                    correction="Return strict JSON.",
+                )
+                self.assertEqual(result.pending, (("0", diagnostic),))
+                self.assertEqual(provider.calls, 1)
+                self.assertEqual(tracker.provider_calls, 1)
+                self.assertGreater(tracker.prompt_bytes, 0)
+
     def test_continuation_reuses_completed_batch_without_resetting_budget(self):
         bundle, requirements, resource, budgets, render = self.fixture()
         initial_bundle = EvidenceBundle(bundle.snapshot, bundle.records[:1])

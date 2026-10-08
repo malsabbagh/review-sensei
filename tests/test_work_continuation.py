@@ -43,6 +43,175 @@ class ContextProvider(AssessingProvider):
 
 
 class WorkContinuationTests(unittest.TestCase):
+    def test_repeated_scope_request_from_split_file_remains_pending_once(self):
+        class Provider:
+            name = "fixture"
+            model = "fixture"
+            calls = 0
+
+            def complete(self, request):
+                self.calls += 1
+                result = {
+                    "summary": "Review the cross-file relationship.",
+                    "comments": [],
+                }
+                if "src/0.py" in request.prompt:
+                    result["context_requests"] = [
+                        {
+                            "reference": "src/0.py",
+                            "kind": "joint",
+                            "required_paths": ["src/1.py"],
+                            "reason": "Review the shared relationship.",
+                        }
+                    ]
+                return ProviderResponse(json.dumps(result), self.name)
+
+        diff = "diff --git a/src/0.py b/src/0.py\n--- a/src/0.py\n+++ b/src/0.py\n"
+        diff += "@@ -1 +1 @@\n-old\n+" + "a" * 100 + "\n"
+        diff += "@@ -10 +10 @@\n-old\n+" + "b" * 100 + "\n"
+        diff += "diff --git a/src/1.py b/src/1.py\n--- a/src/1.py\n+++ b/src/1.py\n@@ -1 +1 @@\n-old\n+new\n"
+        provider = Provider()
+        run = ReviewService(
+            provider,
+            stages=(Stage("review", "Review {diff}", ("summary", "comments")),),
+            work_budgets=ReviewWorkBudgets(mode="unified", batch_diff_bytes=256),
+        ).run(ReviewRequest(diff=diff))
+        self.assertEqual(run.outcome.status, "partial")
+        self.assertEqual(provider.calls, 3)
+        self.assertFalse(run.result.coverage.fully_reviewed)
+
+    def test_multiple_discovery_requests_cover_all_references_without_pr_metadata(self):
+        from dataclasses import replace
+
+        from review_sensei.evidence import EvidenceBundle
+
+        pending, bundle = test_review_work.UnifiedAdaptersTests().fixture((100, 100))
+        snapshot = replace(bundle.snapshot, repository=None, pull_request=None)
+        bundle = EvidenceBundle(
+            snapshot,
+            tuple(replace(record, snapshot=snapshot) for record in bundle.records),
+        )
+
+        class ScopeProvider(AssessingProvider):
+            def complete(self, request):
+                value = json.loads(super().complete(request).text)
+                value["context_requests"] = [
+                    {
+                        "reference": item["fingerprint"],
+                        "kind": "discovery",
+                        "required_paths": ["src/0.py", "src/1.py"],
+                        "reason": "Review the shared relationship.",
+                    }
+                    for item in reversed(value["assessments"])
+                ]
+                value["assessments"] = []
+                return ProviderResponse(json.dumps(value), self.name)
+
+        class FullProvider:
+            name = "fixture"
+            model = "fixture"
+
+            def __init__(self):
+                self.requests = []
+
+            def complete(self, request):
+                self.requests.append(request)
+                return ProviderResponse(
+                    '{"summary":"Reviewed both paths.","comments":[]}', self.name
+                )
+
+        full = FullProvider()
+        policy = ReviewWorkBudgets(mode="unified")
+        tracker = ResourceBudgetTracker(ResourceBudget.create())
+        work = reassess(
+            provider=ScopeProvider(),
+            pending=pending,
+            bundle=bundle,
+            source_body=HUMAN,
+            authority_digest="f" * 64,
+            work_budgets=policy,
+            tracker=tracker,
+            broader_service=ReviewService(
+                full,
+                stages=(Stage("review", "Review {diff}", ("summary", "comments")),),
+                work_budgets=policy,
+            ),
+        )
+        self.assertEqual(len(full.requests), 1)
+        self.assertIn("src/0.py", full.requests[0].prompt)
+        self.assertIn("src/1.py", full.requests[0].prompt)
+        self.assertEqual(tracker.provider_calls, 2)
+        self.assertIsNotNone(work.discovery.result)
+        self.assertFalse(work.reply.decisions)
+        self.assertEqual(len(work.inventory.pending), 2)
+        self.assertTrue(
+            all(
+                item.evidence_paths == ("src/0.py", "src/1.py")
+                for item in work.inventory.pending
+            )
+        )
+
+    def test_retained_coverage_uses_closed_approval_vocabulary(self):
+        from dataclasses import replace
+
+        from review_sensei.hosting.github.approval import (
+            approval_eligibility_from_result,
+        )
+        from review_sensei.models import ReviewComment, ReviewResult
+
+        result = ReviewResult(
+            summary="Review this boundary.",
+            provider="fixture",
+            comments=(
+                ReviewComment(
+                    path="src/0.py",
+                    line=1,
+                    body="Confirm this boundary.",
+                    needs_human=True,
+                ),
+            ),
+        )
+        arguments = dict(
+            head_sha="b" * 40, base_sha="a" * 40, enabled=True, app_authored=False
+        )
+        prior = approval_eligibility_from_result(result, **arguments)
+        for state in (None, "reviewed", "partial", "incomplete", "unknown"):
+            with self.subTest(state=state):
+                retained = replace(
+                    prior, facts=replace(prior.facts, coverage_blocker=state)
+                )
+                merged = approval_eligibility_from_result(
+                    result, **arguments, retained_eligibility=retained
+                )
+                self.assertEqual(
+                    merged.facts.coverage_blocker,
+                    None if state in (None, "reviewed") else state,
+                )
+                self.assertFalse(
+                    merged.evaluate(
+                        app_authored=False, has_open_review_threads=False
+                    ).approved
+                )
+
+    def test_failed_enumeration_is_explicit_and_cannot_clear_findings(self):
+        from review_sensei.evidence import EvidenceBundle
+
+        pending, bundle = self.fixture()
+        failed = EvidenceBundle(bundle.snapshot, (), enumeration_complete=False)
+        provider = AssessingProvider()
+        work = reassess(
+            provider=provider,
+            pending=pending,
+            bundle=failed,
+            source_body=HUMAN,
+            authority_digest="f" * 64,
+            work_budgets=ReviewWorkBudgets(mode="unified"),
+        )
+        self.assertFalse(provider.calls)
+        self.assertFalse(work.reply.decisions)
+        self.assertEqual(work.inventory.apply(work.reply.decisions), pending)
+        self.assertIn("enumeration is incomplete", work.reply.body)
+
     def test_repeated_discovery_finding_keeps_prior_cross_file_requirements(self):
         from dataclasses import replace
 

@@ -236,12 +236,19 @@ def main():
         return 0
     with tempfile.TemporaryDirectory(prefix="reviewsensei-readers-") as temporary:
         directory = Path(temporary)
-        archive = subprocess.run(
-            ["git", "archive", "--format=tar", BASELINE, "src"],
-            cwd=ROOT,
-            check=True,
-            capture_output=True,
-        ).stdout
+        try:
+            archive = subprocess.run(
+                ["git", "archive", "--format=tar", BASELINE, "src"],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+            ).stdout
+        except (subprocess.CalledProcessError, OSError):
+            print(
+                "reader compatibility check: pinned v0.6.16 source is unavailable locally",
+                file=sys.stderr,
+            )
+            return 1
         # Copy only regular archived files beneath src, never links or devices.
         with tarfile.open(fileobj=io.BytesIO(archive)) as tree:
             for member in tree.getmembers():

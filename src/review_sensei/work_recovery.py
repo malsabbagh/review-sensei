@@ -70,7 +70,13 @@ def _plan_document(plan: ReviewWorkPlan) -> dict[str, object]:
 
 
 class WorkRecoveryStore:
-    """A trusted host opts in with diagnostics policy, private path and HMAC key."""
+    """Trusted diagnostics with a private path, HMAC key and aware wall clock.
+
+    ``now`` must provide a trustworthy, nondecreasing wall clock for checkpoint
+    age and expiry. Only wall-clock durations cross processes; the tracker uses
+    its own monotonic seconds locally, with no shared clock-origin requirement.
+    A backward wall-clock value preceding the saved checkpoint is rejected.
+    """
 
     def __init__(
         self,
@@ -357,9 +363,12 @@ class WorkRecoveryStore:
             for name, count in counters.items():
                 setattr(tracker, name, max(getattr(tracker, name), count))
             restored_elapsed = elapsed + int((now - saved).total_seconds() * 1000)
-            tracker.started = (
-                tracker.monotonic() - max(tracker.elapsed_ms(), restored_elapsed) / 1000
-            )
+            # Sample one local tick so time spent between clock reads is not
+            # counted twice. Rebase durations onto this process's monotonic
+            # clock; never restore an absolute origin from another process.
+            tick = tracker.monotonic()
+            current_elapsed = max(0, int((tick - tracker.started) * 1000))
+            tracker.started = tick - max(current_elapsed, restored_elapsed) / 1000
             return execution
         except (
             OSError,

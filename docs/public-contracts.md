@@ -45,7 +45,11 @@ Published schemas live under `src/review_sensei/schemas/` and are included in th
 installed package. Each schema has a draft 2020-12 `$schema` and an `$id`
 containing `/v1/` for established documents. The opt-in authenticated work
 recovery document has its own `/v2/` identity and does not extend the v1
-publication-only recovery format.
+publication-only recovery format. This is a new v2 schema family: its
+HMAC-authenticated `document` explicitly requires `schema_version: "2.0"` so the
+closed recovery reader can reject unsupported payload versions. Established v1
+documents are not given a new discriminator. This follows ADR 0008's new `$id`
+requirement for a new major shape; the v2 discriminator is intentional.
 
 | Schema | Document |
 | --- | --- |

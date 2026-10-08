@@ -307,6 +307,8 @@ def reassess(
     )
     updated = current_inventory.apply(decisions)
     body = f"Reassessed {len(decisions)} findings for the current head: {len(updated.resolved) - len(pending.resolved)} addressed or safely dismissed; {len(updated.pending)} remain pending. All approval requirements still apply."
+    if not bundle.enumeration_complete:
+        body = "Current changed-file enumeration is incomplete. " + body
     if execution.pending:
         body += " Some required evidence or provider work could not be completed within the configured bounds; those findings remain pending."
     reply = HumanAssessmentReply(body, decisions)

@@ -32,6 +32,30 @@ class Provider:
 
 
 class WorkRecoveryTests(unittest.TestCase):
+    def test_restoration_uses_one_tick_and_preserves_current_elapsed_time(self):
+        plan, resource, budgets, render = self.fixture()
+        with tempfile.TemporaryDirectory() as root:
+            store = WorkRecoveryStore(
+                Path(root), key=b"k" * 32, artifacts="diagnostics", now=lambda: NOW
+            )
+            self.run_plan(plan, resource, budgets, render, Provider(), store)
+            manifest = json.loads(next(Path(root).glob("*.json")).read_text())[
+                "document"
+            ]["request_digests"]
+            ticks = iter((10000.0, 10010.0, 10012.0, 10012.0))
+            tracker = ResourceBudgetTracker(resource, monotonic=lambda: next(ticks))
+            resumed = WorkRecoveryStore(
+                Path(root),
+                key=b"k" * 32,
+                artifacts="diagnostics",
+                now=lambda: NOW + timedelta(seconds=1),
+            )
+            resumed.load(
+                plan, tracker, budgets, lambda value, batch: value["text"], manifest
+            )
+            self.assertEqual(tracker.elapsed_ms(), 12000)
+            self.assertEqual(tracker.provider_calls, 2)
+
     def test_restart_does_not_refresh_the_original_recovery_expiry(self):
         plan, resource, budgets, render = self.fixture()
         with tempfile.TemporaryDirectory() as root:

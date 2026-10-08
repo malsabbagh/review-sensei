@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import base64
 import json
+import subprocess
+import sys
+import tempfile
 import unittest
 from copy import deepcopy
 from dataclasses import replace
+from pathlib import Path
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github.approval import ReviewApprovalEligibility
@@ -94,6 +98,31 @@ class ReaderCompatibilityTests(unittest.TestCase):
                 with self.assertRaises(GitHubPublicationError):
                     finalizer.load_eligibility(**arguments, require_valid=True)
                 self.assertEqual(state.events(), [])
+
+
+class ReviewReaderCompatibilityTests(unittest.TestCase):
+    def test_missing_pinned_commit_fails_offline_with_bounded_diagnostic(self):
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "scripts/check_review_reader_compatibility.py"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(
+                ["git", "init", "--quiet", str(root)], check=True, capture_output=True
+            )
+            target = root / "scripts" / script.name
+            target.parent.mkdir()
+            target.write_bytes(script.read_bytes())
+            result = subprocess.run(
+                [sys.executable, str(target)], cwd=root, capture_output=True, text=True
+            )
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(
+            result.stderr,
+            "reader compatibility check: pinned v0.6.16 source is unavailable locally\n",
+        )
 
 
 if __name__ == "__main__":

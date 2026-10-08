@@ -329,9 +329,11 @@ def discover(
             ),
         )
         scopes = tuple(
-            scope
-            for item in execution.completed
-            for scope in item.value.context_requests
+            dict.fromkeys(
+                scope
+                for item in execution.completed
+                for scope in item.value.context_requests
+            )
         )
         bridge_pending = []
         if scopes:

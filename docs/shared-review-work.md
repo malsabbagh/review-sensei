@@ -12,7 +12,7 @@ advanced:
   review_work:
     mode: unified
     batch_diff_bytes: 131072
-    batch_prompt_bytes: 262144
+    batch_prompt_bytes: 262144  # Preferred target; unqualified CLI admission is 48 KiB.
     max_total_prompt_bytes: 2097152
     max_total_output_bytes: 1048576
   resources:
@@ -26,7 +26,10 @@ responses remain at most 16 KiB. JSON escaping, finding text, instructions and
 correction reserve count toward admission. A trusted library integration may
 pass `ProviderCapabilities` after qualifying an exact provider/model and the
 UTF-8-byte token upper bound, framing, output reservation and safety margin.
-This change qualifies no production model or hosted routing profile.
+The CLI does not accept a self-declared qualification from YAML or a PR: larger
+prompt admission requires trusted library-supplied capabilities for the exact
+provider/model. This change qualifies no production model or hosted routing
+profile.
 
 The shared run envelope permits at most eight actual provider dispatches, two
 transport retries, two structural retries and 120 seconds. Failed dispatches
@@ -117,7 +120,12 @@ validation, provider/routing request identity and expiry are required for reuse.
 Consumed calls are saved before dispatch; cumulative bytes/retries and elapsed
 wall time survive restart, so interruptions cannot mint a new deadline or call
 allowance. Terminal rejected batches remain pending on restart; only interrupted
-dispatches may resume. Restart also preserves the original retention expiry.
+dispatches may resume. Restart also preserves the original retention expiry. The host supplies a
+trustworthy, nondecreasing aware wall clock for age/expiry. Saved elapsed duration
+plus wall-clock checkpoint age is rebased onto one local monotonic tick, preserving
+the larger current duration; clocks need no common origin. A clock before the
+saved timestamp rejects reuse. Persisting a prior monotonic origin would not be
+portable across restarts.
 Retained completed work may be republished after inference time is
 exhausted only through the existing current-source/head/eligibility gates.
 
