@@ -1477,6 +1477,7 @@ class GitHubApplication:
                 if human is not None:
                     assert human.eligibility.human_review is not None
                     inventory = human.eligibility.human_review
+                    work_assessment = None
                     if human.evidence_diagnostic:
                         assessment = HumanAssessmentReply(
                             body=f"Human reassessment has insufficient current diff evidence (reason: `{human.evidence_diagnostic}`). No findings were cleared; approval requirements remain unchanged. After the required evidence is available within the context budget, rerun a full review for the current head and submit a new authorized mention.",
@@ -1511,7 +1512,7 @@ class GitHubApplication:
                     accepted = not inventory.pending or any(
                         item.decision != "unresolved" for item in assessment.decisions
                     )
-                    if inventory.pending and human.evidence_bundle is not None:
+                    if work_assessment is not None:
                         accepted = accepted or work_assessment.inventory != inventory
                     review_token = None
                     if accepted:
@@ -1526,12 +1527,12 @@ class GitHubApplication:
                         pull_request=pull_request,
                         prepared=human,
                         reply=work_assessment
-                        if inventory.pending and human.evidence_bundle is not None
+                        if work_assessment is not None
                         else assessment,
                         app_slug=app_slug,
                     )
                     if (
-                        inventory.pending
+                        work_assessment is not None
                         and human.evidence_bundle is not None
                         and work_assessment.discovery is not None
                         and reply_outcome.status in {"replied", "already_replied"}

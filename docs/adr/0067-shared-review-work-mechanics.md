@@ -158,8 +158,9 @@ Run the complete lint/type/schema/unit/coverage and installed wheel/sdist gates
 before promotion. Synthetic fixtures contain no private evidence or live tokens.
 
 `scripts/check_review_reader_compatibility.py` archives the immutable v0.6.16
-commit from local objects and runs its real readers in a separate process. It
-checks unchanged v1 identity/wire documents, v2 rejection without older-authority
+commit from local objects and runs its real readers in a separate process. CI
+fetches that exact commit before the gate; unavailable source fails the gate.
+It checks unchanged v1 identity/wire documents, v2 rejection without older-authority
 fallback, opt-in transaction rejection and session reader behavior. The pinned
 reader skips trusted comments over its 16 KiB size limit and reports missing
 state. The upgraded reader instead blocks initialization for oversized trusted
@@ -177,6 +178,14 @@ before expanded writes and retaining upgraded readers during rollback.
    reader supports v2 and the source of required paths is authoritative.
 5. A rollout decision, released package, consumer/channel migration and any
    default change require separate operator review.
+
+Before switching reusable workflow revisions in either direction, pause new
+provider work and drain queued/running jobs using the former separate reply
+group. The shared `reviewsensei-provider-review-<repo>-<pr>` group cannot exclude
+jobs using `reviewsensei-provider-reply-<repo>-<pr>`. Include delayed jobs and
+consumers pinned to older workflows; resume only when active full/reply/command
+entry points and hosted/local backends use the same key. The implementation does
+not perform that rollout. See the operations guide for the concurrency transition.
 
 Before v2 writes, rollback selects legacy work routing on compatible readers.
 After opt-in transaction or v2 writes, preserve readers capable of interpreting

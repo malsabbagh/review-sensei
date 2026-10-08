@@ -137,7 +137,11 @@ reader needed for durable records. Never reset a ledger, erase pending findings
 or fall back to older eligibility to make an incompatible record usable.
 
 Run `python scripts/check_review_reader_compatibility.py` from a checkout with
-the immutable v0.6.16 commit available locally. It compares that exact source and
+the immutable v0.6.16 commit `5a121dfe39fb978c7d71def0d08dc570aad83f1d`
+available locally. CI fetches that exact commit before running the gate; a shallow
+local checkout needs `git fetch --no-tags --depth=1 origin 5a121dfe39fb978c7d71def0d08dc570aad83f1d`
+first. The gate fails when that source is unavailable; it never skips or
+substitutes a newer reader. It compares that exact source and
 the upgraded reader without network or worktree mutations. The old reader treats
 trusted session comments over 16 KiB as missing; the upgraded reader recognizes
 oversized terminal markers as integrity failures and refuses initialization.
@@ -149,6 +153,17 @@ replies and commands, including hosted/local backends, with cancellation disable
 Replies keep distinct workflow-level identities. GitHub may replace queued jobs
 because its concurrency group has one pending slot; replaced work grants no
 assessment decision and stays pending. This is serialization, not a durable FIFO.
+
+When upgrading or rolling back the reusable workflow, pause admission and let
+queued and running provider jobs finish before switching workflow revisions.
+The old `reviewsensei-provider-reply-<repo>-<pr>` group becomes the shared
+`reviewsensei-provider-review-<repo>-<pr>` group. GitHub does not serialize work
+across those two keys. Include delayed jobs, command/review/reply entry points
+and both hosted/local backends in the drain; a consumer still pinned to the old
+workflow can otherwise overlap a new run. Resume admission only when the active
+entry points use the same group key. Keep current-head/source/eligibility fences
+enabled throughout. This is a rollout prerequisite, not a migration performed
+by this implementation.
 
 Provider quality/capacity qualification, hosted pilots and any default or
 consumer rollout remain separate phases. Broader publication and recovery need

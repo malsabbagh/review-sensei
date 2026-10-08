@@ -834,6 +834,9 @@ class ConversationPublisher:
 
         Pagination and individual HTTP responses retain their existing bounds.
         No patch is truncated or replaced with a historical inline fragment.
+        With include_all_changed, base/head and changed-file count are fenced
+        around pagination. Required-path-only callers must fence publication
+        against the supplied snapshot themselves.
         """
         import time
 
