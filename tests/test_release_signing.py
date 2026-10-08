@@ -415,6 +415,7 @@ class UserSetupTests(unittest.TestCase):
         variables = {}
         secret_names = set()
         registered = []
+        interrupt_upload = [True]
 
         def api(path):
             if path == "user":
@@ -455,6 +456,9 @@ class UserSetupTests(unittest.TestCase):
             if args[:3] == ["gh", "secret", "set"]:
                 self.assertIsNotNone(stdin)
                 self.assertNotIn("synthetic-export-placeholder", " ".join(args))
+                if interrupt_upload[0]:
+                    interrupt_upload[0] = False
+                    raise ValueError("synthetic interrupted upload")
                 secret_names.add(args[3])
             return ""
 
@@ -468,6 +472,8 @@ class UserSetupTests(unittest.TestCase):
             backup = Path(temporary).resolve() / "backup"
             old_mask = os.umask(0o077)
             try:
+                with self.assertRaisesRegex(ValueError, "interrupted upload"):
+                    SETUP.setup(backup, None)
                 first = SETUP.setup(backup, None)
                 second = SETUP.setup(backup, EMAIL)
             finally:
