@@ -5,7 +5,7 @@ Date: 2026-10-07
 Owners/Reviewers: Maintainers
 Approved by: not applicable
 Related issue: none; user-authorized implementation of the unified review plan
-Related PR: pending draft creation
+Related PR: [#228](https://github.com/malsabbagh/review-sensei/pull/228)
 
 ## Context
 
