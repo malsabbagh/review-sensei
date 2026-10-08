@@ -291,7 +291,9 @@ class PreparationRenderingTests(unittest.TestCase):
         ):
             PREP.prepare(self.root, VERSION, DATE, self.base)
         self.assertEqual(remote_main(), self.run_git("rev-parse", "HEAD"))
-        self.assertFalse((self.root / PREP.RECEIPT).exists())
+        # A previously prepared release can already have a tracked receipt.
+        # Losing the main race must preserve every original checkout byte.
+        self.assertEqual(self.run_git("status", "--porcelain"), "")
 
 
 def ci_run(identity=42, status="completed", conclusion="success", attempt=1):
