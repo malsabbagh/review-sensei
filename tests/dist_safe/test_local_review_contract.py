@@ -186,6 +186,41 @@ class LocalReviewContractTests(unittest.TestCase):
         self.assertTrue(stdout)
         self.assertNotIn("reason=", stderr)
 
+    def test_unified_private_receipts_reuse_installed_wheel_without_inference(self):
+        from review_sensei.providers.fixture import FixtureProvider
+
+        config = self.root / "config.yml"
+        config.write_text(
+            "schema: 1\ngithub:\n  artifacts: diagnostics\nadvanced:\n  review_work:\n    mode: unified\n",
+            encoding="utf-8",
+        )
+        key = self.root / "key"
+        key.write_bytes(b"k" * 32)
+        key.chmod(0o600)
+        arguments = [
+            *self.base_arguments(CLEAN_RESPONSE),
+            "--config",
+            config,
+            "--work-recovery-dir",
+            self.root / "receipts",
+            "--work-recovery-key-file",
+            key,
+        ]
+        status, _, _ = self.run_review(*arguments, environment=self.clean_environment())
+        self.assertEqual(status, 0)
+        receipt = json.loads(next((self.root / "receipts").glob("*.json")).read_text())
+        validate_public_document(receipt, "work-recovery-artifact")
+        with patch.object(
+            FixtureProvider,
+            "complete",
+            side_effect=AssertionError("unexpected repeated inference"),
+        ) as dispatch:
+            status, _, _ = self.run_review(
+                *arguments, environment=self.clean_environment()
+            )
+        self.assertEqual(status, 0)
+        dispatch.assert_not_called()
+
     def test_invalid_input_exits_two_with_a_structured_reason(self):
         status, stdout, stderr = self.run_review(
             "--diff",

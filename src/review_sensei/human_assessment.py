@@ -12,6 +12,7 @@ from .context import finding_lifecycle_for_comment
 from .errors import ReviewFormatError, ReviewInputError
 from .models import ConversationContext, ProviderRequest, ProviderResponse, ReviewResult
 from .providers.base import ReviewProvider
+from .scope import CONTEXT_REQUEST_INSTRUCTION, ContextRequest, parse_context_requests
 from .validation import validate_bounded_text, validate_repository_path
 
 MAX_HUMAN_FINDINGS = 20
@@ -350,8 +351,17 @@ class HumanAssessmentDecision:
 class HumanAssessmentReply:
     body: str
     decisions: tuple[HumanAssessmentDecision, ...]
+    context_requests: tuple[ContextRequest, ...] = ()
 
     def __post_init__(self) -> None:
+        if (
+            not isinstance(self.context_requests, tuple)
+            or len(self.context_requests) > 4
+            or any(
+                not isinstance(item, ContextRequest) for item in self.context_requests
+            )
+        ):
+            raise ReviewInputError("human assessment scope requests are invalid")
         validate_bounded_text(
             self.body, 4096, label="human assessment reply", allow_empty=False
         )
@@ -478,6 +488,7 @@ class HumanAssessmentService:
         max_prompt_bytes: int = 48 * 1024,
         max_response_bytes: int = 16 * 1024,
         max_output_tokens: int | None = None,
+        allow_context_requests: bool = False,
     ) -> ProviderRequest:
         prompt = (
             "Reassess the pending ReviewSensei human-review findings for this exact head. "
@@ -496,6 +507,7 @@ class HumanAssessmentService:
                 if any(item.required_paths for item in pending.pending)
                 else ""
             )
+            + (CONTEXT_REQUEST_INSTRUCTION if allow_context_requests else "")
             + json.dumps(
                 {
                     "head_sha": head_sha,
@@ -523,12 +535,19 @@ class HumanAssessmentService:
         pending: PendingHumanReview,
         source_body: str,
         diff_context: str,
+        allow_context_requests: bool = False,
+        allowed_context_paths: set[str] | None = None,
     ) -> HumanAssessmentReply:
         reason = "human_assessment_invalid_json"
         try:
             value = json.loads(response.text)
             reason = "human_assessment_reply_fields_invalid"
-            if not isinstance(value, dict) or set(value) != {"body", "assessments"}:
+            if not isinstance(value, dict) or set(value) not in (
+                {"body", "assessments"},
+                {"body", "assessments", "context_requests"}
+                if allow_context_requests
+                else {"body", "assessments"},
+            ):
                 raise ReviewInputError("human assessment reply fields are invalid")
             body = value["body"]
             reason = "human_assessment_reply_body_invalid"
@@ -548,6 +567,21 @@ class HumanAssessmentService:
                 raise ReviewInputError("human assessment decisions are invalid")
             decisions = []
             pending_by_id = {item.fingerprint: item for item in pending.pending}
+            reason = "human_assessment_invalid_response"
+            context_requests = parse_context_requests(
+                value.get("context_requests", []),
+                references=set(pending_by_id),
+                allowed_paths=allowed_context_paths or set(),
+            )
+            if any(
+                len(
+                    set(pending_by_id[item.reference].evidence_paths)
+                    | set(item.required_paths)
+                )
+                > 8
+                for item in context_requests
+            ):
+                raise ReviewInputError("scope request exceeds the finding path bound")
             for item in value["assessments"]:
                 reason = "human_assessment_decision_fields_invalid"
                 fields = {
@@ -596,7 +630,16 @@ class HumanAssessmentService:
                 )
                 decisions.append(decision)
             reason = "human_assessment_invalid_response"
-            result = HumanAssessmentReply(body=body, decisions=tuple(decisions))
+            if any(
+                decision.decision != "unresolved"
+                and decision.fingerprint
+                in {request.reference for request in context_requests}
+                for decision in decisions
+            ):
+                raise ReviewInputError("scope request conflicts with a resolution")
+            result = HumanAssessmentReply(
+                body=body, decisions=tuple(decisions), context_requests=context_requests
+            )
             pending.apply(result.decisions)
             return result
         except (

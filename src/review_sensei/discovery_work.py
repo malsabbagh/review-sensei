@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+import json
+from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING
 
 from .budgets import provider_output_tokens
 from .context import IncrementalReviewPlan, ReviewContextCacheKey
 from .diff import analyze_diff
-from .errors import ReviewInputError
+from .errors import ReviewFormatError, ReviewInputError
 from .evidence import EvidenceBundle, EvidenceRecord, EvidenceSnapshot, evidence_digest
 from .execution import CompletedBatch, execute_plan
 from .models import (
@@ -30,10 +31,17 @@ from .planning import (
     plan_work,
 )
 from .providers.base import ReviewProvider
+from .scope import CONTEXT_REQUEST_INSTRUCTION, ContextRequest, parse_context_requests
 from .service import _PROVIDER_OUTPUT_CORRECTION, _ValidatedStageOutput
 
 if TYPE_CHECKING:
     from .service import ReviewRun, ReviewService
+    from .work_recovery import WorkRecoveryStore
+
+
+@dataclass(frozen=True)
+class DiscoveryBatchOutput(_ValidatedStageOutput):
+    context_requests: tuple[ContextRequest, ...] = ()
 
 
 def discover(
@@ -46,6 +54,8 @@ def discover(
     current_key: ReviewContextCacheKey | None,
     profile: str,
     provider: ReviewProvider,
+    recovery: WorkRecoveryStore | None = None,
+    allow_expansion: bool = True,
 ) -> ReviewRun:
     configured = {category.id for category in service.review_categories}
     if request.active_category_ids is not None and not set(
@@ -103,6 +113,7 @@ def discover(
     stage_summary: dict[str, str] = {}
     failed = False
     comment_stage = False
+    scope_wave_used = not allow_expansion
 
     for stage in service.stages:
         categories = tuple(
@@ -152,7 +163,7 @@ def discover(
                 analysis=batch_analysis,
             )
             return ProviderRequest(
-                prompt=prompt,
+                prompt=prompt + "\n" + CONTEXT_REQUEST_INSTRUCTION,
                 model=request.model,
                 limits=request.limits,
                 max_prompt_bytes=budgets.batch_prompt_bytes,
@@ -219,22 +230,54 @@ def discover(
                     "profile": profile,
                     "provider": stage_provider.name,
                     "model": request.model,
+                    "stage_prompt": stage.prompt_template,
+                    "stage_outputs": stage.outputs,
+                    "categories": tuple(category.id for category in categories),
+                    "cache": asdict(current_key) if current_key is not None else None,
                 }
             ),
         )
 
         def validate(
             response: ProviderResponse, batch: WorkBatch
-        ) -> _ValidatedStageOutput:
-            return service._validated_stage_output(
-                response.text,
+        ) -> DiscoveryBatchOutput:
+            value = json.loads(response.text)
+            if not isinstance(value, dict) or not set(value) <= set(stage.outputs) | {
+                "context_requests"
+            }:
+                raise ReviewFormatError("discovery output fields are invalid")
+            scope = parse_context_requests(
+                value.pop("context_requests", []),
+                references=set(batch.paths),
+                allowed_paths=set(analysis.changed_paths),
+            )
+            output = service._validated_stage_output(
+                json.dumps(value),
                 stage=stage,
                 analysis=analyze_diff(batch.diff_context, limits=request.limits),
                 active_categories=categories,
                 propose_learnings=request.propose_learnings,
             )
+            return DiscoveryBatchOutput(
+                output.summary, output.comments, output.proposals, scope
+            )
 
-        def accept(item: CompletedBatch[_ValidatedStageOutput]) -> bool:
+        def encode_output(value: DiscoveryBatchOutput) -> object:
+            fields: dict[str, object] = {}
+            if "summary" in stage.outputs:
+                fields["summary"] = value.summary
+            if "comments" in stage.outputs:
+                fields["comments"] = [item.to_dict() for item in value.comments]
+            if "learning_proposals" in stage.outputs:
+                fields["learning_proposals"] = [
+                    item.to_dict() for item in value.proposals
+                ]
+            fields["context_requests"] = [
+                item.to_dict() for item in value.context_requests
+            ]
+            return fields
+
+        def accept(item: CompletedBatch[DiscoveryBatchOutput]) -> bool:
             output = item.value
             try:
                 ReviewResult(
@@ -267,8 +310,132 @@ def discover(
             budgets=budgets,
             correction=_PROVIDER_OUTPUT_CORRECTION,
             accept=accept,
+            recovery=recovery,
+            encode_recovery=encode_output,
+            decode_recovery=lambda value, batch: validate(
+                ProviderResponse(json.dumps(value), stage_provider.name), batch
+            ),
+            revalidate_cached=lambda value, batch: (
+                validate(
+                    ProviderResponse(
+                        json.dumps(encode_output(value)), stage_provider.name
+                    ),
+                    batch,
+                )
+                == value
+            ),
+            repairable_validation=lambda exc: isinstance(
+                exc, (ReviewFormatError, json.JSONDecodeError)
+            ),
         )
+        scopes = tuple(
+            scope
+            for item in execution.completed
+            for scope in item.value.context_requests
+        )
+        bridge_pending = []
+        if scopes:
+            if scope_wave_used:
+                bridge_pending = list(scopes)
+            else:
+                scope_wave_used = True
+                whole_records = {
+                    record.canonical_path: EvidenceRecord.from_diff_record(
+                        record, snapshot
+                    )
+                    for record in records
+                }
+                bridge_requirements = []
+                bridge_records = {}
+                for scope in scopes:
+                    paths = tuple(sorted({scope.reference, *scope.required_paths}))
+                    if len(paths) > 8:
+                        bridge_pending.append(scope)
+                        continue
+                    keys = []
+                    for path in paths:
+                        bridge_record = whole_records.get(path)
+                        if bridge_record is None or not bridge_record.complete:
+                            keys.append(evidence_digest({"missing_bridge": path}))
+                        else:
+                            keys.append(bridge_record.evidence_id)
+                            bridge_records[bridge_record.evidence_id] = bridge_record
+                    bridge_requirements.append(
+                        WorkRequirement(
+                            "bridge:" + evidence_digest(scope.to_dict()), tuple(keys)
+                        )
+                    )
+                bridge_bundle = EvidenceBundle(
+                    snapshot,
+                    tuple(bridge_records.values()),
+                    analysis.enumeration_complete,
+                )
+                bridge_plan = plan_work(
+                    "discovery",
+                    bridge_bundle,
+                    bridge_requirements,
+                    budgets=budgets,
+                    render=render,
+                    correction=_PROVIDER_OUTPUT_CORRECTION,
+                    authority_digest=plan.authority_digest,
+                )
+
+                def validate_bridge(
+                    response: ProviderResponse, batch: WorkBatch
+                ) -> DiscoveryBatchOutput:
+                    output = validate(response, batch)
+                    if output.context_requests:
+                        raise ReviewInputError("scope expansion wave exhausted")
+                    return output
+
+                bridge = execute_plan(
+                    bridge_plan,
+                    provider=stage_provider,
+                    render=render,
+                    validate=validate_bridge,
+                    tracker=tracker,
+                    budgets=budgets,
+                    correction=_PROVIDER_OUTPUT_CORRECTION,
+                    accept=accept,
+                    repairable_validation=lambda exc: isinstance(
+                        exc, (ReviewFormatError, json.JSONDecodeError)
+                    ),
+                    recovery=recovery,
+                    encode_recovery=encode_output,
+                    decode_recovery=lambda value, batch: validate_bridge(
+                        ProviderResponse(json.dumps(value), stage_provider.name), batch
+                    ),
+                    revalidate_cached=lambda value, batch: (
+                        validate_bridge(
+                            ProviderResponse(
+                                json.dumps(encode_output(value)), stage_provider.name
+                            ),
+                            batch,
+                        )
+                        == value
+                    ),
+                )
+                failed_bridge_ids = set(bridge.pending_ids)
+                bridge_pending.extend(
+                    scope
+                    for scope in scopes
+                    if "bridge:" + evidence_digest(scope.to_dict()) in failed_bridge_ids
+                )
+            for scope in bridge_pending:
+                failed = True
+                for path in {scope.reference, *scope.required_paths}:
+                    if path in file_outcomes:
+                        file_outcomes[path] = ("budget-exhausted", "chunk-failed")
+                    for file_record in analysis.file_records:
+                        if path in file_record.coverage_paths:
+                            for bridge_hunk in file_record.hunks:
+                                hunk_outcomes[bridge_hunk.index] = (
+                                    "budget-exhausted",
+                                    "chunk-failed",
+                                )
         stage_summary[stage.name] = "partial" if execution.pending else "complete"
+        if bridge_pending:
+            stage_summary[stage.name] = "partial"
         failed = failed or bool(execution.pending)
         by_id = {item.identity: item for item in plan.requirements}
         evidence_by_id = bundle.by_id()

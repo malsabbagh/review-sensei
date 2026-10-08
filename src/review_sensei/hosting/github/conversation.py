@@ -828,12 +828,15 @@ class ConversationPublisher:
         head_sha: str,
         required_paths: Sequence[str],
         timeout_seconds: float = 120,
+        include_all_changed: bool = False,
     ):
         """Load exact complete file patches outside the bounded chat context.
 
         Pagination and individual HTTP responses retain their existing bounds.
         No patch is truncated or replaced with a historical inline fragment.
         """
+        import time
+
         from ...evidence import EvidenceBundle, EvidenceRecord, EvidenceSnapshot
 
         if isinstance(required_paths, str) or len(required_paths) > 64:
@@ -843,16 +846,44 @@ class ConversationPublisher:
         snapshot = EvidenceSnapshot(repository, pull_request, base_sha, head_sha)
         if not required_paths:
             return EvidenceBundle(snapshot, ())
+        expected_count = None
+        acquisition_deadline = time.monotonic() + min(60, timeout_seconds)
+
+        def remaining_acquisition():
+            return max(0.0, acquisition_deadline - time.monotonic())
+
+        def snapshot_current():
+            status, pr = self.http.request(
+                "GET",
+                self.http.repository_path(repository, f"/pulls/{pull_request}"),
+                token=token,
+                timeout_seconds=remaining_acquisition(),
+            )
+            if (
+                status != 200
+                or not isinstance(pr, dict)
+                or not isinstance(pr.get("base"), dict)
+                or not isinstance(pr.get("head"), dict)
+                or pr["base"].get("sha") != base_sha
+                or pr["head"].get("sha") != head_sha
+            ):
+                raise GitHubConversationError("review evidence snapshot changed")
+            return pr.get("changed_files")
+
         try:
+            if include_all_changed:
+                expected_count = snapshot_current()
             files = self.http.paginate(
                 path=self.http.repository_path(
                     repository, f"/pulls/{pull_request}/files"
                 ),
                 token=token,
                 page_sizes=(100, 50, 25, 5, 1),
-                max_requests=32,
-                timeout_seconds=timeout_seconds,
+                max_requests=62 if include_all_changed else 64,
+                timeout_seconds=remaining_acquisition(),
             )
+            if include_all_changed:
+                snapshot_current()
         except GitHubHTTPError:
             return EvidenceBundle(snapshot, (), enumeration_complete=False)
         records = []
@@ -863,7 +894,7 @@ class ConversationPublisher:
                 )
             path = item["filename"]
             validate_repository_path(path, label="review evidence path")
-            if path not in required_paths:
+            if not include_all_changed and path not in required_paths:
                 continue
             patch = item.get("patch")
             records.append(
@@ -883,6 +914,14 @@ class ConversationPublisher:
                 )
             )
         try:
+            if expected_count is not None and (
+                isinstance(expected_count, bool)
+                or not isinstance(expected_count, int)
+                or len({record.path for record in records}) != expected_count
+            ):
+                return EvidenceBundle(
+                    snapshot, tuple(records), enumeration_complete=False
+                )
             return EvidenceBundle(snapshot, tuple(records))
         except ReviewInputError as exc:
             raise GitHubConversationError(

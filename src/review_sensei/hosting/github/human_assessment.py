@@ -207,6 +207,7 @@ class HumanAssessmentPublisher:
                 timeout_seconds=work_tracker.remaining_seconds()
                 if work_tracker is not None
                 else 120,
+                include_all_changed=True,
             )
             return PreparedHumanAssessment(
                 conversation=replace(
@@ -284,7 +285,9 @@ class HumanAssessmentPublisher:
         ):
             raise GitHubConversationError("human assessment evidence is insufficient")
         try:
-            updated_inventory = inventory.apply(reply.decisions)
+            updated_inventory = (
+                work.inventory if work is not None else inventory
+            ).apply(reply.decisions)
         except ReviewInputError as exc:
             raise GitHubConversationError(
                 "human assessment identities are invalid"

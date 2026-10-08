@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 from .budgets import EffectiveWorkBudget
 from .errors import ProviderError, ReviewFormatError, ReviewInputError
@@ -20,6 +20,31 @@ from .providers.base import ReviewProvider
 from .validation import utf8_size, validate_bounded_text
 
 T = TypeVar("T")
+
+if TYPE_CHECKING:
+    from .work_recovery import WorkRecoveryStore
+
+
+def provider_work_identity(provider: ReviewProvider) -> str:
+    """Bind adapter/routing settings, deliberately excluding credentials."""
+    policy = getattr(provider, "routing_policy", None)
+    fields = (
+        policy.identity_fields()
+        if policy is not None and callable(getattr(policy, "identity_fields", None))
+        else None
+    )
+    return evidence_digest(
+        {
+            "adapter": type(provider).__module__ + "." + type(provider).__qualname__,
+            "name": provider.name,
+            "model": provider.model,
+            "base_url": getattr(provider, "base_url", None),
+            "timeout_seconds": getattr(provider, "timeout_seconds", None),
+            "max_output_tokens": getattr(provider, "max_output_tokens", None),
+            "allow_model_override": getattr(provider, "allow_model_override", True),
+            "routing_policy": fields,
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -80,6 +105,7 @@ def execute_call(
     budgets: EffectiveWorkBudget,
     correction: str = "",
     repairable_validation: Callable[[Exception], bool] | None = None,
+    before_dispatch: Callable[[], None] | None = None,
 ) -> CallResult[T]:
     """Count every dispatch, bound correction and transport retries, fail closed."""
     tracker.budget.validate_against_limits(request.limits)
@@ -121,6 +147,8 @@ def execute_call(
         )
         tracker.record_prompt_attempt(request.prompt)
         tracker.record_provider_call()
+        if before_dispatch is not None:
+            before_dispatch()
         try:
             response = provider.complete(bounded)
         except ProviderError as exc:
@@ -182,6 +210,9 @@ def execute_plan(
     prior: WorkExecution[T] | None = None,
     revalidate_cached: Callable[[T, WorkBatch], bool] | None = None,
     repairable_validation: Callable[[Exception], bool] | None = None,
+    recovery: WorkRecoveryStore | None = None,
+    encode_recovery: Callable[[T], object] | None = None,
+    decode_recovery: Callable[[object, WorkBatch], T] | None = None,
 ) -> WorkExecution[T]:
     tracker.budget.validate_against_limits()
     if plan.budget_digest != budgets.digest or (
@@ -190,6 +221,53 @@ def execute_plan(
     ):
         raise ReviewInputError("work execution budgets do not match the admitted plan")
     cached: dict[str, CompletedBatch[T]] = {}
+    terminal_pending: dict[str, str] = {}
+    requests: dict[str, ProviderRequest] = {}
+    request_digests: dict[str, str | None] = {}
+    for batch in plan.batches:
+        try:
+            request = render(batch)
+        except ReviewInputError:
+            request_digests[batch.batch_id] = None
+            continue
+        requests[batch.batch_id] = request
+        request_digests[batch.batch_id] = evidence_digest(
+            {
+                "domain": "reviewsensei:work-request:v1",
+                "prompt": request.prompt,
+                "provider": provider.name,
+                "provider_model": provider.model,
+                "provider_identity": provider_work_identity(provider),
+                "model": request.model,
+                "json_mode": request.json_mode,
+                "output_tokens": request.max_output_tokens,
+                "max_prompt_bytes": request.max_prompt_bytes,
+                "max_response_bytes": request.max_response_bytes,
+                "budget": budgets.digest,
+            }
+        )
+    if recovery is not None and recovery.enabled:
+        if (
+            encode_recovery is None
+            or decode_recovery is None
+            or revalidate_cached is None
+        ):
+            raise ReviewInputError(
+                "work recovery requires normalized codecs and fresh semantic validation"
+            )
+        recovered = recovery.load(
+            plan, tracker, budgets, decode_recovery, request_digests
+        )
+        if recovered is not None:
+            prior = recovered
+            # Only dispatches interrupted before a durable outcome may resume.
+            # Restarting the same authenticated plan cannot create another
+            # semantic or transport retry for an already rejected batch.
+            terminal_pending = {
+                identity: reason
+                for identity, reason in recovered.pending
+                if reason != "interrupted"
+            }
     if prior is not None:
         if (
             revalidate_cached is None
@@ -205,28 +283,48 @@ def execute_plan(
         cached = {item.batch.batch_id: item for item in prior.completed}
     completed: list[CompletedBatch[T]] = []
     pending = list(plan.unprocessed)
+
+    def save_state(next_index: int) -> None:
+        if recovery is not None and encode_recovery is not None:
+            retained_pending = pending + [
+                (identity, "interrupted")
+                for batch in plan.batches[next_index:]
+                for identity in batch.requirement_ids
+            ]
+            recovery.save(
+                WorkExecution(
+                    plan,
+                    tuple(completed),
+                    tuple(sorted(retained_pending)),
+                    tracker.execution_identity,
+                ),
+                tracker,
+                encode_recovery,
+                request_digests,
+            )
+
     for index, batch in enumerate(plan.batches):
-        try:
-            request = render(batch)
-        except ReviewInputError:
+        terminal_reasons = [
+            terminal_pending[identity]
+            for identity in batch.requirement_ids
+            if identity in terminal_pending
+        ]
+        if terminal_reasons:
+            pending.extend(
+                (identity, terminal_pending.get(identity, terminal_reasons[0]))
+                for identity in batch.requirement_ids
+            )
+            save_state(index + 1)
+            continue
+        planned_request = requests.get(batch.batch_id)
+        if planned_request is None:
             pending.extend(
                 (identity, "prompt_budget") for identity in batch.requirement_ids
             )
             continue
-        request_digest = evidence_digest(
-            {
-                "domain": "reviewsensei:work-request:v1",
-                "prompt": request.prompt,
-                "provider": provider.name,
-                "provider_model": provider.model,
-                "model": request.model,
-                "json_mode": request.json_mode,
-                "output_tokens": request.max_output_tokens,
-                "max_prompt_bytes": request.max_prompt_bytes,
-                "max_response_bytes": request.max_response_bytes,
-                "budget": budgets.digest,
-            }
-        )
+        request = planned_request
+        request_digest = request_digests[batch.batch_id]
+        assert request_digest is not None
         previous = cached.get(batch.batch_id)
         if (
             previous is not None
@@ -237,6 +335,7 @@ def execute_plan(
         ):
             if accept is None or accept(previous):
                 completed.append(previous)
+                save_state(index + 1)
                 continue
             pending.extend(
                 (identity, "output_budget")
@@ -252,6 +351,7 @@ def execute_plan(
             budgets=budgets,
             correction=correction,
             repairable_validation=repairable_validation,
+            before_dispatch=lambda: save_state(index),
         )
         if result.value is None or result.diagnostic is not None:
             pending.extend(
@@ -268,6 +368,8 @@ def execute_plan(
                 )
                 break
             completed.append(item)
+        save_state(index + 1)
+    save_state(len(plan.batches))
     return WorkExecution(
         plan, tuple(completed), tuple(sorted(pending)), tracker.execution_identity
     )

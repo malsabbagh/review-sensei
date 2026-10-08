@@ -881,6 +881,20 @@ the facts remain v1. Upgraded readers accept v1 and v2, and a latest unsupported
 record blocks older authority. Normal review publication continues writing v1.
 The work-policy digest extends transaction configuration only for opt-in runs.
 
+Closed context requests permit one host-validated joint or discovery wave using
+the same planner and tracker. Broader discovery uses configured full-review
+policy and its normal publisher; the merged eligibility retains exact prior
+findings, blockers, coverage and qualification. Source reply, latest authority
+and base/head fence mutations, and result replay preserves persisted concerns.
+Explicit opt-ins expose a private HMAC-authenticated v2 receipt store; admission
+is saved before dispatch and restored without resetting calls or deadlines.
+Artifacts retain normalized receipts and exact evidence only under diagnostics
+policy, with bounded size/count/expiry and current semantic validation. See
+[shared work operations](shared-review-work.md) for CLI and retention controls.
+The reusable workflow serializes provider work per PR across full/reply/command
+modes and backends without cancelling active siblings; GitHub's single pending
+slot can replace queued work, which cannot clear a pending finding.
+
 The offline pinned-reader gate, `scripts/check_review_reader_compatibility.py`,
 uses the immutable published v0.6.16 source. That reader refuses richer eligibility
 and opt-in transaction contexts, but skips session comments exceeding its 16 KiB

@@ -330,6 +330,63 @@ def plan_work(
     )
 
 
+def plan_continuation(
+    previous: ReviewWorkPlan,
+    bundle: EvidenceBundle,
+    requirements: Sequence[WorkRequirement],
+    *,
+    reusable: Sequence[WorkBatch],
+    budgets: EffectiveWorkBudget,
+    render: Callable[[WorkBatch], object],
+    correction: str = "",
+    deferred: dict[str, str] | None = None,
+) -> ReviewWorkPlan:
+    """Keep compatible receipts fixed and pack remaining work with plan_work."""
+    if (
+        bundle.snapshot != previous.bundle.snapshot
+        or budgets.digest != previous.budget_digest
+    ):
+        raise ReviewInputError("continuation snapshot or budget changed")
+    by_id = {item.identity: item for item in requirements}
+    records = bundle.by_id()
+    kept = tuple(
+        batch
+        for batch in reusable
+        if batch in previous.batches
+        and all(by_id.get(item.identity) == item for item in batch.requirements)
+        and all(records.get(record.evidence_id) == record for record in batch.records)
+    )
+    deferred = deferred or {}
+    if not set(deferred) <= set(by_id):
+        raise ReviewInputError("continuation deferred identities are invalid")
+    kept = tuple(
+        batch for batch in kept if not set(batch.requirement_ids) & set(deferred)
+    )
+    assigned = {identity for batch in kept for identity in batch.requirement_ids}
+    remaining = plan_work(
+        previous.mode,
+        bundle,
+        tuple(
+            item
+            for item in requirements
+            if item.identity not in assigned and item.identity not in deferred
+        ),
+        budgets=budgets,
+        render=render,
+        correction=correction,
+        authority_digest=previous.authority_digest,
+    )
+    return ReviewWorkPlan(
+        previous.mode,
+        bundle,
+        tuple(requirements),
+        kept + remaining.batches,
+        tuple(sorted((*remaining.unprocessed, *deferred.items()))),
+        previous.authority_digest,
+        budgets.digest,
+    )
+
+
 # Related names use the existing per-request metadata item ceiling. This is
 # an admission policy, not a claim that every 64-path payload fits: the normal
 # instruction/prompt limits and the durable byte-fit check still apply.

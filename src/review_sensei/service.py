@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .budgets import ProviderCapabilities, ReviewWorkBudgets
 from .concurrency import ReviewConcurrencyPlan
@@ -61,6 +61,9 @@ from .stages import (
     load_stages_from_dir,
 )
 from .validation import utf8_size, validate_bounded_text
+
+if TYPE_CHECKING:
+    from .work_recovery import WorkRecoveryStore
 
 DEFAULT_CATEGORY_CATALOG = load_review_categories_from_dir(
     Path(__file__).parent / "default_categories"
@@ -676,6 +679,8 @@ class ReviewService:
         tracker: ResourceBudgetTracker | None = None,
         provider_override: ReviewProvider | None = None,
         attach_change_coverage: bool = True,
+        work_recovery: WorkRecoveryStore | None = None,
+        allow_work_expansion: bool = True,
         monotonic: Callable[[], float] | None = None,
         sleeper: Callable[[float], None] | None = None,
     ) -> ReviewRun:
@@ -700,6 +705,10 @@ class ReviewService:
             request = replace(request, work_policy_digest=self.work_policy_digest)
         elif request.work_policy_digest is not None:
             raise ReviewInputError("review work policy requires the unified mechanism")
+        elif work_recovery is not None and work_recovery.enabled:
+            raise ReviewInputError(
+                "work receipt recovery requires the unified mechanism"
+            )
         active_provider = provider_override or self.provider
         key_request = request
         if (
@@ -804,6 +813,8 @@ class ReviewService:
                 current_key=current_key,
                 profile=profile,
                 provider=active_provider,
+                recovery=work_recovery,
+                allow_expansion=allow_work_expansion,
             )
 
         try:

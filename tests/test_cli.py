@@ -78,6 +78,59 @@ class FakeRegistry:
 
 
 class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
+    def test_unified_cli_receipts_restart_without_provider_calls_and_require_policy(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            config = root / "config.yml"
+            config.write_text(
+                "schema: 1\ngithub:\n  artifacts: diagnostics\nadvanced:\n  review_work:\n    mode: unified\n"
+            )
+            diff = root / "change.patch"
+            diff.write_text(DIFF)
+            key = root / "authentication-key"
+            key.write_bytes(b"k" * 32)
+            key.chmod(0o600)
+            arguments = [
+                "--config",
+                str(config),
+                "--diff",
+                str(diff),
+                "--work-recovery-dir",
+                str(root / "receipts"),
+                "--work-recovery-key-file",
+                str(key),
+            ]
+            for expected_calls in (1, 0):
+                provider = SymbolContextProvider()
+                with (
+                    patch(
+                        "review_sensei.cli.default_registry",
+                        return_value=FakeRegistry(provider),
+                    ),
+                    redirect_stdout(io.StringIO()),
+                    redirect_stderr(io.StringIO()),
+                ):
+                    status = main(arguments)
+                self.assertEqual(status, 0)
+                self.assertEqual(len(provider.requests), expected_calls)
+            config.write_text(
+                "schema: 1\nadvanced:\n  review_work:\n    mode: unified\n"
+            )
+            provider = SymbolContextProvider()
+            with (
+                patch(
+                    "review_sensei.cli.default_registry",
+                    return_value=FakeRegistry(provider),
+                ),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+            ):
+                status = main(arguments)
+            self.assertEqual(status, 2)
+            self.assertFalse(provider.requests)
+
     def test_github_review_cli_wires_review_and_learning_publication(self):
         from review_sensei.hosting import github as github_module
 

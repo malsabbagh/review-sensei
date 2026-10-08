@@ -307,11 +307,14 @@ def review_marker(
     pull_request: int,
     head_sha: str,
     result: ReviewResult,
+    continuation_digest: str | None = None,
 ) -> str:
     digest = review_result_digest(result)
     return (
         f"{review_identity_marker(repository_id=repository_id, pull_request=pull_request, head_sha=head_sha)} "
-        f"result={digest} coverage={result.coverage_mode} -->"
+        f"result={digest} coverage={result.coverage_mode}"
+        + (f" continuation={continuation_digest}" if continuation_digest else "")
+        + " -->"
     )
 
 
@@ -1369,6 +1372,8 @@ class ReviewPublisher:
         policy: str,
         approval_enabled: bool,
         qualification: str,
+        retained_eligibility: ReviewApprovalEligibility | None = None,
+        persisted_eligibility: ReviewApprovalEligibility | None = None,
     ) -> PublicationResult:
         """Re-assert one already-published result's gate and approval decision.
 
@@ -1380,12 +1385,45 @@ class ReviewPublisher:
         a repeated run explains its withholding the same way.
         """
 
+        persisted = persisted_eligibility
+        if persisted is not None and persisted.result_digest != review_result_digest(
+            result
+        ):
+            return PublicationResult(
+                status="already_published", diagnostic="approval_withheld"
+            )
+        replay_eligibility = persisted or approval_eligibility_from_result(
+            result,
+            head_sha=head_sha,
+            base_sha=base_sha,
+            enabled=approval_enabled,
+            app_authored=False,
+            qualification=qualification,
+            retained_eligibility=retained_eligibility,
+        )
+        replay_eligibility = replace(
+            replay_eligibility,
+            facts=replace(
+                replay_eligibility.facts,
+                enabled=approval_enabled and replay_eligibility.facts.enabled,
+                qualification=qualification
+                if qualification not in ("qualified", "not-required")
+                else replay_eligibility.facts.qualification,
+            ),
+        )
         check_diagnostic = self._check_state_or_diagnostic(
             check_token=check_token,
             repository=repository,
             head_sha=head_sha,
             app_slug=app_slug,
-            outcome=check_outcome_for_result(result, policy=policy),
+            outcome=check_outcome_for_result(
+                replace(
+                    result,
+                    review_status=replay_eligibility.facts.review_status,
+                ),
+                policy=policy,
+                required_fixes=replay_eligibility.facts.has_blocking_findings,
+            ),
         )
         finalized = self.finalizer.finalize(
             token=token,
@@ -1393,15 +1431,8 @@ class ReviewPublisher:
             pull_request=pull_request,
             head_sha=head_sha,
             app_slug=app_slug,
-            eligibility=approval_eligibility_from_result(
-                result,
-                head_sha=head_sha,
-                base_sha=base_sha,
-                enabled=approval_enabled,
-                app_authored=False,
-                qualification=qualification,
-                check_published=check_diagnostic is None,
-            ),
+            eligibility=replay_eligibility,
+            require_persisted=persisted is not None,
         )
         diagnostic = check_diagnostic
         if diagnostic is None and finalized.status == "approval_withheld":
@@ -1440,6 +1471,9 @@ class ReviewPublisher:
         evidence_confirmed_concerns: Sequence[str] = (),
         authorized_dispositions: Sequence[object] = (),
         prepared_review: PublishableReview | None = None,
+        retained_eligibility: ReviewApprovalEligibility | None = None,
+        continuation_digest: str | None = None,
+        source_guard: Callable[[], bool] | None = None,
     ) -> PublicationResult:
         if not isinstance(auto_approve, bool):
             raise GitHubPublicationError("review auto_approve must be a boolean")
@@ -1460,6 +1494,20 @@ class ReviewPublisher:
             raise GitHubPublicationError("review base sha is invalid")
         if not isinstance(result, ReviewResult):
             raise GitHubPublicationError("review result is invalid")
+        if retained_eligibility is not None:
+            if (
+                not isinstance(retained_eligibility, ReviewApprovalEligibility)
+                or not isinstance(continuation_digest, str)
+                or re.fullmatch(r"[a-f0-9]{64}", continuation_digest) is None
+                or not callable(source_guard)
+            ):
+                raise GitHubPublicationError(
+                    "broader review source authority is invalid"
+                )
+            if not source_guard():
+                return PublicationResult(status="skipped_edited_source")
+        elif continuation_digest is not None or source_guard is not None:
+            raise GitHubPublicationError("broader review retained authority is missing")
         # Omitted policies use the same deterministic default as preparation;
         # runtime configuration is resolved by the application, not from
         # ambient environment variables at this publication boundary. The
@@ -1548,13 +1596,14 @@ class ReviewPublisher:
         result = prepared.result
         # Validate the complete inventory before checks or review mutations.
         # Failure must not publish an unreassessable human-review record.
-        approval_eligibility_from_result(
+        prospective_eligibility = approval_eligibility_from_result(
             result,
             head_sha=head_sha,
             base_sha=base_sha,
             enabled=approval_enabled,
             app_authored=False,
             qualification=qualification,
+            retained_eligibility=retained_eligibility,
         )
         # Automatic approval also requires an eligible review: a partial or
         # failed analysis, a pending human assessment, or incomplete coverage
@@ -1564,7 +1613,13 @@ class ReviewPublisher:
         # disagree. The finding review event and the finalizer's gate
         # maintenance still follow the operator's opt-in, so a blocking finding
         # keeps requesting changes on an ineligible review.
-        approval_eligible = _approval_eligible(result)
+        approval_eligible = _approval_eligible(result) and not (
+            retained_eligibility is not None
+            and (
+                prospective_eligibility.facts.has_blocking_findings
+                or prospective_eligibility.facts.has_human_adjudication_findings
+            )
+        )
         auto_approval = auto_approve and approval_eligible
         analysis = self._validate_locations(result, diff)
         marker = review_marker(
@@ -1572,6 +1627,7 @@ class ReviewPublisher:
             pull_request=pull_request,
             head_sha=head_sha,
             result=result,
+            continuation_digest=continuation_digest,
         )
         identity_marker = review_identity_marker(
             repository_id=repository_id,
@@ -1597,16 +1653,48 @@ class ReviewPublisher:
         # Any pagination/transport failure is an uncertainty and therefore
         # fails closed instead of being treated as "no marker".
         try:
-            identity_states, result_states = self._published_state_index(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                identity_marker=identity_marker,
-                result_marker=marker,
-                app_slug=app_slug,
+            identity_states, result_states, persisted_eligibility = (
+                self._published_state_index(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    identity_marker=identity_marker,
+                    result_marker=marker,
+                    app_slug=app_slug,
+                )
             )
-            if has_blocking_findings(result):
+            if retained_eligibility is not None:
+                if result_states:
+                    current = persisted_eligibility
+                    if (
+                        current is None
+                        or replace(
+                            current,
+                            facts=replace(
+                                current.facts,
+                                check_published=prospective_eligibility.facts.check_published,
+                            ),
+                        )
+                        != prospective_eligibility
+                    ):
+                        return PublicationResult(status="skipped_stale_head")
+                    return self._finalize_published_result(
+                        token=token,
+                        repository=repository,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        base_sha=base_sha,
+                        app_slug=app_slug,
+                        check_token=check_token,
+                        result=result,
+                        policy=effective_policy,
+                        approval_enabled=approval_enabled,
+                        qualification=qualification,
+                        retained_eligibility=retained_eligibility,
+                        persisted_eligibility=persisted_eligibility,
+                    )
+            elif has_blocking_findings(result):
                 if result_states:
                     if not preflight.app_authored:
                         return self._finalize_published_result(
@@ -1621,6 +1709,7 @@ class ReviewPublisher:
                             policy=effective_policy,
                             approval_enabled=approval_enabled,
                             qualification=qualification,
+                            persisted_eligibility=persisted_eligibility,
                         )
                     return PublicationResult(status="already_published")
             else:
@@ -1640,6 +1729,7 @@ class ReviewPublisher:
                             policy=effective_policy,
                             approval_enabled=approval_enabled,
                             qualification=qualification,
+                            persisted_eligibility=persisted_eligibility,
                         )
                     return PublicationResult(status="already_published")
         except GitHubHTTPTransientError as exc:
@@ -1665,6 +1755,54 @@ class ReviewPublisher:
         )
         if write_preflight.result is not None:
             return write_preflight.result
+        continuation_body_parts: (
+            tuple[list[tuple[ReviewComment, str, str, str]], str] | None
+        ) = None
+        if retained_eligibility is not None:
+            assert source_guard is not None
+            if not source_guard():
+                return PublicationResult(status="skipped_edited_source")
+            current = self.finalizer.load_eligibility(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                require_valid=True,
+            )
+            if current != retained_eligibility:
+                return PublicationResult(status="skipped_stale_head")
+            continuation_body_parts = self._assemble_review_body(
+                result=result,
+                analysis=analysis,
+                convergence_policy=convergence_policy,
+                read_facts=lambda: self._conversation_resolution_facts(
+                    token=token, repository=repository, branch=base_branch
+                ),
+                auto_approve=auto_approval,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+            )
+            prepared_comments, continuation_summary = continuation_body_parts
+            continuation_summary += "\n\nEarlier findings remain in their assessment inventory; all approval requirements still apply."
+            continuation_body_parts = (prepared_comments, continuation_summary)
+            validate_bounded_text(
+                continuation_summary,
+                result.limits.max_summary_bytes,
+                label="published review summary",
+                allow_empty=False,
+            )
+            # False is the longer JSON boolean. Preflight the whole framed
+            # authority before the first check or review mutation.
+            preflight_body = f"{_with_discussion_instruction(continuation_summary)}\n\n{marker}\n\n{approval_eligibility_marker(replace(prospective_eligibility, facts=replace(prospective_eligibility.facts, check_published=False)))}"
+            validate_bounded_text(
+                preflight_body,
+                MAX_PUBLISHED_REVIEW_BODY_BYTES,
+                label="published review body",
+                allow_empty=False,
+            )
         # An old success on this head must not stand in for the review that is
         # about to be published, so the pending gate state is written first and
         # concluded before the review body is composed. The persisted
@@ -1688,7 +1826,14 @@ class ReviewPublisher:
                     repository=repository,
                     head_sha=head_sha,
                     app_slug=app_slug,
-                    outcome=check_outcome_for_result(result, policy=effective_policy),
+                    outcome=check_outcome_for_result(
+                        replace(
+                            result,
+                            review_status=prospective_eligibility.facts.review_status,
+                        ),
+                        policy=effective_policy,
+                        required_fixes=prospective_eligibility.facts.has_blocking_findings,
+                    ),
                 )
         eligibility = approval_eligibility_from_result(
             result,
@@ -1698,20 +1843,24 @@ class ReviewPublisher:
             app_authored=write_preflight.app_authored,
             qualification=qualification,
             check_published=check_diagnostic is None,
+            retained_eligibility=retained_eligibility,
         )
         try:
-            prepared_comments, summary = self._assemble_review_body(
-                result=result,
-                analysis=analysis,
-                convergence_policy=convergence_policy,
-                read_facts=lambda: self._conversation_resolution_facts(
-                    token=token, repository=repository, branch=base_branch
-                ),
-                auto_approve=auto_approval,
-                repository_id=repository_id,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                base_sha=base_sha,
+            prepared_comments, summary = (
+                continuation_body_parts
+                or self._assemble_review_body(
+                    result=result,
+                    analysis=analysis,
+                    convergence_policy=convergence_policy,
+                    read_facts=lambda: self._conversation_resolution_facts(
+                        token=token, repository=repository, branch=base_branch
+                    ),
+                    auto_approve=auto_approval,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                )
             )
             validate_bounded_text(
                 summary,
@@ -1793,7 +1942,7 @@ class ReviewPublisher:
         # check and comments; advisory never fails the check.
         if (
             approval_enabled
-            and has_blocking_findings(result)
+            and eligibility.facts.has_blocking_findings
             and not write_preflight.app_authored
         ):
             event, published_state = "REQUEST_CHANGES", "CHANGES_REQUESTED"
@@ -1803,6 +1952,22 @@ class ReviewPublisher:
             repository,
             f"/pulls/{pull_request}/reviews",
         )
+        if retained_eligibility is not None:
+            assert source_guard is not None
+            if not source_guard():
+                return PublicationResult(status="skipped_edited_source")
+            if (
+                self.finalizer.load_eligibility(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                    require_valid=True,
+                )
+                != retained_eligibility
+            ):
+                return PublicationResult(status="skipped_stale_head")
         try:
             status, payload = self.http.request(
                 "POST",
@@ -1821,7 +1986,7 @@ class ReviewPublisher:
                 repository=repository,
                 pull_request=pull_request,
                 head_sha=head_sha,
-                marker=identity_marker,
+                marker=marker if retained_eligibility is not None else identity_marker,
                 app_slug=app_slug,
                 expected_state=published_state,
             ):
@@ -1832,6 +1997,7 @@ class ReviewPublisher:
                     head_sha=head_sha,
                     app_slug=app_slug,
                     eligibility=eligibility,
+                    require_persisted=retained_eligibility is not None,
                     check_diagnostic=check_diagnostic,
                     status="already_published",
                 )
@@ -1856,6 +2022,7 @@ class ReviewPublisher:
                     head_sha=head_sha,
                     app_slug=app_slug,
                     eligibility=eligibility,
+                    require_persisted=retained_eligibility is not None,
                     check_diagnostic=check_diagnostic,
                     status="published",
                     review_id=review_id,
@@ -1887,7 +2054,7 @@ class ReviewPublisher:
                 repository=repository,
                 pull_request=pull_request,
                 head_sha=head_sha,
-                marker=identity_marker,
+                marker=marker if retained_eligibility is not None else identity_marker,
                 app_slug=app_slug,
                 expected_state=published_state,
             ):
@@ -1898,6 +2065,7 @@ class ReviewPublisher:
                     head_sha=head_sha,
                     app_slug=app_slug,
                     eligibility=eligibility,
+                    require_persisted=retained_eligibility is not None,
                     check_diagnostic=check_diagnostic,
                     status="already_published",
                 )
@@ -1916,7 +2084,7 @@ class ReviewPublisher:
                 repository=repository,
                 pull_request=pull_request,
                 head_sha=head_sha,
-                marker=identity_marker,
+                marker=marker if retained_eligibility is not None else identity_marker,
                 app_slug=app_slug,
                 expected_state=published_state,
             ):
@@ -1927,6 +2095,7 @@ class ReviewPublisher:
                     head_sha=head_sha,
                     app_slug=app_slug,
                     eligibility=eligibility,
+                    require_persisted=retained_eligibility is not None,
                     check_diagnostic=check_diagnostic,
                     status="already_published",
                 )
@@ -1963,6 +2132,7 @@ class ReviewPublisher:
         check_diagnostic: str | None,
         status: str,
         review_id: int | None = None,
+        require_persisted: bool = False,
     ) -> PublicationResult:
         """Finalize approval for one published head and report its withholding.
 
@@ -1981,6 +2151,7 @@ class ReviewPublisher:
             head_sha=head_sha,
             app_slug=app_slug,
             eligibility=eligibility,
+            require_persisted=require_persisted,
         )
         diagnostic = check_diagnostic
         if diagnostic is None and finalized.status == "approval_withheld":
@@ -2391,7 +2562,7 @@ class ReviewPublisher:
         identity_marker: str,
         result_marker: str,
         app_slug: str,
-    ) -> tuple[frozenset[str], frozenset[str]]:
+    ) -> tuple[frozenset[str], frozenset[str], ReviewApprovalEligibility | None]:
         path = self.http.repository_path(repository, f"/pulls/{pull_request}/reviews")
         payload = self.http.paginate(path=path, token=token)
         identity_states: set[str] = set()
@@ -2419,7 +2590,13 @@ class ReviewPublisher:
                     identity_states.add(state)
                 if result_marker in body:
                     result_states.add(state)
-        return frozenset(identity_states), frozenset(result_states)
+        return (
+            frozenset(identity_states),
+            frozenset(result_states),
+            self.finalizer._eligibility_from_reviews(
+                payload, head_sha=head_sha, app_slug=app_slug, require_valid=True
+            ),
+        )
 
     def _published_states(
         self,
@@ -2431,7 +2608,7 @@ class ReviewPublisher:
         marker: str,
         app_slug: str,
     ) -> frozenset[str]:
-        identity_states, _ = self._published_state_index(
+        identity_states, _, _ = self._published_state_index(
             token=token,
             repository=repository,
             pull_request=pull_request,

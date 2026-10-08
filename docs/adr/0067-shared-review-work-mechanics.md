@@ -39,9 +39,9 @@ never truncates a patch, and uses bounded adaptive pagination.
 
 `advanced.review_work.mode: unified` opts into the mechanism for both entry
 points. The packaged default is `legacy`, meaning the existing work routing;
-it is unrelated to the retired legacy convergence-policy selection. No consumer
-configuration, workflow, release, hosted channel, permission or default changes
-are made here.
+it is unrelated to the retired legacy convergence-policy selection. No consumer configuration, release, hosted channel, permission or default
+changes are made here. The reusable workflow source serializes provider work
+for each PR across modes and backends without cancelling an active sibling.
 
 128 KiB diff / 256 KiB prompt are configurable preferred batch targets, not
 model-capacity claims. Unknown providers keep a 48 KiB serialized work prompt;
@@ -67,8 +67,25 @@ fresh mode-specific validation, with the same snapshot, source authority,
 provider/model, resource policy and original tracker. It cannot mint a fresh
 call/deadline allowance. A controller may supply additional complete evidence;
 changing an obligation invalidates its old assessment while unchanged valid
-batches can be reused. This is an in-process continuation seam, not a new
-cross-process prompt/result store or an automatic hosted broader-review policy.
+batches can be reused. Closed `context_requests` permit one host-validated joint or broader-discovery
+wave. Joint work uses authoritative complete changed-file groups; discovery has
+its own prompts and result. A configured trusted `broader_service` consumes the
+same tracker and publishes through the normal full-review publisher while
+retaining prior findings, blockers, coverage and qualification. Hosted CLI use
+requires an explicit flag and existing automatic-review/write opt-ins. Source
+reply, exact snapshot and latest persisted authority fence the new publication.
+Its continuation marker binds the original authority; normal result replay
+cannot reconstruct eligibility in a way that drops retained obligations.
+
+An optional HMAC-authenticated v2 work receipt store supports cross-process
+continuation. It saves consumed admission before dispatch and retains normalized
+receipts and exact evidence, not prompts or raw responses. Reuse requires the
+current exact plan, evidence, provider/routing/request identity, budgets, expiry
+and semantic validation. Calls, retries, bytes and elapsed wall time survive
+restart. It requires explicit diagnostics, a private host directory and key;
+limits are 2 MiB/artifact, eight artifacts/8 MiB total, 32 directory entries and
+six-hour default/24-hour maximum expiry. The host owns cleanup. No artifact is
+automatically uploaded or placed in the public ledger.
 
 ## Scope and contracts
 
@@ -94,9 +111,10 @@ than silently reusing a transaction with different semantics. Ledger limits
 from ADR 0066 are a separate compatibility concern and are not expanded here.
 
 Only bounded identity hashes and the existing inventory/resolution authority
-are published. Evidence patches and normalized batch replies remain in memory;
-no raw provider responses, prompts, credentials or source text are added to
-session history or public diagnostics. All existing App/human authorization,
+are published. Evidence patches and normalized batch replies remain in memory by default.
+The explicit private diagnostics store may retain them; no raw provider
+responses, prompts, credentials or source text are added to session history or
+public diagnostics. All existing App/human authorization,
 freshness, idempotency, coverage, qualification, thread and blocker gates remain
 authoritative. The finalizer still decides approval.
 
@@ -112,8 +130,8 @@ this trades additional bounded calls for complete evidence and validation.
 Unqualified providers, very large individual hunks/files and cross-file groups
 may still produce partial work. Full discovery may miss relationships spanning
 separate batches; paths or prior findings are never silently treated as fixed.
-The typed continuation seam supports future controlled widening without adding
-a second batching engine.
+The typed continuation controller widens scope without adding a second batching
+engine; a second wave stays pending.
 
 ## Alternatives considered
 
@@ -167,9 +185,8 @@ fall back to older eligibility to recover. Ambiguity remains action-required.
 ## Follow-up work
 
 Provider capacity/quality qualification and controlled hosted pilots remain
-promotion gates. An automatic, justified broader-context/discovery request
-contract and a bounded hosted continuation controller must use this mechanism,
-reuse valid evidence/results and preserve all existing obligations. Persistent
-publication-only recovery remains the existing review transaction/inventory
-contract; a future batch checkpoint must be versioned and reader-first, never
-an ad hoc dump of the in-memory evidence graph.
+promotion gates. Reader rollout must precede v2 writers, including delayed
+finalizers. Explicit receipt retention and key management remain host policy.
+GitHub's one-pending-slot concurrency behavior is not a durable queue; a cancelled
+queued reply remains pending and can be explicitly retried. No consumer rollout,
+production qualification, release or deployment is included in this change.

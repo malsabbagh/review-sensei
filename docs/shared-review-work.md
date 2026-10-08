@@ -41,7 +41,7 @@ Reassessment requires complete current file patches for every finding path and
 does not select guessed hunk fragments. Patch counts, syntax, conflicts and
 enumeration are checked. The GitHub loader retains its 512 KiB response and
 1,000-item bounds, tries pages of 100/50/25/5/1 entries, and permits no more than
-32 requests within the remaining work deadline. A missing, truncated,
+64 HTTP reads, including snapshot fences, within 60 seconds and the remaining work deadline. A missing, truncated,
 oversized or failed requirement remains pending.
 
 Aggregate reply evidence stays outside the 16 KiB conversation field. Each
@@ -66,12 +66,60 @@ an earlier clean result. Structural JSON/schema failures permit one bounded
 correction per batch within the shared retry allowance; citation, rationale and
 reserved-marker failures keep the batch pending without a semantic retry.
 
-The library continuation seam can add complete evidence and revalidate/reuse
-unchanged completed batches with the original `ResourceBudgetTracker`. It
-rejects a fresh tracker, changed source authority, snapshot or resource policy.
-There is no automatic hosted broader-review controller or new cross-process
-batch store in this implementation slice. Existing persisted inventory
-resolutions and publication-only transaction recovery remain authoritative.
+Unified batches may return up to four closed `context_requests`: an assigned
+fingerprint (reply) or supplied path (discovery), `kind: joint|discovery`, up to
+eight canonical changed paths and a concrete reason bounded to 512 bytes. The
+host validates references and paths; prompt text cannot authorize arbitrary
+file access. Joint work uses one expansion wave, the same planner/executor and
+the original tracker. Compatible completed batches retain their evidence and
+request identities. A second wave, unknown path or oversized group remains
+pending. Newly widened pending requirements are persisted in v2 authority.
+
+A broader discovery request remains a separate mode. A trusted library host may
+provide `broader_service` to `reassess` and receive its full `ReviewRun` in
+`HumanAssessmentWork.discovery`; this consumes the same remaining envelope and
+cannot recursively expand. Omission from that result does not clear the old
+human inventory. The hosted controller publishes its new full result through the normal review
+publisher only when trusted automatic-review policy is enabled. It retains the
+exact prior finding identities and resolutions, unions newly discovered findings,
+and preserves blockers, incomplete coverage and missing qualification. The new
+result marker includes the source assessment authority digest; replays reconcile
+that exact continuation and consult latest persisted eligibility. Current reply,
+base/head and authority are checked again before mutations. Oversized combined
+inventory or review framing fails before publication; incomplete discovery leaves
+the request pending. A clean broader result cannot clear an omitted old finding.
+The CLI requires explicit `github-reply --enable-broader-review` plus unified
+mode, trusted automatic-review policy and writes. It uses configured stages,
+categories and provider routing; no live hosted policy is enabled by this change.
+
+`WorkRecoveryStore` is an optional host-owned v2 diagnostics store. Pass it via
+`ReviewService.run(work_recovery=...)`, `reassess(recovery=...)`, or the hosted
+composition seam. It requires an explicit private directory, a host-supplied
+HMAC key of at least 32 bytes, and `artifacts="diagnostics"`. Its default is
+`artifacts="none"`, which creates no directory and performs no reads or writes;
+hosted use also requires the existing artifact flag. Both CLI entry points accept paired `--work-recovery-dir` and
+`--work-recovery-key-file` options only in unified mode with diagnostics enabled.
+The key file and directory must be private to the current user on POSIX; symlinks
+are refused. No automatic key, new environment setting, artifact upload or
+deployment is introduced.
+
+The authenticated artifact retains exact evidence and normalized validated
+receipts, not prompts or raw provider responses. It is sensitive diagnostics,
+bounded to 2 MiB per artifact, eight artifacts/8 MiB per private run directory,
+32 directory entries, six-hour default/24-hour maximum
+expiry, atomic private-file writes, and the existing explicit seven-day hosted
+artifact-retention policy when an operator separately uploads it. Nothing is
+added to the session ledger. The host owns cleanup and should allocate one
+private directory per run; expiry prevents reuse and does not delete files.
+Oversized artifacts fail rather than truncate.
+Authentication, full plan/evidence/source/policy identity, current semantic
+validation, provider/routing request identity and expiry are required for reuse.
+Consumed calls are saved before dispatch; cumulative bytes/retries and elapsed
+wall time survive restart, so interruptions cannot mint a new deadline or call
+allowance. Terminal rejected batches remain pending on restart; only interrupted
+dispatches may resume. Restart also preserves the original retention expiry.
+Retained completed work may be republished after inference time is
+exhausted only through the existing current-source/head/eligibility gates.
 
 Deploy compatible readers before opting in. Unified transaction contexts add a
 hashed work-policy identity; old readers reject that extension. Keep v2 writers
@@ -88,6 +136,12 @@ oversized terminal markers as integrity failures and refuses initialization.
 Quiesce older readers/writers before expanded records exist. Old-reader rollback
 is unsafe after such writes, independently of unified prompt evidence budgets.
 
-Provider quality/capacity qualification, hosted pilots, automatic justified
-broader-context requests, persistent batch recovery and any default or consumer
-rollout remain separate phases. See [ADR 0067](adr/0067-shared-review-work-mechanics.md).
+The reusable hosted workflow uses one PR-scoped provider lane for full reviews,
+replies and commands, including hosted/local backends, with cancellation disabled.
+Replies keep distinct workflow-level identities. GitHub may replace queued jobs
+because its concurrency group has one pending slot; replaced work grants no
+assessment decision and stays pending. This is serialization, not a durable FIFO.
+
+Provider quality/capacity qualification, hosted pilots and any default or
+consumer rollout remain separate phases. Broader publication and recovery need
+the explicit trusted opt-ins described above. See [ADR 0067](adr/0067-shared-review-work-mechanics.md).

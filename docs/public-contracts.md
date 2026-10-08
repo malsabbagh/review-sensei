@@ -43,7 +43,9 @@ versioning policy above.
 
 Published schemas live under `src/review_sensei/schemas/` and are included in the
 installed package. Each schema has a draft 2020-12 `$schema` and an `$id`
-containing `/v1/`.
+containing `/v1/` for established documents. The opt-in authenticated work
+recovery document has its own `/v2/` identity and does not extend the v1
+publication-only recovery format.
 
 | Schema | Document |
 | --- | --- |
@@ -59,6 +61,7 @@ containing `/v1/`.
 | `evaluation-report.schema.json` | Privacy-safe evaluation result and metrics |
 | `promotion-record.schema.json` | Real-provider promotion evidence |
 | `recovery-artifact.schema.json` | Publication-only recovery artifact |
+| `work-recovery-artifact.schema.json` | Opt-in v2 authenticated work receipts, evidence and consumed admission; requires current evidence and semantic revalidation |
 | `run-outcome.schema.json` | Structured run outcome and diagnostics |
 | `candidate-finding.schema.json` | Provider-neutral candidate finding with bounded evidence; canonical path rules are enforced by `CandidateFinding.from_dict`, not the schema |
 | `verification-result.schema.json` | Candidate evidence verification result |

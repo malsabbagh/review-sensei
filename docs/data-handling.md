@@ -30,6 +30,16 @@ expires automatically, contains only a publisher-validated result, and is not
 uploaded unless the existing `upload_artifacts` opt-in is enabled. Repository
 learnings are ordinary files owned and retained by the repository; publication
 recovery never writes them.
+Unified review work may explicitly retain exact file patches and normalized
+validated batch receipts in `WorkRecoveryStore`. This private diagnostics store
+requires a host key and directory, verifies HMAC authentication and current
+identity/semantics on reuse, and retains no prompts or raw provider responses.
+Both CLI paths require paired recovery options and diagnostics policy. Its
+limits are 2 MiB per artifact, eight artifacts/8 MiB per run directory, and
+six-hour default/24-hour maximum reuse expiry. Expiry does not delete files;
+the host owns cleanup and any separate upload/retention policy. It writes
+nothing by default and never adds evidence to the public session ledger.
+
 Lens documents are read only for the current review and are not persisted by
 the core. The optional in-memory `ReviewContextCache` stores only bounded
 metadata such as coverage mode and generation; it is repository/PR-scoped,
