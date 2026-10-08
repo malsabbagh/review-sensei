@@ -11,6 +11,7 @@ from ...human_assessment import PendingHumanReview
 from ...models import ReviewResult
 
 APPROVAL_ELIGIBILITY_SCHEMA_VERSION = "1"
+APPROVAL_ELIGIBILITY_CROSS_FILE_VERSION = "2.0"
 REVIEW_STATUSES = frozenset({"complete", "partial", "incomplete", "summary-only"})
 EVIDENCE_POLICIES = frozenset({"legacy", "confirmed"})
 # ``not-required`` covers backends without a published qualification slice.
@@ -152,6 +153,8 @@ class ReviewApprovalEligibility:
         }
         if self.human_review is not None:
             value["human_review"] = self.human_review.to_dict()
+            if any(item.required_paths for item in self.human_review.findings):
+                value["schema_version"] = APPROVAL_ELIGIBILITY_CROSS_FILE_VERSION
         return value
 
     @classmethod
@@ -165,7 +168,10 @@ class ReviewApprovalEligibility:
             raise ReviewInputError(
                 "approval eligibility must contain the documented fields"
             )
-        if value.get("schema_version") != APPROVAL_ELIGIBILITY_SCHEMA_VERSION:
+        if value.get("schema_version") not in (
+            APPROVAL_ELIGIBILITY_SCHEMA_VERSION,
+            APPROVAL_ELIGIBILITY_CROSS_FILE_VERSION,
+        ):
             raise ReviewInputError("approval eligibility schema_version is invalid")
         head_sha = value.get("head_sha")
         result_digest = value.get("result_digest")
@@ -184,6 +190,15 @@ class ReviewApprovalEligibility:
             if "human_review" in value
             else None
         )
+        cross_file = human_review is not None and any(
+            item.required_paths for item in human_review.findings
+        )
+        if cross_file != (
+            value.get("schema_version") == APPROVAL_ELIGIBILITY_CROSS_FILE_VERSION
+        ):
+            raise ReviewInputError(
+                "approval eligibility requirements version is invalid"
+            )
         if human_review is not None and facts.has_human_adjudication_findings != bool(
             human_review.pending
         ):
@@ -250,12 +265,13 @@ def approval_eligibility_from_result(
     qualification: str = "not-required",
     check_published: bool = True,
     base_sha: str | None = None,
+    retained_eligibility: ReviewApprovalEligibility | None = None,
 ) -> ReviewApprovalEligibility:
     """Build the persisted eligibility document for one published review."""
 
     from .publication import review_result_digest
 
-    return ReviewApprovalEligibility(
+    eligibility = ReviewApprovalEligibility(
         head_sha=head_sha,
         result_digest=review_result_digest(result),
         human_review=PendingHumanReview.from_result(result, base_sha),
@@ -265,6 +281,62 @@ def approval_eligibility_from_result(
             app_authored=app_authored,
             qualification=qualification,
             check_published=check_published,
+        ),
+    )
+    if retained_eligibility is None:
+        return eligibility
+    retained = retained_eligibility
+    if (
+        not isinstance(retained, ReviewApprovalEligibility)
+        or retained.head_sha != head_sha
+        or retained.human_review is None
+        or retained.human_review.base_sha != base_sha
+    ):
+        raise ReviewInputError("broader review retained authority is invalid")
+    # Discovery omission never retires an earlier human or blocking obligation.
+    findings = {item.fingerprint: item for item in retained.human_review.findings}
+    for item in eligibility.human_review.findings if eligibility.human_review else ():
+        if item.fingerprint in findings:
+            previous = findings[item.fingerprint]
+            if previous.path != item.path or previous.body != item.body:
+                raise ReviewInputError("broader review finding authority conflicts")
+            # The ordinary discovery result has a v1 inventory; rediscovering
+            # the same finding must not discard its stricter v2 requirement.
+            item = replace(item, required_paths=previous.required_paths)
+        findings[item.fingerprint] = item
+    inventory = PendingHumanReview(
+        retained.human_review.base_sha,
+        tuple(findings.values()),
+        retained.human_review.resolved,
+    )
+    old, new = retained.facts, eligibility.facts
+    return replace(
+        eligibility,
+        human_review=inventory,
+        facts=replace(
+            new,
+            enabled=new.enabled and old.enabled,
+            app_authored=new.app_authored or old.app_authored,
+            review_status=(
+                "partial"
+                if old.evidence_policy == "confirmed"
+                and new.evidence_policy != "confirmed"
+                else new.review_status
+                if old.review_status == "complete"
+                else old.review_status
+            ),
+            evidence_policy="confirmed"
+            if old.evidence_policy == "confirmed"
+            else new.evidence_policy,
+            has_blocking_findings=new.has_blocking_findings
+            or old.has_blocking_findings,
+            has_human_adjudication_findings=bool(inventory.pending),
+            coverage_blocker=old.coverage_blocker
+            if old.coverage_blocker not in (None, "reviewed")
+            else new.coverage_blocker,
+            qualification=old.qualification
+            if old.qualification not in ("qualified", "not-required")
+            else new.qualification,
         ),
     )
 

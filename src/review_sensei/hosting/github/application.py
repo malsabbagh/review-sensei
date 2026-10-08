@@ -5,9 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from hashlib import sha256
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from ...baseline import ReviewBaseline, baseline_from_history_document
+from ...budgets import ReviewWorkBudgets
 from ...context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from ...convergence import (
     OPERATOR_REVIEW_MODES,
@@ -24,9 +25,14 @@ from ...disposition import MaintainerCommand
 from ...errors import ReviewInputError
 from ...human_assessment import HumanAssessmentReply, HumanAssessmentService
 from ...models import ReviewResult, ReviewTransaction
-from ...outcomes import RecoveryArtifact
+from ...outcomes import RecoveryArtifact, ResourceBudget, ResourceBudgetTracker
 from ...planning import related_paths_for_change
 from ...providers.base import ReviewProvider
+from ...reassessment_work import reassess
+
+if TYPE_CHECKING:
+    from ...service import ReviewService
+    from ...work_recovery import WorkRecoveryStore
 from ...session import (
     SessionIdentity,
     SessionLedger,
@@ -45,6 +51,7 @@ from ...session import (
 )
 from ...verifier import CandidateFinding, PublishableReview
 from .approval import (
+    ReviewApprovalEligibility,
     has_blocking_findings,
     has_human_adjudication_findings,
     qualification_state_for_publication,
@@ -148,6 +155,9 @@ class GitHubApplication:
         evidence_confirmed_concerns: Sequence[str] = (),
         configuration_context: Mapping[str, object] | None = None,
         evidence_context: Mapping[str, object] | None = None,
+        retained_eligibility: ReviewApprovalEligibility | None = None,
+        continuation_digest: str | None = None,
+        source_guard: Callable[[], bool] | None = None,
     ) -> PublicationResult:
         if not options.github_writes or not options.auto_review:
             return PublicationResult(status="disabled")
@@ -799,6 +809,12 @@ class GitHubApplication:
             }
             if publisher_has_prepare:
                 publisher_arguments["prepared_review"] = prepared_publishable
+            if retained_eligibility is not None:
+                publisher_arguments.update(
+                    retained_eligibility=retained_eligibility,
+                    continuation_digest=continuation_digest,
+                    source_guard=source_guard,
+                )
             publication = (
                 PublicationResult(
                     status="handoff",
@@ -1397,11 +1413,27 @@ class GitHubApplication:
         app_slug: str,
         root_comment_id: int | None,
         source_kind: str = "inline",
+        work_budgets: ReviewWorkBudgets | None = None,
+        budget: ResourceBudget | None = None,
+        work_recovery: WorkRecoveryStore | None = None,
+        broader_service: ReviewService | None = None,
     ) -> ReplyResult:
         """Authorize, generate, validate, and publish one mention reply."""
 
         if not options.github_writes or not options.mention_replies:
             return ReplyResult(status="disabled")
+        if (
+            work_recovery is not None
+            and work_recovery.enabled
+            and not options.upload_artifacts
+        ):
+            raise ReviewInputError(
+                "work recovery requires explicit diagnostics artifact policy"
+            )
+        if broader_service is not None and not options.auto_review:
+            raise ReviewInputError(
+                "broader discovery requires trusted full-review policy"
+            )
         prepared = self.replier.prepare_context(
             token=read_token,
             repository=repository,
@@ -1431,6 +1463,7 @@ class GitHubApplication:
             # Adapter test seams may implement only the original conversation
             # interface. The real GitHub adapter shares one bounded transport.
             if isinstance(self.replier, ConversationPublisher):
+                work_tracker = ResourceBudgetTracker(budget or ResourceBudget.create())
                 assessor = HumanAssessmentPublisher(http=self.replier.http)
                 human = assessor.prepare(
                     token=read_token,
@@ -1438,15 +1471,32 @@ class GitHubApplication:
                     pull_request=pull_request,
                     prepared=prepared,
                     app_slug=app_slug,
+                    work_budgets=work_budgets,
+                    work_tracker=work_tracker,
                 )
                 if human is not None:
                     assert human.eligibility.human_review is not None
                     inventory = human.eligibility.human_review
+                    work_assessment = None
                     if human.evidence_diagnostic:
                         assessment = HumanAssessmentReply(
                             body=f"Human reassessment has insufficient current diff evidence (reason: `{human.evidence_diagnostic}`). No findings were cleared; approval requirements remain unchanged. After the required evidence is available within the context budget, rerun a full review for the current head and submit a new authorized mention.",
                             decisions=(),
                         )
+                    elif inventory.pending and human.evidence_bundle is not None:
+                        work_assessment = reassess(
+                            provider=reply_provider,
+                            pending=inventory,
+                            bundle=human.evidence_bundle,
+                            source_body=human.source_body,
+                            authority_digest=human.authority_digest,
+                            work_budgets=work_budgets or ReviewWorkBudgets(),
+                            model=model,
+                            tracker=work_tracker,
+                            recovery=work_recovery,
+                            broader_service=broader_service,
+                        )
+                        assessment = work_assessment.reply
                     elif inventory.pending:
                         assessment = HumanAssessmentService(reply_provider).reply(
                             context=human.conversation.context,
@@ -1462,21 +1512,120 @@ class GitHubApplication:
                     accepted = not inventory.pending or any(
                         item.decision != "unresolved" for item in assessment.decisions
                     )
+                    if work_assessment is not None:
+                        accepted = accepted or work_assessment.inventory != inventory
                     review_token = None
                     if accepted:
                         review_token = self.broker.exchange(
                             oidc_token or self.broker.request_oidc_token(),
                             capability="review_publish",
                         )
-                    return assessor.publish(
+                    reply_outcome = assessor.publish(
                         token=capability_token,
                         review_token=review_token,
                         repository=repository,
                         pull_request=pull_request,
                         prepared=human,
-                        reply=assessment,
+                        reply=work_assessment
+                        if work_assessment is not None
+                        else assessment,
                         app_slug=app_slug,
                     )
+                    if (
+                        work_assessment is not None
+                        and human.evidence_bundle is not None
+                        and work_assessment.discovery is not None
+                        and reply_outcome.status in {"replied", "already_replied"}
+                    ):
+                        if (
+                            work_assessment.discovery.outcome.status != "reviewed"
+                            or work_assessment.discovery.result is None
+                        ):
+                            return replace(
+                                reply_outcome,
+                                assessment_status="broader_review_pending",
+                            )
+                        updated_inventory = work_assessment.inventory.apply(
+                            assessment.decisions
+                        )
+                        retained = replace(
+                            human.eligibility,
+                            human_review=updated_inventory,
+                            facts=replace(
+                                human.eligibility.facts,
+                                has_human_adjudication_findings=bool(
+                                    updated_inventory.pending
+                                ),
+                            ),
+                        )
+
+                        def source_guard() -> bool:
+                            source = assessor._source(
+                                token=read_token,
+                                repository=repository,
+                                pull_request=pull_request,
+                                prepared=prepared,
+                                app_slug=app_slug,
+                            )
+                            return (
+                                source is not None
+                                and source["body"] == human.source_body
+                                and source["user"]["login"] == human.source_actor
+                            )
+
+                        if not source_guard():
+                            return replace(
+                                reply_outcome, status="skipped_edited_source"
+                            )
+                        status, current_pr = self.http.request(
+                            "GET",
+                            self.http.repository_path(
+                                repository, f"/pulls/{pull_request}"
+                            ),
+                            token=read_token,
+                        )
+                        if (
+                            status != 200
+                            or not isinstance(current_pr, dict)
+                            or not isinstance(current_pr.get("base"), dict)
+                        ):
+                            raise GitHubPublicationError(
+                                "broader review publication identity is unavailable"
+                            )
+                        base = current_pr["base"]
+                        repository_info = base.get("repo")
+                        if (
+                            not isinstance(repository_info, dict)
+                            or not isinstance(base.get("ref"), str)
+                            or type(repository_info.get("id")) is not int
+                        ):
+                            raise GitHubPublicationError(
+                                "broader review publication identity is invalid"
+                            )
+                        publication = self.publish_review(
+                            options=options,
+                            oidc_token=oidc_token,
+                            repository=repository,
+                            repository_id=repository_info["id"],
+                            pull_request=pull_request,
+                            head_sha=prepared.head_sha,
+                            base_sha=inventory.base_sha,
+                            base_branch=base["ref"],
+                            result=work_assessment.discovery.result,
+                            diff="".join(
+                                record.diff for record in human.evidence_bundle.records
+                            ),
+                            app_slug=app_slug,
+                            retained_eligibility=retained,
+                            continuation_digest=human.authority_digest,
+                            source_guard=source_guard,
+                        )
+                        return replace(
+                            reply_outcome,
+                            assessment_status="broader_review_" + publication.status,
+                            assessment_diagnostic=publication.diagnostic,
+                        )
+                    return reply_outcome
             reply = ConversationService(reply_provider).reply(
                 prepared.context,
                 model=model,

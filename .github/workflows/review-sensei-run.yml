@@ -693,12 +693,11 @@ jobs:
       ((inputs.operation == 'review' && (inputs.mode == 'manual' || needs.bootstrap.outputs.automatic_reviews == 'true')) ||
       (inputs.operation == 'reply' && needs.bootstrap.outputs.mentions == 'true'))
     concurrency:
-      # Reviews and maintainer commands serialize writes for the same PR.
-      # Workflow-level cancellation still supersedes older review runs. Reply
-      # operations intentionally use the triggering run id and never cancel a
-      # sibling reply. The preflight output is authoritative for manual
-      # reviews; event PR metadata is only a host-provided fallback.
-      group: reviewsensei-provider-${{ inputs.operation == 'review' && 'review' || 'reply' }}-${{ github.repository }}-${{ inputs.operation == 'review' && (needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id) || github.run_id }}
+      # Reviews, reassessments and commands share the authoritative PR slot.
+      # Replies keep isolated workflow cancellation groups, while provider
+      # work never cancels an active sibling. GitHub may replace a queued job;
+      # it makes no assessment decision and pending concerns remain pending.
+      group: reviewsensei-provider-review-${{ github.repository }}-${{ needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id }}
       cancel-in-progress: false
     runs-on: ${{ needs.bootstrap.outputs.hosted_runner }}
     permissions:
@@ -1154,11 +1153,9 @@ jobs:
       ((inputs.operation == 'review' && (inputs.mode == 'manual' || needs.bootstrap.outputs.automatic_reviews == 'true')) ||
       (inputs.operation == 'reply' && needs.bootstrap.outputs.mentions == 'true'))
     concurrency:
-      # Keep this key byte-for-byte equivalent to the hosted job. A newer
-      # review therefore cancels any older review for the same PR regardless
-      # of where it runs, while each mention reply remains isolated to its
-      # triggering run.
-      group: reviewsensei-provider-${{ inputs.operation == 'review' && 'review' || 'reply' }}-${{ github.repository }}-${{ inputs.operation == 'review' && (needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id) || github.run_id }}
+      # Share the same validated PR slot with hosted reviews, reassessments
+      # and commands. Runner/backend selection is not an authority partition.
+      group: reviewsensei-provider-review-${{ github.repository }}-${{ needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id }}
       cancel-in-progress: false
     runs-on: [self-hosted, linux, x64, ollama]
     permissions:

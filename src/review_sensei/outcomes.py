@@ -14,6 +14,7 @@ import re
 import sys
 import time
 import unicodedata
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -859,6 +860,9 @@ class ResourceBudgetTracker:
     monotonic: Callable[[], float] = time.monotonic
     sleeper: Callable[[float], None] = time.sleep
     started: float = field(init=False)
+    execution_identity: str = field(
+        default_factory=lambda: uuid.uuid4().hex, init=False
+    )
     provider_calls: int = 0
     transport_retries: int = 0
     structural_retries: int = 0

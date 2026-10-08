@@ -305,6 +305,14 @@ limits stay in place; opt-in `--orchestrate-large-changes` adds a separate
 total-work budget so larger diffs can be chunked without silent truncation or
 unbounded provider calls.
 
+Full review and tagged human reassessment can opt into the same evidence planner
+and bounded executor with `advanced.review_work.mode: unified`. This is an
+experimental work mechanism; existing routing remains the default. It batches
+complete required file patches for replies, and whole files or exhaustive parsed
+hunks for discovery. Missing or oversized evidence and failed batches stay
+pending and withhold approval. See [shared review work](docs/shared-review-work.md)
+for budgets, provider qualification and reader-safe rollout.
+
 Npm `package-lock.json` and `npm-shrinkwrap.json` changes are reviewed as
 material dependency input. Every original hunk remains in the request; a
 bounded aid identifies visible dependency members with exact diff hashes and

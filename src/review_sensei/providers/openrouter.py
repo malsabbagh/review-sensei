@@ -399,7 +399,9 @@ class OpenRouterProvider:
             return self.base_url
         return f"{self.base_url}/chat/completions"
 
-    def _call_test_opener(self, http_request: Request) -> Any:
+    def _call_test_opener(
+        self, http_request: Request, *, timeout: float | None = None
+    ) -> Any:
         # ``_test_opener`` is an internal test seam only.  Production traffic uses
         # ``_safe_opener`` so redirect rejection and verified TLS always apply.
         if self._test_opener is None:
@@ -410,7 +412,7 @@ class OpenRouterProvider:
         try:
             return opener(
                 http_request,
-                timeout=self.timeout_seconds,
+                timeout=self.timeout_seconds if timeout is None else timeout,
                 context=self._ssl_context,
             )
         except TypeError as exc:
@@ -425,6 +427,11 @@ class OpenRouterProvider:
             ) from exc
 
     def complete(self, request: ProviderRequest) -> ProviderResponse:
+        timeout = (
+            min(self.timeout_seconds, request.timeout_seconds)
+            if request.timeout_seconds is not None
+            else self.timeout_seconds
+        )
         model = (request.model if self.allow_model_override else None) or self.model
         try:
             validate_bounded_text(
@@ -442,7 +449,9 @@ class OpenRouterProvider:
             "model": model,
             "messages": [{"role": "user", "content": request.prompt}],
             "stream": False,
-            "max_tokens": self.max_output_tokens,
+            "max_tokens": min(self.max_output_tokens, request.max_output_tokens)
+            if request.max_output_tokens is not None
+            else self.max_output_tokens,
             "provider": self.routing_policy.to_request_provider(),
         }
         if request.json_mode:
@@ -461,11 +470,9 @@ class OpenRouterProvider:
 
         try:
             if self._test_opener is None:
-                response_ctx = self._safe_opener.open(
-                    http_request, timeout=self.timeout_seconds
-                )
+                response_ctx = self._safe_opener.open(http_request, timeout=timeout)
             else:
-                response_ctx = self._call_test_opener(http_request)
+                response_ctx = self._call_test_opener(http_request, timeout=timeout)
             with response_ctx as response:
                 body = read_bounded_body(
                     response,

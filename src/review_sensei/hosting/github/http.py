@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
 import re
+import time
 from collections.abc import Callable
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
@@ -35,6 +37,7 @@ class GitHubHttpTransport(Protocol):
         *,
         token: str,
         body: dict[str, object] | None = None,
+        timeout_seconds: float | None = None,
     ) -> tuple[int, dict[str, Any] | list[Any] | None]:
         """Return (status, parsed JSON body) for one bounded request."""
 
@@ -83,6 +86,7 @@ class GitHubHttp:
         *,
         token: str,
         body: dict[str, object] | None = None,
+        timeout_seconds: float | None = None,
     ) -> tuple[int, dict[str, Any] | list[Any] | None]:
         if not isinstance(path, str) or not path.startswith("/") or "\n" in path:
             raise GitHubHTTPError("GitHub request path is invalid")
@@ -107,8 +111,18 @@ class GitHubHttp:
             headers=headers,
             method=method,
         )
+        timeout: float = self.timeout
+        if timeout_seconds is not None:
+            if (
+                isinstance(timeout_seconds, bool)
+                or not isinstance(timeout_seconds, (int, float))
+                or not math.isfinite(timeout_seconds)
+                or timeout_seconds <= 0
+            ):
+                raise GitHubHTTPError("GitHub request timeout is invalid")
+            timeout = min(timeout, timeout_seconds)
         try:
-            with self.opener(request, timeout=self.timeout) as response:
+            with self.opener(request, timeout=timeout) as response:
                 raw = response.read(MAX_GITHUB_RESPONSE_BYTES + 1)
                 if not isinstance(raw, (bytes, bytearray)):
                     raise GitHubHTTPError("GitHub response was invalid")
@@ -161,6 +175,9 @@ class GitHubHttp:
         path: str,
         token: str,
         page_sizes: tuple[int, ...] = (100,),
+        max_requests: int | None = None,
+        timeout_seconds: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> list[Any]:
         """Return at most ``MAX_PAGINATION_ITEMS`` list entries.
 
@@ -188,6 +205,21 @@ class GitHubHttp:
                 "GitHub pagination page sizes must descend and divide evenly"
             )
 
+        if max_requests is not None and (
+            isinstance(max_requests, bool)
+            or not isinstance(max_requests, int)
+            or not 1 <= max_requests <= MAX_PAGINATION_ITEMS + len(page_sizes)
+        ):
+            raise GitHubHTTPError("GitHub pagination request budget is invalid")
+        if timeout_seconds is not None and (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0
+        ):
+            raise GitHubHTTPError("GitHub pagination timeout is invalid")
+        started = monotonic()
+        requests = 0
         collected: list[Any] = []
         separator = "&" if "?" in path else "?"
         page_size_index = 0
@@ -197,8 +229,25 @@ class GitHubHttp:
                 raise GitHubHTTPError("GitHub pagination offset was invalid")
             page = len(collected) // page_size + 1
             current = f"{path}{separator}per_page={page_size}&page={page}"
+            remaining = (
+                timeout_seconds - (monotonic() - started)
+                if timeout_seconds is not None
+                else None
+            )
+            if (max_requests is not None and requests >= max_requests) or (
+                remaining is not None and remaining <= 0
+            ):
+                raise GitHubHTTPPaginationLimitError(
+                    "GitHub pagination exhausted its request or time budget"
+                )
+            requests += 1
             try:
-                status, body = self.request("GET", current, token=token)
+                if remaining is None:
+                    status, body = self.request("GET", current, token=token)
+                else:
+                    status, body = self.request(
+                        "GET", current, token=token, timeout_seconds=remaining
+                    )
             except GitHubHTTPResponseTooLargeError:
                 if page_size_index + 1 >= len(page_sizes):
                     raise

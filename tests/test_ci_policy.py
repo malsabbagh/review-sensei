@@ -914,12 +914,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             )
         )
 
-        expected_provider_group = (
-            "group: reviewsensei-provider-${{ inputs.operation == 'review' && "
-            "'review' || 'reply' }}-${{ github.repository }}-${{ inputs.operation == "
-            "'review' && (needs.authoritative-preflight.outputs.pull_request_number || "
-            "github.event.pull_request.number || github.run_id) || github.run_id }}"
-        )
+        expected_provider_group = "group: reviewsensei-provider-review-${{ github.repository }}-${{ needs.authoritative-preflight.outputs.pull_request_number || github.event.pull_request.number || github.run_id }}"
         # The hosted and local jobs intentionally share the provider review slot.
         self.assertEqual(hosted, expected_provider_group)
         self.assertEqual(local, expected_provider_group)
@@ -940,7 +935,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("bootstrap", hosted)
         self.assertNotIn("bootstrap", local)
         self.assertIn(
-            "Reviews and maintainer commands serialize writes for the same PR.",
+            "Reviews, reassessments and commands share the authoritative PR slot.",
             text,
         )
 
@@ -2023,7 +2018,8 @@ class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
         self.assertEqual(len(provider_lines), 2)
         for line in group_lines:
             self.assertIn("github.repository", line)
-            self.assertIn("inputs.operation == 'review'", line)
+            if "provider" not in line:
+                self.assertIn("inputs.operation == 'review'", line)
             self.assertNotIn("head_sha", line)
             self.assertNotIn("inputs.head_sha", line)
             self.assertNotIn("github.sha", line)
@@ -2077,7 +2073,7 @@ class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
                     event_pull_request=pr,
                     run_id="reply-333",
                 )
-                self.assertNotEqual(command_group, reply_group)
+                self.assertEqual(command_group, reply_group)
 
     def test_manual_and_automatic_reviews_share_the_serialized_provider_group(self):
         automatic = _hosted_provider_group(
@@ -2176,7 +2172,7 @@ class PythonWorkflowConcurrencyParityTests(unittest.TestCase):
         self.assertEqual(hosted_review, "reviewsensei-review-acme/api-7")
         self.assertEqual(hosted_reply, "reviewsensei-reply-acme/api-run-99")
         self.assertEqual(
-            hosted_reply_provider, "reviewsensei-provider-reply-acme/api-run-99"
+            hosted_reply_provider, "reviewsensei-provider-review-acme/api-7"
         )
         self.assertNotEqual(hosted_review, hosted_reply)
         self.assertNotEqual(hosted_review, hosted_reply_provider)

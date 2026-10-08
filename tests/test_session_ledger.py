@@ -2251,6 +2251,26 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         quoted = f"{body}\nQuoted after marker"
         self.assertIsNone(parse_session_comment(quoted, identity=IDENTITY))
 
+    def test_oversized_trusted_terminal_authority_never_initializes_a_new_ledger(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        body = render_session_comment(repository_id=99, pull_request=136, record=record)
+        oversized = "x" * MAX_SESSION_COMMENT_BYTES + "\n" + body
+        item = {
+            "id": 7,
+            "body": oversized,
+            "user": {"login": "reviewsensei[bot]", "type": "Bot"},
+        }
+        http, calls = make_http([json_response([item]), json_response([item])])
+        ledger = GitHubIssueCommentSessionLedger(
+            http, token="token", app_slug="reviewsensei[bot]"
+        )
+        self.assertEqual(
+            ledger.load(IDENTITY, now=FIXED_NOW).status, "integrity-failed"
+        )
+        with self.assertRaisesRegex(ReviewInputError, "integrity-failed"):
+            ledger.initialize(IDENTITY, now=FIXED_NOW)
+        self.assertEqual([method for method, _url, _data in calls], ["GET", "GET"])
+
     def test_parser_uses_the_final_json_fence_before_the_marker(self):
         record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
         body = render_session_comment(repository_id=99, pull_request=136, record=record)

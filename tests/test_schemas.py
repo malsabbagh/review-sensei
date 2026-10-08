@@ -46,6 +46,7 @@ SCHEMA_NAMES = (
     "openrouter-qualification",
     "run-outcome",
     "recovery-artifact",
+    "work-recovery-artifact",
     "candidate-finding",
     "verification-result",
     "coverage-manifest",
@@ -72,7 +73,13 @@ class PublicSchemaTests(unittest.TestCase):
                     value["$schema"],
                     "https://json-schema.org/draft/2020-12/schema",
                 )
-                self.assertIn("/v1/", value["$id"])
+                if name == "work-recovery-artifact":
+                    self.assertEqual(
+                        value["$id"],
+                        "https://reviewsensei.dev/schemas/v2/work-recovery-artifact.schema.json",
+                    )
+                else:
+                    self.assertIn("/v1/", value["$id"])
 
     def test_packaged_defaults_and_examples_validate(self) -> None:
         cases = (

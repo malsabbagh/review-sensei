@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0067](0067-shared-review-work-mechanics.md) | Proposed | Share discovery and human reassessment planning, evidence and execution | User-authorized implementation | Opt-in routing, complete evidence groups, bounded continuation and reader-first rollout |
 | [0065](0065-complete-human-inventory-and-approval-retry.md) | Proposed | Persist complete human inventories and retry exact-head approval | PR #216; [PR #222](https://github.com/malsabbagh/review-sensei/pull/222) | Distinct collision identities, bounded pending-patch priority, safe diagnostics and preserved approval gates |
 | [0063](0063-authenticated-reservation-recovery.md) | Proposed | Recover abandoned analysis through authenticated live run evidence | Pending triage | Owned cleanup, constrained legacy proof and preserved session budgets |
 | [0062](0062-optional-hosted-runner-label.md) | Proposed | Allow one trusted hosted runner label | PR #212 | Validated label, GitHub default, preserved local lane and channel dependency |

@@ -43,7 +43,13 @@ versioning policy above.
 
 Published schemas live under `src/review_sensei/schemas/` and are included in the
 installed package. Each schema has a draft 2020-12 `$schema` and an `$id`
-containing `/v1/`.
+containing `/v1/` for established documents. The opt-in authenticated work
+recovery document has its own `/v2/` identity and does not extend the v1
+publication-only recovery format. This is a new v2 schema family: its
+HMAC-authenticated `document` explicitly requires `schema_version: "2.0"` so the
+closed recovery reader can reject unsupported payload versions. Established v1
+documents are not given a new discriminator. This follows ADR 0008's new `$id`
+requirement for a new major shape; the v2 discriminator is intentional.
 
 | Schema | Document |
 | --- | --- |
@@ -59,6 +65,7 @@ containing `/v1/`.
 | `evaluation-report.schema.json` | Privacy-safe evaluation result and metrics |
 | `promotion-record.schema.json` | Real-provider promotion evidence |
 | `recovery-artifact.schema.json` | Publication-only recovery artifact |
+| `work-recovery-artifact.schema.json` | Opt-in v2 authenticated work receipts, evidence and consumed admission; requires current evidence and semantic revalidation |
 | `run-outcome.schema.json` | Structured run outcome and diagnostics |
 | `candidate-finding.schema.json` | Provider-neutral candidate finding with bounded evidence; canonical path rules are enforced by `CandidateFinding.from_dict`, not the schema |
 | `verification-result.schema.json` | Candidate evidence verification result |
