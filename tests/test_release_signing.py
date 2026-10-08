@@ -166,6 +166,7 @@ class SigningOperationTests(unittest.TestCase):
         existing=False,
         bad_key=False,
         fail_push=False,
+        late_main=False,
     ):
         calls = []
         secret_locations = []
@@ -219,7 +220,11 @@ class SigningOperationTests(unittest.TestCase):
                 )
             )
             stack.enter_context(
-                patch.object(SIGN.prep, "remote_main", return_value=SHA)
+                patch.object(
+                    SIGN.prep,
+                    "remote_main",
+                    return_value="d" * 40 if late_main else SHA,
+                )
             )
             stack.enter_context(
                 patch.object(SIGN.prep, "ci_once", return_value={"id": 1})
@@ -236,7 +241,7 @@ class SigningOperationTests(unittest.TestCase):
                     return_value=("d" * 40 if bad_remote else TAG_OBJECT, SHA),
                 )
             )
-            if any((fail_verify, bad_remote, existing, bad_key)):
+            if any((fail_verify, bad_remote, existing, bad_key, late_main)):
                 with self.assertRaises(ValueError):
                     SIGN.sign(ROOT, SHA, VERSION, DATE)
             else:
@@ -269,6 +274,11 @@ class SigningOperationTests(unittest.TestCase):
     def test_existing_tag_is_not_resigned_or_updated(self):
         calls = self.exercise(existing=True)
         self.assertFalse(any("--sign" in args or "push" in args for args in calls))
+
+    def test_main_advance_after_local_signing_stops_before_remote_write(self):
+        calls = self.exercise(late_main=True)
+        self.assertTrue(any("--sign" in args for args in calls))
+        self.assertFalse(any("push" in args for args in calls))
 
     def test_wrong_remote_object_fails_without_remote_deletion(self):
         calls = self.exercise(bad_remote=True)
@@ -472,6 +482,16 @@ class UserSetupTests(unittest.TestCase):
             self.assertEqual(secret_names, set(SETUP.SECRET_NAMES))
             self.assertEqual((backup / "private.asc").stat().st_mode & 0o777, 0o600)
             self.assertNotIn("private-placeholder", json.dumps(first))
+            (backup / "private.asc").write_text("changed-synthetic-export")
+            before = len(commands)
+            with self.assertRaisesRegex(ValueError, "backup bytes changed"):
+                SETUP.setup(backup, EMAIL)
+            self.assertFalse(
+                any(
+                    args[:3] == ["gh", "secret", "set"] for args, _ in commands[before:]
+                )
+            )
+            (backup / "private.asc").write_text("synthetic-export-placeholder")
             variables[SETUP.PUBLIC_VARIABLES[0]] = "D" * 40
             before = len(commands)
             with self.assertRaises(ValueError):

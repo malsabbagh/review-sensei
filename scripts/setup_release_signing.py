@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -182,6 +183,14 @@ def setup(backup: Path, email: str | None) -> dict[str, str]:
         for path in (password, private, public, manifest):
             if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
                 raise ValueError("backup contains missing, linked or non-private files")
+        hashes = record.get("files", {})
+        if set(hashes) != {password.name, private.name, public.name} or any(
+            hashes.get(path.name) != hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in (password, private, public)
+        ):
+            raise ValueError(
+                "completed signing backup bytes changed; no upload allowed"
+            )
     else:
         if configured.intersection(SECRET_NAMES) or set(current).intersection(
             PUBLIC_VARIABLES
@@ -251,6 +260,10 @@ def setup(backup: Path, email: str | None) -> dict[str, str]:
                         "account": "malsabbagh",
                         "email": email,
                         "fingerprint": fingerprint,
+                        "files": {
+                            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                            for path in (password, private, public)
+                        },
                     },
                     indent=2,
                 )
