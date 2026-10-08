@@ -1,0 +1,122 @@
+name: Prepare release
+run-name: Prepare ReviewSensei ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Unpublished X.Y.Z version; reviewed Unreleased notes become this release
+        required: true
+        type: string
+      release_date:
+        description: Release changelog date in YYYY-MM-DD (retained on retries)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+# Serialize with readiness and the released snapshot writer. No push/CI/tag
+# event dispatches preparation, so the generated commit cannot start a loop.
+concurrency:
+  group: release-docs-main
+  cancel-in-progress: false
+
+jobs:
+  qualify-base:
+    if: >-
+      github.repository == 'malsabbagh/review-sensei' &&
+      github.ref == 'refs/heads/main' &&
+      github.actor == 'malsabbagh' && github.triggering_actor == 'malsabbagh'
+    name: Qualify reviewed main source
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Require complete exact-head main CI before any generated write
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: python scripts/prepare_release.py wait-ci --sha "$SOURCE_SHA"
+
+  prepare:
+    name: Generate and commit release metadata and documentation
+    needs: qualify-base
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release-docs-main
+    outputs:
+      source_sha: ${{ steps.prepare.outputs.source_sha }}
+    steps:
+      # Execute reviewed dispatch code. Fresh main integration must match this
+      # exact base, except for an independently verified identical retry commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install pinned manifest validator before minting the App token
+        run: python -m pip install --disable-pip-version-check jsonschema==4.26.0
+      - name: Mint the existing repository-only dedicated release token
+        id: release-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_DOCS_APP_CLIENT_ID || vars.RELEASE_DOCS_APP_ID }}
+          private-key: ${{ secrets.RELEASE_DOCS_APP_PRIVATE_KEY }}
+          owner: malsabbagh
+          repositories: review-sensei
+          permission-contents: write
+          permission-actions: read
+          permission-metadata: read
+          skip-token-revoke: false
+      - name: Commit only deterministic release files through the narrow App exception
+        id: prepare
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+          RELEASE_DOCS_APP_ID: ${{ vars.RELEASE_DOCS_APP_ID }}
+          RELEASE_DOCS_APP_SLUG: ${{ steps.release-token.outputs.app-slug }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_DATE: ${{ inputs.release_date }}
+          SOURCE_SHA: ${{ github.sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: >-
+          python scripts/prepare_release.py prepare
+          --version "$RELEASE_VERSION" --date "$RELEASE_DATE" --base-sha "$SOURCE_SHA"
+
+  qualify-prepared:
+    name: Qualify exact generated commit before owner signing
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      # No App secret/key is available here. The default token only reads CI.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install pinned manifest validator
+        run: python -m pip install --disable-pip-version-check jsonschema==4.26.0
+      - name: Require all exact-head CI jobs and emit the signed-tag handoff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREPARED_SHA: ${{ needs.prepare.outputs.source_sha }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_DATE: ${{ inputs.release_date }}
+        run: >-
+          python scripts/prepare_release.py wait-ci
+          --sha "$PREPARED_SHA" --version "$RELEASE_VERSION" --date "$RELEASE_DATE"

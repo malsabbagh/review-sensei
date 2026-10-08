@@ -9,8 +9,31 @@ permissions:
   contents: read
 
 jobs:
+  qualify-source:
+    name: Qualify signed prepared source and exact-head CI
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install pinned manifest validator
+        run: python -m pip install --disable-pip-version-check jsonschema==4.26.0
+      - name: Require the signed tag to bind the exact CI-qualified generated commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/prepare_release.py qualify-tag --tag "$GITHUB_REF_NAME"
+
   docs-build:
     name: Build release documentation
+    needs: qualify-source
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -47,6 +70,7 @@ jobs:
 
   build:
     name: Build and attest release bundle
+    needs: qualify-source
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -56,7 +80,7 @@ jobs:
       - name: Check out tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Set up Python
@@ -128,6 +152,7 @@ jobs:
 
   native-build:
     name: Native standalone (${{ matrix.target }})
+    needs: qualify-source
     strategy:
       fail-fast: false
       matrix:
@@ -149,7 +174,7 @@ jobs:
       - name: Check out tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - name: Set up Python
         if: ${{ !startsWith(matrix.target, 'linux-') }}
@@ -214,7 +239,7 @@ jobs:
       - name: Check out tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -432,7 +457,7 @@ jobs:
       - name: Check out tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Download validated release bundle

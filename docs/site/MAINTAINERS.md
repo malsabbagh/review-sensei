@@ -82,13 +82,21 @@ the released source, even when their source manifest label is
 See [the release docs procedure](../releasing.md#tag-driven-documentation-starting-with-0617)
 for bootstrap, retry, supersession, historical snapshots and rollback policy.
 
+Before tagging, the owner-dispatched preparation workflow generates aligned
+Python/npm/changelog/current-installation/source-site files and commits one
+explicitly allowlisted payload to main. Full exact-head CI precedes the owner
+signed tag, and Release re-verifies its generation receipt before all builds.
+The App can update only those preparation files and the separate released snapshot
+through the reviewed workflows; GitHub itself does not enforce a file-path scope.
+
 The post-tag writeback job also maintains the complete generated snapshot under
 `docs/releases/latest/` and its `docs/releases/latest.md` index on main. It uses
-fresh-main, non-force integration and no per-release docs PR. Source site
-release metadata may lag package preparation; the build derives the actual tag
-version in its staging copy. A dedicated repository-only App has an explicitly
+fresh-main, non-force integration and no per-release docs PR. The source site
+version/pins/pages are prepared before package builds; final tag/run provenance
+and immutable source links are generated in the staging copy. A dedicated repository-only App has an explicitly
 approved exception only for the isolated main PR rule; deletion, non-force and
 linear-history protections retain no App exception. Its environment key is
 main-only, and ordinary source PR requirements remain unchanged. Complete
 `docs/release-docs-bot.md` and the real App readiness probe before first use;
-keep 0.6.17 held until that succeeds and release PR #226 is requalified.
+keep 0.6.17 held until that succeeds and the generated main commit passes exact
+CI. PR #226 remains an unmerged comparison reference.

@@ -24,6 +24,7 @@ INSTALLATION_TARGETS = {
     "index.html": ("home-cli",),
     "getting-started/index.html": (
         "release-heading",
+        "release-info",
         "actions-pip",
         "cli-pip",
         "cli-npm",

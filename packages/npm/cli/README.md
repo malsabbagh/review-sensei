@@ -22,17 +22,21 @@ operating system and architecture. Linux musl and other architectures are
 unsupported. Keep npm optional dependencies enabled: the launcher needs its
 exact-version platform package and reports an error if it is missing.
 
+<!-- release-installation:package-npm-1:start -->
 ```console
 npm install --save-dev @reviewsensei/cli@0.6.16
 npx review-sensei --version
 npx review-sensei --help
 ```
+<!-- release-installation:package-npm-1:end -->
 
 Or run an exact version without adding a project dependency:
 
+<!-- release-installation:package-npm-2:start -->
 ```console
 npx --yes @reviewsensei/cli@0.6.16 --help
 ```
+<!-- release-installation:package-npm-2:end -->
 
 From your repository directory, create a patch and review it with a reachable
 local Ollama server and an installed model. `prepare-diff` requires an external
