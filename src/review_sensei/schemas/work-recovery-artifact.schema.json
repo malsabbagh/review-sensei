@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v2/work-recovery-artifact.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "document",
+    "authentication"
+  ],
+  "properties": {
+    "authentication": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "plan",
+        "execution_identity",
+        "resource_budget",
+        "saved_at",
+        "expires_at",
+        "elapsed_ms",
+        "counters",
+        "completed",
+        "pending",
+        "request_digests"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "2.0"
+        },
+        "plan": {
+          "type": "object"
+        },
+        "execution_identity": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        },
+        "resource_budget": {
+          "type": "object"
+        },
+        "saved_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "elapsed_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "counters": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "provider_calls",
+            "transport_retries",
+            "structural_retries",
+            "prompt_bytes",
+            "response_bytes"
+          ],
+          "properties": {
+            "provider_calls": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8
+            },
+            "transport_retries": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2
+            },
+            "structural_retries": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2
+            },
+            "prompt_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2097152
+            },
+            "response_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1048576
+            }
+          }
+        },
+        "completed": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "batch_id",
+              "request_digest",
+              "result"
+            ],
+            "properties": {
+              "batch_id": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "request_digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "result": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "pending": {
+          "type": "array",
+          "maxItems": 40000,
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "string",
+              "maxLength": 512
+            }
+          }
+        },
+        "request_digests": {
+          "type": "object",
+          "maxProperties": 8,
+          "propertyNames": {
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

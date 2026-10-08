@@ -854,14 +854,53 @@ finalizer without another inference or reassessment review. All other eligibilit
 facts, current authorization, live thread checks and approval markers remain
 authoritative.
 
-Reassessment prioritizes the complete supplied current patches for validated
+The default reassessment path prioritizes the complete supplied current patches for validated
 pending paths within the existing 12 KiB budget. Missing, conflicting or
 oversized required evidence produces a deterministic acknowledgment and a
 separate insufficient-evidence outcome, with no inference, review capability or
 eligibility/approval mutation. Ordinary conversation selection remains unchanged.
 Provider output rejection exposes a closed reason code without source or model
 payload, and accepted decisions still require verbatim human and relevant current
-diff evidence. No corrective provider retry is added.
+diff evidence. That path adds no corrective provider retry.
+
+[ADR 0067](adr/0067-shared-review-work-mechanics.md) introduces the opt-in
+`advanced.review_work.mode: unified` mechanism. Both full discovery and human
+reassessment use immutable snapshot-bound evidence, one deterministic rendered
+request planner, and one executor for provider calls, retries and aggregate
+budgets. Mode adapters retain distinct prompts and validators. Complete file
+groups are atomic for reassessment; exhaustive parsed hunks are permitted only
+for discovery. Publisher validation uses the original per-batch evidence map,
+without concatenating it into the bounded conversation diff field. Failed or
+unprocessed work retains pending findings and conservative coverage.
+
+Unified reassessment permits one bounded structural correction per batch within
+the shared retry/call allowance. Citation, rationale and reserved-marker failures
+do not trigger semantic correction retries. Explicit cross-file requirements use
+eligibility payload version `2.0` inside the recognized `eligibility:v1` envelope;
+the facts remain v1. Upgraded readers accept v1 and v2, and a latest unsupported
+record blocks older authority. Normal review publication continues writing v1.
+The work-policy digest extends transaction configuration only for opt-in runs.
+
+Closed context requests permit one host-validated joint or discovery wave using
+the same planner and tracker. Broader discovery uses configured full-review
+policy and its normal publisher; the merged eligibility retains exact prior
+findings, blockers, coverage and qualification. Source reply, latest authority
+and base/head fence mutations, and result replay preserves persisted concerns.
+Explicit opt-ins expose a private HMAC-authenticated v2 receipt store; admission
+is saved before dispatch and restored without resetting calls or deadlines.
+Artifacts retain normalized receipts and exact evidence only under diagnostics
+policy, with bounded size/count/expiry and current semantic validation. See
+[shared work operations](shared-review-work.md) for CLI and retention controls.
+The reusable workflow serializes provider work per PR across full/reply/command
+modes and backends without cancelling active siblings; GitHub's single pending
+slot can replace queued work, which cannot clear a pending finding.
+
+The offline pinned-reader gate, `scripts/check_review_reader_compatibility.py`,
+uses the immutable published v0.6.16 source. That reader refuses richer eligibility
+and opt-in transaction contexts, but skips session comments exceeding its 16 KiB
+ceiling. Upgraded readers treat oversized trusted terminal markers as unreadable
+authority and prohibit initialization. Expanded writers require quiescing older
+readers/writers; rollback retains upgraded readers rather than resetting state.
 
 This architecture preserves the provider-neutral core: GitHub transport,
 Actions OIDC, broker capabilities, setup lifecycle, publication markers, and

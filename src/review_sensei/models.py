@@ -275,12 +275,18 @@ def _validate_configuration_context(value: Mapping[str, object]) -> None:
     ):
         raise ReviewInputError("review transaction category_policy is invalid")
     orchestration = value.get("orchestration")
-    if not isinstance(orchestration, Mapping) or set(orchestration) != (
-        _TRANSACTION_ORCHESTRATION_KEYS
+    if not isinstance(orchestration, Mapping) or set(orchestration) not in (
+        _TRANSACTION_ORCHESTRATION_KEYS,
+        _TRANSACTION_ORCHESTRATION_KEYS | {"work_policy_digest"},
     ):
         raise ReviewInputError("review transaction orchestration is invalid")
     if not isinstance(orchestration.get("enabled"), bool):
         raise ReviewInputError("review transaction orchestration.enabled is invalid")
+    if "work_policy_digest" in orchestration and (
+        not isinstance(orchestration["work_policy_digest"], str)
+        or not _SHA256.fullmatch(orchestration["work_policy_digest"])
+    ):
+        raise ReviewInputError("review transaction work policy digest is invalid")
     publication_mode = value.get("publication_mode")
     if publication_mode not in _TRANSACTION_PUBLICATION_MODES:
         raise ReviewInputError("review transaction publication_mode is invalid")
@@ -314,6 +320,7 @@ def build_transaction_configuration_context(
     category_policy: Sequence[str],
     publication_mode: str,
     orchestration_enabled: bool,
+    work_policy_digest: str | None = None,
 ) -> dict[str, object]:
     """Closed configuration identity shared by analysis and publication."""
 
@@ -325,6 +332,11 @@ def build_transaction_configuration_context(
         "orchestration": {"enabled": orchestration_enabled},
         "publication_mode": publication_mode,
     }
+    if work_policy_digest is not None:
+        context["orchestration"] = {
+            "enabled": orchestration_enabled,
+            "work_policy_digest": work_policy_digest,
+        }
     _validate_configuration_context(context)
     return context
 
@@ -506,6 +518,7 @@ class ReviewRequest:
     work_budget: TotalWorkBudget = field(
         default_factory=lambda: DEFAULT_TOTAL_WORK_BUDGET
     )
+    work_policy_digest: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.diff, str) or not self.diff.strip():
@@ -520,6 +533,11 @@ class ReviewRequest:
             raise ReviewInputError("orchestrate_large_changes must be a boolean")
         if not isinstance(self.work_budget, TotalWorkBudget):
             raise ReviewInputError("work_budget must be a TotalWorkBudget value")
+        if self.work_policy_digest is not None and (
+            not isinstance(self.work_policy_digest, str)
+            or not _SHA256.fullmatch(self.work_policy_digest)
+        ):
+            raise ReviewInputError("review work policy digest is invalid")
         for label, value, maximum in (
             ("repository", self.repository, self.limits.max_repository_bytes),
             ("title", self.title, self.limits.max_title_bytes),
@@ -2097,8 +2115,22 @@ class ProviderRequest:
     max_prompt_bytes: int = DEFAULT_REVIEW_LIMITS.max_prompt_bytes
     max_response_bytes: int = DEFAULT_REVIEW_LIMITS.max_provider_response_bytes
     limits: ReviewLimits = DEFAULT_REVIEW_LIMITS
+    max_output_tokens: int | None = None
+    timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
+        if self.max_output_tokens is not None and (
+            isinstance(self.max_output_tokens, bool)
+            or not isinstance(self.max_output_tokens, int)
+            or not 1 <= self.max_output_tokens <= 16_384
+        ):
+            raise ReviewInputError("provider output token budget is invalid")
+        if self.timeout_seconds is not None and (
+            isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, (int, float))
+            or not 0 < self.timeout_seconds <= 3600
+        ):
+            raise ReviewInputError("provider request timeout is invalid")
         if not isinstance(self.limits, ReviewLimits):
             raise ReviewInputError("provider limits must be a ReviewLimits value")
         if self.max_prompt_bytes == DEFAULT_REVIEW_LIMITS.max_prompt_bytes:

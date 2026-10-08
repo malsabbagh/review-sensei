@@ -16,6 +16,7 @@
       "src/review_sensei/schemas/evaluation-corpus.schema.json",
       "src/review_sensei/schemas/evaluation-report.schema.json",
       "src/review_sensei/schemas/promotion-record.schema.json",
+      "src/review_sensei/schemas/work-recovery-artifact.schema.json",
       "evaluation/v1/corpus.json"
     ],
     "description": "Required entries are these paths plus lanes.dist_safe.helpers and every module under lanes.dist_safe.discover. Forbidden entries are lanes.checkout_only.modules. The verifier reads this contract so MANIFEST.in and this file are the only places a lane asset is declared."

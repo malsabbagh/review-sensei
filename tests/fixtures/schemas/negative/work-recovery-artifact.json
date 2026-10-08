@@ -1,0 +1,118 @@
+{
+  "authentication": "0000000000000000000000000000000000000000000000000000000000000000",
+  "document": {
+    "completed": [
+      {
+        "batch_id": "4896ed2e52ba4de3678995a8e757569a28ee591c05bdd7e0a45c11bb6a2517ec",
+        "request_digest": "fe87b7f8d2fe9fe148f06b57882ef979bb90c5b02667dc90aa6f4470151f9479",
+        "result": {
+          "text": "{}"
+        }
+      },
+      {
+        "batch_id": "d83ffe060747b215a0e14e8a9722311e264b30be2c33012c3c746da520698bff",
+        "request_digest": "af3f864aea29a3affde9571eb23db42ee4d0389c653dbc58af0bbc9beb2933b2",
+        "result": {
+          "text": "{}"
+        }
+      }
+    ],
+    "counters": {
+      "prompt_bytes": 26,
+      "provider_calls": 2,
+      "response_bytes": 4,
+      "structural_retries": 0,
+      "transport_retries": 0
+    },
+    "elapsed_ms": 0,
+    "execution_identity": "00000000000000000000000000000000",
+    "expires_at": "2026-10-08T06:00:00+00:00",
+    "pending": [],
+    "plan": {
+      "authority": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "batches": [
+        "4896ed2e52ba4de3678995a8e757569a28ee591c05bdd7e0a45c11bb6a2517ec",
+        "d83ffe060747b215a0e14e8a9722311e264b30be2c33012c3c746da520698bff"
+      ],
+      "budgets": "9431ed6b7f2eaff6af50c9f33b894adc0188f43fadb81f1cea630be6e2a35d8c",
+      "enumeration_complete": true,
+      "mode": "reassessment",
+      "plan_id": "335906db829e69bbd0da48a4121cc05fd7ada860c8368bc6e1c29aeb2a7fa3c0",
+      "records": [
+        {
+          "diff_sha256": "78caacca5910009cf67c585d1ae03ef2dc7cb5b912e57a4610e7934c5b6eea4d",
+          "expected_additions": null,
+          "expected_deletions": null,
+          "old_path": null,
+          "original_diff": null,
+          "patch": "@@ -1 +1 @@\n-old\n+new",
+          "patch_sha256": "3dd9b61bebb49ba375d6ff6e016a91472be06b1c0eddc4eacee07f3fc75ade88",
+          "path": "src/a.py",
+          "provenance": "github-files",
+          "snapshot": {
+            "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "pull_request": null,
+            "repository": null
+          },
+          "supplied_complete": true
+        },
+        {
+          "diff_sha256": "c830e9418e781b55bb4ff47b5dcbcbb1676b2ab2abd73fb53c3e8872fb220142",
+          "expected_additions": null,
+          "expected_deletions": null,
+          "old_path": null,
+          "original_diff": null,
+          "patch": "@@ -1 +1 @@\n-old\n+new",
+          "patch_sha256": "3dd9b61bebb49ba375d6ff6e016a91472be06b1c0eddc4eacee07f3fc75ade88",
+          "path": "src/b.py",
+          "provenance": "github-files",
+          "snapshot": {
+            "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "pull_request": null,
+            "repository": null
+          },
+          "supplied_complete": true
+        }
+      ],
+      "requirements": [
+        {
+          "evidence_ids": [
+            "5ee4232e34ba4753a2c95d937977186ac356fc39c33909ac018f742e466fcd46"
+          ],
+          "hunk_indexes": [],
+          "identity": "0"
+        },
+        {
+          "evidence_ids": [
+            "cbff4d5c403fc81ba5212475062a1ede2200a028adbb0c4d159e50d0f812da45"
+          ],
+          "hunk_indexes": [],
+          "identity": "1"
+        }
+      ],
+      "snapshot": {
+        "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "pull_request": null,
+        "repository": null
+      },
+      "unprocessed": []
+    },
+    "request_digests": {
+      "4896ed2e52ba4de3678995a8e757569a28ee591c05bdd7e0a45c11bb6a2517ec": "fe87b7f8d2fe9fe148f06b57882ef979bb90c5b02667dc90aa6f4470151f9479",
+      "d83ffe060747b215a0e14e8a9722311e264b30be2c33012c3c746da520698bff": "af3f864aea29a3affde9571eb23db42ee4d0389c653dbc58af0bbc9beb2933b2"
+    },
+    "resource_budget": {
+      "max_output_bytes": 1048576,
+      "max_prompt_bytes": 1048576,
+      "max_provider_calls": 2,
+      "max_retry_attempts": 2,
+      "timeout_ms": 120000
+    },
+    "saved_at": "2026-10-08T00:00:00+00:00",
+    "schema_version": "2.0",
+    "unexpected": true
+  }
+}

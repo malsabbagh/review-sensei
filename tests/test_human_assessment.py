@@ -208,7 +208,12 @@ class State:
                     self.files
                     if self.files is not None
                     else [
-                        {"filename": path, "patch": self.diff}
+                        {
+                            "filename": path,
+                            "patch": self.diff,
+                            "additions": 1,
+                            "deletions": 1,
+                        }
                         for path in dict.fromkeys(
                             f.path for f in self.eligibility.human_review.findings
                         )
@@ -304,7 +309,7 @@ class State:
             if method == "POST" and path.endswith("/pulls/1/reviews")
         ]
 
-    def application_reply(self, provider):
+    def application_reply(self, provider, *, work_budgets=None):
         broker = Broker()
         application = GitHubApplication(
             broker=broker,
@@ -327,11 +332,142 @@ class State:
             app_slug=APP,
             root_comment_id=10,
             source_kind="issue",
+            work_budgets=work_budgets,
         )
         return result, broker
 
 
 class HumanAssessmentTests(unittest.TestCase):
+    def test_unified_reads_v2_required_file_groups_and_old_mode_refuses_them(self):
+        from review_sensei.budgets import ReviewWorkBudgets
+        from tests.test_review_work import AssessingProvider
+
+        original = prior()
+        finding = replace(
+            original.human_review.findings[0],
+            required_paths=("src/app.py", "src/other.py"),
+        )
+        inventory = PendingHumanReview(BASE, (finding,))
+        state = State(replace(original, human_review=inventory))
+        state.files = [
+            {"filename": path, "patch": DIFF, "additions": 1, "deletions": 1}
+            for path in finding.required_paths
+        ]
+        with self.assertRaisesRegex(GitHubConversationError, "unified"):
+            state.application_reply(AssessingProvider())
+        self.assertEqual(state.events(), [])
+        outcome, _ = state.application_reply(
+            AssessingProvider(), work_budgets=ReviewWorkBudgets(mode="unified")
+        )
+        self.assertEqual(outcome.approval_status, "approved")
+        self.assertEqual(state.events(), ["COMMENT", "APPROVE"])
+
+    def test_unified_complete_file_batches_publish_one_v1_refresh_and_approval(self):
+        from review_sensei.budgets import ReviewWorkBudgets
+        from review_sensei.human_assessment import (
+            HumanReviewFinding,
+            PendingHumanReview,
+        )
+        from tests.test_review_work import AssessingProvider, large_patch
+
+        original = prior()
+        inventory = PendingHumanReview(
+            BASE,
+            tuple(
+                HumanReviewFinding(
+                    f"{index:064x}", f"src/{index}.py", "Confirm local-only behavior."
+                )
+                for index in range(9)
+            ),
+        )
+        state = State(replace(original, human_review=inventory))
+        state.files = [
+            {
+                "filename": item.path,
+                "patch": large_patch(8500),
+                "additions": 1,
+                "deletions": 1,
+            }
+            for item in inventory.findings
+        ]
+        provider = AssessingProvider()
+        outcome, broker = state.application_reply(
+            provider, work_budgets=ReviewWorkBudgets(mode="unified")
+        )
+        self.assertGreater(len(provider.calls), 1)
+        self.assertEqual(outcome.approval_status, "approved")
+        self.assertEqual(state.events(), ["COMMENT", "APPROVE"])
+        self.assertEqual(broker.capabilities, ["issue_reply", "review_publish"])
+        refreshed = approval_eligibility_from_body(state.reviews[-2]["body"])
+        self.assertFalse(refreshed.human_review.pending)
+        self.assertEqual(refreshed.result_digest, original.result_digest)
+
+    def test_unified_oversized_file_retains_pending_and_never_approves(self):
+        from review_sensei.budgets import ReviewWorkBudgets
+        from review_sensei.human_assessment import (
+            HumanReviewFinding,
+            PendingHumanReview,
+        )
+        from tests.test_review_work import AssessingProvider, large_patch
+
+        original = prior()
+        inventory = PendingHumanReview(
+            BASE,
+            (
+                HumanReviewFinding(
+                    "1" * 64, "src/app.py", "Confirm local-only behavior."
+                ),
+                HumanReviewFinding(
+                    "2" * 64, "src/other.py", "Confirm local-only behavior."
+                ),
+            ),
+        )
+        state = State(replace(original, human_review=inventory))
+        state.files = [
+            {
+                "filename": "src/app.py",
+                "patch": large_patch(80000),
+                "additions": 1,
+                "deletions": 1,
+            },
+            {"filename": "src/other.py", "patch": DIFF, "additions": 1, "deletions": 1},
+        ]
+        provider = AssessingProvider()
+        outcome, _ = state.application_reply(
+            provider, work_budgets=ReviewWorkBudgets(mode="unified")
+        )
+        self.assertEqual(len(provider.calls), 1)
+        self.assertNotEqual(outcome.approval_status, "approved")
+        self.assertEqual(state.events(), ["COMMENT"])
+        refreshed = approval_eligibility_from_body(state.reviews[-1]["body"])
+        self.assertEqual(
+            tuple(item.fingerprint for item in refreshed.human_review.pending),
+            ("1" * 64,),
+        )
+
+    def test_unified_races_during_provider_execution_never_write_authority(self):
+        from review_sensei.budgets import ReviewWorkBudgets
+        from tests.test_review_work import AssessingProvider
+
+        for mutation in ("head", "base", "source"):
+            with self.subTest(mutation=mutation):
+                state = State()
+
+                class Provider(AssessingProvider):
+                    def complete(self, request):
+                        result = super().complete(request)
+                        if mutation == "source":
+                            state.source["body"] += " edited"
+                        else:
+                            setattr(state, mutation, "c" * 40)
+                        return result
+
+                outcome, _ = state.application_reply(
+                    Provider(), work_budgets=ReviewWorkBudgets(mode="unified")
+                )
+                self.assertNotEqual(outcome.approval_status, "approved")
+                self.assertEqual(state.events(), [])
+
     def human_result(self, comments):
         return ReviewResult(
             summary="Human assessment is required.",
@@ -911,7 +1047,7 @@ class HumanAssessmentTests(unittest.TestCase):
         state = State(prior(extra_human=True))
         state.files = [
             {"filename": "docs/a.md", "patch": "+unrelated\n" * 1300},
-            {"filename": "src/other.py", "patch": DIFF},
+            {"filename": "src/other.py", "patch": DIFF, "additions": 1, "deletions": 1},
             {"filename": "src/app.py", "patch": DIFF},
         ]
         payload = response_for(state.eligibility)

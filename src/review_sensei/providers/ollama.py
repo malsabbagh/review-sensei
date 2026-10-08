@@ -119,12 +119,12 @@ class OllamaProvider:
                 handlers.append(HTTPHandler())
             self._safe_opener = build_opener(*handlers)
 
-    def _call_custom_opener(self, http_request: Request) -> Any:
+    def _call_custom_opener(self, http_request: Request, *, timeout: float) -> Any:
         """Invoke an injected opener with timeout and TLS context kwargs."""
 
         opener = getattr(self._opener, "open", self._opener)
         kwargs: dict[str, object] = {
-            "timeout": self.timeout_seconds,
+            "timeout": timeout,
             "context": self._ssl_context,
         }
         try:
@@ -141,6 +141,11 @@ class OllamaProvider:
         return f"{self.base_url}/generate"
 
     def complete(self, request: ProviderRequest) -> ProviderResponse:
+        timeout = (
+            min(self.timeout_seconds, request.timeout_seconds)
+            if request.timeout_seconds is not None
+            else self.timeout_seconds
+        )
         model = (request.model if self.allow_model_override else None) or self.model
         try:
             validate_bounded_text(
@@ -161,8 +166,15 @@ class OllamaProvider:
         }
         if request.json_mode:
             payload["format"] = "json"
+        output_tokens = request.max_output_tokens
         if self.max_output_tokens is not None:
-            payload["options"] = {"num_predict": self.max_output_tokens}
+            output_tokens = (
+                min(self.max_output_tokens, output_tokens)
+                if output_tokens is not None
+                else self.max_output_tokens
+            )
+        if output_tokens is not None:
+            payload["options"] = {"num_predict": output_tokens}
 
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -178,11 +190,9 @@ class OllamaProvider:
         try:
             if self._opener is urlopen:
                 assert self._safe_opener is not None
-                response_ctx = self._safe_opener.open(
-                    http_request, timeout=self.timeout_seconds
-                )
+                response_ctx = self._safe_opener.open(http_request, timeout=timeout)
             else:
-                response_ctx = self._call_custom_opener(http_request)
+                response_ctx = self._call_custom_opener(http_request, timeout=timeout)
             with response_ctx as response:
                 body = read_bounded_body(
                     response,

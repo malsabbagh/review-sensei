@@ -23,6 +23,8 @@ from .baseline import (
 from .configuration import (
     BACKEND_DEFAULTS,
     IGNORED_PROVIDER_ENVIRONMENT_SETTINGS,
+    ProductConfiguration,
+    customization_directories,
     documented_backend_names,
     internal_backend_names,
     load_configuration,
@@ -85,6 +87,7 @@ from .providers.profiles import get_provider_profile
 from .providers.routing import bind_stage_providers
 from .service import DEFAULT_STAGES, ReviewService
 from .validation import DEFAULT_REVIEW_LIMITS, read_bounded_utf8
+from .work_recovery import WorkRecoveryStore
 from .workflow import prepare_diff
 
 # The parser intentionally narrows the namespace type after argparse parsing;
@@ -950,6 +953,7 @@ def _parser() -> argparse.ArgumentParser:
         help="Print the installed ReviewSensei version and exit",
     )
     parser.add_argument("--diff", type=Path, help="Path to a unified diff file")
+    _add_work_recovery_arguments(parser)
     parser.add_argument(
         "--config",
         type=Path,
@@ -1910,6 +1914,12 @@ def _github_parser() -> argparse.ArgumentParser:
 
     reply = subparsers.add_parser("reply", help="Generate or publish a mention reply")
     reply.add_argument("--reply", type=Path)
+    _add_work_recovery_arguments(reply)
+    reply.add_argument(
+        "--enable-broader-review",
+        action="store_true",
+        help="Allow one bounded full discovery continuation under trusted unified review policy.",
+    )
     reply.add_argument(
         "--config", type=Path, help="Path to trusted ReviewSensei configuration"
     )
@@ -1970,6 +1980,54 @@ def _github_parser() -> argparse.ArgumentParser:
         help="Enable mention reply publication for this invocation.",
     )
     return parser
+
+
+def _add_work_recovery_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--work-recovery-dir",
+        type=Path,
+        help="Private run directory for opt-in authenticated work receipts.",
+    )
+    parser.add_argument(
+        "--work-recovery-key-file",
+        type=Path,
+        help="Host-owned private authentication key file; requires diagnostics artifact policy.",
+    )
+
+
+def _work_recovery_from_cli(
+    args: argparse.Namespace, configuration: ProductConfiguration
+) -> WorkRecoveryStore | None:
+    directory = getattr(args, "work_recovery_dir", None)
+    key_path = getattr(args, "work_recovery_key_file", None)
+    if directory is None and key_path is None:
+        return None
+    if (
+        directory is None
+        or key_path is None
+        or configuration.advanced.review_work.mode != "unified"
+        or configuration.github.artifacts != "diagnostics"
+    ):
+        raise ReviewInputError(
+            "work recovery requires both paths, unified mode and explicit diagnostics artifact policy"
+        )
+    try:
+        if key_path.is_symlink() or (
+            os.name == "posix"
+            and (
+                key_path.stat().st_mode & 0o077 or key_path.stat().st_uid != os.getuid()
+            )
+        ):
+            raise ReviewInputError("work recovery key file must be private")
+        with key_path.open("rb") as stream:
+            key = stream.read(4097)
+        if not 32 <= len(key) <= 4096:
+            raise ValueError("key size")
+    except (OSError, ValueError):
+        raise ReviewInputError(
+            "work recovery key file is unavailable or invalid"
+        ) from None
+    return WorkRecoveryStore(directory, key=key, artifacts="diagnostics")
 
 
 def _bind_hosted_command_attestation(
@@ -2427,10 +2485,55 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         _validate_live_profile_gates(args, argv)
         provider_settings, _ = resolve_review_inference(args, argv)
         provider = default_registry().create(provider_settings)
+        work_configuration = load_configuration(getattr(args, "config", None))
+        work_recovery = _work_recovery_from_cli(args, work_configuration)
+        broader_service = None
+        if getattr(args, "enable_broader_review", False):
+            if (
+                work_configuration.advanced.review_work.mode != "unified"
+                or not work_configuration.github.automatic_reviews
+                or not work_configuration.github.writes
+            ):
+                raise ReviewInputError(
+                    "broader review requires unified mode and trusted full-review/write policy"
+                )
+            from .stages import (
+                category_catalog_for_configured_stages,
+                load_stages_from_dir,
+            )
+
+            custom = customization_directories(work_configuration)
+            stages = load_stages_from_dir(
+                custom.stages or Path(__file__).parent / "default_stages",
+                category_catalog=category_catalog_for_configured_stages(
+                    custom.categories
+                ),
+            )
+            full_provider, stage_providers = bind_stage_providers(
+                registry=default_registry(), settings=provider_settings, stages=stages
+            )
+            broader_service = ReviewService(
+                full_provider,
+                stages=stages,
+                stage_providers=stage_providers,
+                work_budgets=work_configuration.advanced.review_work,
+            )
+        reply_budget = ResourceBudget.create()
+        if (
+            work_configuration.advanced.review_work.mode == "unified"
+            and work_configuration.advanced.resources.max_provider_calls is not None
+        ):
+            reply_budget = replace(
+                reply_budget,
+                max_provider_calls=work_configuration.advanced.resources.max_provider_calls,
+            )
         reply_outcome = application.generate_and_publish_reply(
             options=GitHubWriteOptions(
                 github_writes=True,
                 mention_replies=True,
+                auto_review=broader_service is not None,
+                reviews_policy=work_configuration.github.reviews,
+                upload_artifacts=work_configuration.github.artifacts == "diagnostics",
             ),
             oidc_token=args.oidc_token,
             read_token=read_token,
@@ -2444,6 +2547,10 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             app_slug=args.app_slug,
             root_comment_id=args.root_comment_id or None,
             source_kind=args.source_kind,
+            work_budgets=work_configuration.advanced.review_work,
+            budget=reply_budget,
+            work_recovery=work_recovery,
+            broader_service=broader_service,
         )
         print(reply_outcome.status)
         assessment_status = getattr(reply_outcome, "assessment_status", None)
@@ -3201,7 +3308,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.categories_dir and not args.stages_dir:
             raise ReviewInputError("--categories-dir requires --stages-dir")
         limits = DEFAULT_REVIEW_LIMITS
-        orchestrate = bool(getattr(args, "orchestrate_large_changes", False))
+        work_configuration = load_configuration(getattr(args, "config", None))
+        work_budgets = work_configuration.advanced.review_work
+        work_recovery = _work_recovery_from_cli(args, work_configuration)
+        resource_budget = ResourceBudget.for_limits(limits)
+        if (
+            work_budgets.mode == "unified"
+            and work_configuration.advanced.resources.max_provider_calls is not None
+        ):
+            resource_budget = replace(
+                resource_budget,
+                max_provider_calls=work_configuration.advanced.resources.max_provider_calls,
+            )
+        orchestrate = (
+            bool(getattr(args, "orchestrate_large_changes", False))
+            or work_budgets.mode == "unified"
+        )
         # Read and preflight before loading any provider adapter.  The helper
         # performs a bounded ``maximum + 1`` read and strict UTF-8
         # decoding; the shared analysis validates all diff/path dimensions.
@@ -3214,9 +3336,20 @@ def main(argv: list[str] | None = None) -> int:
                 maximum=work_budget.max_total_diff_bytes,
                 label="diff",
             )
-            analysis = plan_change(
-                diff, limits=limits, orchestrate=True, work_budget=work_budget
-            ).analysis
+            if work_budgets.mode == "unified":
+                analysis = analyze_diff(
+                    diff,
+                    limits=limits,
+                    allow_incomplete=True,
+                    max_bytes=work_budget.max_total_diff_bytes,
+                    max_lines=work_budget.max_total_diff_lines,
+                    max_files=work_budget.max_total_files,
+                    max_hunks=work_budget.max_total_hunks,
+                )
+            else:
+                analysis = plan_change(
+                    diff, limits=limits, orchestrate=True, work_budget=work_budget
+                ).analysis
         else:
             diff = read_bounded_utf8(
                 args.diff,
@@ -3499,6 +3632,8 @@ def main(argv: list[str] | None = None) -> int:
             provider,
             stages=stages,
             stage_providers=stage_providers,
+            work_budgets=work_budgets,
+            budget=resource_budget,
         )
         context_root = args.context_root or args.learning_root
         context_store = (
@@ -3597,6 +3732,7 @@ def main(argv: list[str] | None = None) -> int:
             untrusted_head_sha=untrusted_head_sha,
             orchestrate_large_changes=orchestrate,
             work_budget=work_budget,
+            work_policy_digest=service.work_policy_digest,
         )
         current_key = build_review_context_cache_key(
             _checkpoint_cache_request(
@@ -3647,6 +3783,7 @@ def main(argv: list[str] | None = None) -> int:
                         category_policy=category_policy,
                         publication_mode=policy.mode,
                         orchestration_enabled=orchestrate,
+                        work_policy_digest=service.work_policy_digest,
                     )
                 )
                 transaction_configuration_digest = (
@@ -3853,7 +3990,8 @@ def main(argv: list[str] | None = None) -> int:
                 trusted_base_sha=resolved_base_sha,
                 trusted_head_sha=resolved_head_sha,
                 profile=effective_profile,
-                budget=ResourceBudget.for_limits(limits),
+                budget=resource_budget,
+                work_recovery=work_recovery,
             )
             if (
                 run.result is not None

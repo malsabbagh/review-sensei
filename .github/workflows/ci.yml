@@ -84,6 +84,10 @@ jobs:
         run: python scripts/validate_json_contracts.py
       - name: Validate versioned public schemas
         run: python scripts/validate_public_schemas.py
+      - name: Fetch immutable legacy reader source
+        run: git fetch --no-tags --depth=1 origin 5a121dfe39fb978c7d71def0d08dc570aad83f1d
+      - name: Verify legacy and current reader compatibility
+        run: python scripts/check_review_reader_compatibility.py
       - name: Validate evaluation corpus
         run: python scripts/validate_evaluation_corpus.py
       - name: Validate site manifest
