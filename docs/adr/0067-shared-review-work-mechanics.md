@@ -80,6 +80,13 @@ paths and the existing 20 findings / 24 KiB inventory. Trusted controllers may
 construct v2 inventories; normal `from_result` publication still writes v1.
 Required paths are never inferred from finding prose or a guessed hunk.
 
+The richer eligibility document uses payload `schema_version: "2.0"` inside
+the recognized `reviewsensei:eligibility:v1` envelope. Result-side facts retain
+version `1`, and the nested human inventory has version `2`. Old readers see
+the newest envelope and reject its payload, withholding approval instead of
+revealing an older clean record. New readers require the payload version to
+agree with the presence of explicit requirements; no v1 downgrade is accepted.
+
 Unified work policy is hashed into cache identity and, when transactions are
 used, the existing orchestration context. New readers accept old contexts and
 the optional `work_policy_digest`. Old readers reject that extension rather
@@ -129,6 +136,15 @@ adaptive pagination bounds, deadline/output controls, cache/budget identities,
 continuation without reset, stale source/base/head and aggregate publication.
 Run the complete lint/type/schema/unit/coverage and installed wheel/sdist gates
 before promotion. Synthetic fixtures contain no private evidence or live tokens.
+
+`scripts/check_review_reader_compatibility.py` archives the immutable v0.6.16
+commit from local objects and runs its real readers in a separate process. It
+checks unchanged v1 identity/wire documents, v2 rejection without older-authority
+fallback, opt-in transaction rejection and session reader behavior. The pinned
+reader skips trusted comments over its 16 KiB size limit and reports missing
+state. The upgraded reader instead blocks initialization for oversized trusted
+terminal authority. This historical gap requires quiescing old readers/writers
+before expanded writes and retaining upgraded readers during rollback.
 
 ## Rollout and rollback
 

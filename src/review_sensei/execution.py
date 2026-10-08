@@ -79,6 +79,7 @@ def execute_call(
     tracker: ResourceBudgetTracker,
     budgets: EffectiveWorkBudget,
     correction: str = "",
+    repairable_validation: Callable[[Exception], bool] | None = None,
 ) -> CallResult[T]:
     """Count every dispatch, bound correction and transport retries, fail closed."""
     tracker.budget.validate_against_limits(request.limits)
@@ -149,9 +150,12 @@ def execute_call(
                 allow_empty=False,
             )
             value = validate(response)
-        except (ReviewFormatError, ReviewInputError, ValueError, TypeError):
+        except (ReviewFormatError, ReviewInputError, ValueError, TypeError) as exc:
             if (
                 not correction
+                or (
+                    repairable_validation is not None and not repairable_validation(exc)
+                )
                 or corrected
                 or tracker.structural_retries >= tracker.budget.max_retry_attempts
             ):
@@ -177,6 +181,7 @@ def execute_plan(
     accept: Callable[[CompletedBatch[T]], bool] | None = None,
     prior: WorkExecution[T] | None = None,
     revalidate_cached: Callable[[T, WorkBatch], bool] | None = None,
+    repairable_validation: Callable[[Exception], bool] | None = None,
 ) -> WorkExecution[T]:
     tracker.budget.validate_against_limits()
     if plan.budget_digest != budgets.digest or (
@@ -246,6 +251,7 @@ def execute_plan(
             tracker=tracker,
             budgets=budgets,
             correction=correction,
+            repairable_validation=repairable_validation,
         )
         if result.value is None or result.diagnostic is not None:
             pending.extend(

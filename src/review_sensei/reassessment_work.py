@@ -13,6 +13,7 @@ from .human_assessment import (
     MAX_HUMAN_SOURCE_BYTES,
     HumanAssessmentReply,
     HumanAssessmentService,
+    HumanAssessmentValidationError,
     PendingHumanReview,
     validate_assessment_evidence,
 )
@@ -23,6 +24,20 @@ from .providers.base import ReviewProvider
 from .validation import DEFAULT_REVIEW_LIMITS, validate_bounded_text
 
 _CORRECTION = "The previous response failed validation. Return fresh strict JSON using only this batch's finding fingerprints, with concrete rationale and verbatim evidence from the supplied human reply and current file patches. Unsupported findings remain unresolved."
+
+_REPAIRABLE_VALIDATION = frozenset(
+    {
+        "human_assessment_invalid_json",
+        "human_assessment_reply_fields_invalid",
+        "human_assessment_reply_body_invalid",
+        "human_assessment_decisions_invalid",
+        "human_assessment_decision_fields_invalid",
+        "human_assessment_decision_value_invalid",
+        "human_assessment_decision_text_invalid",
+        "human_assessment_unknown_finding",
+        "human_assessment_duplicate_decision",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -123,6 +138,10 @@ def reassess(
         budgets=budgets,
         correction=_CORRECTION,
         prior=prior.execution if prior is not None else None,
+        repairable_validation=lambda exc: (
+            isinstance(exc, HumanAssessmentValidationError)
+            and exc.diagnostic in _REPAIRABLE_VALIDATION
+        ),
         revalidate_cached=lambda value, batch: (
             validate(
                 ProviderResponse(

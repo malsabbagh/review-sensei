@@ -379,12 +379,15 @@ class GitHubIssueCommentSessionLedger:
                     continue
                 trusted_session_author = True
             body = item.get("body")
-            if (
-                not isinstance(body, str)
-                or not _within_session_comment_limit(body)
-                or not _marker_shaped(body)
-            ):
+            if not isinstance(body, str) or not _marker_shaped(body):
                 continue
+            if not _within_session_comment_limit(body):
+                # An unreadable newer writer's authority is established state,
+                # not a missing ledger. Never initialize a second session.
+                raise SessionLoadError(
+                    SessionLoadReason.INTEGRITY_FAILED,
+                    "session comment exceeds the supported reader bound",
+                )
             comment_id = item.get("id")
             if (
                 isinstance(comment_id, bool)

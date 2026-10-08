@@ -442,6 +442,53 @@ class AssessingProvider:
 
 
 class UnifiedAdaptersTests(unittest.TestCase):
+    def test_citation_failure_has_no_semantic_correction_retry(self):
+        pending, bundle = self.fixture((100,))
+
+        class Provider(AssessingProvider):
+            def complete(self, request):
+                response = super().complete(request)
+                payload = json.loads(response.text)
+                payload["assessments"][0]["diff_evidence"] = (
+                    "invented unsupported quote"
+                )
+                return ProviderResponse(json.dumps(payload), self.name)
+
+        provider = Provider()
+        run = reassess(
+            provider=provider,
+            pending=pending,
+            bundle=bundle,
+            source_body=HUMAN,
+            authority_digest="f" * 64,
+            work_budgets=ReviewWorkBudgets(mode="unified"),
+        )
+        self.assertEqual(len(provider.calls), 1)
+        self.assertFalse(run.execution.completed)
+        self.assertEqual(pending.apply(run.reply.decisions), pending)
+
+    def test_invalid_json_gets_one_bounded_structural_correction(self):
+        pending, bundle = self.fixture((100,))
+
+        class Provider(AssessingProvider):
+            def complete(self, request):
+                if not self.calls:
+                    self.calls.append(request)
+                    return ProviderResponse("{", self.name)
+                return super().complete(request)
+
+        provider = Provider()
+        run = reassess(
+            provider=provider,
+            pending=pending,
+            bundle=bundle,
+            source_body=HUMAN,
+            authority_digest="f" * 64,
+            work_budgets=ReviewWorkBudgets(mode="unified"),
+        )
+        self.assertEqual(len(provider.calls), 2)
+        self.assertFalse(pending.apply(run.reply.decisions).pending)
+
     def test_v2_cross_file_inventory_keeps_exact_identity_and_complete_group(self):
         pending, bundle = self.fixture((100, 100))
         finding = replace(

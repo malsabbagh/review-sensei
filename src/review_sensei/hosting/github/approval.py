@@ -11,6 +11,7 @@ from ...human_assessment import PendingHumanReview
 from ...models import ReviewResult
 
 APPROVAL_ELIGIBILITY_SCHEMA_VERSION = "1"
+APPROVAL_ELIGIBILITY_CROSS_FILE_VERSION = "2.0"
 REVIEW_STATUSES = frozenset({"complete", "partial", "incomplete", "summary-only"})
 EVIDENCE_POLICIES = frozenset({"legacy", "confirmed"})
 # ``not-required`` covers backends without a published qualification slice.
@@ -152,6 +153,8 @@ class ReviewApprovalEligibility:
         }
         if self.human_review is not None:
             value["human_review"] = self.human_review.to_dict()
+            if any(item.required_paths for item in self.human_review.findings):
+                value["schema_version"] = APPROVAL_ELIGIBILITY_CROSS_FILE_VERSION
         return value
 
     @classmethod
@@ -165,7 +168,10 @@ class ReviewApprovalEligibility:
             raise ReviewInputError(
                 "approval eligibility must contain the documented fields"
             )
-        if value.get("schema_version") != APPROVAL_ELIGIBILITY_SCHEMA_VERSION:
+        if value.get("schema_version") not in (
+            APPROVAL_ELIGIBILITY_SCHEMA_VERSION,
+            APPROVAL_ELIGIBILITY_CROSS_FILE_VERSION,
+        ):
             raise ReviewInputError("approval eligibility schema_version is invalid")
         head_sha = value.get("head_sha")
         result_digest = value.get("result_digest")
@@ -184,6 +190,15 @@ class ReviewApprovalEligibility:
             if "human_review" in value
             else None
         )
+        cross_file = human_review is not None and any(
+            item.required_paths for item in human_review.findings
+        )
+        if cross_file != (
+            value.get("schema_version") == APPROVAL_ELIGIBILITY_CROSS_FILE_VERSION
+        ):
+            raise ReviewInputError(
+                "approval eligibility requirements version is invalid"
+            )
         if human_review is not None and facts.has_human_adjudication_findings != bool(
             human_review.pending
         ):

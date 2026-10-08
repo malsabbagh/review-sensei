@@ -196,9 +196,13 @@ class HumanAssessmentPublisher:
                 base_sha=eligibility.human_review.base_sha,
                 head_sha=prepared.head_sha,
                 required_paths=tuple(
-                    path
-                    for item in eligibility.human_review.pending
-                    for path in item.evidence_paths
+                    sorted(
+                        {
+                            path
+                            for item in eligibility.human_review.pending
+                            for path in item.evidence_paths
+                        }
+                    )
                 ),
                 timeout_seconds=work_tracker.remaining_seconds()
                 if work_tracker is not None

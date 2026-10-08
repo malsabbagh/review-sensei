@@ -58,6 +58,14 @@ decisions require citations for every related path. Normal publication still
 writes v1; required paths are never inferred from prose. Existing work routing
 refuses pending v2 groups rather than treating the primary file as sufficient.
 
+Richer eligibility uses payload version `2.0` within the existing
+`reviewsensei:eligibility:v1` envelope. The facts document remains version `1`.
+Both versions are read strictly; richer requirements cannot be downgraded by
+changing the version. Malformed or unsupported latest authority never exposes
+an earlier clean result. Structural JSON/schema failures permit one bounded
+correction per batch within the shared retry allowance; citation, rationale and
+reserved-marker failures keep the batch pending without a semantic retry.
+
 The library continuation seam can add complete evidence and revalidate/reuse
 unchanged completed batches with the original `ResourceBudgetTracker`. It
 rejects a fresh tracker, changed source authority, snapshot or resource policy.
@@ -71,6 +79,14 @@ disabled until every reply/finalization reader supports them. Rollback stops
 new writers and selects existing routing on compatible readers; preserve any
 reader needed for durable records. Never reset a ledger, erase pending findings
 or fall back to older eligibility to make an incompatible record usable.
+
+Run `python scripts/check_review_reader_compatibility.py` from a checkout with
+the immutable v0.6.16 commit available locally. It compares that exact source and
+the upgraded reader without network or worktree mutations. The old reader treats
+trusted session comments over 16 KiB as missing; the upgraded reader recognizes
+oversized terminal markers as integrity failures and refuses initialization.
+Quiesce older readers/writers before expanded records exist. Old-reader rollback
+is unsafe after such writes, independently of unified prompt evidence budgets.
 
 Provider quality/capacity qualification, hosted pilots, automatic justified
 broader-context requests, persistent batch recovery and any default or consumer
