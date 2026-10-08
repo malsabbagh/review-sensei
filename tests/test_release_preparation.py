@@ -63,6 +63,10 @@ class PreparationRenderingTests(unittest.TestCase):
         self.root = Path(self.temporary.name) / "source"
         shutil.copytree(self.fixture, self.root)
         self.run_git("init", "-q")
+        # Production uses a Linux checkout with no storage normalization.
+        # Isolate this byte-identity fixture from Windows/global autocrlf;
+        # the explicit attributes test still proves filters are rejected.
+        self.run_git("config", "core.autocrlf", "false")
         self.run_git("add", ".")
         self.run_git("commit", "-qm", "Reviewed source")
         self.base = self.run_git("rev-parse", "HEAD")
