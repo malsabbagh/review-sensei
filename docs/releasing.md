@@ -156,28 +156,93 @@ project-scoped upload credential. It is still critical to protect the trusted
 workflow and environment: a contributor who can change and run that workflow
 can affect the package identity.
 
-## Python version and tag procedure
+## Prepare main before signing and building
 
-1. Choose the next immutable three-component version. The first package release
-   uses the existing `0.1.0` value in `pyproject.toml`.
-2. Update `[project].version` and add a dated heading to `CHANGELOG.md` in the
-   same pull request. Keep the heading in the form `## X.Y.Z - YYYY-MM-DD`.
-3. From a clean checkout, run the local build and consumer checks below. The
-   validator must report exactly one sdist and one wheel, with package defaults
-   in the wheel and `docs/`/`examples/` in the sdist.
-4. Merge the reviewed change to `main`. Create an annotated, signed tag from
-   the release commit and push only that tag:
+The normal complete Python/npm release uses `prepare-release.yml` before the
+signed tag. Merge and qualify this reviewed workflow implementation first.
+**Do not merge PR #226**: retain it as the 0.6.17 comparison reference. Preparation
+changes the main metadata through the dedicated App; tagging an unchanged
+0.6.16 source as 0.6.17 still fails the release contract.
+
+1. Complete [the dedicated App setup and real readiness check](release-docs-bot.md).
+   The existing main-only environment and isolated PR-rule exception are required.
+   A broad exception on a mixed PR/core ruleset is rejected. Repository rules
+   setup still requires the owner's exclusive editing window and explicit setup
+   authority; neither workflow changes rules or App permissions.
+2. Review and merge all intended source and the `CHANGELOG.md` Unreleased notes
+   under the ordinary source review policy. Choose an unpublished `X.Y.Z` version
+   and explicit `YYYY-MM-DD` release date. The owner dispatches from fresh main:
 
    ```bash
-   git tag -s v0.1.0 -m "ReviewSensei 0.1.0"
-   git push origin v0.1.0
+   gh workflow run prepare-release.yml --ref main \
+     -f version=0.6.17 -f release_date=2026-10-08
    ```
 
-   The tag must match the package version and changelog. The workflow rejects a
-   missing `v` prefix, a metadata mismatch, or a missing dated heading.
-5. Monitor the `Release` workflow. The Python and npm build jobs must pass
-   before their respective publish jobs can run. The `pypi` and `npm`
-   environments each require their configured publication approval.
+3. Preparation requires full terminal-success **push/main CI on the dispatch SHA**
+   before writes. It executes trusted dispatch code and integrates a clean
+   disposable worktree at that exact main source. The existing short-lived App
+   token is repository-only Contents write/Actions read/Metadata read and is
+   revoked when its twenty-minute generation job finishes. The later CI-wait job
+   has no App key or write token.
+4. The deterministic renderer updates `[project].version`, all six npm versions
+   and exact optional dependencies, paired marked current installation pins in
+   packaged READMEs/source docs, site version/tag/date and generated provider/release
+   pages. It moves only already-reviewed Unreleased notes under the dated release
+   heading; no free-form workflow notes or provider claim generation occurs.
+   Historical examples outside markers and the `@v5` channel stay unchanged.
+   `PAYLOAD_PATHS` in `scripts/prepare_release.py` lists the complete allowlist.
+   Runtime source, configs, tests, workflows, credentials and protection policy
+   are outside it. The generated `.publication/release-preparation.json` records
+   the reviewed parent SHA, immutable version/date intent, notes digest and hashes
+   of every payload file. Index/regular-file/filter checks prove the actual commit
+   contains those bytes; symlinks, ignored payload, extra staged paths and storage
+   transformations stop the write. The single DCO bot commit is pushed normally,
+   never with force. A concurrent main update requires a fresh dispatch.
+5. Ordinary main CI runs because the push uses the App rather than GITHUB_TOKEN.
+   The preparation workflow waits for **all fifteen exact-head CI jobs**, including
+   native ABI/parity, npm/clean-wheel contracts, Worker and CodeQL. It checks the
+   latest run and newest execution of each job (failed-job retries may retain
+   earlier successful jobs). Missing, skipped, failed, cancelled, racing or timed
+   out checks withhold signing. It re-verifies the parent/file receipt, main SHA,
+   unused tag and all seven registry versions before the handoff. A successful
+   preparation does not publish packages or make new source docs live on Pages.
+6. Complete the existing readers-first, compatibility/canary and protected
+   publication qualification below. Using the owner's **existing signing identity**,
+   create the signed annotated tag on exactly the SHA emitted in the successful
+   preparation summary, then push only that tag:
+
+   ```bash
+   git fetch origin main
+   git tag -s v0.6.17 <qualified-prepared-sha> -m "ReviewSensei 0.6.17"
+   git push origin refs/tags/v0.6.17
+   ```
+
+   Stop if main/CI changed or the tag exists. Signing is deliberately an owner
+   checkpoint; no automated signing secret, tag-permission bypass or movable-tag
+   update is added. The Release source gate verifies the signed remote tag/object,
+   event/local SHA, main ancestry, receipt-bound single-parent allowlisted commit,
+   all versions/docs and terminal exact-head main CI before any docs/Python/native
+   build. Python/npm then build, attest and publish from **that tagged commit**.
+   Package/environment approvals remain required; later snapshot commits never
+   become a replacement package source.
+
+For a transient CI issue, rerun the failed CI job, then retry the failed
+`qualify-prepared` job. A new dispatch from unchanged prepared main with the same
+version/date is an idempotent no-op followed by exact-head CI qualification. If
+main advanced, select and qualify the new reviewed source; refreshing an unpublished
+same-version preparation retains the existing date and reviewed release notes,
+incorporates any new reviewed Unreleased notes, and generates a new receipt/commit
+and full CI. An all-jobs rerun of an old dispatch stops on stale main; it must not
+silently incorporate another source. Any existing tag or PyPI/npm version stops
+preparation, including partial publications. Recover a tagged release by retrying
+its existing jobs/artifacts; never regenerate that version or move the tag.
+
+For offline inspection, use `prepare_release.py render` only in a disposable
+checkout with explicit version, date and base SHA. It performs no network or
+publication. Validate the generated candidate, then compare version/entry points,
+all six npm manifests, provider facts/current installation pins and legacy fixture
+behavior with PR #226. Complete bytes may differ because main includes later
+reviewed source, marker metadata and immutable tag/run provenance.
 
 ## Public reusable-workflow tag channel
 
@@ -536,33 +601,21 @@ details.
 
 ## Tag-driven documentation starting with 0.6.17
 
-**0.6.17 is the first tag using this automation.** Merge the reviewed automation
-PR before creating `v0.6.17`. The release owner must then update/rebase the
-0.6.17 release PR onto main containing both `scripts/release_docs.py` and the
-`Release` docs-build / Pages qualification and docs writeback jobs. Re-run final qualification and
-terminal CI on that exact release PR head before its reviewed merge and signed
-tag. Do not tag the earlier release PR head or retrofit the automation onto an
-existing immutable tag. Preparing this automation PR does not authorize release,
-publication, a `v5` move, Worker deployment or repository-setting changes.
+**0.6.17 is the first tag using this automation.** Merge and qualify the reviewed
+preparation/diagnostic workflow before creating it, then follow
+[prepare main before signing and building](#prepare-main-before-signing-and-building).
+PR #226 remains unmerged as a comparison reference. No tag is eligible from
+this implementation PR's unchanged 0.6.16 metadata. The owner-only preparation
+commits the aligned version/changelog/current-installation/source docs first;
+full CI on that exact generated commit precedes the owner's signed tag.
 
-The release PR owns Python and all six npm versions, exact npm optional
-dependencies, packaged README pins, the dated changelog, and reviewed prose or
-provider claims. The package source must already agree with the intended tag:
-post-tag documentation generation does not turn 0.6.16 source into a 0.6.17
-package. Keep the existing 0.6.17 release PR (#226) for that preparation; no
-additional release PR is needed. Rebase it after this correction merges and
-requalify its exact head. A tag-derived package-version refactor is outside this
-documentation change.
-
-Source site metadata may record an older version than current Python/npm
-metadata, but never a future version or an inconsistent tag. Source generated
-pages still agree with their reviewed manifest. The tag build updates a staged
-manifest's version/tag and explicitly marked current-installation snippets automatically;
-there is no required pre-tag bump of site metadata, onboarding snippets or
-generated release pages. Historical examples and version references outside
-those marked snippets retain their reviewed values, including on current pages.
-A tag cannot invent new prose or provider claims.
-Ordinary content changes still need review and source generation checks.
+The tag build retains staged immutable provenance and SHA-pinned docs/example
+links. It does not mutate the signed source, invent new prose/provider claims or
+replace pre-tag package metadata. The successful-release snapshot remains a
+separate machine-owned main update. This means source docs are generated before
+package builds, while final release/run provenance is generated after the signed
+source exists. Ordinary content changes still need review and source generation
+checks; historical versions outside current markers retain their values.
 
 The read-only `Release` documentation job checks the exact event SHA and clean
 checkout against the signed annotated tag object as verified by GitHub. It

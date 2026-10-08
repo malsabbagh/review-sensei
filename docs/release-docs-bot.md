@@ -2,7 +2,7 @@
 
 This setup enables the owner-approved automatic main update after a successful
 release. Keep **v0.6.17 held** until setup and the real App readiness check below
-succeed. Implementation PR #227 still needs ordinary independent review before
+succeed. The release-preparation workflow needs ordinary independent review before
 merge; approval of this App exception does not waive implementation review.
 
 ## Register and install the dedicated App
@@ -18,7 +18,7 @@ Grant exactly these repository permissions, with no account permissions:
 
 | Permission | Level | Purpose |
 | --- | --- | --- |
-| Contents | Read and write | Read verified release source and commit generated docs to main |
+| Contents | Read and write | Commit allowlisted release metadata/source docs and verified released snapshots to main |
 | Actions | Read-only | Qualify successful release runs and their retained artifacts |
 | Metadata | Read-only | GitHub's required metadata access and active-rule checks |
 
@@ -28,8 +28,10 @@ key and installation tokens are secrets.
 
 GitHub does not restrict Contents write by file path. It permits repository
 content/ref/release operations, subject to existing rules. The trusted workflow
-enforces the generated-docs allowlist and never updates source, workflows, tags
-or release objects. The App receives no permission to edit workflows or rules.
+enforces separate allowlists: preparation changes only version metadata, reviewed
+changelog headings/notes and marked/generated source documentation; successful
+release writeback changes only the generated released snapshot. Neither path
+changes runtime source, workflows, tags or release objects. The App receives no permission to edit workflows or rules.
 The integration rejects nested Git storage-attribute files and proves that the
 Git index contains the complete snapshot with byte-identical blobs before
 committing; ignored files or filter transformations fail without a push.
@@ -45,7 +47,12 @@ Pages keeps its existing separate deployment environment and reviewers.
 
 Generate a private key in the dedicated App's settings. Enter its PEM value
 directly as environment secret **`RELEASE_DOCS_APP_PRIVATE_KEY`**. Add environment
-variable **`RELEASE_DOCS_APP_ID`** containing the numeric App ID.
+variable **`RELEASE_DOCS_APP_ID`** containing the numeric App ID. Optionally add
+**`RELEASE_DOCS_APP_CLIENT_ID`** with the public Client ID (for example an `Iv...`
+identifier), which GitHub recommends for JWT authentication. The token Action
+uses Client ID when configured and otherwise the supported App ID. The numeric
+App ID remains required for identity and ruleset actors; do not replace it with
+the Client ID. A Client ID is public metadata, not a Client secret.
 Do not store either in repository-wide secrets, upload the PEM to an assistant,
 paste it into chat, or commit it. Keep any downloaded key file outside the repo
 and handle rotation in the App and environment settings.
@@ -136,12 +143,27 @@ probe must confirm this API contract for the narrow token before readiness is
 claimed. Runtime checks applicable main rulesets; owner setup verifies actor
 isolation across all active repository rulesets.
 
-Only then rebase release PR #226 onto main containing the automation and
-requalify its exact head. Follow [the release procedure](releasing.md#tag-driven-documentation-starting-with-0617)
-for its reviewed merge and signed immutable `v0.6.17` tag. Generated docs commits
-use the dedicated bot identity. App pushes run ordinary main CI, while Release
-remains tag-triggered and Pages listens only to Release completion or explicit
-release-run retry, so a docs commit does not start another release/docs cycle.
+Only after readiness succeeds, use [Prepare release](releasing.md#prepare-main-before-signing-and-building)
+to generate and commit the package versions, dated reviewed changelog notes and
+source docs before package builds. **PR #226 remains an unmerged comparison
+reference; it is not the source to merge or tag.** Preparation is owner-dispatched
+on main, pins its reviewed base and full CI, verifies an explicit file allowlist
+and exact indexed bytes, and refuses a stale main or existing version. The App
+pushes without force, and ordinary main CI runs on the generated commit. The
+owner signs that exact source only after CI and reader/publication qualification.
+No new signing key or permission is introduced. Preparation has no push, CI,
+release or tag trigger, so these commits do not start another preparation cycle.
+
+If readiness rejects identity/permissions, its diagnostic reports only the
+specific differing public fields (`id`, `slug`, owner login and declared permission
+map), with expected and observed values. It never prints the full App/API response,
+private key, Client secret or token. A successful token mint establishes JWT/key
+acceptance and the requested installation grants; a subsequent metadata mismatch
+is not evidence that switching issuer IDs or replacing the key will fix it.
+Compare the exact diagnostic before changing registration/installation settings.
+The read-only readiness workflow remains main-only, so run it only after the
+reviewed diagnostic changes reach main. Missing or broad rules still stop both
+preparation and released-snapshot writeback.
 
 For recovery, retain the existing cutoff, repair the reviewed App/environment
 configuration and retry the same successful release run. Key rotation needs a

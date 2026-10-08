@@ -133,6 +133,41 @@ class DocsAppGuardTests(unittest.TestCase):
                 ):
                     self.check()
 
+    def test_app_mismatch_reports_exact_public_fields_without_response_secrets(self):
+        self.app.update(
+            {
+                "owner": {"login": "wrong-owner"},
+                "permissions": {**BOT.APP_PERMISSIONS, "actions": "write"},
+                "client_secret": "SENSITIVE_CLIENT_SECRET",
+                "pem": "SENSITIVE_PRIVATE_KEY",
+            }
+        )
+        with self.assertRaises(ValueError) as raised:
+            self.check()
+        text = str(raised.exception)
+        self.assertIn('"owner_login"', text)
+        self.assertIn('"observed": "wrong-owner"', text)
+        self.assertIn('"actions": "write"', text)
+        self.assertIn('"actions": "read"', text)
+        for excluded in (
+            "SENSITIVE_CLIENT_SECRET",
+            "SENSITIVE_PRIVATE_KEY",
+            '"client_secret"',
+            '"pem"',
+            '"slug"',
+            '"id"',
+        ):
+            self.assertNotIn(excluded, text)
+
+    def test_missing_metadata_permission_is_diagnosed_without_relaxing_guard(self):
+        del self.app["permissions"]["metadata"]
+        with self.assertRaises(ValueError) as raised:
+            self.check()
+        text = str(raised.exception)
+        self.assertIn('"permissions"', text)
+        self.assertIn('"metadata": "read"', text)
+        self.assertIn('"observed": {"actions": "read", "contents": "write"}', text)
+
     def test_unknown_bypass_or_non_pr_exception_is_rejected(self):
         for target in ("core", "pr"):
             for mode in (None, "always", "never", "pull_requests_only", "exempt"):

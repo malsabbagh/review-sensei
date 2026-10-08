@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Prepare version metadata, dated reviewed changelog notes, current installation
+  pins and generated source docs through an owner-only main workflow. The narrow
+  dedicated App pushes one allowlisted, byte-verified commit; full exact-head CI
+  and the owner's signed immutable tag qualify the Python/npm release. Retain
+  the successful-release Pages/provenance snapshot and separately approved
+  reader, channel, Worker and publication gates.
+- Report the exact public App identity or declared-permission mismatch during
+  readiness without exposing credentials. Support the recommended public Client
+  ID for token authentication while retaining numeric App ID identity/rule checks.
+- Retain the merged experimental shared review-work engine and constrained
+  recovery receipts (#228). Legacy routing remains the default. Upgrade every
+  shared-ledger reader before expanded or richer writes; old readers can
+  misclassify oversized latest comments as absent.
+
 - Admit up to 64 related paths under the existing metadata item ceiling and
   allocate up to 12 KiB of history inside a coordinated 20 KiB record / 40 KiB
   comment envelope. Check actual escaped bytes and reserve future lifecycle

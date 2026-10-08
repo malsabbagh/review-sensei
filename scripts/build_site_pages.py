@@ -360,8 +360,12 @@ def build_site_pages(
     manifest = _load_manifest(manifest_path)
     providers_output.parent.mkdir(parents=True, exist_ok=True)
     releases_output.parent.mkdir(parents=True, exist_ok=True)
-    providers_output.write_text(render_providers_page(manifest), encoding="utf-8")
-    releases_output.write_text(render_releases_page(manifest), encoding="utf-8")
+    providers_output.write_text(
+        render_providers_page(manifest), encoding="utf-8", newline="\n"
+    )
+    releases_output.write_text(
+        render_releases_page(manifest), encoding="utf-8", newline="\n"
+    )
     return providers_output, releases_output
 
 

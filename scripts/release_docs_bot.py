@@ -56,7 +56,29 @@ def check_app(app_id: int, slug: str) -> dict[str, str]:
         or app.get("owner", {}).get("login") != docs.REPOSITORY.split("/")[0]
         or app.get("permissions") != APP_PERMISSIONS
     ):
-        raise ValueError("dedicated docs App identity/owner/permissions do not match")
+        # These fields are public App metadata. Never dump the response: other
+        # App endpoints and future fields can include credentials.
+        expected = {
+            "id": app_id,
+            "slug": slug,
+            "owner_login": docs.REPOSITORY.split("/")[0],
+            "permissions": APP_PERMISSIONS,
+        }
+        observed = {
+            "id": app.get("id"),
+            "slug": app.get("slug"),
+            "owner_login": app.get("owner", {}).get("login"),
+            "permissions": app.get("permissions"),
+        }
+        differences = {
+            field: {"expected": expected[field], "observed": observed[field]}
+            for field in expected
+            if expected[field] != observed[field]
+        }
+        raise ValueError(
+            "dedicated docs App identity/owner/permissions do not match: "
+            + json.dumps(differences, sort_keys=True)
+        )
     repositories = api("installation/repositories?per_page=100")
     entries = repositories.get("repositories", [])
     if (

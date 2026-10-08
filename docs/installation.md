@@ -8,11 +8,13 @@ contain a JavaScript engine, system-Python fallback, runtime downloader, or
 install lifecycle hook. An external `git` executable is also required for
 `prepare-diff`.
 
+<!-- release-installation:package-npm-1:start -->
 ```bash
 npx --yes @reviewsensei/cli@0.6.16 --version
 npx --yes @reviewsensei/cli@0.6.16 prepare-diff \
   --repository . --base-ref main --head-ref feature --output pr.patch
 ```
+<!-- release-installation:package-npm-1:end -->
 
 The launcher and all optional platform packages use one exact version from
 `pyproject.toml` and the signed `vX.Y.Z` tag. Supported targets are macOS

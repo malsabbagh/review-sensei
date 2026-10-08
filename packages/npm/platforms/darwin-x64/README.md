@@ -6,10 +6,12 @@ standalone Python engine bundled for macOS Intel.
 
 Install the public launcher, which selects the matching native package:
 
+<!-- release-installation:package-npm-1:start -->
 ```console
 npm install --save-dev @reviewsensei/cli@0.6.16
 npx review-sensei --help
 ```
+<!-- release-installation:package-npm-1:end -->
 
 Use [`@reviewsensei/cli`](https://www.npmjs.com/package/@reviewsensei/cli) for
 installation, provider/model configuration, authentication, and review examples.

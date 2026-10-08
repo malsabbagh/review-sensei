@@ -106,10 +106,12 @@ replacements by `review-sensei config`.
 Node.js 22 or newer can invoke the same Python review engine through the
 provider-neutral `@reviewsensei/cli` launcher:
 
+<!-- release-installation:package-npm-1:start -->
 ```bash
 npx --yes @reviewsensei/cli@0.6.16 --version
 npx --yes @reviewsensei/cli@0.6.16 --help
 ```
+<!-- release-installation:package-npm-1:end -->
 
 The launcher selects one of the five native packages (macOS arm64/x64,
 glibc Linux arm64/x64, or Windows x64), forwards arguments unchanged, and
