@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -26,11 +27,14 @@ MATRIX_TERMS = (
     "artifact retention",
 )
 
+SITE_VERSION = json.loads(
+    (REPO_ROOT / "docs/site/data/site-manifest.json").read_text(encoding="utf-8")
+)["release_facts"]["version"]
 VERSION_PATTERNS = (
-    re.compile(r"review-sensei==0\.6\.16"),
-    re.compile(r"review-sensei\s+0\.6\.16"),
-    re.compile(r"@reviewsensei/cli@0\.6\.16"),
-    re.compile(r"REVIEWSENSEI_VERSION=0\.6\.16"),
+    re.compile(r"review-sensei==" + re.escape(SITE_VERSION)),
+    re.compile(r"review-sensei\s+" + re.escape(SITE_VERSION)),
+    re.compile(r"@reviewsensei/cli@" + re.escape(SITE_VERSION)),
+    re.compile(r"REVIEWSENSEI_VERSION=" + re.escape(SITE_VERSION)),
 )
 
 # Patterns that would indicate a credential value leaked into static docs.
@@ -73,7 +77,7 @@ class GettingStartedSiteTests(unittest.TestCase):
         ]
         self.assertTrue(
             matched,
-            "page must reference review-sensei 0.6.16 or @reviewsensei/cli@0.6.16",
+            f"page must reference the source site's release version {SITE_VERSION}",
         )
 
     def test_no_credential_values(self) -> None:

@@ -350,6 +350,9 @@ class ReleaseDocsBuildTests(unittest.TestCase):
         for filename in ("pyproject.toml", "CHANGELOG.md", "README.md", ".gitignore"):
             shutil.copy(ROOT / filename, cls.root / filename)
         version = DOCS.load_script(ROOT, "check_release_version").project_version(ROOT)
+        site_version = json.loads(
+            (ROOT / "docs/site/data/site-manifest.json").read_text(encoding="utf-8")
+        )["release_facts"]["version"]
         paths = [
             cls.root / "pyproject.toml",
             cls.root / "CHANGELOG.md",
@@ -358,16 +361,26 @@ class ReleaseDocsBuildTests(unittest.TestCase):
             *list((cls.root / "packages/npm").rglob("package.json")),
         ]
         for path in paths:
+            source_version = (
+                site_version if path.is_relative_to(cls.root / "docs/site") else version
+            )
             path.write_text(
-                path.read_text(encoding="utf-8").replace(version, "0.6.17"),
+                path.read_text(encoding="utf-8").replace(source_version, "0.6.17"),
                 encoding="utf-8",
             )
         builder = DOCS.load_script(cls.root, "build_site_pages")
         builder.build_site_pages()
+        # Temporary repositories must not launch detached maintenance that can
+        # recreate object files while TemporaryDirectory removes the fixture.
         for args in (
             ("init", "-q"),
+            ("config", "--local", "maintenance.auto", "false"),
             ("add", "."),
             (
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "gc.auto=0",
                 "-c",
                 "user.name=Docs Test",
                 "-c",
@@ -474,8 +487,13 @@ class ReleaseDocsBuildTests(unittest.TestCase):
                 DOCS.load_script(root, "build_site_pages").build_site_pages()
                 for args in (
                     ("init", "-q"),
+                    ("config", "--local", "maintenance.auto", "false"),
                     ("add", "."),
                     (
+                        "-c",
+                        "maintenance.auto=false",
+                        "-c",
+                        "gc.auto=0",
                         "-c",
                         "user.name=Docs Test",
                         "-c",
@@ -522,6 +540,110 @@ class ReleaseDocsBuildTests(unittest.TestCase):
                     f"pip install review-sensei=={version}",
                     (output / "site/index.html").read_text(encoding="utf-8"),
                 )
+
+    def test_tag_build_derives_release_metadata_and_pins_from_older_source_docs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "source"
+            shutil.copytree(
+                self.root, root, ignore=shutil.ignore_patterns(".git", "__pycache__")
+            )
+            manifest_path = root / "docs/site/data/site-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["release_facts"].update(version="0.6.16", tag="v0.6.16")
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+            )
+            onboarding = root / "docs/site/getting-started/index.html"
+            onboarding.write_text(
+                onboarding.read_text(encoding="utf-8").replace("0.6.17", "0.6.16"),
+                encoding="utf-8",
+            )
+            history = (
+                '<aside class="historical">Release 0.6.15: '
+                "pip install review-sensei==0.6.15; @reviewsensei/cli@0.6.15; "
+                "REVIEWSENSEI_VERSION=0.6.15; review-sensei 0.6.15; "
+                "pip install review-sensei; dependency Release 1.0.0; @v5</aside>"
+            )
+            # Historical instructions may share a current installation page.
+            for page in (root / "docs/site/index.html", onboarding):
+                page.write_text(
+                    page.read_text(encoding="utf-8").replace(
+                        "</main>", history + "</main>"
+                    ),
+                    encoding="utf-8",
+                )
+            archive = root / "docs/site/history/v0.6.15/index.html"
+            archive.parent.mkdir(parents=True)
+            archive.write_text("<main>" + history + "</main>", encoding="utf-8")
+            DOCS.load_script(root, "build_site_pages").build_site_pages()
+            for args in (
+                ("init", "-q"),
+                ("config", "--local", "maintenance.auto", "false"),
+                ("add", "."),
+                (
+                    "-c",
+                    "maintenance.auto=false",
+                    "-c",
+                    "gc.auto=0",
+                    "-c",
+                    "user.name=Docs Test",
+                    "-c",
+                    "user.email=docs@example.test",
+                    "commit",
+                    "-qm",
+                    "Versioned package with older source docs",
+                ),
+            ):
+                subprocess.run(
+                    ["git", "-C", str(root), *args], check=True, capture_output=True
+                )
+            sha = subprocess.check_output(
+                ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+            ).strip()
+            real_check = subprocess.check_output
+
+            def git_output(args, **kwargs):
+                if args[-1] == "refs/tags/v0.6.17":
+                    return self.tag_sha + "\n"
+                return real_check(args, **kwargs)
+
+            output = Path(temporary) / "bundle"
+            with (
+                patch.dict(os.environ, {"GITHUB_SHA": sha}),
+                patch.object(DOCS, "tag_identity", return_value=(self.tag_sha, sha)),
+                patch.object(DOCS.subprocess, "check_output", side_effect=git_output),
+            ):
+                DOCS.build(root, output, "v0.6.17", 42, 1)
+            DOCS.verify_bundle(output, dict(self.selection, source_sha=sha))
+            for relative in (
+                "index.html",
+                "getting-started/index.html",
+                "history/v0.6.15/index.html",
+            ):
+                self.assertIn(
+                    history, (output / "site" / relative).read_text(encoding="utf-8")
+                )
+            staged = json.loads((output / "site/data/site-manifest.json").read_text())
+            self.assertEqual(staged["release_facts"]["version"], "0.6.17")
+            self.assertEqual(
+                json.loads(manifest_path.read_text())["release_facts"]["version"],
+                "0.6.16",
+            )
+            self.assertIn(
+                "@reviewsensei/cli@0.6.17",
+                (output / "site/getting-started/index.html").read_text(
+                    encoding="utf-8"
+                ),
+            )
+            self.assertIn(
+                "@reviewsensei/cli@0.6.16", onboarding.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(root), "status", "--porcelain"], text=True
+                ),
+                "",
+            )
 
     def test_provenance_schema_rejects_missing_identity_or_mutable_source(self):
         schema = json.loads(
@@ -614,17 +736,52 @@ class ReleaseDocsBuildTests(unittest.TestCase):
     def test_stale_onboarding_installation_pins_fail(self):
         with tempfile.TemporaryDirectory() as temporary:
             site = Path(temporary)
+            for relative in DOCS.INSTALLATION_TARGETS:
+                path = site / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(ROOT / "docs/site" / relative, path)
+            DOCS.rewrite_installation_versions(site, "0.6.17")
+            original = (site / "index.html").read_text(encoding="utf-8")
             for snippet in (
                 "pip install review-sensei==0.6.16",
                 "npx --yes @reviewsensei/cli@0.6.16",
+                "REVIEWSENSEI_VERSION=0.6.16",
+                "review-sensei 0.6.16",
                 "Release 0.6.16",
+                "pip install review-sensei",
             ):
-                (site / "index.html").write_text(snippet, encoding="utf-8")
+                (site / "index.html").write_text(
+                    original.replace("pip install review-sensei==0.6.17", snippet),
+                    encoding="utf-8",
+                )
                 with (
                     self.subTest(snippet=snippet),
                     self.assertRaisesRegex(ValueError, "installation version"),
                 ):
                     DOCS.validate_installation_versions(site, "0.6.17")
+
+    def test_missing_nested_duplicate_or_unknown_installation_targets_fail(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            site = Path(temporary)
+            for relative in DOCS.INSTALLATION_TARGETS:
+                path = site / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(ROOT / "docs/site" / relative, path)
+            home = site / "index.html"
+            original = home.read_text(encoding="utf-8")
+            start = "<!-- release-installation:home-cli:start -->"
+            end = "<!-- release-installation:home-cli:end -->"
+            for malformed in (
+                original.replace(end, ""),
+                original.replace(start, start + start),
+                original + start + "pip install review-sensei" + end,
+                original.replace("home-cli:end", "unknown:end"),
+                original.replace(end, start),
+            ):
+                with self.subTest(malformed=malformed[-100:]):
+                    home.write_text(malformed, encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "installation target"):
+                        DOCS.rewrite_installation_versions(site, "0.6.17")
 
 
 class ReleaseDocsWorkflowTests(unittest.TestCase):
@@ -643,8 +800,10 @@ class ReleaseDocsWorkflowTests(unittest.TestCase):
         self.assertIn("workflows: [Release]", workflow)
         self.assertNotIn("workflows: [CI]", workflow)
         self.assertNotIn("branches: [main]", workflow)
-        self.assertNotIn("secrets.", workflow)
-        qualifier, deploy = workflow.split("\n  deploy:\n", 1)
+        qualifier, remaining = workflow.split("\n  deploy:\n", 1)
+        deploy, update = remaining.split("\n  update-main:\n", 1)
+        self.assertNotIn("secrets.", qualifier)
+        self.assertNotIn("secrets.", deploy)
         self.assertNotIn("pages: write", qualifier)
         self.assertNotIn("id-token: write", qualifier)
         self.assertIn("ref: ${{ github.sha }}", qualifier)
@@ -661,6 +820,23 @@ class ReleaseDocsWorkflowTests(unittest.TestCase):
         self.assertIn("needs: qualify", deploy)
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertNotIn("git push", workflow)
+        self.assertIn("contents: read", update)
+        self.assertNotIn("\n      contents: write\n", update)
+        self.assertIn("permission-contents: write", update)
+        self.assertIn("environment: release-docs-main", update)
+        self.assertIn("secrets.RELEASE_DOCS_APP_PRIVATE_KEY", update)
+        self.assertIn("repositories: review-sensei", update)
+        self.assertIn("skip-token-revoke: false", update)
+        self.assertIn("GH_TOKEN: ${{ steps.docs-token.outputs.token }}", update)
+        self.assertNotIn("permission-administration", update)
+        self.assertNotIn("permission-workflows", update)
+        self.assertIn("actions: read", update)
+        self.assertNotIn("pages: write", update)
+        self.assertNotIn("id-token: write", update)
+        self.assertIn("digest-mismatch: error", update)
+        self.assertIn("ref: ${{ github.sha }}", update)
+        self.assertIn("persist-credentials: false", update)
+        self.assertIn("sync_release_docs.py", update)
 
 
 if __name__ == "__main__":

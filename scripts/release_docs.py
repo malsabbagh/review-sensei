@@ -20,6 +20,28 @@ REPOSITORY = "malsabbagh/review-sensei"
 TAG = re.compile(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)\Z")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 ARTIFACT = "review-sensei-release-docs"
+INSTALLATION_TARGETS = {
+    "index.html": ("home-cli",),
+    "getting-started/index.html": (
+        "release-heading",
+        "actions-pip",
+        "cli-pip",
+        "cli-npm",
+        "fallback-actions",
+        "fallback-cli",
+    ),
+}
+INSTALLATION_MARKER = re.compile(
+    r"<!-- release-installation:([a-z0-9-]+):(start|end) -->"
+)
+INSTALLATION_PATTERNS = (
+    r"(pip install review-sensei==)([0-9]+\.[0-9]+\.[0-9]+)",
+    r"(@reviewsensei/cli@)([0-9]+\.[0-9]+\.[0-9]+)",
+    r"(REVIEWSENSEI_VERSION=)([0-9]+\.[0-9]+\.[0-9]+)",
+    r"(review-sensei\s+)([0-9]+\.[0-9]+\.[0-9]+)",
+    r"(Release )([0-9]+\.[0-9]+\.[0-9]+)",
+)
+UNPINNED_PIP = r"pip install review-sensei(?![=\w-])"
 REQUIRED_JOBS = {
     "Build release documentation",
     "Publish npm packages with Trusted Publishing",
@@ -188,18 +210,63 @@ def file_inventory(directory: Path) -> dict[str, str]:
     return result
 
 
-def validate_installation_versions(site: Path, version: str) -> None:
-    patterns = (
-        r"pip install review-sensei==([0-9]+\.[0-9]+\.[0-9]+)",
-        r"@reviewsensei/cli@([0-9]+\.[0-9]+\.[0-9]+)",
-        r"Release ([0-9]+\.[0-9]+\.[0-9]+)",
-    )
-    for path in site.rglob("*.html"):
+def installation_spans(content: str, targets: tuple[str, ...]) -> list[tuple[int, int]]:
+    """Select reviewed current-installation spans, including JS string content."""
+    spans = []
+    seen = set()
+    opened = None
+    for marker in INSTALLATION_MARKER.finditer(content):
+        name, kind = marker.groups()
+        if name not in targets:
+            raise ValueError(f"unknown current installation target: {name}")
+        if kind == "start":
+            if opened is not None or name in seen:
+                raise ValueError("nested or duplicate current installation target")
+            opened = (name, marker.end())
+            seen.add(name)
+        else:
+            if opened is None or opened[0] != name:
+                raise ValueError("unmatched current installation target")
+            spans.append((opened[1], marker.start()))
+            opened = None
+    if opened is not None or seen != set(targets):
+        raise ValueError("missing or incomplete current installation target")
+    return spans
+
+
+def rewrite_installation_versions(site: Path, version: str) -> None:
+    for relative, targets in INSTALLATION_TARGETS.items():
+        path = site / relative
         content = path.read_text(encoding="utf-8")
-        for pattern in patterns:
-            if any(value != version for value in re.findall(pattern, content)):
+        for start, end in reversed(installation_spans(content, targets)):
+            snippet = re.sub(
+                UNPINNED_PIP,
+                f"pip install review-sensei=={version}",
+                content[start:end],
+            )
+            for pattern in INSTALLATION_PATTERNS:
+                snippet = re.sub(pattern, lambda match: match[1] + version, snippet)
+            content = content[:start] + snippet + content[end:]
+        path.write_text(content, encoding="utf-8")
+
+
+def validate_installation_versions(site: Path, version: str) -> None:
+    for relative, targets in INSTALLATION_TARGETS.items():
+        content = (site / relative).read_text(encoding="utf-8")
+        for start, end in installation_spans(content, targets):
+            snippet = content[start:end]
+            versions = [
+                match[1]
+                for pattern in INSTALLATION_PATTERNS
+                for match in re.findall(pattern, snippet)
+            ]
+            if (
+                not versions
+                or any(value != version for value in versions)
+                or re.search(UNPINNED_PIP, snippet)
+            ):
                 raise ValueError(
-                    f"site installation version disagrees with tag: {path.name}"
+                    f"site installation version disagrees with tag: {relative}"
                 )
 
 
@@ -227,17 +294,27 @@ def build(root: Path, output: Path, tag: str, run_id: int, attempt: int) -> None
     pages = load_script(root, "build_site_pages")
     pages.check_site_pages(root=root)
     file_inventory(root / "docs/site")
-    validate_installation_versions(root / "docs/site", version)
     if output.exists():
         raise ValueError("docs build output must be absent")
     output.mkdir(parents=True)
     site = output / "site"
     shutil.copytree(root / "docs/site", site)
+    # Package source is already versioned before tagging. Site release metadata
+    # and installation snippets are generated after the tag, without editing
+    # the immutable source or requiring a pre-tag documentation bump.
+    manifest_path = site / "data/site-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["release_facts"].update(version=version, tag=tag)
+    load_script(root, "validate_site_manifest").validate_site_manifest(
+        manifest, root=root
+    )
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     pages.build_site_pages(
-        manifest_path=site / "data/site-manifest.json",
+        manifest_path=manifest_path,
         providers_output=site / "providers/index.html",
         releases_output=site / "releases/index.html",
     )
+    rewrite_installation_versions(site, version)
     # Public docs/example links point to immutable source, including snippets
     # embedded in JS strings. The separate operator-managed @v5 channel stays
     # as documented; a package tag never promotes that channel.
@@ -248,13 +325,6 @@ def build(root: Path, output: Path, tag: str, run_id: int, attempt: int) -> None
             content = content.replace(
                 f"{prefix}{kind}/main/", f"{prefix}{kind}/{source_sha}/"
             )
-        # Unversioned installation commands would follow registry latest rather
-        # than this docs cutoff, including after a partially failed release.
-        content = re.sub(
-            r"pip install review-sensei(?![=\w-])",
-            f"pip install review-sensei=={version}",
-            content,
-        )
         content = content.replace(
             ">implemented on main<", ">implemented in this release<"
         )
@@ -266,6 +336,7 @@ def build(root: Path, output: Path, tag: str, run_id: int, attempt: int) -> None
         )
         content = content.replace("</main>", banner + "</main>")
         path.write_text(content, encoding="utf-8")
+    validate_installation_versions(site, version)
     provenance = {
         "schema_version": "1.0",
         "repository": REPOSITORY,

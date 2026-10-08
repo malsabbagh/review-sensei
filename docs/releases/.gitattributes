@@ -1,0 +1,3 @@
+# Preserve the verified artifact bytes on every platform.
+latest/** -text
+latest.md -text

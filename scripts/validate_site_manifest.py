@@ -128,18 +128,25 @@ def validate_release_alignment(root: Path, document: dict[str, Any]) -> None:
     release = document["release_facts"]
     expected = project_version(root)
     manifest_version = release["version"]
-    if manifest_version != expected:
+
+    # Main may prepare the next package version while its source site still
+    # records the last documentation cutoff. Release generation binds a staged
+    # copy to the actual tag; source metadata must never claim a future version.
+    def numeric(version: str) -> tuple[int, ...]:
+        return tuple(int(part) for part in version.split("."))
+
+    if numeric(manifest_version) > numeric(expected):
         raise SiteManifestError(
-            f"release_facts.version {manifest_version!r} does not match "
+            f"release_facts.version {manifest_version!r} is newer than "
             f"pyproject.toml {expected!r}"
         )
     npm_version = npm_launcher_version(root)
-    if manifest_version != npm_version:
+    if expected != npm_version:
         raise SiteManifestError(
-            f"release_facts.version {manifest_version!r} does not match "
+            f"pyproject.toml version {expected!r} does not match "
             f"{NPM_LAUNCHER_RELATIVE} {npm_version!r}"
         )
-    expected_tag = f"v{expected}"
+    expected_tag = f"v{manifest_version}"
     if release["tag"] != expected_tag:
         raise SiteManifestError(
             f"release_facts.tag {release['tag']!r} does not match {expected_tag!r}"

@@ -32,10 +32,19 @@ class SiteManifestValidationTests(unittest.TestCase):
         validated = validate_module.validate_site_manifest(
             document, root=ROOT, schema=schema
         )
-        self.assertEqual(
-            validated["release_facts"]["version"],
-            validate_module.project_version(ROOT),
+        self.assertLessEqual(
+            tuple(map(int, validated["release_facts"]["version"].split("."))),
+            tuple(map(int, validate_module.project_version(ROOT).split("."))),
         )
+
+    def test_source_site_may_lag_next_package_version_but_not_its_own_tag(self):
+        document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        document["release_facts"].update(version="0.1.2", tag="v0.1.2")
+        validate_module.validate_site_manifest(document, root=ROOT, schema=schema)
+        document["release_facts"]["tag"] = "v0.1.3"
+        with self.assertRaises(validate_module.SiteManifestError):
+            validate_module.validate_site_manifest(document, root=ROOT, schema=schema)
 
     def test_wrong_release_version_is_rejected(self) -> None:
         document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
@@ -183,7 +192,8 @@ class SiteManifestValidationTests(unittest.TestCase):
             self.assertIn("OpenRouter", provider_html)
             self.assertIn("not implemented", provider_html)
             self.assertIn(
-                f"Version {validate_module.project_version(ROOT)}", release_html
+                f"Version {json.loads(MANIFEST_PATH.read_text())['release_facts']['version']}",
+                release_html,
             )
             self.assertIn("review-sensei-run.yml", release_html)
 
