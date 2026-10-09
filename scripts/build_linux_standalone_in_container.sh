@@ -15,10 +15,17 @@ case "$target" in
 esac
 
 root=$(git rev-parse --show-toplevel)
-build_image=python:3.11-bookworm@sha256:b99029c95d3d37fb1e4e76d287f7984373dca77c665885986e31b2c95260c13c
-consumer_image=debian:12-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+# Docker publishes these official images to ECR Public as well as Docker Hub.
+# Preserve the exact multi-platform digests and the Debian 12 ABI baseline.
+build_image=public.ecr.aws/docker/library/python:3.11-bookworm@sha256:b99029c95d3d37fb1e4e76d287f7984373dca77c665885986e31b2c95260c13c
+consumer_image=public.ecr.aws/docker/library/debian:12-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 
-docker run --rm --platform "$platform" \
+# Admit both images before spending time on a build; never switch to a mutable
+# tag or silently retry against a different registry during either smoke test.
+docker pull --platform "$platform" "$build_image"
+docker pull --platform "$platform" "$consumer_image"
+
+docker run --rm --pull never --platform "$platform" \
   --user "$(id -u):$(id -g)" \
   --volume "$root:/workspace" --workdir /workspace \
   --env "TARGET=$target" --env HOME=/tmp --env PYTHONPATH=/workspace/src \
@@ -40,7 +47,7 @@ docker run --rm --platform "$platform" \
   '
 
 # No Python, Node, model credential, or network is available to this consumer.
-docker run --rm --platform "$platform" --network none \
+docker run --rm --pull never --platform "$platform" --network none \
   --user "$(id -u):$(id -g)" \
   --volume "$root:/workspace:ro" --workdir /workspace \
   --env "TARGET=$target" --env HOME=/tmp \
