@@ -13,6 +13,46 @@ follow [the runtime rollout plan](review-runtime-rollout.md). Its next-version
 candidate must be rechecked against all registries before preparation; `v5`
 promotion follows verified package publication rather than a floating install.
 
+## GitHub Release draft and publication
+
+For future tags containing this workflow, successful Python, native/npm and
+docs builds prepare a **draft** GitHub Release before the two protected package
+jobs request approval. Notes come from that version's reviewed, dated changelog
+section, with links to its exact source commit and Release run. The four assets
+are the validated wheel, source archive, `SHA256SUMS` and SPDX SBOM. Checksums
+cover all three payloads; their GitHub build attestations must bind the signed
+tag ref, source digest and Release workflow on GitHub-hosted runners.
+
+Both existing `npm` and `pypi` environment approvals remain required. Only after
+both publisher jobs succeed does the final job publish the verified draft.
+A draft or failed Release run cannot trigger released-docs Pages deployment.
+No additional GitHub App, private key, rules bypass or registry credential is
+needed: the two GitHub Release jobs use their short-lived workflow token with
+Contents write, Actions read and Attestations read. They cannot approve the
+publisher environments or sign tags.
+
+For an interrupted draft job, rerun that job in the original Release run with
+its retained original bundle. An exact matching draft resumes only missing
+assets. A dropped create/upload/publish response is reconciled through readback;
+an already published exact release with successful publisher proofs is a no-op.
+The finalizer never creates a missing draft or repairs missing assets: retry
+draft preparation first. Finalizer-only retries reuse prior successful build
+and publisher attempts, while a newer failed attempt blocks publication.
+
+Existing notes, tag/source/run identity and asset SHA-256/size must match.
+Unexpected assets, duplicate releases, missing remote digests, edits or moved
+tags hold publication without overwriting or deleting anything. Inspect the
+mismatch with the owner instead of forcing a retry. Retain Actions artifacts
+until release recovery is complete. GitHub has no transaction spanning tag,
+job and release state; final fresh checks and per-tag job serialization limit
+but cannot remove changes made concurrently by a repository administrator.
+`make_latest=legacy` asks GitHub to select the latest stable version rather than
+unconditionally promoting an older retry.
+
+Existing immutable tags keep the workflow at their original commit. This change
+does not update or backfill their releases. Review any older-release recovery
+separately; never move a tag to opt it into the new process.
+
 ## npm release paths (issue #103)
 
 The `Release` workflow's `publish-npm` job is the normal npm path for a
