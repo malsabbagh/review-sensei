@@ -153,6 +153,10 @@ class CompleteEvidenceTests(unittest.TestCase):
         )
         with self.assertRaises(BaselinePersistenceError):
             baseline_history_document(large, max_bytes=size - 1, require_complete=True)
+        with self.assertRaisesRegex(ReviewInputError, "byte allowance"):
+            baseline_history_document(
+                large, max_bytes=MAX_HISTORY_BASELINE_BYTES + 1, require_complete=True
+            )
 
     def test_broader_discovery_retains_twenty_resolved_findings_and_capacity_reason(
         self,
@@ -406,6 +410,16 @@ class CompleteEvidenceTests(unittest.TestCase):
             replace(result, persistence_status=None).content_digest(),
         )
         facts = approval_facts_from_result(result, enabled=True, app_authored=False)
+        self.assertEqual(type(facts).from_dict(facts.to_dict()), facts)
+        for status in ("complete", "partial", "incomplete", "summary-only"):
+            with self.subTest(legacy_status=status):
+                legacy = replace(facts, review_status=status, persistence_status=None)
+                self.assertEqual(type(facts).from_dict(legacy.to_dict()), legacy)
+        for status in ("complete", "incomplete", "summary-only"):
+            with self.subTest(status=status), self.assertRaises(ReviewInputError):
+                replace(facts, review_status=status)
+        with self.assertRaises(ReviewInputError):
+            replace(facts, persistence_status="unsupported")
         self.assertIn(
             "baseline-capacity-exceeded", evaluate_approval_facts(facts).blockers
         )

@@ -62,6 +62,13 @@ class ApprovalFacts:
     has_open_review_threads: bool | None = None
     persistence_status: str | None = None
 
+    def __post_init__(self) -> None:
+        if self.persistence_status is not None and (
+            self.persistence_status != "capacity-exceeded"
+            or self.review_status != "partial"
+        ):
+            raise ReviewInputError("approval facts persistence status is invalid")
+
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = {
             "schema_version": APPROVAL_ELIGIBILITY_SCHEMA_VERSION,
