@@ -1,5 +1,10 @@
 # Architecture
 
+For the operational flows and separate analysis, persistence, reassessment and
+approval bounds, see [Review pipelines and customization](review-pipelines.md).
+That guide is a fixed snapshot of `a598d4a` (0.6.18), not a live mirror of this
+architecture page. Refresh ownership and validation steps live in the guide itself.
+
 ## npm launcher and standalone boundary (issue #103)
 
 The npm surface is an adapter around the existing Python engine, not a second
