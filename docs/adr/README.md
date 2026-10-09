@@ -7,6 +7,15 @@ ADRs capture durable architecture decisions for this repository. Use `docs/adr/N
 
 Process: `docs/process/adr-process.md`
 
+## Unmerged proposals outside this tree
+
+[PR #236](https://github.com/malsabbagh/review-sensei/pull/236) contains proposed
+ADR 0072, lossless inline review evidence with lifecycle capacity. The
+[separate proposal snapshot](../proposed-evidence-persistence.md) links its
+inspected source commit and measurements. ADR 0072 is not a current-tree
+record or a shipped contract until that implementation lands; its eventual
+index entry belongs with the implementation change.
+
 ## Index
 
 | ADR | Status | Decision | Related issue | Notes |

@@ -90,7 +90,7 @@ sequenceDiagram
         alt Invalid inventory, stale authority, failure or ambiguous write
             Publish-->>Host: Refuse, fail or require publication reconciliation
         else Eligible publication
-            Publish->>Publish: Idempotent COMMENT review, inline/body findings and eligibility
+            Publish->>Publish: Idempotent policy-specific review, findings and eligibility
             Publish->>Publish: Evaluate exact-head check and separate approval gates
             Publish->>Ledger: Finalize publication against checkpointed result
             Publish-->>Caller: Published review<br/> check/approval outcome
@@ -137,13 +137,24 @@ need a supported attribution/admission reason. Completed review rounds have no
 PR-wide allowance cap. Failed attempts have a separate bounded policy.
 ([baseline compatibility and scope][baseline], [round admission][convergence])
 
-The publisher issues an exact-head `COMMENT` review. `ReviewSensei` is the check
-that represents merge eligibility: required fixes yield failure; incomplete or
-unpublished review yields action required. Automatic approval is a separate
-`APPROVE` operation under `github.reviews: auto-approve`, after complete current
-eligibility, no required blockers/human obligations, complete blocking-thread
-lookup, applicable provider qualification and PR state checks. `blocking` never
-auto-approves; `advisory` does not enforce the ReviewSensei merge gate or approve.
+Publication and enforcement depend on `github.reviews`. For a complete review,
+`auto-approve` keeps the `ReviewSensei` check successful and publishes
+`REQUEST_CHANGES` when required fixes remain, otherwise `COMMENT`. `blocking`
+publishes `COMMENT` and fails the check when required fixes remain. `advisory`
+publishes `COMMENT` with a neutral check. Incomplete or failed publication stays
+`action_required` in the enforcing modes. An App-authored PR remains a
+`COMMENT` rather than receiving `REQUEST_CHANGES` from its own author; the
+change-request branch also requires approval to be enabled.
+
+Automatic approval is a separate `APPROVE` operation under `auto-approve`, after
+complete current eligibility, no required blockers/human obligations, complete
+blocking-thread lookup, applicable qualification and PR state checks. `blocking`
+and `advisory` do not auto-approve. For the design contracts, see
+[ADR 0057](adr/0057-one-check-run-as-the-single-merge-authority.md),
+[ADR 0032](adr/0032-blocking-finding-classification-for-approvals.md) and
+[ADR 0056 host facts](adr/0056-host-fact-placement-and-honest-approval-presentation.md).
+Reconcile any disagreement with those decisions and the pinned runtime source
+before treating this guide as approval policy.
 Only unresolved **blocking ReviewSensei** threads enter the blocking-thread gate.
 Missing latest eligibility or incomplete scans cannot expose an older clean result.
 ([publisher][publication], [approval rules][approval], [check conclusion][checks])
@@ -253,7 +264,7 @@ sequenceDiagram
 ```
 
 Sources: [unified reassessment][reassessment], [budget admission][budgets],
-[batch execution][workflow], [GitHub evidence loader][controller], [assessment publication][human-controller],
+[batch execution in execution.py][executor], [GitHub evidence loader][controller], [assessment publication][human-controller],
 [broader CLI opt-in][cli], [eligibility union][approval]. Total prompt/output
 allowances are 2 MiB/1 MiB, separate from per-batch admission. Failed dispatches
 consume calls. One expansion wave, at most four context requests per response,
@@ -342,7 +353,7 @@ unified execution tightens supported adapter timeout/output settings to the
 remaining allowance. YAML timeout has a 3,600 s ceiling, and YAML calls accept
 1–8. At this SHA the direct normal/reply CLI applies the YAML call tightening to
 **unified** work; do not assume it changes legacy core `ResourceBudget`.
-([configuration defaults/parser][config], [CLI budget construction][cli], [executor][workflow])
+([configuration defaults/parser][config], [CLI budget construction][cli], [executor][executor])
 
 ### Context, replies, transport, and publication
 
@@ -615,184 +626,42 @@ to existing local/private egress constraints; it does not authorize a new cloud
 provider or arbitrary model endpoint.
 ([stage template validation][stages], [stage binding][provider-config], [execution][service])
 
-## Proposed persistence redesign (PR #236, not deployed)
+## Unmerged persistence proposal
 
-The current-state diagrams and tables above remain pinned to main `a598d4a`.
-This section is separately reconciled against draft
-[PR #236](https://github.com/malsabbagh/review-sensei/pull/236), inspected at
-[`9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d`](https://github.com/malsabbagh/review-sensei/tree/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d).
-It describes that implementation proposal, **not a merged, released or deployed
-feature**. Its [decision record][proposed-adr] remains Proposed.
+[PR #236](https://github.com/malsabbagh/review-sensei/pull/236) proposes different
+persistence and publication behavior. Its [separate review snapshot](proposed-evidence-persistence.md)
+contains the proposed diagram, current-versus-proposed limits and capacity
+measurements. That snapshot is pinned to the inspected implementation commit;
+it does not describe a merged, released or deployed feature. The current-state
+pipelines and limits on this page remain pinned to main `a598d4a`.
 
-The change keeps the existing authenticated inline ledger and atomic lifecycle.
-Small legacy-shaped evidence stays readable in its existing form. Larger
-inventories use `zlib-json-v1`: canonical JSON compressed with zlib, base64 data,
-exact decoded length and SHA-256. The digest checks content integrity; it does
-not replace producer/ledger authentication. Encoding is neither encryption nor
-redaction. No external evidence service, split-comment store or new YAML capacity
-knob is introduced. ([encoder/decoder][proposed-encoding], [baseline writer][proposed-baseline])
+## Refreshing this guide
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Analysis as Complete analysis
-    participant Writer as Proposed complete-evidence writer
-    participant Ledger as Existing authenticated ledger
-    participant Human as Human eligibility marker
-    participant Gate as Publication and approval gates
-    participant Reply as Existing bounded reassessment planner
-    Analysis->>Writer: All finding identities, criteria and covered paths
-    Writer->>Writer: Validate and deduplicate paths before counting
-    Writer->>Writer: Keep small legacy shape or encode full canonical inventory
-    Note over Writer,Ledger: Baseline 512 metadata findings maximum<br/>Decoded 2 MiB<br/> encoded at most 11,264 B, possibly less
-    alt Complete baseline fits actual allocation and lifecycle reserve
-        Writer->>Ledger: Atomic checkpoint of whole evidence and exact result
-    else Encoded, decoded or field bounds exceeded
-        Writer->>Ledger: Established partial checkpoint<br/> preserve prior baseline
-        Writer->>Gate: Full comments plus persistence_status capacity-exceeded
-        Note over Gate: Outcome remains partial<br/>Diagnostic baseline_capacity_exceeded<br/> approval withheld
-    end
-    Analysis->>Writer: Complete human inventory, if present
-    Writer->>Writer: Reserve space for all future resolved identities
-    Note over Writer,Human: Whole inventory count ceiling 250<br/>16 KiB body each / 2 MiB decoded<br/>8 paths per finding / 64 unique paths overall<br/>24 KiB persisted including every future resolution ID
-    alt Full inventory plus future resolution list fits
-        Writer->>Human: Whole immutable inventory<br/> mutable resolutions outside encoding
-        Human->>Gate: Exact eligibility<br/> version 3 when inventory is encoded
-        Gate->>Gate: Format overview plus complete finding prose and authority markers
-        Note over Gate: Input overview default 32 KiB<br/>Finding prose has separate allowance<br/>Complete framed body still at most 65,536 B
-        alt Complete framed review fits
-            Gate->>Gate: Publish and retain pending obligations and approval gates
-            opt Later reply to encoded inventory
-                Human->>Reply: Automatically select bounded evidence batches
-                Note over Reply: Even with legacy work default<br/>Normally 4 findings per batch / 16 KiB response<br/>8 total dispatches / 120 s by default<br/>Batching does not expand whole-inventory caps
-                Reply->>Gate: Validated decisions plus unresolved remainder
-            end
-        else Framed publication cannot fit
-            Gate-->>Analysis: Visible refusal<br/> no smaller obligation set or replaced prior authority
-        end
-    else Human inventory cannot fit
-        Writer-->>Gate: Visible refusal<br/> no shortened obligation set
-    end
-```
+This page is a source-verified snapshot, not a generated live limit registry.
+When runtime behavior changes, refresh the inspected SHA and relevant source
+links together with the affected prose, diagrams, examples and tables:
 
-Sources: [proposed baseline writer][proposed-baseline],
-[human inventory and resolution reserve][proposed-human],
-[capacity checkpoint][proposed-cli], [eligibility versions/propagation][proposed-approval],
-[publication formatting and final body admission][proposed-publication].
-When the proposed runtime is actually adopted, this diagram replaces the
-persistence-specific portion of the main flows and encoded human inventories
-automatically select the existing bounded reassessment planner on replies.
-Small legacy-shaped inventories retain legacy routing unless unified mode is
-selected. Lens invocation behavior remains as described above.
-([reply routing][proposed-human-controller])
+- Check `validation.py`, `models.py`, `outcomes.py`, `budgets.py` and `stages.py`
+  for input/result, retry, work and lens bounds.
+- Check `baseline.py`, `session.py`, `human_assessment.py` and the GitHub
+  publication, approval, checks, conversation and HTTP adapters for persistence,
+  evidence, publication and policy gates.
+- Check `configuration.py`, `cli.py`, provider adapters/profiles and the
+  reusable workflow for defaults, precedence and route-specific wiring.
+- Validate each YAML example with `review-sensei config validate --config FILE`
+  and `config show --config FILE --explain`; validate category/stage JSON with
+  the packaged constructors and CLI examples with the actual argument parser.
+- Parse the Mermaid sequences, check every relative document target, and check
+  each pinned source path against its stated commit. Proposal paths must be
+  checked at the proposal SHA, not expected in this current-main checkout.
 
-| Boundary | Current inspected main | PR #236 proposal at inspected head |
-| --- | --- | --- |
-| Complete baseline findings | 2 persisted findings | Whole runtime metadata inventory, at most 512; normal result still at most 250 comments |
-| Baseline byte capacity | 11,264 B maximum, allocation can be lower | Same encoded/allocation ceiling, plus strict 2 MiB decoded bound; compression does not guarantee fit |
-| Baseline path counting | 512 occurrences before deduplication | 512 validated unique paths after deduplication; related paths still at most 64 |
-| Baseline persisted fields | 256-character path/identity, 128-character defect kind | Canonical paths up to 4,096 UTF-8 bytes; symbol/defect-kind validation at 256 bytes; closed expanded schema/runtime checks |
-| History and record growth | 12,288 B history / 20,480 B record, 1,024 B baseline reserve | Unchanged envelopes and reserve; no whole-inventory projection |
-| Human inventory | 20 findings; 2 KiB/body; 24 KiB whole JSON inventory | 250 findings; full validated 16 KiB/body; 2 MiB decoded; 24 KiB persisted envelope **including all future resolution identities** |
-| Human resolutions | Included in existing bounded JSON | Mutable resolved list outside immutable compressed inventory; every subset preflighted against all-resolved capacity |
-| Human evidence paths | At most 8/finding, 64 unique/inventory | Unchanged whole-inventory restriction; smaller provider batches do not enlarge it |
-| Reassessment per request | At most 20 decisions; unified normally packs 4 | Same per-request caps; trusted multi-batch aggregate can retain whole inventory |
-| Rich-inventory reply routing | Whole inventory limited to 20; unified mode explicitly selected | Encoded inventories automatically enter bounded multi-batch reassessment even with the legacy default; the direct legacy request still refuses more than 20 pending findings |
-| Latest human eligibility | Versions 1/2 | Versions 1/2 readable; encoded inventory requires version `3` |
-| Publication text allowance | Formatted summary, including body-placed findings, charged to input-summary limit (default 32 KiB); final body at most 65,536 B | Finding prose charged separately from input overview; complete framed review still at most 65,536 B |
-| Baseline capacity status | `partial` with `coverage-partial` | `partial` remains fail-closed, adds `persistence_status: capacity-exceeded` and diagnostic `baseline_capacity_exceeded`; analysis manifest is preserved |
+The ADRs own design decisions; source at the inspected revision establishes
+runtime behavior. Reconcile any disagreement explicitly before publishing a
+refresh. Keep the unmerged snapshot separate, refresh its pin if the reviewed
+proposal changes, and move its behavior into the current guide only after the
+implementation is merged and the documented runtime is verified. No generated
+infrastructure or silent limit updates are implied.
 
-Sources: [baseline bounds/shape][proposed-baseline], [human bounds and request guard][proposed-human],
-[status construction][proposed-cli], [eligibility facts][proposed-approval].
-No capacity status clears a human-adjudication obligation. The persistence cause
-is included in the exact result digest and retained across delayed finalization
-and broader-discovery eligibility union. CLI/review/check presentation names
-complete analysis, unavailable baseline persistence and withheld approval rather
-than claiming incomplete analysis. Ordinary incomplete-analysis results retain
-their prior semantics. ([result contract][proposed-models], [presentation][proposed-presentation], [check mapping][proposed-checks])
-
-Readers bound encoded bytes before decoding, bound decompression to the claimed
-length plus one, require exact length/digest and terminated streams without
-trailing data, reject noncanonical/duplicate-key JSON, then validate the expanded
-schema/runtime fields. A large high-entropy inventory can still exceed encoded
-capacity; oversized human markers or formatted review bodies still refuse
-publication. Result limits, provider budgets, complete-patch requirements,
-transport scans, current source/head fences and approval gates remain independent.
-([strict decoder][proposed-encoding], [writer checks][proposed-baseline], [human marker checks][proposed-human], [publication][proposed-publication])
-
-The proposal removes the current three-finding persistence cliff and an
-additional publication bottleneck. The publisher now allows the validated
-input-summary allowance plus admitted finding-body bytes, capped at 65,536
-bytes, for its formatted overview. The original input summary, per-finding
-prose and total-result limits still apply. The complete review body, including
-eligibility, finding-identity and discussion markers, must separately fit
-65,536 bytes before publication. A 41,425-byte formatted fifty-finding review
-can therefore publish as a 58,449-byte framed body; it is no longer incorrectly
-charged entirely to the 32,768-byte input-summary allowance.
-([publication admission][proposed-publication], [qualification decision][proposed-adr])
-
-The following measurements use the final proposal's varied synthetic fixtures:
-distinct failure narratives, symbols, paths and request/receipt digests, with
-about 555 prose bytes per finding. Above 32 findings they reuse those 32 paths.
-These are **reproducible fixtures, not production-frequency estimates or a
-capacity guarantee**. Baselines retain identities and criteria, not prose.
-
-| Findings | Baseline encoded bytes | Human envelope needed with every finding resolved | Complete framed human review |
-| --- | ---: | ---: | --- |
-| 12 | 2,354 | 9,123 | 22,903 B; published |
-| 21 | 3,658 | 7,297 | 26,998 B; published |
-| 50 | 7,643 | 15,132 | 58,449 B; published |
-| 100 | 14,391; refused | 28,714; refused | No authority published |
-| 250 | 34,431; refused | 68,841; refused | No authority published |
-
-Twelve human findings retain plain legacy JSON; larger cases use compression,
-which explains the decrease at 21 findings. The baseline fixture first exceeds
-the 11,264-byte ceiling at 77 findings. With four maximal dispositions and four
-maximal retained continuation attestations, the remaining allowance is 10,897
-bytes and the first refusal is at 75. Fifty findings plus retained state, a
-publication transaction and three full progress entries occupy a valid
-16,765-byte record, below 20,480 bytes. These thresholds apply to these fixtures;
-longer distinct fields or different retained state can fit fewer findings.
-([varied capacity/publication fixtures][proposed-varied-capacity-tests],
-[lifecycle/restart fixtures][proposed-capacity-tests], [measured qualification][proposed-adr])
-
-Persistence and publication still need separate checks. Fifty findings with
-about 1,110 prose bytes each fit the human envelope at 22,320 bytes including
-all resolutions, but their complete framed review exceeds the GitHub body
-limit and is refused without replacing prior authority. Fifty findings with
-about 1,665 prose bytes each exceed the human envelope itself. A separate
-65-unique-path case fails the whole-inventory path restriction before any
-remote mutation. Smaller provider batches do not change these limits.
-([refusal and authority-preservation tests][proposed-varied-capacity-tests], [qualification][proposed-adr])
-
-The triggering public PR #231 workload provides twelve published explanations
-and paths, plus its exact two-obligation human eligibility. Its discarded
-original baseline metadata is unavailable. A reconstruction using those
-explanations with replacement symbol/evidence identities and fixture cache
-metadata needs 2,162 encoded baseline bytes; the exact published human inventory
-grows from 2,055 to 2,188 bytes when both obligations are resolved. This supports
-useful capacity for the triggering workload without claiming a byte-for-byte
-replay of the missing baseline. ([reconstruction and limitation][proposed-adr])
-
-The unchanged single-record bounds remain material for larger normal review
-results. The design improves capacity for modest inventories, but does **not**
-make every otherwise-valid 250-comment review durably reusable or publishable.
-Inspect the explicit capacity outcome and remaining human obligations instead
-of treating compression or a higher analysis target as a promise of complete
-persistence or approval.
-
-Deploy compatible ledger readers, reply readers and delayed approval finalizers
-**before enabling these writers**. Existing valid small records need no forced
-reset. Older readers cannot safely consume richer encoded evidence/version 3;
-rollback requires restoring compatible readers, not deleting obligations or
-falling back to an earlier clean marker. The implementation PR itself does not
-merge, release, deploy, move a channel or rerun an affected hosted review.
-([rollout decision][proposed-adr], [reader-compatibility gate][proposed-reader-check])
-
-For existing experimental unified-work deployment constraints, see
-[shared review work](shared-review-work.md). For the current-main count/reserve
-rationale, see [ADR 0070](adr/0070-bounded-checkpoint-overflow.md) and
-[ADR 0053](adr/0053-bounded-durable-convergence-history.md).
 
 [cli]: https://github.com/malsabbagh/review-sensei/blob/a598d4ae47892d243ce67333bcc5c182da95637a/src/review_sensei/cli.py
 
@@ -829,7 +698,7 @@ rationale, see [ADR 0070](adr/0070-bounded-checkpoint-overflow.md) and
 
 [reassessment]: https://github.com/malsabbagh/review-sensei/blob/a598d4ae47892d243ce67333bcc5c182da95637a/src/review_sensei/reassessment_work.py
 
-[workflow]: https://github.com/malsabbagh/review-sensei/blob/a598d4ae47892d243ce67333bcc5c182da95637a/src/review_sensei/execution.py
+[executor]: https://github.com/malsabbagh/review-sensei/blob/a598d4ae47892d243ce67333bcc5c182da95637a/src/review_sensei/execution.py
 
 [default-stage]: https://github.com/malsabbagh/review-sensei/blob/a598d4ae47892d243ce67333bcc5c182da95637a/src/review_sensei/default_stages/01-default-review.json
 
@@ -864,31 +733,3 @@ rationale, see [ADR 0070](adr/0070-bounded-checkpoint-overflow.md) and
 [openai-adapter]: https://github.com/malsabbagh/review-sensei/blob/a598d4ae47892d243ce67333bcc5c182da95637a/src/review_sensei/providers/openai_compatible.py
 
 [openrouter-adapter]: https://github.com/malsabbagh/review-sensei/blob/a598d4ae47892d243ce67333bcc5c182da95637a/src/review_sensei/providers/openrouter.py
-
-[proposed-adr]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/docs/adr/0072-lossless-inline-review-evidence.md
-
-[proposed-encoding]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/bounded_evidence.py
-
-[proposed-baseline]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/baseline.py
-
-[proposed-human]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/human_assessment.py
-
-[proposed-cli]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/cli.py
-
-[proposed-approval]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/hosting/github/approval.py
-
-[proposed-models]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/models.py
-
-[proposed-presentation]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/presentation.py
-
-[proposed-checks]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/hosting/github/checks.py
-
-[proposed-publication]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/hosting/github/publication.py
-
-[proposed-reader-check]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/scripts/check_review_reader_compatibility.py
-
-[proposed-human-controller]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/hosting/github/human_assessment.py
-
-[proposed-capacity-tests]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/tests/test_complete_evidence.py
-
-[proposed-varied-capacity-tests]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/tests/test_evidence_capacity.py
