@@ -11,10 +11,12 @@ Process: `docs/process/adr-process.md`
 
 [PR #236](https://github.com/malsabbagh/review-sensei/pull/236) contains proposed
 ADR 0072, lossless inline review evidence with lifecycle capacity. The
-[separate proposal snapshot](../proposed-evidence-persistence.md) links its
-inspected source commit and measurements. ADR 0072 is not a current-tree
-record or a shipped contract until that implementation lands; its eventual
-index entry belongs with the implementation change.
+[separate proposal snapshot](../proposed-evidence-persistence.md) is a
+current-tree documentation file added by PR #235, linking the inspected proposal
+commit and measurements. The ADR 0072 file itself is **not in this tree**; it
+exists only in the separate PR #236 source snapshot. This pointer does not make
+it a shipped contract. Its eventual index entry belongs with the implementation
+change.
 
 ## Index
 

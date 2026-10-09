@@ -2,6 +2,9 @@
 
 For the operational flows and separate analysis, persistence, reassessment and
 approval bounds, see [Review pipelines and customization](review-pipelines.md).
+That guide is a fixed snapshot of `a598d4a` (0.6.18), not a live mirror of this
+architecture page. Maintainers changing a documented contract should refresh
+its pin, examples and diagrams alongside the relevant architecture/ADR change.
 
 ## npm launcher and standalone boundary (issue #103)
 

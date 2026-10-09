@@ -10,6 +10,14 @@ This section is separately reconciled against draft
 It describes that implementation proposal, **not a merged, released or deployed
 feature**. Its [decision record][proposed-adr] remains Proposed.
 
+The inspected PR #236 head was `9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d`; all
+14 source paths were verified at that commit. These are immutable commit URLs,
+not moving branch URLs. They remain usable only while GitHub retains reachable
+content for that inspected commit. A rebase, deletion or retention change can
+make an old snapshot unavailable. Recheck reachability and the reviewed head
+before publishing or refreshing this snapshot; report unavailable evidence
+instead of silently substituting another revision or claiming its measurements.
+
 The change keeps the existing authenticated inline ledger and atomic lifecycle.
 Small legacy-shaped evidence stays readable in its existing form. Larger
 inventories use `zlib-json-v1`: canonical JSON compressed with zlib, base64 data,

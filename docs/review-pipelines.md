@@ -4,6 +4,10 @@ This guide describes the implementation inspected at
 [`a598d4ae47892d243ce67333bcc5c182da95637a`](https://github.com/malsabbagh/review-sensei/tree/a598d4ae47892d243ce67333bcc5c182da95637a)
 (main, package 0.6.18). Source links below pin that revision. A later branch or
 release can change these contracts; validate against its source before rollout.
+Snapshot SHA: `a598d4ae47892d243ce67333bcc5c182da95637a`. Refresh owner: repository
+maintainers changing review/configuration contracts. This historical snapshot
+does not automatically follow main or the latest release; update it deliberately
+using the [refresh checklist](#refreshing-this-guide).
 The diagrams render directly on GitHub. KiB and MiB mean 1,024 and 1,048,576
 bytes. Byte limits are UTF-8 or serialized bytes as specified, not model tokens.
 
@@ -18,6 +22,9 @@ Start with the [normal review](#normal-review), [reply routes](#reply-routes),
 | Was the complete baseline/inventory persisted? | Checkpoint result and diagnostics, latest authenticated ledger/eligibility | That pending human obligations are resolved |
 | Are human obligations or required fixes still open? | Exact finding identities, validated reassessment, blocking-thread scan | That the PR is eligible for approval |
 | May this exact head be approved? | Current PR/base/head, latest eligibility, policy, qualification, coverage and thread gates | That a provider's clean-looking prose is authoritative |
+
+Table and examples in this section describe inspected main `a598d4a`, not an
+unmerged proposal or a later release.
 
 The distinction matters on this revision: analysis can enumerate every file and
 produce a valid 12-finding result, yet fail the **two-finding durable baseline**
