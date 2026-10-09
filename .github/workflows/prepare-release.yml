@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Unpublished X.Y.Z version; reviewed Unreleased notes become this release
+        description: Unpublished X.Y.Z version; use authored notes or generate exact merged-source notes
         required: true
         type: string
       release_date:

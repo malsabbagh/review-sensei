@@ -576,6 +576,13 @@ rollback/yank, and compromised-release response are documented in
 `docs/releasing.md`. The workflow cannot reserve the PyPI project or decide
 whether a maintainer should publish; those are explicit external operations.
 
+Release Marshal keeps authored changelog notes when supplied and otherwise
+generates escaped commit-title notes from the exact first-parent range since the
+previous version's signed annotated tag. Notes, version metadata and generated
+docs share the existing allowlisted direct App commit and receipt digest. Exact
+prepared-source CI still precedes signing and owner publisher approval. See
+[ADR 0071](adr/0071-generated-release-notes.md).
+
 Supported release combinations are bound by a versioned compatibility
 manifest: workflow commit, Python distribution digest, npm artifact digests,
 public schema version, and Worker identity. Build output is valid only when
