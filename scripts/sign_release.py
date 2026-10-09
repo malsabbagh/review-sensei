@@ -10,6 +10,9 @@ import re
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +22,48 @@ import release_docs_bot as bot
 from sync_release_docs import git
 
 OWNER_ID = 13791232
+
+
+class Operation(Enum):
+    IMPORT_KEY = "gpg import dedicated key"
+    LIST_KEYS = "gpg list dedicated keys"
+    SIGN_TAG = "git sign release tag"
+    STOP_AGENT = "gpgconf stop signing agent"
+    DELETE_TAG = "git delete local release tag"
+
+
+class SigningCommandError(ValueError):
+    """Only fixed operation labels and exit status, never command diagnostics."""
+
+
+def cleanup(actions: list[tuple[str, Callable[[], Any]]]) -> None:
+    primary_error = sys.exception()
+    failures = []
+    for operation, action in actions:
+        try:
+            action()
+        except Exception as exc:
+            # Cleanup must continue and cannot replace an active signing error.
+            # Only our own command error has guaranteed public-only content.
+            failures.append(
+                str(exc)
+                if isinstance(exc, SigningCommandError)
+                else f"{operation} failed ({type(exc).__name__}); private diagnostics withheld"
+            )
+    if failures:
+        detail = "; ".join(failures)
+        if primary_error is None:
+            raise ValueError(f"release signing cleanup failed: {detail}")
+        print(f"release signing cleanup warning: {detail}", file=sys.stderr)
+
+
+@contextmanager
+def signing_home() -> Iterator[Path]:
+    temporary = tempfile.TemporaryDirectory(prefix="release-signing-")
+    try:
+        yield Path(temporary.name)
+    finally:
+        cleanup([("remove temporary signing directory", temporary.cleanup)])
 
 
 def signing_identity() -> tuple[str, str]:
@@ -82,12 +127,25 @@ def qualify(root: Path, sha: str, version: str, date: str) -> dict[str, Any]:
     return receipt
 
 
-def run(args: list[str], *, env: dict[str, str], cwd: Path | None = None) -> str:
+def run(
+    args: list[str],
+    *,
+    operation: Operation,
+    env: dict[str, str],
+    cwd: Path | None = None,
+) -> str:
     # Never print command output on failure: GPG and credential tools can
     # return private input in diagnostics. Only public tag metadata is emitted.
-    result = subprocess.run(args, env=env, cwd=cwd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(args, env=env, cwd=cwd, capture_output=True, text=True)
+    except OSError as exc:
+        raise SigningCommandError(
+            f"{operation.value} failed ({type(exc).__name__}); private diagnostics withheld"
+        ) from None
     if result.returncode:
-        raise ValueError("release signing command failed; private diagnostics withheld")
+        raise SigningCommandError(
+            f"{operation.value} failed with exit code {result.returncode}; private diagnostics withheld"
+        )
     return result.stdout
 
 
@@ -118,8 +176,7 @@ def sign(root: Path, sha: str, version: str, date: str) -> dict[str, str]:
     # belongs to the existing Release run, never a second signing operation.
     prep.unused(version)
     tag = "v" + version
-    with tempfile.TemporaryDirectory(prefix="release-signing-") as temporary:
-        home = Path(temporary)
+    with signing_home() as home:
         home.chmod(0o700)
         key = home / "key.asc"
         password = home / "passphrase"
@@ -146,8 +203,12 @@ def sign(root: Path, sha: str, version: str, date: str) -> dict[str, str]:
         gpg = ["gpg", "--batch", "--no-tty", "--homedir", str(home)]
         created = False
         try:
-            run([*gpg, "--import", str(key)], env=env)
-            keys = run([*gpg, "--with-colons", "--list-secret-keys"], env=env)
+            run([*gpg, "--import", str(key)], operation=Operation.IMPORT_KEY, env=env)
+            keys = run(
+                [*gpg, "--with-colons", "--list-secret-keys"],
+                operation=Operation.LIST_KEYS,
+                env=env,
+            )
             fingerprints = re.findall(r"^fpr:::::::::([A-F0-9]+):", keys, re.MULTILINE)
             if fingerprints != [fingerprint]:
                 raise ValueError(
@@ -189,6 +250,7 @@ def sign(root: Path, sha: str, version: str, date: str) -> dict[str, str]:
             ]
             run(
                 [*command, "tag", "--sign", tag, sha, "-m", f"ReviewSensei {version}"],
+                operation=Operation.SIGN_TAG,
                 env=env,
             )
             created = True
@@ -200,7 +262,9 @@ def sign(root: Path, sha: str, version: str, date: str) -> dict[str, str]:
                 text=True,
             )
             if verified.returncode:
-                raise ValueError("dedicated tag signature failed local verification")
+                raise SigningCommandError(
+                    f"git verify release tag failed with exit code {verified.returncode}; private diagnostics withheld"
+                )
             valid_signature(verified.stderr, fingerprint)
             print(
                 json.dumps(
@@ -250,7 +314,7 @@ def sign(root: Path, sha: str, version: str, date: str) -> dict[str, str]:
             # object fails above regardless of the push return code.
             if pushed.returncode:
                 print(
-                    "Tag push response was unsuccessful; exact GitHub-verified object reconciled"
+                    f"git push release tag returned exit code {pushed.returncode}; exact GitHub-verified object reconciled"
                 )
             return {
                 "tag": tag,
@@ -260,13 +324,28 @@ def sign(root: Path, sha: str, version: str, date: str) -> dict[str, str]:
             }
         finally:
             # Ephemeral runner keyring; no private artifact/cache is uploaded.
-            subprocess.run(
-                ["gpgconf", "--homedir", str(home), "--kill", "all"],
-                env=env,
-                capture_output=True,
-            )
+            actions: list[tuple[str, Callable[[], Any]]] = [
+                (
+                    Operation.STOP_AGENT.value,
+                    lambda: run(
+                        ["gpgconf", "--homedir", str(home), "--kill", "all"],
+                        operation=Operation.STOP_AGENT,
+                        env=env,
+                    ),
+                )
+            ]
             if created:
-                git(root, "tag", "--delete", tag)
+                actions.append(
+                    (
+                        Operation.DELETE_TAG.value,
+                        lambda: run(
+                            ["git", "-C", str(root), "tag", "--delete", tag],
+                            operation=Operation.DELETE_TAG,
+                            env=env,
+                        ),
+                    )
+                )
+            cleanup(actions)
 
 
 def main() -> int:

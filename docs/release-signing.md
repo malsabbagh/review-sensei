@@ -90,6 +90,13 @@ signature, pushes a new annotated tag without force, and requires GitHub's
 verified object/source readback. The App token triggers the existing Release
 workflow; personal owner credentials are not stored in Actions.
 
+Command failures report fixed operation names and exit codes, never raw command
+arguments or stdout/stderr. Cleanup attempts agent shutdown, local tag removal
+and temporary keyring removal independently. If signing already failed, cleanup
+warnings preserve that original error. If signing succeeded but cleanup fails,
+the run fails rather than reporting success. Inspect the emitted public tag
+object/source SHA before recovery; cleanup never deletes a remote tag.
+
 Inspect exact source/tag SHA, GPG fingerprint and Release builds before
 approving the two publish jobs. GitHub assets wait for both publications;
 successful Release is still required for released docs/Pages. If a tag exists,

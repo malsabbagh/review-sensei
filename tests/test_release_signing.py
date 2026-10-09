@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stderr
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -147,14 +148,112 @@ class SigningAuthorityTests(unittest.TestCase):
 
     def test_command_failure_cannot_print_private_diagnostics(self):
         failure = subprocess.CompletedProcess(
-            [], 1, "synthetic-private-placeholder", "synthetic-passphrase-placeholder"
+            [], 23, "synthetic-private-placeholder", "synthetic-passphrase-placeholder"
         )
         with (
             patch.object(SIGN.subprocess, "run", return_value=failure),
             self.assertRaises(ValueError) as exc,
         ):
-            SIGN.run(["gpg", "--import", "key.asc"], env={})
+            SIGN.run(
+                ["synthetic-private-program", "synthetic-private-argument"],
+                operation=SIGN.Operation.IMPORT_KEY,
+                env={},
+            )
+        self.assertIn(
+            "gpg import dedicated key failed with exit code 23", str(exc.exception)
+        )
         self.assertNotIn("placeholder", str(exc.exception))
+        self.assertNotIn("synthetic-private", str(exc.exception))
+
+    def test_command_launch_failure_has_safe_operation_without_os_diagnostics(self):
+        with (
+            patch.object(
+                SIGN.subprocess,
+                "run",
+                side_effect=FileNotFoundError("synthetic-private-path"),
+            ),
+            self.assertRaises(SIGN.SigningCommandError) as exc,
+        ):
+            SIGN.run(
+                ["synthetic-private-program"], operation=SIGN.Operation.SIGN_TAG, env={}
+            )
+        self.assertIn(
+            "git sign release tag failed (FileNotFoundError)", str(exc.exception)
+        )
+        self.assertNotIn("synthetic-private", str(exc.exception))
+
+
+class SigningCleanupTests(unittest.TestCase):
+    def test_cleanup_preserves_original_exception_and_attempts_every_action(self):
+        original = ValueError("original qualification failure")
+        first = Mock(
+            side_effect=SIGN.SigningCommandError(
+                "gpgconf stop signing agent failed with exit code 9; private diagnostics withheld"
+            )
+        )
+        second = Mock(side_effect=RuntimeError("synthetic-private-diagnostics"))
+        errors = io.StringIO()
+        with redirect_stderr(errors), self.assertRaises(ValueError) as exc:
+            try:
+                raise original
+            finally:
+                SIGN.cleanup(
+                    [
+                        ("stop signing agent", first),
+                        ("delete local release tag", second),
+                    ]
+                )
+        self.assertIs(exc.exception, original)
+        first.assert_called_once_with()
+        second.assert_called_once_with()
+        self.assertIn("exit code 9", errors.getvalue())
+        self.assertIn(
+            "delete local release tag failed (RuntimeError)", errors.getvalue()
+        )
+        self.assertNotIn("synthetic-private", errors.getvalue())
+
+    def test_cleanup_failure_after_success_still_fails_and_attempts_every_action(self):
+        first = Mock(side_effect=OSError("synthetic-private-diagnostics"))
+        second = Mock()
+        with self.assertRaisesRegex(
+            ValueError, "release signing cleanup failed"
+        ) as exc:
+            SIGN.cleanup(
+                [("stop signing agent", first), ("delete local release tag", second)]
+            )
+        first.assert_called_once_with()
+        second.assert_called_once_with()
+        self.assertNotIn("synthetic-private", str(exc.exception))
+
+    def test_temporary_directory_cleanup_preserves_primary_or_fails_success(self):
+        for primary in (None, ValueError("original signing failure")):
+            with self.subTest(primary=primary):
+                temporary = Mock(name="synthetic-temporary-directory")
+                temporary.name = str(ROOT)
+                temporary.cleanup.side_effect = OSError("synthetic-private-path")
+                errors = io.StringIO()
+                with (
+                    patch.object(
+                        SIGN.tempfile, "TemporaryDirectory", return_value=temporary
+                    ),
+                    redirect_stderr(errors),
+                    self.assertRaises(ValueError) as exc,
+                ):
+                    with SIGN.signing_home() as home:
+                        self.assertEqual(home, ROOT)
+                        if primary is not None:
+                            raise primary
+                temporary.cleanup.assert_called_once_with()
+                if primary is not None:
+                    self.assertIs(exc.exception, primary)
+                else:
+                    self.assertIn(
+                        "remove temporary signing directory failed (OSError)",
+                        str(exc.exception),
+                    )
+                self.assertNotIn(
+                    "synthetic-private", errors.getvalue() + str(exc.exception)
+                )
 
 
 class SigningOperationTests(unittest.TestCase):
@@ -167,12 +266,15 @@ class SigningOperationTests(unittest.TestCase):
         bad_key=False,
         fail_push=False,
         late_main=False,
+        fail_agent=False,
+        fail_delete=False,
     ):
         calls = []
         secret_locations = []
 
-        def safe_run(args, *, env, cwd=None):
+        def safe_run(args, *, operation, env, cwd=None):
             calls.append(args)
+            self.assertIsInstance(operation, SIGN.Operation)
             self.assertNotIn("RELEASE_SIGNING_PRIVATE_KEY", env)
             self.assertNotIn("RELEASE_SIGNING_PASSPHRASE", env)
             self.assertEqual(env["GIT_CONFIG_GLOBAL"], os.devnull)
@@ -182,6 +284,12 @@ class SigningOperationTests(unittest.TestCase):
                 (home / "key.asc").read_text(), IDENTITY["RELEASE_SIGNING_PRIVATE_KEY"]
             )
             self.assertNotIn(IDENTITY["RELEASE_SIGNING_PASSPHRASE"], " ".join(args))
+            if (operation is SIGN.Operation.STOP_AGENT and fail_agent) or (
+                operation is SIGN.Operation.DELETE_TAG and fail_delete
+            ):
+                raise SIGN.SigningCommandError(
+                    f"{operation.value} failed with exit code 9; private diagnostics withheld"
+                )
             if "--list-secret-keys" in args:
                 fingerprint = "D" * 40 if bad_key else FINGERPRINT
                 return f"fpr:::::::::{fingerprint}:\nuid:::::::::ReviewSensei Release Marshal <{EMAIL}>:\n"
@@ -241,9 +349,30 @@ class SigningOperationTests(unittest.TestCase):
                     return_value=("d" * 40 if bad_remote else TAG_OBJECT, SHA),
                 )
             )
-            if any((fail_verify, bad_remote, existing, bad_key, late_main)):
-                with self.assertRaises(ValueError):
+            if any(
+                (
+                    fail_verify,
+                    bad_remote,
+                    existing,
+                    bad_key,
+                    late_main,
+                    fail_agent,
+                    fail_delete,
+                )
+            ):
+                with self.assertRaises(ValueError) as exc:
                     SIGN.sign(ROOT, SHA, VERSION, DATE)
+                if late_main:
+                    self.assertEqual(
+                        str(exc.exception), "main/CI advanced before immutable tag push"
+                    )
+                elif fail_verify:
+                    self.assertIn(
+                        "git verify release tag failed with exit code 1",
+                        str(exc.exception),
+                    )
+                elif fail_agent or fail_delete:
+                    self.assertIn("release signing cleanup failed", str(exc.exception))
             else:
                 self.assertEqual(
                     SIGN.sign(ROOT, SHA, VERSION, DATE)["tag_object_sha"], TAG_OBJECT
@@ -287,6 +416,23 @@ class SigningOperationTests(unittest.TestCase):
     def test_dropped_push_response_reconciles_only_exact_github_verified_object(self):
         self.exercise(fail_push=True)
         self.exercise(fail_push=True, bad_remote=True)
+
+    def test_cleanup_failure_preserves_signing_failure_and_removes_secret_directory(
+        self,
+    ):
+        errors = io.StringIO()
+        with redirect_stderr(errors):
+            calls = self.exercise(late_main=True, fail_agent=True, fail_delete=True)
+        self.assertTrue(any("--kill" in args for args in calls))
+        self.assertTrue(any("--delete" in args for args in calls))
+        self.assertFalse(any("push" in args for args in calls))
+        self.assertIn("exit code 9", errors.getvalue())
+        self.assertNotIn("placeholder", errors.getvalue())
+
+    def test_successful_signing_with_cleanup_failure_is_not_reported_as_success(self):
+        calls = self.exercise(fail_agent=True)
+        self.assertTrue(any("push" in args for args in calls))
+        self.assertTrue(any("--delete" in args for args in calls))
 
 
 @unittest.skipUnless(os.name == "posix", "secure local key setup targets macOS/Linux")
