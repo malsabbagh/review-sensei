@@ -352,9 +352,11 @@ remaining allowance. YAML timeout has a 3,600 s ceiling, and YAML calls accept
 | Symbol context YAML | Disabled; defaults/ceilings 16 files, 128 KiB, depth 1; explicit `allowed_paths` | Supplemental source access stays within trusted paths; library policy has different wider bounds, not YAML options |
 | Stage/category files | 32 stage files × 128 KiB; 64 category files × 64 KiB | Malformed, duplicate or oversized configuration rejected |
 | Per-stage lens definition | 16 categories/stage; 16 focus items/category; 32 patterns/sources per relevant field | More categories than this need a valid staged design within run budgets |
+| Approved learning files / feedback | 100 files, 64 KiB/file; feedback 256 KiB/file, 256 records; finding identity 256 B, note 512 B | Repository loaders reject oversized or invalid inputs; feedback is not automatically approved learning |
 | Conversation | 20 messages; 64 KiB serialized context/prompt; 16 KiB reply | Chat context can be bounded/clipped; not complete reassessment evidence |
 | Hosted conversation selection | 1 KiB/message, 2 KiB PR title, 4 KiB PR body, 512 B/finding, 6 KiB learnings, 12 KiB diff | Tighter than model-level conversation fields (8 KiB PR body / 16 KiB diff) |
 | Legacy human reply | Source 4 KiB; whole evidence diff 12 KiB; prompt 48 KiB; response 16 KiB | Required complete evidence overflow/missing/conflict keeps inventory pending |
+| Assessment reply / decisions | Reply body 4 KiB; at most 20 decisions/request; rationale 1 KiB, human/diff citation 512 B each; at most 7 related-path citations of 512 B each | Resolution requires a rationale and exact-source human citation of at least 20 stripped characters, and exact-path diff citations of at least 10; valid JSON alone cannot resolve an obligation |
 | REST | 512 KiB response; at most 1,000 list items | Failed/incomplete authority scan is not a clean lookup |
 | Review threads | 10 pages × 100 threads | Incomplete pagination withholds authority/approval |
 | Unified evidence acquisition | Pages 100/50/25/5/1; at most 64 reads including snapshot fences; 60 s or remaining deadline | Complete immutable evidence required; shrinking pages cannot lift item/time/response bounds |
@@ -362,7 +364,8 @@ remaining allowance. YAML timeout has a 3,600 s ceiling, and YAML calls accept
 | Confirmed candidate | 8 evidence references, 16 assumptions; excerpt at most 512 characters on one line; claim/trigger/path/rationale/assumption at most 1,024 characters | Runtime verification checks exact snapshot and actionability; character limits here differ from byte limits |
 
 Sources: [model context contracts][models], [document/source context][context],
-[stage loader][stages], [configuration][config], [chat service][conversation],
+[stage loader][stages], [learning loader/feedback][learning-loader], [configuration][config],
+[chat service][conversation], [assessment validation][human],
 [GitHub context/evidence loader][controller], [REST client][http],
 [publication/thread scans][publication], [candidate verifier][verifier].
 
@@ -742,6 +745,7 @@ rationale, see [ADR 0070](adr/0070-bounded-checkpoint-overflow.md) and
 [conversation]: https://github.com/malsabbagh/review-sensei/blob/a598d4ae47892d243ce67333bcc5c182da95637a/src/review_sensei/conversation.py
 
 [human]: https://github.com/malsabbagh/review-sensei/blob/a598d4ae47892d243ce67333bcc5c182da95637a/src/review_sensei/human_assessment.py
+[learning-loader]: https://github.com/malsabbagh/review-sensei/blob/a598d4ae47892d243ce67333bcc5c182da95637a/src/review_sensei/learnings.py
 
 [reassessment]: https://github.com/malsabbagh/review-sensei/blob/a598d4ae47892d243ce67333bcc5c182da95637a/src/review_sensei/reassessment_work.py
 
