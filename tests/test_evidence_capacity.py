@@ -15,6 +15,7 @@ from review_sensei.bounded_evidence import canonical_bytes, encode_evidence
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github import ReviewPublisher
+from review_sensei.hosting.github.checks import check_outcome_for_result
 from review_sensei.hosting.github.errors import GitHubPublicationError
 from review_sensei.hosting.github.publication import (
     MAX_PUBLISHED_REVIEW_BODY_BYTES,
@@ -141,6 +142,38 @@ def publish(state, comments):
 
 
 class EvidenceCapacityTests(unittest.TestCase):
+    def test_decoded_human_inventory_must_reserve_all_resolution_growth(self):
+        comments = varied_comments(85)
+        findings = tuple(
+            PendingHumanReview.from_result(human_result((comment,)), BASE).findings[0]
+            for comment in comments
+        )
+        source = {
+            "base_sha": BASE,
+            "findings": [finding.to_dict() for finding in findings],
+            "resolved": [],
+        }
+        wrapper = {
+            "inventory": encode_evidence(source, max_decoded_bytes=2097152),
+            "resolved": [],
+        }
+        self.assertLess(len(canonical_bytes(wrapper)), MAX_HUMAN_REVIEW_BYTES)
+        with self.assertRaisesRegex(ReviewInputError, "inventory.*size limit"):
+            PendingHumanReview.from_dict(wrapper)
+
+    def test_advisory_capacity_status_does_not_claim_an_approval_gate(self):
+        result = replace(
+            human_result(()),
+            review_status="partial",
+            persistence_status="capacity-exceeded",
+        )
+        advisory = check_outcome_for_result(result, policy="advisory")
+        self.assertEqual(advisory.conclusion, "neutral")
+        self.assertIn("does not request automatic approval", advisory.summary)
+        self.assertNotIn("Approval is withheld", advisory.summary)
+        enforced = check_outcome_for_result(result, policy="auto-approve")
+        self.assertIn("Approval is withheld", enforced.summary)
+
     def test_human_inventory_encoding_is_cached_without_exposing_mutable_state(self):
         with patch(
             "review_sensei.human_assessment.encode_evidence", wraps=encode_evidence

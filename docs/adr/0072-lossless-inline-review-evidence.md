@@ -108,6 +108,12 @@ large to publish in one review. Such publication is refused visibly;
 it does not silently publish a smaller human-obligation set. Existing path,
 required-path, work and HTTP pagination limits also remain intentional bounds.
 API scans at their limit must not be interpreted as complete discovery.
+The preliminary formatted-text allowance intentionally counts all admitted
+prose, including inline placements. This avoids making inventory admission
+depend on placement. The exact fully framed body check is the publication
+capacity authority; the preliminary allowance is not a claimed early proof that
+markers fit. Advisory capacity checks retain neutral policy semantics and say
+that automatic approval and a merge gate are not requested by that policy.
 
 ## Alternatives considered
 

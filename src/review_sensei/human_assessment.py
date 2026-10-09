@@ -229,6 +229,11 @@ class PendingHumanReview:
 
     @classmethod
     def from_dict(cls, value: object) -> PendingHumanReview:
+        """Read closed evidence through a fresh constructor's growth preflight.
+
+        Decoding alone grants no inventory authority. The final cls(...) call
+        revalidates all findings and the all-resolved persisted byte bound.
+        """
         if isinstance(value, dict) and "inventory" in value:
             if (
                 set(value) != {"inventory", "resolved"}

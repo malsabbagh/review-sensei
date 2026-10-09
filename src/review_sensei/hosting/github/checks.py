@@ -169,7 +169,11 @@ def check_outcome_for_result(
         ),
     )
     if result.persistence_status == "capacity-exceeded":
-        detail = "Analysis completed, but complete evidence could not fit the durable baseline; approval is withheld. Publication retains the full validated finding inventory."
+        detail = "Analysis completed, but complete evidence could not fit the durable baseline. Publication retains the full validated finding inventory."
+        if policy == "advisory":
+            detail += " This advisory policy does not request automatic approval or impose a merge gate."
+        else:
+            detail += " Approval is withheld."
         if any(comment.needs_human for comment in result.comments):
             detail += " Human assessment obligations remain open independently."
         return CheckOutcome(

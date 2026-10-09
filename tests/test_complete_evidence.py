@@ -111,6 +111,8 @@ class CompleteEvidenceTests(unittest.TestCase):
             {**legacy, "finding_limit": 3},
             {**legacy, "identity_or_path_character_limit": 4096},
             {key: value for key, value in legacy.items() if key != "maximum_bytes"},
+            {**current, "identity_or_path_character_limit": 256},
+            {**current, "unexpected": True},
         ):
             with self.assertRaises(ReviewInputError):
                 validate_public_document(changed, "checkpoint-diagnostics")
@@ -422,6 +424,20 @@ class CompleteEvidenceTests(unittest.TestCase):
 
 
 class BoundedEncodingTests(unittest.TestCase):
+    def test_valid_envelopes_reach_digest_and_stream_validation(self):
+        encoded = encode_evidence({"finding": "bounded text"}, max_decoded_bytes=2048)
+        packed = base64.b64decode(encoded["data"])
+        for changed in (
+            {**encoded, "sha256": "0" * 64},
+            {**encoded, "data": base64.b64encode(packed[:-1]).decode()},
+            {**encoded, "data": base64.b64encode(packed + packed).decode()},
+        ):
+            self.assertLess(len(canonical_bytes(changed)), 2048)
+            with self.assertRaisesRegex(
+                ReviewInputError, "encoded evidence is invalid"
+            ):
+                decode_evidence(changed, max_encoded_bytes=2048, max_decoded_bytes=2048)
+
     def test_encoded_limit_covers_the_complete_envelope_at_exact_boundary(self):
         source = {"evidence": "bounded immutable text"}
         encoded = encode_evidence(source, max_decoded_bytes=2048)
