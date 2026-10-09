@@ -58,7 +58,10 @@ required paths. The immutable complete inventory is compressed; its mutable
 resolved identity list remains outside that compressed member. Before admitting
 an inventory, the writer proves that every resolution can fit the same 24 KiB
 publication marker inventory bound. Any resolution subset is therefore safe.
-The outer eligibility version is `3` for encoded human inventories. Versions
+Encoded whole inventories automatically use the existing bounded work planner
+on replies, even when the repository retains the legacy work default; they
+cannot enter its single-provider-call lane. This does not raise prompt, output,
+evidence or call budgets. The outer eligibility version is `3` for encoded human inventories. Versions
 `1` and `2` remain readable. No finding is resolved by omission, inventory
 compression, an incomplete batch, or a human request for approval. Provider
 responses remain limited to twenty decisions per batch; trusted aggregates can

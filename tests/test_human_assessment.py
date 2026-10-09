@@ -338,6 +338,34 @@ class State:
 
 
 class HumanAssessmentTests(unittest.TestCase):
+    def test_encoded_inventory_uses_batches_under_default_reply_configuration(self):
+        from review_sensei.human_assessment import HumanReviewFinding
+        from tests.test_review_work import AssessingProvider
+
+        original = prior()
+        inventory = PendingHumanReview(
+            BASE,
+            tuple(
+                HumanReviewFinding(
+                    f"{i:064x}", "src/app.py", f"Concern {i}: " + "x" * 2100
+                )
+                for i in range(25)
+            ),
+        )
+        state = State(replace(original, human_review=inventory))
+        state.files = [
+            {"filename": "src/app.py", "patch": DIFF, "additions": 1, "deletions": 1}
+        ]
+        provider = AssessingProvider()
+        outcome, _broker = state.application_reply(provider)
+        self.assertGreater(len(provider.calls), 1)
+        self.assertEqual(outcome.approval_status, "approved")
+        self.assertEqual(state.events(), ["COMMENT", "APPROVE"])
+        refreshed = approval_eligibility_from_body(state.reviews[-2]["body"])
+        self.assertEqual(len(refreshed.human_review.findings), 25)
+        self.assertFalse(refreshed.human_review.pending)
+        self.assertEqual(refreshed.result_digest, original.result_digest)
+
     def test_unified_reads_v2_required_file_groups_and_old_mode_refuses_them(self):
         from review_sensei.budgets import ReviewWorkBudgets
         from tests.test_review_work import AssessingProvider

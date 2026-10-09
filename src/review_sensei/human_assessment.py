@@ -158,6 +158,11 @@ class PendingHumanReview:
         )
 
     @property
+    def requires_batched_reassessment(self) -> bool:
+        """Rich whole inventories must not enter the legacy single-call lane."""
+        return "inventory" in self.to_dict()
+
+    @property
     def pending(self) -> tuple[HumanReviewFinding, ...]:
         return tuple(
             item for item in self.findings if item.fingerprint not in self.resolved
