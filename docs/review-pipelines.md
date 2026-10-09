@@ -619,7 +619,7 @@ provider or arbitrary model endpoint.
 The current-state diagrams and tables above remain pinned to main `a598d4a`.
 This section is separately reconciled against draft
 [PR #236](https://github.com/malsabbagh/review-sensei/pull/236), inspected at
-[`6c4202962e2971db582945163a61b8419472c1a2`](https://github.com/malsabbagh/review-sensei/tree/6c4202962e2971db582945163a61b8419472c1a2).
+[`bd827391d8c1bd57045d57d81ed7dd7267fd4f79`](https://github.com/malsabbagh/review-sensei/tree/bd827391d8c1bd57045d57d81ed7dd7267fd4f79).
 It describes that implementation proposal, **not a merged, released or deployed
 feature**. Its [decision record][proposed-adr] remains Proposed.
 
@@ -639,6 +639,7 @@ sequenceDiagram
     participant Ledger as Existing authenticated ledger
     participant Human as Human eligibility marker
     participant Gate as Publication and approval gates
+    participant Reply as Existing bounded reassessment planner
     Analysis->>Writer: All finding identities, criteria and covered paths
     Writer->>Writer: Validate and deduplicate paths before counting
     Writer->>Writer: Keep small legacy shape or encode full canonical inventory
@@ -657,6 +658,11 @@ sequenceDiagram
         Writer->>Human: Whole immutable inventory<br/> mutable resolutions outside encoding
         Human->>Gate: Exact eligibility<br/> version 3 when inventory is encoded
         Gate->>Gate: Preserve pending obligations and all current approval gates
+        opt Later reply to encoded inventory
+            Human->>Reply: Automatically select bounded evidence batches
+            Note over Reply: Even with legacy work default<br/>Existing call, evidence, prompt and output caps
+            Reply->>Gate: Validated decisions plus unresolved remainder
+        end
     else Human inventory or formatted publication cannot fit
         Writer-->>Gate: Visible refusal<br/> no shortened obligation set
     end
@@ -665,9 +671,12 @@ sequenceDiagram
 Sources: [proposed baseline writer][proposed-baseline],
 [human inventory and resolution reserve][proposed-human],
 [capacity checkpoint][proposed-cli], [eligibility versions/propagation][proposed-approval].
-This diagram replaces only the persistence-specific portion of the main flows
-when the proposed runtime is actually adopted; provider/lens routing stays as
-described above.
+When the proposed runtime is actually adopted, this diagram replaces the
+persistence-specific portion of the main flows and encoded human inventories
+automatically select the existing bounded reassessment planner on replies.
+Small legacy-shaped inventories retain legacy routing unless unified mode is
+selected. Lens invocation behavior remains as described above.
+([reply routing][proposed-human-controller])
 
 | Boundary | Current inspected main | PR #236 proposal at inspected head |
 | --- | --- | --- |
@@ -679,7 +688,7 @@ described above.
 | Human inventory | 20 findings; 2 KiB/body; 24 KiB whole JSON inventory | 250 findings; full validated 16 KiB/body; 2 MiB decoded; 24 KiB persisted envelope **including all future resolution identities** |
 | Human resolutions | Included in existing bounded JSON | Mutable resolved list outside immutable compressed inventory; every subset preflighted against all-resolved capacity |
 | Reassessment per request | At most 20 decisions; unified normally packs 4 | Same per-request caps; trusted multi-batch aggregate can retain whole inventory |
-| Large legacy reassessment | Whole inventory limited to 20 | Legacy dedicated request refuses more than 20 pending findings; unified mode is needed to attempt larger batched reassessment, within unchanged budgets |
+| Rich-inventory reply routing | Whole inventory limited to 20; unified mode explicitly selected | Encoded inventories automatically enter bounded multi-batch reassessment even with the legacy default; the direct legacy request still refuses more than 20 pending findings |
 | Latest human eligibility | Versions 1/2 | Versions 1/2 readable; encoded inventory requires version `3` |
 | Baseline capacity status | `partial` with `coverage-partial` | `partial` remains fail-closed, adds `persistence_status: capacity-exceeded` and diagnostic `baseline_capacity_exceeded`; analysis manifest is preserved |
 
@@ -785,24 +794,26 @@ rationale, see [ADR 0070](adr/0070-bounded-checkpoint-overflow.md) and
 
 [openrouter-adapter]: https://github.com/malsabbagh/review-sensei/blob/a598d4ae47892d243ce67333bcc5c182da95637a/src/review_sensei/providers/openrouter.py
 
-[proposed-adr]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/docs/adr/0071-lossless-inline-review-evidence.md
+[proposed-adr]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/docs/adr/0071-lossless-inline-review-evidence.md
 
-[proposed-encoding]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/src/review_sensei/bounded_evidence.py
+[proposed-encoding]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/bounded_evidence.py
 
-[proposed-baseline]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/src/review_sensei/baseline.py
+[proposed-baseline]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/baseline.py
 
-[proposed-human]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/src/review_sensei/human_assessment.py
+[proposed-human]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/human_assessment.py
 
-[proposed-cli]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/src/review_sensei/cli.py
+[proposed-cli]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/cli.py
 
-[proposed-approval]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/src/review_sensei/hosting/github/approval.py
+[proposed-approval]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/hosting/github/approval.py
 
-[proposed-models]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/src/review_sensei/models.py
+[proposed-models]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/models.py
 
-[proposed-presentation]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/src/review_sensei/presentation.py
+[proposed-presentation]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/presentation.py
 
-[proposed-checks]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/src/review_sensei/hosting/github/checks.py
+[proposed-checks]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/hosting/github/checks.py
 
-[proposed-publication]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/src/review_sensei/hosting/github/publication.py
+[proposed-publication]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/hosting/github/publication.py
 
-[proposed-reader-check]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/scripts/check_review_reader_compatibility.py
+[proposed-reader-check]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/scripts/check_review_reader_compatibility.py
+
+[proposed-human-controller]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/hosting/github/human_assessment.py
