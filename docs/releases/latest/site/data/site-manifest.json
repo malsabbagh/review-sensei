@@ -1,0 +1,193 @@
+{
+  "schema_version": "1.0",
+  "last_updated": "2026-10-09",
+  "release_facts": {
+    "version": "0.6.17",
+    "tag": "v0.6.17",
+    "python_package": "review-sensei",
+    "npm_launcher": "@reviewsensei/cli",
+    "npm_platform_packages": [
+      "@reviewsensei/cli-darwin-arm64",
+      "@reviewsensei/cli-darwin-x64",
+      "@reviewsensei/cli-linux-arm64-gnu",
+      "@reviewsensei/cli-linux-x64-gnu",
+      "@reviewsensei/cli-win32-x64"
+    ],
+    "workflow_references": [
+      {
+        "name": "Reusable runner",
+        "path": ".github/workflows/review-sensei-run.yml",
+        "ref": "v5",
+        "notes": "Public setup-v5 callers pin this reusable workflow through the operator-managed v5 tag."
+      },
+      {
+        "name": "Example caller",
+        "path": "examples/github-actions/review-sensei-review.yml",
+        "ref": "v5",
+        "notes": "Documents PyPI-first install with executing-commit fallback and compatibility manifest proof."
+      }
+    ],
+    "documentation": [
+      "docs/releasing.md",
+      "docs/installation.md",
+      "README.md"
+    ]
+  },
+  "providers": [
+    {
+      "id": "ollama-local",
+      "title": "Ollama (local)",
+      "provider": "ollama",
+      "profile": "local-private",
+      "inference_destination": {
+        "endpoint_scope": "local",
+        "base_url": "http://127.0.0.1:11434/api",
+        "default_model": "qwen3.5:4b"
+      },
+      "credential_ref": null,
+      "engine_support": {
+        "cli": true,
+        "evaluate": true,
+        "npx_launcher": true
+      },
+      "workflow_support": {
+        "reusable_workflow": true,
+        "provider_mode": "local-ollama",
+        "notes": "Default installed workflow path: inference.backend: local-ollama in .reviewsensei.yml, with the packaged local model unless inference.model names another one."
+      },
+      "status_labels": [
+        "implemented-on-main",
+        "available-in-distribution",
+        "supported"
+      ],
+      "evidence": [
+        "src/review_sensei/providers/registry.py",
+        "src/review_sensei/providers/profiles.py",
+        "docs/installation.md"
+      ],
+      "limitations": [
+        "Requires a reachable local Ollama runner on loopback.",
+        "No bearer credential is used for the default local-private profile."
+      ]
+    },
+    {
+      "id": "ollama-cloud",
+      "title": "Ollama Cloud",
+      "provider": "ollama",
+      "profile": "deep-verification",
+      "inference_destination": {
+        "endpoint_scope": "remote",
+        "base_url": "https://ollama.com/api",
+        "default_model": "deepseek-v4.1-flash:cloud"
+      },
+      "credential_ref": "OLLAMA_API_KEY",
+      "engine_support": {
+        "cli": true,
+        "evaluate": true,
+        "npx_launcher": true
+      },
+      "workflow_support": {
+        "reusable_workflow": true,
+        "provider_mode": "cloud-ollama",
+        "notes": "Installed workflows opt in with inference.backend: cloud-ollama in .reviewsensei.yml and the repository OLLAMA_API_KEY secret."
+      },
+      "status_labels": [
+        "implemented-on-main",
+        "available-in-distribution",
+        "supported"
+      ],
+      "evidence": [
+        "src/review_sensei/providers/registry.py",
+        "src/review_sensei/providers/profiles.py",
+        "docs/installation.md",
+        "docs/data-handling.md"
+      ],
+      "limitations": [
+        "Requires a provisioned Ollama Cloud account and OLLAMA_API_KEY.",
+        "Cloud egress is explicit opt-in; local runs cannot silently fail over to Ollama Cloud."
+      ]
+    },
+    {
+      "id": "openai-compatible",
+      "title": "OpenAI-compatible (Python boundary)",
+      "provider": "openai-compatible",
+      "profile": "fast-triage",
+      "inference_destination": {
+        "endpoint_scope": "remote",
+        "base_url": "https://api.openai.com/v1",
+        "default_model": "gpt-4o-mini"
+      },
+      "credential_ref": "OPENAI_API_KEY",
+      "engine_support": {
+        "cli": true,
+        "evaluate": true,
+        "npx_launcher": true
+      },
+      "workflow_support": {
+        "reusable_workflow": false,
+        "provider_mode": null,
+        "notes": "Installed GitHub workflows do not pass --profile; fast-triage is an explicit CLI/evaluate path only."
+      },
+      "status_labels": [
+        "implemented-on-main",
+        "available-in-distribution"
+      ],
+      "evidence": [
+        "src/review_sensei/providers/registry.py",
+        "src/review_sensei/providers/openai_compatible.py",
+        "docs/public-contracts.md",
+        "docs/adr/0041-production-provider-adapters-and-per-stage-profiles.md"
+      ],
+      "limitations": [
+        "Named profiles are immutable presets; custom endpoints require unprofiled openai-compatible use.",
+        "Not enabled by the reusable workflow; requires OPENAI_API_KEY and --profile fast-triage or equivalent settings.",
+        "The npx launcher forwards argv to the Python CLI; reaching openai-compatible still requires explicit --profile fast-triage (or unprofiled flags) plus OPENAI_API_KEY."
+      ]
+    },
+    {
+      "id": "openrouter",
+      "title": "OpenRouter",
+      "provider": "openrouter",
+      "profile": "openrouter-sonnet / openrouter-gpt (CLI profiles)",
+      "inference_destination": {
+        "endpoint_scope": "remote",
+        "base_url": "https://openrouter.ai/api/v1",
+        "default_model": "deepseek/deepseek-v4.1-flash"
+      },
+      "credential_ref": "OPENROUTER_API_KEY",
+      "engine_support": {
+        "cli": true,
+        "evaluate": true,
+        "npx_launcher": true
+      },
+      "workflow_support": {
+        "reusable_workflow": true,
+        "provider_mode": "openrouter",
+        "notes": "Installed workflows opt in with inference.backend: openrouter in .reviewsensei.yml and the repository OPENROUTER_API_KEY secret. The supported label applies to this hosted workflow path with allowlisted models only."
+      },
+      "status_labels": [
+        "implemented-on-main",
+        "available-in-distribution",
+        "supported",
+        "experimental"
+      ],
+      "evidence": [
+        "src/review_sensei/providers/registry.py",
+        "src/review_sensei/providers/openrouter.py",
+        "src/review_sensei/providers/profiles.py",
+        "src/review_sensei/provider_config.py",
+        "packages/npm/cli/README.md",
+        "tests/test_cli.py",
+        "docs/installation.md",
+        "docs/data-handling.md",
+        "docs/adr/0045-openrouter-trusted-configuration.md"
+      ],
+      "limitations": [
+        "Hosted OpenRouter accepts only the published allowlist in provider_config.HOSTED_OPENROUTER_DEFAULTS; the default model deepseek/deepseek-v4.1-flash is pinned to Morph with no fallback, data collection denied, and ZDR required.",
+        "CLI profiles openrouter-sonnet and openrouter-gpt remain unqualified and require --allow-unqualified-profile for live review; tests/test_cli.py covers the opt-in and fail-closed paths.",
+        "The npx launcher forwards argv to the Python CLI; reaching OpenRouter still requires explicit --provider openrouter (or --profile) plus OPENROUTER_API_KEY.",
+        "Hosted workflows reject allow_unqualified_profile=true; use the CLI for unqualified profile runs."
+      ]
+    }
+  ]
+}

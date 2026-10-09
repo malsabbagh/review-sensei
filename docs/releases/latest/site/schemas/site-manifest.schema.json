@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/site-manifest.schema.json",
+  "title": "ReviewSensei site manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "last_updated", "release_facts", "providers"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "last_updated": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "release_facts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "tag",
+        "python_package",
+        "npm_launcher",
+        "workflow_references"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)$"
+        },
+        "tag": {
+          "type": "string",
+          "pattern": "^v(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)$"
+        },
+        "python_package": {
+          "type": "string",
+          "minLength": 1
+        },
+        "npm_launcher": {
+          "type": "string",
+          "pattern": "^@reviewsensei/cli$"
+        },
+        "npm_platform_packages": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^@reviewsensei/cli-"
+          },
+          "uniqueItems": true
+        },
+        "workflow_references": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/workflow_reference"
+          }
+        },
+        "compatibility_manifest": {
+          "type": "string",
+          "minLength": 1
+        },
+        "documentation": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "providers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/provider_entry"
+      }
+    }
+  },
+  "$defs": {
+    "status_label": {
+      "type": "string",
+      "enum": [
+        "implemented-on-main",
+        "available-in-distribution",
+        "experimental",
+        "supported",
+        "not-implemented",
+        "planned",
+        "source-only"
+      ]
+    },
+    "workflow_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "path"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    },
+    "provider_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "provider",
+        "inference_destination",
+        "credential_ref",
+        "engine_support",
+        "workflow_support",
+        "status_labels",
+        "evidence",
+        "limitations"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "inference_destination": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["endpoint_scope", "base_url"],
+          "properties": {
+            "endpoint_scope": {
+              "type": "string",
+              "enum": ["local", "remote"]
+            },
+            "base_url": {
+              "type": "string",
+              "minLength": 1
+            },
+            "default_model": {
+              "type": ["string", "null"]
+            }
+          }
+        },
+        "credential_ref": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "engine_support": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cli", "evaluate", "npx_launcher"],
+          "properties": {
+            "cli": { "type": "boolean" },
+            "evaluate": { "type": "boolean" },
+            "npx_launcher": { "type": "boolean" }
+          }
+        },
+        "workflow_support": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reusable_workflow", "notes"],
+          "properties": {
+            "reusable_workflow": { "type": "boolean" },
+            "provider_mode": {
+              "type": ["string", "null"]
+            },
+            "notes": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "status_labels": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/status_label"
+          },
+          "uniqueItems": true
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}
