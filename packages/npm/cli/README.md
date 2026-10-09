@@ -24,7 +24,7 @@ exact-version platform package and reports an error if it is missing.
 
 <!-- release-installation:package-npm-1:start -->
 ```console
-npm install --save-dev @reviewsensei/cli@0.6.16
+npm install --save-dev @reviewsensei/cli@0.6.17
 npx review-sensei --version
 npx review-sensei --help
 ```
@@ -34,7 +34,7 @@ Or run an exact version without adding a project dependency:
 
 <!-- release-installation:package-npm-2:start -->
 ```console
-npx --yes @reviewsensei/cli@0.6.16 --help
+npx --yes @reviewsensei/cli@0.6.17 --help
 ```
 <!-- release-installation:package-npm-2:end -->
 

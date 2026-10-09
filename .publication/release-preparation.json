@@ -1,0 +1,32 @@
+{
+  "base_sha": "7287cb23de22e8c0c196d85ee80526683635c748",
+  "files": {
+    "CHANGELOG.md": "7abeb02b18c6f62d93bf0ad4612e6a72b56f6b73310ef101614d6f1bbd9baf91",
+    "README.md": "e2173ad2324bfed2189fd9683baeffd93baa9d992786a6b003e9a082cbd2e744",
+    "docs/installation.md": "6de5b2173f76259b55597422b0301605ff7a64afcba8e73851ea8fb622550806",
+    "docs/site/data/site-manifest.json": "8228fd675d9267a7dd9fe3694ea1f4898246b87c6fac1ed1312066e4a35e743a",
+    "docs/site/getting-started/index.html": "6488ecff3bd10b973c2922a318278419732f4ac697082e2a7fecb894d30a72ab",
+    "docs/site/index.html": "9b1b8c3212e42fd31e73d702b43f1caccbae9d523d4678a0659ff3207182f686",
+    "docs/site/providers/index.html": "441336847bce6061b507bfaa05647698d27c72383aa089164757afbcad226c80",
+    "docs/site/releases/index.html": "667b44f9ef83f3744344c70d42771e9132c4d337a822ecd24f21369b0bfc469d",
+    "packages/npm/cli/README.md": "90a3082f88e08a05a103f0acec5edfd44bddd82d53063edc9d2f64049e73e701",
+    "packages/npm/cli/package.json": "5da07ac63071be5010e234e68c56f9d28d963e966c0f599875fc996e770245f4",
+    "packages/npm/platforms/darwin-arm64/README.md": "e36261546812e437ae838ec1999f4bba6f1f4528cc3888f1fe921d094aa8130e",
+    "packages/npm/platforms/darwin-arm64/package.json": "f58c49174838b26faa625e718f8ae53fc356f51d1ebd5bb0cb43e22b3f5dbee0",
+    "packages/npm/platforms/darwin-x64/README.md": "34545ed281e0f5ae2abbc2ac73cd9f8a17857fe31b4a5f5e5da7db5cd8ec72a9",
+    "packages/npm/platforms/darwin-x64/package.json": "e0add27fb15750a6cfacdc1eacea5a4ddad6972b47d2e784f9af0bb65b9b7b60",
+    "packages/npm/platforms/linux-arm64-gnu/README.md": "454fcb5dcaab46eb5452de72dfbf8b93a5af962f648da0b27680293ac03a8d13",
+    "packages/npm/platforms/linux-arm64-gnu/package.json": "55cb5379702cfae3f57ab67a894191d8164ae20e657ebc2f451921d95c4bba69",
+    "packages/npm/platforms/linux-x64-gnu/README.md": "6c20df550900f9baee5edec624bbd2bc9286934cfbb87eccb348bdf46be12d7b",
+    "packages/npm/platforms/linux-x64-gnu/package.json": "d5bb2fde5adaa65cd037123f78871548043144eb5a30beaceb31de2a7afbbfd2",
+    "packages/npm/platforms/win32-x64/README.md": "a05d16b09d4263d18d52fd94bdf8a2ced721d968a66118641f1a0aa6879a97eb",
+    "packages/npm/platforms/win32-x64/package.json": "866c072f386e83542cf5af58a6062a082bda3bcd7f681789535fc3d958ac56d0",
+    "pyproject.toml": "66d34449240863b7d59516615b37f436ee50ff89078811898acb29c350fba840"
+  },
+  "notes_sha256": "85a6f9a333c050acc1f2140967e8d9e9056a724074b35f1e8b31f761ac2bd2c5",
+  "release_date": "2026-10-09",
+  "repository": "malsabbagh/review-sensei",
+  "schema_version": "1.0",
+  "tag": "v0.6.17",
+  "version": "0.6.17"
+}

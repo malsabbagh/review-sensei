@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.17 - 2026-10-09
+
 - Add opt-in Release Marshal signing with a dedicated GPG key after full
   prepared-main CI. Retain Mo's separate npm/PyPI approval gates and wait for
   both package publications before GitHub release assets. Provide a user-run
