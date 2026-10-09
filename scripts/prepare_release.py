@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+import html
 import json
 import os
 import re
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -56,6 +58,8 @@ PAYLOAD_PATHS = frozenset(
     )
 )
 ALLOWED_PATHS = PAYLOAD_PATHS | {RECEIPT}
+MAX_NOTE_COMMITS = 256
+MAX_NOTE_BYTES = 256 * 1024
 CI_JOBS = frozenset(
     (
         "Compatibility (Python 3.11, ubuntu-latest)",
@@ -130,6 +134,91 @@ def released_notes(text: str, version: str, date: str) -> str:
     if not notes:
         raise ValueError("release requires reviewed changelog notes")
     return notes
+
+
+def source_version(root: Path, sha: str) -> str:
+    version = tomllib.loads(git(root, "show", f"{sha}:pyproject.toml"))["project"][
+        "version"
+    ]
+    docs.version_tuple("v" + version)
+    return version
+
+
+def history_notes(root: Path, current: str, base: str) -> tuple[str, str, str]:
+    """Render commit subjects as data from one exact first-parent release range."""
+    tag = "v" + current
+    docs.version_tuple(tag)
+    if source_version(root, base) != current:
+        raise ValueError("automatic notes source version differs from selected history")
+    try:
+        tag_object = git(root, "rev-parse", "--verify", f"refs/tags/{tag}")
+        if git(root, "cat-file", "-t", tag_object) != "tag":
+            raise ValueError(
+                "automatic notes require an annotated previous release tag"
+            )
+        previous = git(root, "rev-parse", "--verify", f"{tag_object}^{{commit}}")
+        header = git(root, "cat-file", "tag", tag_object).split("\n\n", 1)[0]
+        if f"tag {tag}" not in header.splitlines():
+            raise ValueError("automatic notes previous tag name differs")
+        chain = git(
+            root,
+            "rev-list",
+            "--first-parent",
+            f"--max-count={MAX_NOTE_COMMITS + 1}",
+            base,
+        ).splitlines()
+    except subprocess.CalledProcessError:
+        raise ValueError(
+            "automatic notes require the previous release tag and full history"
+        ) from None
+    if previous not in chain or source_version(root, previous) != current:
+        raise ValueError(
+            "automatic notes previous release is outside the bounded main history"
+        )
+    commits = list(reversed(chain[: chain.index(previous)]))
+    if not commits:
+        raise ValueError("automatic notes require changes after the previous release")
+    prefix = f"https://github.com/{docs.REPOSITORY}"
+    lines = [
+        f"Changes since [{tag}]({prefix}/releases/tag/{tag}), from "
+        f"[{previous}]({prefix}/commit/{previous}) through "
+        f"[{base}]({prefix}/commit/{base}).",
+        "",
+        f"Previous annotated tag object: `{tag_object}`.",
+        "",
+    ]
+    for sha in commits:
+        subject = git(root, "show", "-s", "--format=%s", sha)
+        if (
+            not subject
+            or len(subject.encode()) > 2048
+            or any(
+                ord(character) < 32 or ord(character) == 127 for character in subject
+            )
+        ):
+            raise ValueError(
+                "automatic notes require bounded single-line commit subjects"
+            )
+        # Neither commit messages nor PR titles are executable Markdown/HTML.
+        label = re.sub(
+            r"([\\`*_{}\[\]()#!|])", r"\\\1", html.escape(subject, quote=False)
+        )
+        lines.append(f"- {label} ([{sha}]({prefix}/commit/{sha})).")
+    notes = "\n".join(lines)
+    if len(notes.encode()) > MAX_NOTE_BYTES:
+        raise ValueError("automatic release notes exceed the bounded history allowance")
+    return notes, tag_object, previous
+
+
+def qualify_notes_origin(root: Path, version: str, base: str) -> None:
+    """Bind automatic notes to the remotely verified immutable previous tag."""
+    current = source_version(root, base)
+    _, pending, _ = changelog_parts(git(root, "show", f"{base}:CHANGELOG.md"))
+    if pending or current == version:
+        return
+    _, tag_object, previous = history_notes(root, current, base)
+    if docs.tag_identity("v" + current) != (tag_object, previous):
+        raise ValueError("automatic notes previous release tag identity changed")
 
 
 def check_site(root: Path) -> None:
@@ -218,7 +307,7 @@ def validate_payload(root: Path) -> dict[str, Any]:
 
 
 def generate(root: Path, version: str, date: str, base: str) -> dict[str, Any]:
-    """Deterministic local renderer; consumes only notes already on reviewed main."""
+    """Render authored notes or exact reviewed-source history without provider calls."""
     inputs(version, date, base)
     safe_paths(root)
     current = versions.project_version(root)
@@ -242,11 +331,9 @@ def generate(root: Path, version: str, date: str, base: str) -> dict[str, Any]:
         notes = (pending + "\n\n" + old_notes).strip() if pending else old_notes
         rest = rest.replace(old_notes, notes, 1)
     else:
-        if not pending:
-            raise ValueError("release requires reviewed Unreleased notes")
         if re.search(rf"^## {re.escape(version)} - ", rest, re.MULTILINE):
             raise ValueError("release version already occurs in the changelog")
-        notes = pending
+        notes = pending or history_notes(root, current, base)[0]
         rest = f"## {version} - {date}\n\n{notes}\n\n" + rest
     (root / "CHANGELOG.md").write_text(
         prefix + "\n\n" + rest, encoding="utf-8", newline="\n"
@@ -340,6 +427,21 @@ def verify_commit(root: Path, sha: str) -> dict[str, Any]:
     parents = git(root, "rev-list", "--parents", "-n", "1", sha).split()
     if parents != [sha, receipt["base_sha"]]:
         raise ValueError("preparation commit must have the exact reviewed parent")
+    current = source_version(root, receipt["base_sha"])
+    _, pending, _ = changelog_parts(
+        git(root, "show", f"{receipt['base_sha']}:CHANGELOG.md")
+    )
+    if not pending and current != receipt["version"]:
+        expected = history_notes(root, current, receipt["base_sha"])[0]
+        if (
+            released_notes(
+                (root / "CHANGELOG.md").read_text(encoding="utf-8"),
+                receipt["version"],
+                receipt["release_date"],
+            )
+            != expected
+        ):
+            raise ValueError("automatic release notes differ from exact source history")
     changed = set(
         filter(
             None,
@@ -503,6 +605,7 @@ def prepare(root: Path, version: str, date: str, base: str) -> str:
                 )
             if ci_once(base) is None:
                 raise ValueError("reviewed main CI is not terminal success")
+            qualify_notes_origin(checkout, version, base)
             generate(checkout, version, date, base)
             git(checkout, "add", "--", *sorted(ALLOWED_PATHS))
             validate_index(checkout)
@@ -528,6 +631,7 @@ def prepare(root: Path, version: str, date: str, base: str) -> str:
                 raise ValueError(
                     "reviewed main/CI advanced before push; dispatch again"
                 )
+            qualify_notes_origin(checkout, version, base)
             if (
                 bot.check(
                     os.environ.get("RELEASE_DOCS_APP_ID", ""),
@@ -599,6 +703,7 @@ def wait_ci(
                 receipt = verify_commit(checkout, sha)
                 if receipt["version"] != version or receipt["release_date"] != date:
                     raise ValueError("qualified release preparation intent differs")
+                qualify_notes_origin(checkout, version, receipt["base_sha"])
             finally:
                 git(root, "worktree", "remove", "--force", str(checkout))
         if remote_main() != sha or ci_once(sha) is None:

@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0071](0071-generated-release-notes.md) | Proposed | Generate missing release notes from exact first-parent merged-source history | Maintainer-requested Release Marshal correction | Existing direct App commit, exact tag/source provenance and unchanged publication gates |
 | [0070](0070-bounded-checkpoint-overflow.md) | Proposed | Preserve full finding publication as partial when durable baseline metadata cannot fit | User-authorized PR #231 recovery | Exact sanitized limits, unchanged bounded history, withheld approval and opt-in failure evidence |
 | [0068](0068-dedicated-release-key-and-publication-approval.md) | Proposed | Sign prepared release tags with a dedicated GPG key and retain Mo's publication approvals | User-requested automation | User-run setup; no personal key, new App permission or tag bypass |
 | [0067](0067-shared-review-work-mechanics.md) | Proposed | Share discovery and human reassessment planning, evidence and execution | User-authorized implementation | Opt-in routing, complete evidence groups, bounded continuation and reader-first rollout |

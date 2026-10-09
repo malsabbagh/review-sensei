@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import re
@@ -251,8 +252,182 @@ class PreparationRenderingTests(unittest.TestCase):
         path = self.root / "CHANGELOG.md"
         prefix, _, rest = PREP.changelog_parts(path.read_text())
         path.write_text(prefix + "\n\n" + rest)
-        with self.assertRaisesRegex(ValueError, "reviewed Unreleased"):
+        with self.assertRaisesRegex(ValueError, "previous release tag"):
             self.generated()
+
+    def automatic_fixture(self, subject="Preserve complete findings (#232)"):
+        path = self.root / "CHANGELOG.md"
+        prefix, _, rest = PREP.changelog_parts(path.read_text())
+        path.write_text(prefix + "\n\n" + rest)
+        self.run_git("add", "CHANGELOG.md")
+        self.run_git("commit", "-qm", "Previous released source")
+        previous = self.run_git("rev-parse", "HEAD")
+        self.run_git(
+            "-c",
+            "tag.gpgsign=false",
+            "tag",
+            "-a",
+            "v" + CURRENT,
+            "-m",
+            "Previous release",
+        )
+        tag_object = self.run_git("rev-parse", "refs/tags/v" + CURRENT)
+        self.run_git("commit", "--allow-empty", "-qm", subject)
+        self.base = self.run_git("rev-parse", "HEAD")
+        return tag_object, previous
+
+    def test_empty_unreleased_generates_exact_history_and_provenance_with_no_provider(
+        self,
+    ):
+        tag_object, previous = self.automatic_fixture(
+            "Fix [label](url) <script> `code` (#232)"
+        )
+        receipt = self.generated()
+        notes = PREP.released_notes(
+            (self.root / "CHANGELOG.md").read_text(), VERSION, DATE
+        )
+        self.assertIn(f"`{tag_object}`", notes)
+        for sha in (previous, self.base):
+            self.assertIn(f"/commit/{sha}", notes)
+        self.assertIn(r"Fix \[label\]\(url\) &lt;script&gt; \`code\` \(\#232\)", notes)
+        self.assertNotIn("<script>", notes)
+        self.assertEqual(
+            receipt["notes_sha256"], hashlib.sha256(notes.encode()).hexdigest()
+        )
+        self.assertEqual(self.generated(), receipt)
+        self.assertEqual(
+            PREP.verify_commit(self.root, self.commit_generated()), receipt
+        )
+
+    def test_automatic_notes_reject_empty_or_ambiguous_previous_range_before_writing(
+        self,
+    ):
+        tag_object, previous = self.automatic_fixture()
+        original = (self.root / "CHANGELOG.md").read_bytes()
+        self.run_git("tag", "-d", "v" + CURRENT)
+        self.run_git("-c", "tag.gpgsign=false", "tag", "v" + CURRENT, previous)
+        with self.assertRaisesRegex(ValueError, "annotated previous"):
+            self.generated()
+        self.assertEqual((self.root / "CHANGELOG.md").read_bytes(), original)
+        self.run_git("update-ref", "refs/tags/v" + CURRENT, tag_object)
+        with self.assertRaisesRegex(ValueError, "changes after"):
+            PREP.history_notes(self.root, CURRENT, previous)
+        with (
+            patch.object(PREP, "MAX_NOTE_COMMITS", 0),
+            self.assertRaisesRegex(ValueError, "bounded main history"),
+        ):
+            self.generated()
+        self.assertEqual((self.root / "CHANGELOG.md").read_bytes(), original)
+
+    def test_history_uses_first_parent_merge_titles_without_repeating_branch_commits(
+        self,
+    ):
+        _, previous = self.automatic_fixture()
+        self.run_git("switch", "-qc", "feature")
+        self.run_git("commit", "--allow-empty", "-qm", "Internal branch detail")
+        self.run_git("switch", "--detach", self.base)
+        self.run_git("merge", "--no-ff", "-qm", "Reviewed feature (#234)", "feature")
+        self.base = self.run_git("rev-parse", "HEAD")
+        notes, _, start = PREP.history_notes(self.root, CURRENT, self.base)
+        self.assertEqual(start, previous)
+        self.assertIn("Reviewed feature", notes)
+        self.assertNotIn("Internal branch detail", notes)
+        self.assertLess(
+            notes.index("Preserve complete"), notes.index("Reviewed feature")
+        )
+
+    def test_previous_tag_on_a_side_branch_is_not_a_release_cutoff(self):
+        _, previous = self.automatic_fixture()
+        self.run_git("switch", "-qc", "unmerged", previous)
+        self.run_git("commit", "--allow-empty", "-qm", "Unmerged source")
+        self.run_git("tag", "-d", "v" + CURRENT)
+        self.run_git(
+            "-c", "tag.gpgsign=false", "tag", "-a", "v" + CURRENT, "-m", "Side tag"
+        )
+        self.run_git("switch", "--detach", self.base)
+        with self.assertRaisesRegex(ValueError, "bounded main history"):
+            self.generated()
+        self.assertEqual(self.run_git("status", "--porcelain"), "")
+
+    def test_oversized_or_control_character_subjects_and_notes_stop_before_generation(
+        self,
+    ):
+        self.automatic_fixture()
+        for subject in ("x" * 2049, "Unsafe\tcontrol"):
+            with self.subTest(subject_size=len(subject)):
+                self.run_git("commit", "--allow-empty", "-qm", subject)
+                self.base = self.run_git("rev-parse", "HEAD")
+                with self.assertRaisesRegex(ValueError, "single-line commit subjects"):
+                    self.generated()
+                self.assertEqual(self.run_git("status", "--porcelain"), "")
+                self.run_git("reset", "--hard", "HEAD~1")
+        self.base = self.run_git("rev-parse", "HEAD")
+        with (
+            patch.object(PREP, "MAX_NOTE_BYTES", 10),
+            self.assertRaisesRegex(ValueError, "bounded history allowance"),
+        ):
+            self.generated()
+        self.assertEqual(self.run_git("status", "--porcelain"), "")
+
+    def test_forged_note_and_receipt_digest_cannot_replace_exact_generated_history(
+        self,
+    ):
+        self.automatic_fixture()
+        receipt = self.generated()
+        path = self.root / "CHANGELOG.md"
+        path.write_text(
+            path.read_text().replace(
+                "Preserve complete findings", "Invented release claim"
+            )
+        )
+        notes = PREP.released_notes(path.read_text(), VERSION, DATE)
+        receipt["notes_sha256"] = hashlib.sha256(notes.encode()).hexdigest()
+        receipt["files"] = PREP.file_hashes(self.root)
+        (self.root / PREP.RECEIPT).write_text(json.dumps(receipt))
+        self.run_git("add", ".")
+        self.run_git("commit", "-qm", "Forged generated notes")
+        with self.assertRaisesRegex(ValueError, "exact source history"):
+            PREP.verify_commit(self.root, self.run_git("rev-parse", "HEAD"))
+
+    def test_existing_authored_notes_do_not_require_a_previous_tag(self):
+        with patch.object(
+            PREP, "history_notes", side_effect=AssertionError("unexpected history")
+        ):
+            self.generated()
+            PREP.qualify_notes_origin(self.root, VERSION, self.base)
+
+    def test_verified_previous_tag_required_and_rechecked_before_direct_main_push(self):
+        identity = self.automatic_fixture()
+        remote_main = self.remote_fixture()
+        with (
+            patch.object(PREP, "unused"),
+            patch.object(PREP.docs, "tag_identity", return_value=identity) as tags,
+        ):
+            sha = PREP.prepare(self.root, VERSION, DATE, self.base)
+        self.assertEqual(tags.call_count, 2)
+        self.assertEqual(remote_main(), sha)
+        self.run_git("fetch", "origin", "refs/heads/main")
+        self.run_git("checkout", "--detach", sha)
+        PREP.verify_commit(self.root, sha)
+        self.assertIn(
+            "Preserve complete findings", (self.root / "CHANGELOG.md").read_text()
+        )
+
+    def test_previous_tag_race_withholds_push_and_preserves_reviewed_main(self):
+        identity = self.automatic_fixture()
+        remote_main = self.remote_fixture()
+        with (
+            patch.object(PREP, "unused"),
+            patch.object(
+                PREP.docs,
+                "tag_identity",
+                side_effect=[identity, ("c" * 40, identity[1])],
+            ),
+            self.assertRaisesRegex(ValueError, "tag identity changed"),
+        ):
+            PREP.prepare(self.root, VERSION, DATE, self.base)
+        self.assertEqual(remote_main(), self.base)
+        self.assertEqual(self.run_git("status", "--porcelain"), "")
 
     def remote_fixture(self):
         remote = Path(self.temporary.name) / "remote.git"

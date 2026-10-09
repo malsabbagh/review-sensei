@@ -169,8 +169,10 @@ changes the main metadata through the dedicated App; tagging an unchanged
    A broad exception on a mixed PR/core ruleset is rejected. Repository rules
    setup still requires the owner's exclusive editing window and explicit setup
    authority; neither workflow changes rules or App permissions.
-2. Review and merge all intended source and the `CHANGELOG.md` Unreleased notes
-   under the ordinary source review policy. Choose an unpublished `X.Y.Z` version
+2. Review and merge all intended source under the ordinary source review policy.
+   Authored `CHANGELOG.md` Unreleased notes are optional. If that section is
+   empty, Marshal generates notes from the exact first-parent main commits since
+   the annotated previous-version tag. Choose an unpublished `X.Y.Z` version
    and explicit `YYYY-MM-DD` release date. The owner dispatches from fresh main:
 
    ```bash
@@ -187,8 +189,18 @@ changes the main metadata through the dedicated App; tagging an unchanged
 4. The deterministic renderer updates `[project].version`, all six npm versions
    and exact optional dependencies, paired marked current installation pins in
    packaged READMEs/source docs, site version/tag/date and generated provider/release
-   pages. It moves only already-reviewed Unreleased notes under the dated release
-   heading; no free-form workflow notes or provider claim generation occurs.
+   pages. It moves authored Unreleased notes under the dated release heading when
+   present; otherwise it lists exact merged-source commit subjects with full SHA
+   links, the selected source range and the previous annotated tag object.
+   Subjects are escaped as text, without a provider call or executable Markdown.
+   The previous tag must agree with its GitHub-verified signed identity and
+   previous version, and occur on the selected first-parent main history. Missing
+   or ambiguous ancestry, an unchanged source or history beyond the bounded
+   256-commit / 256 KiB allowance stops preparation. Maintainers can supply authored
+   notes for an exceptional range. Routine empty Unreleased sections require no
+   notes PR. Generated notes are recomputed from source during commit validation;
+   their digest remains bound to the existing preparation receipt. No receipt
+   schema or App permission changes are needed. See [ADR 0071](adr/0071-generated-release-notes.md).
    Historical examples outside markers and the `@v5` channel stay unchanged.
    `PAYLOAD_PATHS` in `scripts/prepare_release.py` lists the complete allowlist.
    Runtime source, configs, tests, workflows, credentials and protection policy
@@ -198,6 +210,9 @@ changes the main metadata through the dedicated App; tagging an unchanged
    contains those bytes; symlinks, ignored payload, extra staged paths and storage
    transformations stop the write. The single DCO bot commit is pushed normally,
    never with force. A concurrent main update requires a fresh dispatch.
+   Integrate the reviewed helper/workflow upgrade once; subsequent owner dispatches
+   generate notes, version metadata and source docs in this direct App commit,
+   without a separate release-notes or generated-docs PR.
 5. Ordinary main CI runs because the push uses the App rather than GITHUB_TOKEN.
    The preparation workflow waits for **all fifteen exact-head CI jobs**, including
    native ABI/parity, npm/clean-wheel contracts, Worker and CodeQL. It checks the
