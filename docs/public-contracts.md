@@ -67,6 +67,8 @@ requirement for a new major shape; the v2 discriminator is intentional.
 | `recovery-artifact.schema.json` | Publication-only recovery artifact |
 | `work-recovery-artifact.schema.json` | Opt-in v2 authenticated work receipts, evidence and consumed admission; requires current evidence and semantic revalidation |
 | `run-outcome.schema.json` | Structured run outcome and diagnostics |
+| `checkpoint-diagnostics.schema.json` | Closed sanitized baseline overflow counts, lengths and exact byte limits |
+| `checkpoint-evidence.schema.json` | Opt-in full validated pre-checkpoint result; explicitly not publication authority |
 | `candidate-finding.schema.json` | Provider-neutral candidate finding with bounded evidence; canonical path rules are enforced by `CandidateFinding.from_dict`, not the schema |
 | `verification-result.schema.json` | Candidate evidence verification result |
 | `coverage-manifest.schema.json` | Per-file and per-hunk review coverage |

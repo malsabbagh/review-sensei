@@ -4,7 +4,7 @@ import copy
 import json
 import tempfile
 import unittest
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +13,7 @@ import review_sensei.session as session_module
 from review_sensei.baseline import (
     MAX_HISTORY_BASELINE_BYTES,
     MAX_HISTORY_ENVELOPE_RESERVE_BYTES,
+    BaselinePersistenceError,
     admission_context_document,
     admission_context_from_document,
     baseline_from_review,
@@ -506,3 +507,76 @@ class ContextCapacityTests(unittest.TestCase):
             baseline_history_document(too_many, require_complete=True)
         with self.assertRaisesRegex(ReviewInputError, "require_complete"):
             baseline_history_document(baseline, require_complete="yes")
+
+    def test_strict_checkpoint_exact_encoded_boundary_and_one_byte_over(self):
+        _policy, baseline, _current = capacity_fixture(16)
+        document = baseline_history_document(baseline, require_complete=True)
+        size = len(encoded(document))
+        self.assertEqual(
+            baseline_history_document(baseline, max_bytes=size, require_complete=True),
+            document,
+        )
+        with self.assertRaises(BaselinePersistenceError) as caught:
+            baseline_history_document(
+                baseline, max_bytes=size - 1, require_complete=True
+            )
+        diagnostics = caught.exception.persistence_diagnostics
+        self.assertEqual(diagnostics["reasons"], ["encoded-bytes"])
+        self.assertEqual(diagnostics["encoded_bytes"], size)
+        self.assertEqual(diagnostics["available_bytes"], size - 1)
+        validate_public_document(diagnostics, "checkpoint-diagnostics")
+        with self.assertRaises(ReviewInputError):
+            validate_public_document(
+                {**diagnostics, "path": "private.py"}, "checkpoint-diagnostics"
+            )
+
+    def test_finding_projection_is_explicitly_incomplete_and_strict_counts_all(self):
+        _policy, baseline, _current = capacity_fixture(16)
+        self.assertEqual(len(baseline.findings), 2)
+        expanded = replace(
+            baseline,
+            findings=baseline.findings
+            + (replace(baseline.findings[0], fingerprint="f" * 64),),
+        )
+        projected = baseline_history_document(expanded)
+        self.assertEqual(len(projected["findings"]), 2)
+        self.assertFalse(projected["complete"])
+        self.assertFalse(projected["coverage_complete"])
+        with self.assertRaises(BaselinePersistenceError) as caught:
+            baseline_history_document(expanded, require_complete=True)
+        diagnostics = caught.exception.persistence_diagnostics
+        complete_document = {
+            **projected,
+            "complete": True,
+            "coverage_complete": True,
+            "findings": [
+                *projected["findings"],
+                asdict(expanded.findings[-1]),
+            ],
+        }
+        self.assertEqual(diagnostics["finding_count"], 3)
+        self.assertEqual(diagnostics["reasons"], ["finding-count"])
+        self.assertEqual(diagnostics["encoded_bytes"], len(encoded(complete_document)))
+
+    def test_field_width_overflow_reports_lengths_without_content(self):
+        _policy, baseline, _current = capacity_fixture(16)
+        expanded = replace(
+            baseline,
+            findings=(
+                replace(baseline.findings[0], symbol="private-symbol-" + "x" * 256),
+            ),
+        )
+        with self.assertRaises(BaselinePersistenceError) as caught:
+            baseline_history_document(expanded, require_complete=True)
+        diagnostics = caught.exception.persistence_diagnostics
+        self.assertEqual(diagnostics["reasons"], ["field-width"])
+        self.assertGreater(diagnostics["maximum_symbol_characters"], 256)
+        self.assertNotIn("private-symbol", json.dumps(diagnostics))
+
+    def test_incomplete_analysis_is_never_a_capacity_error(self):
+        _policy, baseline, _current = capacity_fixture(16)
+        with self.assertRaises(ReviewInputError) as caught:
+            baseline_history_document(
+                replace(baseline, complete=False), require_complete=True
+            )
+        self.assertNotIsInstance(caught.exception, BaselinePersistenceError)

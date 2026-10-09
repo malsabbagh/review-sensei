@@ -45,6 +45,8 @@ SCHEMA_NAMES = (
     "promotion-record",
     "openrouter-qualification",
     "run-outcome",
+    "checkpoint-diagnostics",
+    "checkpoint-evidence",
     "recovery-artifact",
     "work-recovery-artifact",
     "candidate-finding",

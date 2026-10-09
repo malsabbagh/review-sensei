@@ -945,6 +945,8 @@ jobs:
           if [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]; then review_args+=(--base-sha "$BASE_SHA"); fi
           if [[ "$ARTIFACTS" == "diagnostics" ]]; then
             review_args+=(--recovery-artifact recovery-artifact.json)
+            review_args+=(--checkpoint-evidence-output checkpoint-evidence.json \
+              --checkpoint-diagnostics-output checkpoint-diagnostics.json)
           fi
           # Reserve the round, checkpoint the identity-bound transaction, and
           # emit the trusted admission artifacts before inference results are
@@ -970,7 +972,8 @@ jobs:
           # A skipped committed attempt produces no result. Clear runner-local
           # outputs so it cannot accidentally publish an older file.
           rm -f review.json outcome.json recovery-artifact.json publication-outcome.json \
-            configuration-context.json admission-context.json
+            configuration-context.json admission-context.json checkpoint-evidence.json checkpoint-diagnostics.json
+          echo 'checkpoint_workspace_clean=true' >> "$GITHUB_OUTPUT"
           echo 'result_ready=false' >> "$GITHUB_OUTPUT"
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
@@ -1128,7 +1131,7 @@ jobs:
           exit 1
 
       - name: Upload diagnostics artifact
-        if: always() && !cancelled() && inputs.operation == 'review' && needs.bootstrap.outputs.artifacts == 'diagnostics' && steps.provider-review.outcome == 'success' && steps.provider-review.outputs.result_ready == 'true'
+        if: always() && !cancelled() && inputs.operation == 'review' && needs.bootstrap.outputs.artifacts == 'diagnostics' && ((steps.provider-review.outcome == 'success' && steps.provider-review.outputs.result_ready == 'true') || (steps.provider-review.outcome == 'failure' && steps.provider-review.outputs.checkpoint_workspace_clean == 'true' && hashFiles('checkpoint-evidence.json') != ''))
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: review-sensei-diagnostics
@@ -1140,6 +1143,8 @@ jobs:
             configuration-context.json
             admission-context.json
             pr.patch
+            checkpoint-evidence.json
+            checkpoint-diagnostics.json
           if-no-files-found: error
           retention-days: 7
 
@@ -1394,6 +1399,8 @@ jobs:
           if [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]; then review_args+=(--base-sha "$BASE_SHA"); fi
           if [[ "$ARTIFACTS" == "diagnostics" ]]; then
             review_args+=(--recovery-artifact recovery-artifact.json)
+            review_args+=(--checkpoint-evidence-output checkpoint-evidence.json \
+              --checkpoint-diagnostics-output checkpoint-diagnostics.json)
           fi
           # Reserve the round, checkpoint the identity-bound transaction, and
           # emit the trusted admission artifacts before inference results are
@@ -1413,7 +1420,8 @@ jobs:
           # A skipped committed attempt produces no result. Clear runner-local
           # outputs so it cannot accidentally publish an older file.
           rm -f review.json outcome.json recovery-artifact.json publication-outcome.json \
-            configuration-context.json admission-context.json
+            configuration-context.json admission-context.json checkpoint-evidence.json checkpoint-diagnostics.json
+          echo 'checkpoint_workspace_clean=true' >> "$GITHUB_OUTPUT"
           echo 'result_ready=false' >> "$GITHUB_OUTPUT"
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
@@ -1573,7 +1581,7 @@ jobs:
           exit 1
 
       - name: Upload diagnostics artifact
-        if: always() && !cancelled() && inputs.operation == 'review' && needs.bootstrap.outputs.artifacts == 'diagnostics' && steps.provider-review.outcome == 'success' && steps.provider-review.outputs.result_ready == 'true'
+        if: always() && !cancelled() && inputs.operation == 'review' && needs.bootstrap.outputs.artifacts == 'diagnostics' && ((steps.provider-review.outcome == 'success' && steps.provider-review.outputs.result_ready == 'true') || (steps.provider-review.outcome == 'failure' && steps.provider-review.outputs.checkpoint_workspace_clean == 'true' && hashFiles('checkpoint-evidence.json') != ''))
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: review-sensei-diagnostics
@@ -1585,5 +1593,7 @@ jobs:
             configuration-context.json
             admission-context.json
             pr.patch
+            checkpoint-evidence.json
+            checkpoint-diagnostics.json
           if-no-files-found: error
           retention-days: 7

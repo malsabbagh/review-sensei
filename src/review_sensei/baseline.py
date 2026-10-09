@@ -378,6 +378,19 @@ def _history_path_projection(
     return tuple(reviewed), tuple(related)
 
 
+class BaselinePersistenceError(ReviewInputError):
+    """A valid complete baseline cannot fit the durable metadata contract.
+
+    Diagnostics contain only fixed labels, booleans and counts. Never include
+    paths, identities, provider text or configuration values in this report.
+    """
+
+    def __init__(self, diagnostics: dict[str, object]) -> None:
+        validate_public_document(diagnostics, "checkpoint-diagnostics")
+        super().__init__("complete review evidence exceeds the persisted bound")
+        self.persistence_diagnostics = diagnostics
+
+
 def baseline_history_document(
     baseline: ReviewBaseline,
     *,
@@ -414,28 +427,35 @@ def baseline_history_document(
         raise ReviewInputError("baseline related paths exceed the persisted bound")
     # The envelope carries a bounded finding set. Selecting by fingerprint is
     # deterministic and content-derived, so the persisted history does not
-    # depend on provider ordering or on how many retries a run took, and a
-    # review with more findings than the envelope allows still checkpoints
-    # instead of writing a document the schema rejects on the next read.
-    findings = sorted(baseline.findings, key=lambda item: item.fingerprint)[
-        :MAX_HISTORY_FINDINGS
-    ]
-    if any(
-        len(value) > 256
-        for value in (
-            baseline.cache_key.repository,
-            baseline.cache_key.engine,
-            baseline.cache_key.model,
-            baseline.cache_key.profile,
-            *baseline.reviewed_paths,
-            *baseline.related_paths,
+    # depend on provider ordering or on how many retries a run took.
+    # Only optional cache projections may be narrowed. Strict checkpoints
+    # measure the complete document, including findings beyond the write cap.
+    all_findings = sorted(baseline.findings, key=lambda item: item.fingerprint)
+    findings = all_findings if require_complete else all_findings[:MAX_HISTORY_FINDINGS]
+    identity_or_path_characters = max(
+        map(
+            len,
+            (
+                baseline.cache_key.repository,
+                baseline.cache_key.engine,
+                baseline.cache_key.model,
+                baseline.cache_key.profile,
+                *baseline.reviewed_paths,
+                *baseline.related_paths,
+                *(finding.path or "" for finding in findings),
+            ),
         )
-    ) or any(
-        (finding.path is not None and len(finding.path) > 256)
-        or (finding.symbol is not None and len(finding.symbol) > 256)
-        or len(finding.defect_kind) > 128
-        for finding in findings
-    ):
+    )
+    symbol_characters = max((len(item.symbol or "") for item in findings), default=0)
+    defect_kind_characters = max(
+        (len(item.defect_kind) for item in findings), default=0
+    )
+    fields_exceed_bound = (
+        identity_or_path_characters > 256
+        or symbol_characters > 256
+        or defect_kind_characters > 128
+    )
+    if fields_exceed_bound and not require_complete:
         raise ReviewInputError("baseline evidence exceeds persisted field bounds")
     document: dict[str, object] = {
         "cache_key": baseline_cache_key_document(baseline.cache_key),
@@ -465,14 +485,37 @@ def baseline_history_document(
         # separator allowance and explicit incomplete flags.
         document["reviewed_paths"] = sorted(baseline.reviewed_paths)
         document["related_paths"] = sorted(baseline.related_paths)
-        if (
-            not baseline.complete
-            or not baseline.coverage_complete
-            or len(findings) != len(baseline.findings)
-            or _history_encoding_size(document) > max_bytes
-        ):
-            raise ReviewInputError(
-                "complete review evidence exceeds the persisted bound"
+        size = _history_encoding_size(document)
+        reasons = []
+        if not baseline.complete or not baseline.coverage_complete:
+            # Incomplete analysis is not a capacity fallback. It must still
+            # fail closed rather than gaining a publication transaction here.
+            raise ReviewInputError("only complete evidence can be persisted")
+        if len(findings) > MAX_HISTORY_FINDINGS:
+            reasons.append("finding-count")
+        if size > max_bytes:
+            reasons.append("encoded-bytes")
+        if fields_exceed_bound:
+            reasons.append("field-width")
+        if reasons:
+            raise BaselinePersistenceError(
+                {
+                    "schema_version": "1.0",
+                    "reasons": reasons,
+                    "finding_count": len(findings),
+                    "finding_limit": MAX_HISTORY_FINDINGS,
+                    "reviewed_path_count": len(baseline.reviewed_paths),
+                    "related_path_count": len(baseline.related_paths),
+                    "encoded_bytes": size,
+                    "available_bytes": max_bytes,
+                    "maximum_bytes": MAX_HISTORY_BASELINE_BYTES,
+                    "maximum_identity_or_path_characters": identity_or_path_characters,
+                    "identity_or_path_character_limit": 256,
+                    "maximum_symbol_characters": symbol_characters,
+                    "symbol_character_limit": 256,
+                    "maximum_defect_kind_characters": defect_kind_characters,
+                    "defect_kind_character_limit": 128,
+                }
             )
         return document
     available = max_bytes - _history_encoding_size(document)
@@ -481,8 +524,10 @@ def baseline_history_document(
     reviewed, related = _history_path_projection(baseline, available=available)
     document["reviewed_paths"] = list(reviewed)
     document["related_paths"] = list(related)
-    if len(reviewed) != len(baseline.reviewed_paths) or len(related) != len(
-        baseline.related_paths
+    if (
+        len(findings) != len(baseline.findings)
+        or len(reviewed) != len(baseline.reviewed_paths)
+        or len(related) != len(baseline.related_paths)
     ):
         # A dropped path must never read as "not reviewed": a later finding on
         # it would classify as pre-existing or new instead of a missed defect,
