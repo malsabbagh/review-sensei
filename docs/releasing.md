@@ -8,6 +8,11 @@ npm releases and recovery. Package publication is a maintainer operation;
 ordinary pull requests must not push
 tags or invoke a release workflow.
 
+For the next complete-evidence library and lasting unified repository pipeline,
+follow [the runtime rollout plan](review-runtime-rollout.md). Its next-version
+candidate must be rechecked against all registries before preparation; `v5`
+promotion follows verified package publication rather than a floating install.
+
 ## npm release paths (issue #103)
 
 The `Release` workflow's `publish-npm` job is the normal npm path for a

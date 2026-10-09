@@ -10,6 +10,12 @@ work routing is still the packaged default. This setting is separate from
 convergence-policy selection and does not change provider qualification or any
 approval gate.
 
+This repository selects unified work in its root `.reviewsensei.yml` for both
+full review and human reassessment. Hosted jobs read that setting from trusted
+`main`; a PR-local edit does not change the live route. Keep this selection
+through the [complete-evidence runtime rollout](review-runtime-rollout.md).
+The packaged default remains separate from this repository's selected policy.
+
 ```yaml
 schema: 1
 advanced:

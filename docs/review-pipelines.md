@@ -46,6 +46,11 @@ and of `github.reviews`, the publication/approval policy. Historical convergence
 `legacy` and work mode `legacy` are different concepts.
 ([work budgets][budgets], [convergence policy][convergence], [configuration][config])
 
+This repository selects unified work in `.reviewsensei.yml`. Hosted jobs activate
+that choice only after the configuration reaches trusted `main`; ordinary
+customers still choose their own work mode. The [runtime rollout plan](review-runtime-rollout.md)
+binds the complete-evidence library release to the signed `v5` channel.
+
 ```mermaid
 sequenceDiagram
     autonumber

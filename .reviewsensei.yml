@@ -26,6 +26,9 @@ github:
 
 # Optional limits and endpoint overrides.
 advanced:
+  review_work:
+    # Use complete evidence batches for full review and human reassessment.
+    mode: unified
   endpoint:
     # Required to send requests to a custom API root
     allow_custom_endpoint: false
@@ -42,9 +45,6 @@ advanced:
   egress:
     # Permit non-loopback provider traffic
     allow_data_egress: false
-  large_changes:
-    # Split a large diff into bounded review slices
-    orchestrate: false
   resources:
     # Provider request timeout in seconds
     timeout_seconds: 900
