@@ -1,5 +1,8 @@
 # Architecture
 
+For the operational flows and separate analysis, persistence, reassessment and
+approval bounds, see [Review pipelines and customization](review-pipelines.md).
+
 ## npm launcher and standalone boundary (issue #103)
 
 The npm surface is an adapter around the existing Python engine, not a second

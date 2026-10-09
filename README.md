@@ -17,6 +17,9 @@ providers later.
 > movement remain operator-only. It
 > defaults to a local Ollama endpoint and does not require a hosted backend.
 
+For source-linked sequence diagrams, limits, lens behavior, and valid
+configuration examples, see [Review pipelines and customization](docs/review-pipelines.md).
+
 ## What it does
 
 - Keeps review business logic independent of GitHub and model vendors.

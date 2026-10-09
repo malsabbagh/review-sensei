@@ -1,5 +1,9 @@
 # Shared review work (experimental)
 
+See [Review pipelines and customization](review-pipelines.md) for normal and
+reply sequence diagrams, current storage bounds, lens behavior and configuration
+examples. Unified evidence budgets do not expand those storage bounds.
+
 `advanced.review_work.mode: unified` selects one deterministic evidence planner
 and bounded executor for full discovery and tagged human reassessment. Existing
 work routing is still the packaged default. This setting is separate from
