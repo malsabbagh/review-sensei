@@ -402,9 +402,11 @@ class LinuxStandaloneReleaseBaselineTests(unittest.TestCase):
     @unittest.skipIf(sys.platform == "win32", "Linux pull policy uses Bash")
     def test_pinned_pull_retries_are_bounded_and_keep_the_exact_identity(self):
         script = (ROOT / "scripts/build_linux_standalone_in_container.sh").read_text()
-        function = script.split("pull_pinned_image() {", 1)[1].split(
-            '\n}\n\npull_pinned_image "$build_image"', 1
-        )[0]
+        # The helper's outer brace is unindented; nested shell blocks are not.
+        # Extract its actual body independently of blank lines at the call site.
+        functions = re.findall(r"(?ms)^pull_pinned_image\(\) \{(.*?)^\}", script)
+        self.assertEqual(len(functions), 1, "expected exactly one pull helper")
+        function = functions[0]
         image = "public.ecr.aws/docker/library/python@sha256:" + "a" * 64
         for failures, count, status in ((0, 1, 0), (2, 3, 0), (3, 3, 1)):
             with (

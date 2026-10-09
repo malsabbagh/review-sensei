@@ -99,7 +99,9 @@ Windows CI runs that same discovered checkout inventory through
 `python scripts/run_checkout_tests.py --workers 4`. It partitions sorted test IDs
 into disjoint processes with intact test classes, verifies each worker loaded
 its exact inventory, and
-waits for every worker even when a test fails. Discovery errors, empty inventories
+waits for every worker even when a test fails. Separate worker logs are replayed
+in worker order with inventory counts and exit codes so failures are attributable.
+Discovery errors, empty inventories
 and failed workers fail the lane. Module/class fixtures run inside each worker;
 cross-class mutable state must not be shared. Release-preparation fixtures clone
 one precommitted, normalized source seed into independent object stores instead
