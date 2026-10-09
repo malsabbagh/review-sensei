@@ -129,10 +129,12 @@ charged entirely to the 32,768-byte input-summary allowance.
 The following measurements use the final proposal's varied synthetic fixtures:
 distinct failure narratives, symbols, paths and request/receipt digests, with
 about 555 prose bytes per finding. Above 32 findings they reuse those 32 paths.
-These are **reproducible fixtures, not production-frequency estimates or a
-capacity guarantee**. Baselines retain identities and criteria, not prose.
+Every row below is a **recorded measurement at inspected commit `9fb5ad6`
+only**, not a claim about fixtures in this current-main tree, production
+frequency or guaranteed capacity. The source-linked fixtures belong to that
+proposal commit; re-derivation requires checking out that exact source. Baselines retain identities and criteria, not prose.
 
-| Findings | Baseline encoded bytes | Human envelope needed with every finding resolved | Complete framed human review |
+| Findings recorded at `9fb5ad6` only | Baseline encoded bytes | Human envelope needed with every finding resolved | Complete framed human review |
 | --- | ---: | ---: | --- |
 | 12 | 2,354 | 9,123 | 22,903 B; published |
 | 21 | 3,658 | 7,297 | 26,998 B; published |

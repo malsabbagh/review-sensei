@@ -439,10 +439,10 @@ content or environment interpolation.
 | `github` | `automatic_reviews`, `writes`, `reviews`, `mentions`, `learning`, `artifacts` | `true`, `false`, `auto-approve`, `true`, `disabled`, `none` |
 | `advanced.endpoint` | `base_url`, `allow_custom_endpoint`, `credential_env` | Default endpoint; custom endpoint permission false |
 | `advanced.routing` | `upstream_provider` | Backend/routing-specific trusted setting |
-| `advanced.context.symbol_context` | `enabled`, `allowed_paths`, `max_files`, `max_bytes`, `max_depth` | Disabled; 16 / 131072 / 1 |
-| `advanced.egress` | `allow_data_egress` | False; provider endpoint/privacy gates still apply |
-| `advanced.large_changes` | `orchestrate` | False; enables bounded larger-change planning |
-| `advanced.resources` | `timeout_seconds`, `max_provider_calls` | Backend timeout; call ceiling 8 (see direct-CLI caveat above) |
+| `advanced.context.symbol_context` | `enabled`, `allowed_paths`, `max_files`, `max_bytes`, `max_depth` | Parsed defaults: disabled; 16 / 131072 / 1. **Normal CLI does not consume this YAML section**; use its explicit symbol-context flags |
+| `advanced.egress` | `allow_data_egress` | Parsed default false; **normal inference does not consume this YAML field**. Explicit endpoint/profile gates still apply |
+| `advanced.large_changes` | `orchestrate` | Parsed default false; **normal CLI requires `--orchestrate-large-changes` or unified mode**, not this YAML value |
+| `advanced.resources` | `timeout_seconds`, `max_provider_calls` | Backend timeout; call ceiling 8. Direct normal/reply CLI applies the YAML call cap only in unified routes |
 | `advanced.review_work` | `mode`, `batch_diff_bytes`, `batch_prompt_bytes`, `max_total_prompt_bytes`, `max_total_output_bytes` | `legacy`, 131072, 262144, 2097152, 1048576 |
 
 Packaged backend defaults (not this repository's explicit YAML selection):
@@ -661,6 +661,45 @@ links together with the affected prose, diagrams, examples and tables:
 - Parse the Mermaid sequences, check every relative document target, and check
   each pinned source path against its stated commit. Proposal paths must be
   checked at the proposal SHA, not expected in this current-main checkout.
+
+### Executable source/link check
+
+The following one-shot check is stored with this guide and was run for this
+snapshot. It needs both inspected commits in the local Git object database
+(fetch the exact public proposal commit if absent). It verifies duplicate and
+missing reference definitions, relative document paths and every pinned source
+path. It deliberately fails if inspected source is unavailable; it does not
+substitute today's source. This is an offline documentation check, not new CI
+infrastructure or a generator of numeric claims. Validate numbers against the
+listed source/fixtures, and parse the four Mermaid sequences with a compatible
+Mermaid parser separately; the check below does not claim to parse Mermaid.
+
+```python
+from pathlib import Path
+import re
+import subprocess
+
+for name in ("docs/review-pipelines.md", "docs/proposed-evidence-persistence.md"):
+    document = Path(name)
+    text = document.read_text()
+    definitions = re.findall(r"^\[([^\]]+)\]: (\S+)", text, re.M)
+    refs = dict(definitions)
+    assert len(definitions) == len(refs), (name, "duplicate reference")
+    uses = set(re.findall(r"(?<!!)\[[^\]\n]+\]\[([^\]\n]+)\]", text))
+    assert uses == refs.keys(), (name, "missing or unused reference")
+    for target in re.findall(r"(?<!!)\[[^\]\n]+\]\(([^)]+)\)", text):
+        if "://" not in target and not target.startswith("#"):
+            assert (document.parent / target.split("#")[0]).exists(), target
+    for target in refs.values():
+        match = re.fullmatch(
+            r"https://github.com/malsabbagh/review-sensei/blob/([0-9a-f]{40})/(.+)",
+            target,
+        )
+        assert match, target
+        sha, path = match.groups()
+        subprocess.run(["git", "cat-file", "-e", f"{sha}:{path}"], check=True)
+print("Pinned source and document-link checks passed")
+```
 
 The ADRs own design decisions; source at the inspected revision establishes
 runtime behavior. Reconcile any disagreement explicitly before publishing a
