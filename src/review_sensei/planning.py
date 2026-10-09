@@ -268,11 +268,7 @@ def plan_work(
 
     def fits(candidates: tuple[WorkRequirement, ...]) -> bool:
         batch = batch_for(candidates)
-        if (
-            mode == "reassessment"
-            and sum(len(item.evidence_ids) for item in candidates)
-            > budgets.max_findings_per_batch
-        ):
+        if mode == "reassessment" and len(candidates) > budgets.max_findings_per_batch:
             return False
         if (
             utf8_size(batch.diff_context, label="batch evidence")

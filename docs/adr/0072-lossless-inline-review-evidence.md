@@ -72,6 +72,13 @@ responses remain limited to twenty decisions per batch; trusted aggregates can
 retain the complete validated inventory. Prompt, output, calls, deadlines and
 required-evidence checks remain independently bounded.
 
+Reassessment's effective decision budget counts finding requirements, not their
+required file paths. One concern can require up to eight complete file patches;
+shared patches appear once in a batch. Complete cross-file groups remain atomic
+and still must fit the exact diff and rendered-prompt byte bounds. This corrects
+an unintended refusal of a single small five-file concern without expanding any
+provider, output or call limit.
+
 A complete analysis that exceeds remaining baseline capacity retains every
 publishable finding, uses the established fail-closed partial transaction, and
 carries `persistence_status: capacity-exceeded` in its exact content digest.
@@ -135,6 +142,9 @@ capacity boundaries, real 250-finding encoded overflow, tamper/truncated/trailin
 streams and expansion bombs, schema validation, trusted admission round trips,
 local restart, GitHub comment reconstruction, publication failure/retry, human
 prose above 2 KiB, 25-obligation multi-batch reassessment and resolution growth.
+Regress one finding requiring five/eight complete patches, two findings sharing
+eight patches, actual diff/prompt overflow, deterministic batch coverage and
+retained pending identities when the existing call budget is exhausted.
 Run all local gates, packaged wheel lanes, immutable legacy-reader qualification,
 approved-model source review, and exact-head CI before rollout.
 
