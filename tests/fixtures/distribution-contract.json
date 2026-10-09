@@ -46,6 +46,7 @@
       "description": "Developer checkout lane. Requires scripts/, .github/, packages/, deploy/, and checkout-only fixtures. Compatibility and quality CI continue to run this broader suite.",
       "modules": [
         "tests/test_ci_policy.py",
+        "tests/test_checkout_runner.py",
         "tests/test_cloudflare_package.py",
         "tests/test_github_conversation.py",
         "tests/test_github_publication.py",

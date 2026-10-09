@@ -95,6 +95,23 @@ skips `tests/dist_safe` and `tests/downstream` because they are not packages;
 `tests/conftest.py` makes `pytest` skip them too, so the packaged lanes only run
 the documented way, from an unpacked sdist against an installed wheel.
 
+Windows CI runs that same discovered checkout inventory through
+`python scripts/run_checkout_tests.py --workers 4`. It partitions sorted test IDs
+into disjoint processes, verifies each worker loaded its exact inventory, and
+waits for every worker even when a test fails. Discovery errors, empty inventories
+and failed workers fail the lane. Module/class fixtures run inside each worker;
+cross-test mutable state must not be shared. The quality lane still runs the
+complete serial branch-coverage suite with the 80% floor.
+
+CI's Python jobs cache public pip downloads using the pinned tool requirements
+and project metadata as cache inputs; they reinstall the current checkout and
+run every gate. Superseded PR CI runs are cancelled, while main CI runs finish.
+Linux CI and release smoke builds use Docker's official ECR Public mirror with
+the same immutable Python/Debian multi-platform digests. Both images are pulled
+before building, then used without implicit pulls; the clean consumer remains
+offline. No registry login is required. Intel's static-OpenSSL build deliberately
+bypasses the wheel cache to preserve its ABI regression check.
+
 ## Deterministic evaluation changes
 
 Run the corpus validator and fixture evaluation locally before changing corpus,
