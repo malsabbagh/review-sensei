@@ -112,7 +112,8 @@ and project metadata as cache inputs; they reinstall the current checkout and
 run every gate. Superseded PR CI runs are cancelled, while main CI runs finish.
 Linux CI and release smoke builds use Docker's official ECR Public mirror with
 the same immutable Python/Debian multi-platform digests. Both images are pulled
-before building, then used without implicit pulls; the clean consumer remains
+before building, with at most three attempts and jittered backoff for registry
+failures, then used without implicit pulls; the clean consumer remains
 offline. No registry login is required. Intel's static-OpenSSL build deliberately
 bypasses the wheel cache to preserve its ABI regression check.
 

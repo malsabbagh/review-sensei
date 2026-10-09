@@ -5,6 +5,8 @@ import io
 import json
 import re
 import shutil
+import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
@@ -397,6 +399,55 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
 
 class LinuxStandaloneReleaseBaselineTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "Linux pull policy uses Bash")
+    def test_pinned_pull_retries_are_bounded_and_keep_the_exact_identity(self):
+        script = (ROOT / "scripts/build_linux_standalone_in_container.sh").read_text()
+        function = script.split("pull_pinned_image() {", 1)[1].split(
+            '\n}\n\npull_pinned_image "$build_image"', 1
+        )[0]
+        image = "public.ecr.aws/docker/library/python@sha256:" + "a" * 64
+        for failures, count, status in ((0, 1, 0), (2, 3, 0), (3, 3, 1)):
+            with (
+                self.subTest(failures=failures),
+                tempfile.TemporaryDirectory() as scratch,
+            ):
+                shell = f'''set -euo pipefail
+platform=linux/arm64
+attempts=0
+docker() {{
+  attempts=$((attempts + 1))
+  printf '%s\\n' "$*" >>calls
+  [[ "$attempts" -gt {failures} ]]
+}}
+sleep() {{ printf '%s\\n' "$1" >>delays; }}
+pull_pinned_image() {{{function}
+}}
+pull_pinned_image "{image}"
+'''
+                result = subprocess.run(
+                    ["bash", "-c", shell],
+                    cwd=scratch,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, status, result.stderr)
+                calls = (Path(scratch) / "calls").read_text().splitlines()
+                self.assertEqual(
+                    calls, [f"pull --platform linux/arm64 {image}"] * count
+                )
+                delays = Path(scratch) / "delays"
+                waits = (
+                    list(map(int, delays.read_text().splitlines()))
+                    if delays.exists()
+                    else []
+                )
+                self.assertEqual(len(waits), count - 1)
+                for attempt, delay in enumerate(waits, 1):
+                    self.assertTrue(attempt * 5 <= delay < attempt * 5 + 5)
+                if status:
+                    self.assertIn("failed after 3 attempts", result.stderr)
+
     def test_both_publish_paths_build_linux_on_debian_12(self):
         for workflow_name in ("release.yml", "publish-npm.yml"):
             with self.subTest(workflow=workflow_name):
@@ -434,7 +485,10 @@ class LinuxStandaloneReleaseBaselineTests(unittest.TestCase):
         self.assertIn("debian:12-slim@sha256:", script)
         self.assertIn("public.ecr.aws/docker/library/python:", script)
         self.assertIn("public.ecr.aws/docker/library/debian:", script)
-        self.assertEqual(script.count('docker pull --platform "$platform"'), 2)
+        self.assertEqual(script.count('docker pull --platform "$platform"'), 1)
+        self.assertIn("for attempt in 1 2 3", script)
+        self.assertIn('pull_pinned_image "$build_image"', script)
+        self.assertIn('pull_pinned_image "$consumer_image"', script)
         self.assertLess(script.index('"$consumer_image"\n'), script.index("docker run"))
         self.assertEqual(script.count("--pull never"), 2)
         self.assertEqual(script.count("getconf GNU_LIBC_VERSION"), 2)

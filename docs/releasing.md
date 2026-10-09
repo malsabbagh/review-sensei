@@ -404,7 +404,8 @@ Linux's shared build helper pulls the digest-pinned Docker Official Images from
 `public.ecr.aws/docker/library`, avoiding Docker Hub's shared-runner pull quota.
 The pinned manifest contents and Debian 12 glibc baseline are unchanged; both
 amd64 and arm64 images are admitted before building, and the consumer remains
-offline. Registry failure still fails the build, with no mutable-tag fallback.
+offline. Registry failures get at most three pull attempts with jittered backoff
+on the same platform/digest, then fail the build with no mutable-tag fallback.
 This is the [upstream macOS static-build procedure](https://cryptography.io/en/latest/installation/#building-cryptography-on-macos);
 it does not downgrade the dependency. Both `Release` and manual npm builds use
 `scripts/install_standalone_oracle.py` for the same installation contract.
