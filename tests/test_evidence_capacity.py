@@ -3,6 +3,7 @@
 import hashlib
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 from review_sensei.baseline import (
     BaselinePersistenceError,
@@ -10,7 +11,7 @@ from review_sensei.baseline import (
     baseline_from_history_document,
     baseline_history_document,
 )
-from review_sensei.bounded_evidence import canonical_bytes
+from review_sensei.bounded_evidence import canonical_bytes, encode_evidence
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github import ReviewPublisher
@@ -140,6 +141,37 @@ def publish(state, comments):
 
 
 class EvidenceCapacityTests(unittest.TestCase):
+    def test_human_inventory_encoding_is_cached_without_exposing_mutable_state(self):
+        with patch(
+            "review_sensei.human_assessment.encode_evidence", wraps=encode_evidence
+        ) as encoder:
+            inventory = PendingHumanReview.from_result(
+                human_result(varied_comments(25)), BASE
+            )
+            expected = inventory.to_dict()
+            for _ in range(3):
+                self.assertTrue(inventory.requires_batched_reassessment)
+                document = inventory.to_dict()
+                document["inventory"]["data"] = "tampered"
+                document["resolved"].append("0" * 64)
+                self.assertEqual(inventory.to_dict(), expected)
+            self.assertEqual(encoder.call_count, 1)
+            grown = replace(inventory, resolved=(inventory.findings[0].fingerprint,))
+            self.assertEqual(encoder.call_count, 2)
+            reconstructed = PendingHumanReview.from_dict(grown.to_dict())
+            self.assertEqual(reconstructed, grown)
+            self.assertEqual(
+                reconstructed.requires_batched_reassessment,
+                grown.requires_batched_reassessment,
+            )
+            self.assertTrue(grown.requires_batched_reassessment)
+            self.assertEqual(inventory.resolved, ())
+        legacy = PendingHumanReview.from_result(human_result(varied_comments(2)), BASE)
+        document = legacy.to_dict()
+        document["findings"][0]["body"] = "tampered"
+        self.assertFalse(legacy.requires_batched_reassessment)
+        self.assertEqual(PendingHumanReview.from_dict(legacy.to_dict()), legacy)
+
     def test_diverse_full_publication_uses_framed_body_budget(self):
         for count, detail in ((21, 3), (50, 1)):
             with self.subTest(count=count, detail=detail):

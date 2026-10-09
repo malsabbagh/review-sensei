@@ -72,19 +72,28 @@
       "minimum": 0
     },
     "finding_limit": {
-      "const": 512
+      "enum": [
+        2,
+        512
+      ]
     },
     "maximum_bytes": {
       "const": 11264
     },
     "identity_or_path_character_limit": {
-      "const": 4096
+      "enum": [
+        256,
+        4096
+      ]
     },
     "symbol_character_limit": {
       "const": 256
     },
     "defect_kind_character_limit": {
-      "const": 256
+      "enum": [
+        128,
+        256
+      ]
     },
     "decoded_bytes": {
       "type": "integer",
@@ -93,5 +102,33 @@
     "maximum_decoded_bytes": {
       "const": 2097152
     }
-  }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "finding_limit": {
+          "const": 2
+        },
+        "identity_or_path_character_limit": {
+          "const": 256
+        },
+        "defect_kind_character_limit": {
+          "const": 128
+        }
+      }
+    },
+    {
+      "properties": {
+        "finding_limit": {
+          "const": 512
+        },
+        "identity_or_path_character_limit": {
+          "const": 4096
+        },
+        "defect_kind_character_limit": {
+          "const": 256
+        }
+      }
+    }
+  ]
 }

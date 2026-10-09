@@ -41,6 +41,22 @@ versioning policy above.
 
 ## JSON Schemas
 
+`ReviewResult.persistence_status` is optional. Its only value is
+`capacity-exceeded`, and it is permitted only with `review_status: partial`.
+This combination means the analysis completed but its full baseline could not
+be persisted; `baseline_capacity_exceeded` is the corresponding run diagnostic.
+A partial result without this field keeps its existing incomplete-analysis
+meaning. Neither condition permits approval. Human adjudication remains a
+separate requirement. The field participates in the exact result content digest.
+
+Checkpoint diagnostics are numeric, non-authoritative evidence. Current readers
+accept both the historical two-finding/256-character-path/128-character-defect
+profile and the whole-inventory 512-finding/4,096-character-path/256-character-
+defect profile; writers emit the latter. Delayed approval does not reconstruct
+authority from diagnostics. The bounded-evidence encoded byte allowance covers
+the complete canonical JSON envelope, including its base64 and metadata framing.
+The inner data-string check is an early rejection using the same ceiling.
+
 Published schemas live under `src/review_sensei/schemas/` and are included in the
 installed package. Each schema has a draft 2020-12 `$schema` and an `$id`
 containing `/v1/` for established documents. The opt-in authenticated work

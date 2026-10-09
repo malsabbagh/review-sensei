@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Mapping
 
 from .bounded_evidence import canonical_bytes, decode_evidence, encode_evidence
@@ -125,6 +125,12 @@ class PendingHumanReview:
     base_sha: str
     findings: tuple[HumanReviewFinding, ...]
     resolved: tuple[str, ...] = ()
+    _persisted_inventory: bytes | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _requires_batched_reassessment: bool = field(
+        default=False, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if not _hex(self.base_sha, 40):
@@ -150,17 +156,26 @@ class PendingHumanReview:
             or not set(self.resolved) <= identities
         ):
             raise ReviewInputError("human review resolution identity is invalid")
+        future = self._persisted(tuple(sorted(identities)))
         validate_bounded_text(
-            canonical_bytes(self._persisted(tuple(sorted(identities)))).decode("utf-8"),
+            canonical_bytes(future).decode("utf-8"),
             MAX_HUMAN_REVIEW_BYTES,
             label="human review inventory",
             allow_empty=False,
+        )
+        # Cache immutable bytes, never a mutable dictionary exposed to callers.
+        # Replacing a frozen inventory validates and encodes the new instance.
+        object.__setattr__(
+            self, "_requires_batched_reassessment", "inventory" in future
+        )
+        object.__setattr__(
+            self, "_persisted_inventory", canonical_bytes({**future, "resolved": []})
         )
 
     @property
     def requires_batched_reassessment(self) -> bool:
         """Rich whole inventories must not enter the legacy single-call lane."""
-        return "inventory" in self.to_dict()
+        return self._requires_batched_reassessment
 
     @property
     def pending(self) -> tuple[HumanReviewFinding, ...]:
@@ -183,6 +198,10 @@ class PendingHumanReview:
         return result
 
     def _persisted(self, resolved: tuple[str, ...]) -> dict[str, object]:
+        if self._persisted_inventory is not None:
+            # json.loads gives every caller its own mutable serialization view.
+            document = json.loads(self._persisted_inventory)
+            return {**document, "resolved": list(resolved)}
         document = self._document()
         # Reserve every possible resolution before publishing the inventory.
         # Mutable resolutions stay outside compressed immutable evidence, so

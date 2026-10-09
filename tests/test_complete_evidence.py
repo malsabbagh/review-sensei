@@ -47,6 +47,7 @@ from review_sensei.human_assessment import (
 )
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.presentation import WITHHELD_STATE, render_review_text
+from review_sensei.schemas import validate_public_document
 from review_sensei.session import (
     MAX_SESSION_RECORD_BYTES,
     LocalSessionLedger,
@@ -86,6 +87,34 @@ def findings(count):
 
 
 class CompleteEvidenceTests(unittest.TestCase):
+    def test_current_reader_accepts_closed_legacy_and_current_diagnostic_profiles(self):
+        with self.assertRaises(BaselinePersistenceError) as caught:
+            baseline_history_document(
+                replace(fixture._baseline(1), findings=findings(250)),
+                require_complete=True,
+            )
+        current = caught.exception.persistence_diagnostics
+        validate_public_document(current, "checkpoint-diagnostics")
+        legacy = {
+            key: value
+            for key, value in current.items()
+            if key not in {"decoded_bytes", "maximum_decoded_bytes"}
+        }
+        legacy.update(
+            finding_limit=2,
+            identity_or_path_character_limit=256,
+            defect_kind_character_limit=128,
+            reasons=["finding-count"],
+        )
+        validate_public_document(legacy, "checkpoint-diagnostics")
+        for changed in (
+            {**legacy, "finding_limit": 3},
+            {**legacy, "identity_or_path_character_limit": 4096},
+            {key: value for key, value in legacy.items() if key != "maximum_bytes"},
+        ):
+            with self.assertRaises(ReviewInputError):
+                validate_public_document(changed, "checkpoint-diagnostics")
+
     def test_realistic_twelve_and_twenty_four_finding_inventory_round_trips(self):
         for count in (12, 24):
             baseline = replace(fixture._baseline(1), findings=findings(count))
@@ -393,6 +422,22 @@ class CompleteEvidenceTests(unittest.TestCase):
 
 
 class BoundedEncodingTests(unittest.TestCase):
+    def test_encoded_limit_covers_the_complete_envelope_at_exact_boundary(self):
+        source = {"evidence": "bounded immutable text"}
+        encoded = encode_evidence(source, max_decoded_bytes=2048)
+        boundary = len(canonical_bytes(encoded))
+        self.assertLess(len(encoded["data"]), boundary - 1)
+        self.assertEqual(
+            decode_evidence(
+                encoded, max_encoded_bytes=boundary, max_decoded_bytes=2048
+            ),
+            source,
+        )
+        with self.assertRaises(ReviewInputError):
+            decode_evidence(
+                encoded, max_encoded_bytes=boundary - 1, max_decoded_bytes=2048
+            )
+
     def test_decode_rejects_tampering_truncation_trailing_stream_and_expansion_bomb(
         self,
     ):

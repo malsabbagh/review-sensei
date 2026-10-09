@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Cache immutable human-inventory encodings without exposing mutable authority,
+  and accept closed historical checkpoint-diagnostic profiles in current readers.
+
 - Qualify complete evidence with varied finding prose and retained lifecycle
   state, and account for published finding text separately from the input
   summary allowance while preserving the fully framed GitHub body limit.

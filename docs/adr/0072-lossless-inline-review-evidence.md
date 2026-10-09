@@ -58,6 +58,10 @@ required paths. The immutable complete inventory is compressed; its mutable
 resolved identity list remains outside that compressed member. Before admitting
 an inventory, the writer proves that every resolution can fit the same 24 KiB
 publication marker inventory bound. Any resolution subset is therefore safe.
+The validated serialization and batching decision are cached as immutable bytes
+and a private boolean on the frozen inventory. Repeated readers receive fresh
+dictionary views; mutating those views cannot change inventory authority.
+Replacing an inventory revalidates its resolution growth and rebuilds the cache.
 Encoded whole inventories automatically use the existing bounded work planner
 on replies, even when the repository retains the legacy work default; they
 cannot enter its single-provider-call lane. This does not raise prompt, output,
@@ -76,6 +80,9 @@ GitHub review/check distinguish complete analysis, failed baseline persistence,
 and withheld approval. The outcome is `baseline_capacity_exceeded`; coverage is
 not relabeled incomplete. Partial analysis without this field keeps its existing
 semantics. Human adjudication remains an independent approval requirement.
+Numeric diagnostic readers accept both historical and current closed capacity
+profiles. Those diagnostic files never authorize delayed approval or mutate a
+session; the current writer continues to emit only its current limit profile.
 
 ## Scope and consequences
 

@@ -354,6 +354,9 @@ class BaselineRecoveryTests(unittest.TestCase):
         self,
     ):
         before = self.seed_overflow(long_paths=True)
+        # Inject the allocator's capacity seam because this otherwise valid
+        # compact fixture now fits. Real high-entropy overflow is separately
+        # covered by test_evidence_capacity; this proves CLI cleanup/status.
         with patch(
             "review_sensei.session.checkpoint_baseline_capacity", return_value=128
         ):
@@ -366,6 +369,7 @@ class BaselineRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(result.persistence_status, "capacity-exceeded")
         self.assertIn('"encoded-bytes"', stderr)
+        self.assertNotIn('"decoded-bytes"', stderr)
         self.assertEqual(self.provider.calls, 2)
         self.assertEqual(self.record().convergence_history, before.convergence_history)
         self.assertEqual(self.record().failed_attempts, 1)

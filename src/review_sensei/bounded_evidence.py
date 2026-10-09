@@ -36,6 +36,11 @@ def encode_evidence(value: object, *, max_decoded_bytes: int) -> dict[str, objec
 def decode_evidence(
     value: object, *, max_encoded_bytes: int, max_decoded_bytes: int
 ) -> object:
+    """Bound the entire canonical JSON envelope, including base64 framing.
+
+    The cheap inner string check avoids serializing an already oversized
+    payload; it does not allocate a separate allowance for that payload.
+    """
     if not isinstance(value, dict) or set(value) != {
         "encoding",
         "decoded_bytes",
