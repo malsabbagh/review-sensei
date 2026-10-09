@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 Project: ReviewSensei
-Last updated: 2026-10-08
+Last updated: 2026-10-09
 
 ADRs capture durable architecture decisions for this repository. Use `docs/adr/NNNN-short-title.md` for individual records.
 
@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0070](0070-bounded-checkpoint-overflow.md) | Proposed | Preserve full finding publication as partial when durable baseline metadata cannot fit | User-authorized PR #231 recovery | Exact sanitized limits, unchanged bounded history, withheld approval and opt-in failure evidence |
 | [0068](0068-dedicated-release-key-and-publication-approval.md) | Proposed | Sign prepared release tags with a dedicated GPG key and retain Mo's publication approvals | User-requested automation | User-run setup; no personal key, new App permission or tag bypass |
 | [0067](0067-shared-review-work-mechanics.md) | Proposed | Share discovery and human reassessment planning, evidence and execution | User-authorized implementation | Opt-in routing, complete evidence groups, bounded continuation and reader-first rollout |
 | [0065](0065-complete-human-inventory-and-approval-retry.md) | Proposed | Persist complete human inventories and retry exact-head approval | PR #216; [PR #222](https://github.com/malsabbagh/review-sensei/pull/222) | Distinct collision identities, bounded pending-patch priority, safe diagnostics and preserved approval gates |

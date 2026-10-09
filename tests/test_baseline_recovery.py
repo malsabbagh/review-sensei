@@ -18,6 +18,7 @@ from review_sensei.baseline import (
 )
 from review_sensei.cli import main
 from review_sensei.convergence import ReviewConvergencePolicy
+from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github.approval import (
     approval_facts_from_result,
     evaluate_approval_facts,
@@ -27,6 +28,7 @@ from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.outcomes import ResourceBudget
 from review_sensei.planning import MAX_RELATED_PATHS, related_paths_for_change
 from review_sensei.providers.base import ProviderResponse
+from review_sensei.schemas import validate_public_document
 from review_sensei.service import DEFAULT_STAGES
 from review_sensei.session import (
     LocalSessionLedger,
@@ -282,7 +284,6 @@ class BaselineRecoveryTests(unittest.TestCase):
                     enabled=True,
                     app_authored=False,
                     check_published=True,
-                    has_open_review_threads=False,
                 )
             ).approved
         )
@@ -328,7 +329,6 @@ class BaselineRecoveryTests(unittest.TestCase):
                 enabled=True,
                 app_authored=False,
                 check_published=True,
-                has_open_review_threads=False,
             )
         )
         self.assertFalse(eligibility.approved)
@@ -352,15 +352,139 @@ class BaselineRecoveryTests(unittest.TestCase):
         self.assertEqual(self.record().failed_attempts, 1)
         self.assertEqual(self.record().convergence_history, before.convergence_history)
 
-    def test_overflow_full_evidence_that_cannot_fit_keeps_prior_history(self):
+    def test_overflow_full_evidence_that_cannot_fit_publishes_partial_keeps_history(
+        self,
+    ):
         before = self.seed_overflow(long_paths=True)
-        code, stderr, _ = self.run_cli(head="d")
-        self.assertEqual(code, 1, stderr)
-        self.assertIn("complete review evidence exceeds the persisted bound", stderr)
+        code, stderr, outcome = self.run_cli(head="d")
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(outcome["status"], "partial")
+        self.assertIn('"encoded-bytes"', stderr)
         self.assertEqual(self.provider.calls, 2)
         self.assertEqual(self.record().convergence_history, before.convergence_history)
         self.assertEqual(self.record().failed_attempts, 1)
         self.assertIsNone(self.record().reservation_id)
+
+    def oversized_comments(self):
+        return [
+            {
+                "path": "app.py",
+                "line": 2,
+                "body": f"Complete diagnostic finding {number}: preserve this evidence.",
+                "blocking": False,
+                "severity": "low",
+                "defect_kind": f"distinct-defect-{number}",
+            }
+            for number in range(3)
+        ]
+
+    def checkpoint_outputs(self):
+        return (
+            "--checkpoint-evidence-output",
+            str(self.root / "checkpoint-evidence.json"),
+            "--checkpoint-diagnostics-output",
+            str(self.root / "checkpoint-diagnostics.json"),
+        )
+
+    def test_three_findings_preserve_complete_inventory_withhold_approval(self):
+        self.provider.comments = self.oversized_comments()
+        code, stderr, outcome = self.run_cli(extra=self.checkpoint_outputs())
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(outcome["status"], "partial")
+        result = ReviewResult.from_dict(
+            json.loads((self.root / "result.json").read_text())
+        )
+        self.assertEqual(result.review_status, "partial")
+        self.assertEqual(len(result.comments), 3)
+        self.assertEqual(
+            [item.body for item in result.comments],
+            [item["body"] for item in self.provider.comments],
+        )
+        decision = evaluate_approval_facts(
+            replace(
+                approval_facts_from_result(result, enabled=True, app_authored=False),
+                has_open_review_threads=False,
+                has_blocking_findings=False,
+                has_human_adjudication_findings=False,
+            )
+        )
+        self.assertFalse(decision.approved)
+        self.assertEqual(decision.blockers, ("review-partial",))
+        evidence = json.loads((self.root / "checkpoint-evidence.json").read_text())
+        validate_public_document(evidence, "checkpoint-evidence")
+        self.assertFalse(evidence["publishable"])
+        self.assertEqual(evidence["result"]["review_status"], "complete")
+        self.assertEqual(len(evidence["result"]["comments"]), 3)
+        self.assertNotIn("transaction", evidence["result"])
+        # Diagnostic evidence retains the original complete analysis; only the
+        # post-fallback partial result is bound to the durable transaction.
+        self.assertNotEqual(
+            ReviewResult.from_dict(evidence["result"]).content_digest(),
+            result.content_digest(),
+        )
+        with self.assertRaises(ReviewInputError):
+            ReviewResult.from_dict(evidence)
+        diagnostics = json.loads(
+            (self.root / "checkpoint-diagnostics.json").read_text()
+        )
+        self.assertEqual(diagnostics["reasons"], ["finding-count"])
+        self.assertEqual(diagnostics["finding_count"], 3)
+        self.assertEqual(diagnostics["finding_limit"], 2)
+        self.assertLessEqual(diagnostics["available_bytes"], 11264)
+        self.assertNotIn("app.py", json.dumps(diagnostics))
+        record = self.record()
+        self.assertEqual(record.failed_attempts, 1)
+        self.assertEqual(record.completed_initial_reviews, 0)
+        self.assertIsNone(record.reservation_id)
+        self.assertIsNone(record.convergence_history)
+        self.assertEqual(record.transaction.result_sha256, result.content_digest())
+        completed = complete_review_publication(
+            self.ledger, self.identity, result.transaction, published=True
+        )
+        self.assertEqual(completed.failed_attempts, 1)
+        self.assertEqual(completed.completed_initial_reviews, 0)
+        code, stderr, outcome = self.run_cli()
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(outcome["status"], "skipped_policy")
+        self.assertEqual(self.record().failed_attempts, 1)
+
+    def test_checkpoint_io_failure_retains_full_evidence_and_cleans_reservation(self):
+        self.provider.comments = self.oversized_comments()
+        with patch(
+            "review_sensei.session.checkpoint_review_analysis",
+            side_effect=OSError("synthetic persistence failure"),
+        ):
+            code, stderr, _ = self.run_cli(extra=self.checkpoint_outputs())
+        self.assertEqual(code, 1, stderr)
+        self.assertFalse((self.root / "result.json").exists())
+        evidence = json.loads((self.root / "checkpoint-evidence.json").read_text())
+        self.assertEqual(len(evidence["result"]["comments"]), 3)
+        self.assertIsNone(self.record().reservation_id)
+        self.assertEqual(self.record().failed_attempts, 1)
+        self.assertIsNone(self.record().transaction)
+
+    def test_diagnostic_evidence_write_failure_cleans_reservation_once(self):
+        self.provider.comments = self.oversized_comments()
+        code, stderr, _ = self.run_cli(
+            extra=(
+                "--checkpoint-evidence-output",
+                str(self.root / "missing" / "evidence.json"),
+            )
+        )
+        self.assertEqual(code, 1, stderr)
+        self.assertIsNone(self.record().reservation_id)
+        self.assertEqual(self.record().failed_attempts, 1)
+        self.assertIsNone(self.record().transaction)
+
+    def test_overflow_diagnostics_do_not_opt_into_content_retention(self):
+        self.provider.comments = self.oversized_comments()
+        code, stderr, _ = self.run_cli()
+        self.assertEqual(code, 0, stderr)
+        self.assertIn('"finding_limit": 2', stderr)
+        self.assertNotIn("app.py", stderr)
+        self.assertNotIn("preserve this evidence", stderr)
+        self.assertFalse((self.root / "checkpoint-evidence.json").exists())
+        self.assertFalse((self.root / "checkpoint-diagnostics.json").exists())
 
     def test_overflow_chunked_review_obeys_budget_without_restarting_analysis(self):
         before = self.seed_overflow()
@@ -675,7 +799,6 @@ class BaselineRecoveryTests(unittest.TestCase):
                 enabled=True,
                 app_authored=False,
                 check_published=True,
-                has_open_review_threads=False,
             )
         )
         self.assertFalse(eligibility.approved)

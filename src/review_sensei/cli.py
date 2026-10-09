@@ -14,9 +14,11 @@ from typing import NoReturn
 
 from .baseline import (
     RECOVERABLE_FALLBACK_REASONS,
+    BaselinePersistenceError,
     admission_context_document,
     admission_context_from_document,
     baseline_from_history_document,
+    baseline_history_document,
     plan_verification_scope,
     reconcile_overflow_review,
 )
@@ -1174,6 +1176,20 @@ def _parser() -> argparse.ArgumentParser:
         "--outcome",
         type=Path,
         help="Write the structured run-outcome JSON for this invocation",
+    )
+    parser.add_argument(
+        "--checkpoint-evidence-output",
+        type=Path,
+        help=(
+            "Retain the full validated result before durable checkpointing; "
+            "diagnostic evidence only, never publication authorization. "
+            "This opt-in file contains review content"
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-diagnostics-output",
+        type=Path,
+        help="Write sanitized count/byte diagnostics when baseline persistence overflows",
     )
     parser.add_argument(
         "--recovery-artifact",
@@ -3257,6 +3273,13 @@ def main(argv: list[str] | None = None) -> int:
             or args.configuration_context_output is not None
             or args.admission_context_output is not None
         )
+        if not transaction_requested and (
+            args.checkpoint_evidence_output is not None
+            or args.checkpoint_diagnostics_output is not None
+        ):
+            raise ReviewInputError(
+                "checkpoint diagnostics require an identity-bound transaction"
+            )
         if local_session:
             _prepare_local_session(args, hosted_session_ledger=hosted_session_ledger)
         if not hosted_session_ledger:
@@ -4058,6 +4081,22 @@ def main(argv: list[str] | None = None) -> int:
                 raise ReviewInputError("review transaction admission is incomplete")
             if held_reservation is None:
                 raise ReviewInputError("review transaction reservation is missing")
+            if args.checkpoint_evidence_output is not None:
+                # Keep every validated finding even if the ledger or
+                # result output fails below. This is intentionally not
+                # a RecoveryArtifact or an identity-bound publish file.
+                args.checkpoint_evidence_output.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": "1.0",
+                            "publishable": False,
+                            "result": result.to_dict(),
+                        },
+                        indent=2,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
             if not review_analysis_checkpoint_eligible(result):
                 # Preserve uncheckpointable output for review-only callers,
                 # but never emit identity-bound publication artifacts for it.
@@ -4193,6 +4232,37 @@ def main(argv: list[str] | None = None) -> int:
                         if cache_key is not None
                         else None
                     )
+                    if checkpoint_baseline is not None and checkpoint_baseline.complete:
+                        try:
+                            baseline_history_document(
+                                checkpoint_baseline,
+                                max_bytes=checkpoint_baseline_capacity(
+                                    prepared_round.record
+                                ),
+                                require_complete=True,
+                            )
+                        except BaselinePersistenceError as overflow:
+                            diagnostics = overflow.persistence_diagnostics
+                            print(
+                                "review-sensei: checkpoint-overflow: "
+                                + json.dumps(diagnostics, sort_keys=True),
+                                file=sys.stderr,
+                            )
+                            if args.checkpoint_diagnostics_output is not None:
+                                args.checkpoint_diagnostics_output.write_text(
+                                    json.dumps(diagnostics, indent=2) + "\n",
+                                    encoding="utf-8",
+                                )
+                            # Publish the full finding inventory, but do not
+                            # claim a complete durable round or replace its
+                            # prior baseline with a narrowed projection. The
+                            # normal partial checkpoint charges one attempt
+                            # and retains exact-result/idempotency fencing.
+                            result = replace(result, review_status="partial")
+                            outcome = replace(
+                                outcome, status="partial", diagnostic="coverage-partial"
+                            )
+                            checkpoint_baseline = None
                     result = checkpoint_review_analysis(
                         ledger,
                         identity,

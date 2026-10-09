@@ -770,6 +770,24 @@ class ActionPinPolicyTests(unittest.TestCase):
                 self.assertIn("--result review.json", publish_step)
                 upload_step = _step_block(job, "Upload diagnostics artifact")
                 self.assertIn("\n            review.json\n", upload_step)
+                self.assertIn(
+                    "--checkpoint-evidence-output checkpoint-evidence.json", review_step
+                )
+                self.assertIn(
+                    "--checkpoint-diagnostics-output checkpoint-diagnostics.json",
+                    review_step,
+                )
+                self.assertIn(
+                    "needs.bootstrap.outputs.artifacts == 'diagnostics'", upload_step
+                )
+                self.assertIn("steps.provider-review.outcome == 'failure'", upload_step)
+                self.assertIn(
+                    "hashFiles('checkpoint-evidence.json') != ''", upload_step
+                )
+                self.assertIn("\n            checkpoint-evidence.json\n", upload_step)
+                self.assertIn(
+                    "\n            checkpoint-diagnostics.json\n", upload_step
+                )
 
     def test_reusable_workflow_reply_status_parsing_is_identical_across_provider_jobs(
         self,
@@ -1801,6 +1819,45 @@ class ActionPinPolicyTests(unittest.TestCase):
 
 class ReusablePublishGuardTests(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "Linux runner script requires POSIX Bash")
+    def test_early_provider_failure_cannot_upload_stale_checkpoint_evidence(self):
+        workflow = _reusable_workflow_text()
+        for job_id in ("hosted", "local"):
+            with self.subTest(job=job_id), tempfile.TemporaryDirectory() as temporary:
+                job = _job_section(workflow, job_id)
+                block = next(
+                    block
+                    for block in _run_blocks(job)
+                    if "echo 'result_ready=false'" in block
+                )
+                root = Path(temporary)
+                (root / "checkpoint-evidence.json").write_text(
+                    "stale evidence", encoding="utf-8"
+                )
+                output = root / "outputs"
+                process = subprocess.run(
+                    ["bash", "-c", "set -e\n" + block],
+                    cwd=root,
+                    env={
+                        "RUNNER_KIND": "invalid",
+                        "GITHUB_OUTPUT": str(output),
+                        "PATH": os.environ.get("PATH", ""),
+                    },
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(process.returncode, 0)
+                self.assertTrue((root / "checkpoint-evidence.json").exists())
+                self.assertNotIn(
+                    "checkpoint_workspace_clean=true",
+                    output.read_text() if output.exists() else "",
+                )
+                upload = _step_block(job, "Upload diagnostics artifact")
+                self.assertIn(
+                    "steps.provider-review.outputs.checkpoint_workspace_clean == 'true'",
+                    upload,
+                )
+
+    @unittest.skipIf(os.name == "nt", "Linux runner script requires POSIX Bash")
     def test_runner_result_guard_clears_stale_outputs_and_distinguishes_skip(self):
         workflow = _reusable_workflow_text()
         for job_id in ("hosted", "local"):
@@ -1841,6 +1898,8 @@ class ReusablePublishGuardTests(unittest.TestCase):
                             "publication-outcome.json",
                             "configuration-context.json",
                             "admission-context.json",
+                            "checkpoint-evidence.json",
+                            "checkpoint-diagnostics.json",
                         ):
                             (root / name).write_text("stale", encoding="utf-8")
                         output = root / "outputs"
@@ -1855,7 +1914,9 @@ class ReusablePublishGuardTests(unittest.TestCase):
                             text=True,
                         )
                         self.assertEqual(process.returncode, 0, process.stderr)
-                        expected = "result_ready=false\n"
+                        expected = (
+                            "checkpoint_workspace_clean=true\nresult_ready=false\n"
+                        )
                         if produces_result:
                             expected += "result_ready=true\n"
                             self.assertEqual(
@@ -1865,6 +1926,10 @@ class ReusablePublishGuardTests(unittest.TestCase):
                             self.assertFalse((root / "review.json").exists())
                         self.assertEqual(output.read_text(), expected)
                         self.assertFalse((root / "recovery-artifact.json").exists())
+                        self.assertFalse((root / "checkpoint-evidence.json").exists())
+                        self.assertFalse(
+                            (root / "checkpoint-diagnostics.json").exists()
+                        )
 
     def test_provider_jobs_publish_only_a_current_head_after_a_successful_review(
         self,
@@ -1877,7 +1942,7 @@ class ReusablePublishGuardTests(unittest.TestCase):
         )
         upload_if = (
             "if: always() && !cancelled() && inputs.operation == 'review' && needs.bootstrap.outputs.artifacts"
-            " == 'diagnostics' && steps.provider-review.outcome == 'success'"
+            " == 'diagnostics' && ((steps.provider-review.outcome == 'success'"
             " && steps.provider-review.outputs.result_ready == 'true'"
         )
         confirm_name = "Confirm live pull-request head is still current"

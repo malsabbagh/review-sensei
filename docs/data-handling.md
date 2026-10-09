@@ -141,6 +141,20 @@ configuration enables diagnostics uploads, with a seven-day retention window.
 After successful analysis, this opted-in bundle is also uploaded on publication
 failure so a retry can reuse the original identity-bound result. It contains
 source-bearing diff/review data and credential-free configuration identities.
+With diagnostics enabled, `checkpoint-evidence.json` retains the full validated
+result before the durable checkpoint, even if checkpointing subsequently fails.
+Its `publishable: false` envelope is diagnostic evidence, not a publication or
+recovery authorization. The evidence retains the pre-checkpoint status; on
+overflow its digest differs
+from the post-fallback partial result bound to the ledger. Publication retries
+use `review.json` and trusted contexts instead. `checkpoint-diagnostics.json`,
+when present, contains
+only fixed overflow reason labels, counts, lengths and actual byte limits;
+the same sanitized document is logged on overflow. The opted-in bundle is
+uploaded on checkpoint failure when the evidence file exists. It retains the
+existing seven-day window and does not opt a repository into content uploads.
+CLI operators opt in with `--checkpoint-evidence-output` and
+`--checkpoint-diagnostics-output` during an identity-bound transaction.
 The workflow does not add provider/GitHub authentication credentials, raw prompts,
 or raw provider responses. Reviewed repository content can itself contain
 sensitive data, so enable diagnostic uploads only when that content is suitable

@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/checkpoint-diagnostics.schema.json",
+  "title": "ReviewSensei sanitized baseline persistence diagnostics v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "reasons",
+    "finding_count",
+    "reviewed_path_count",
+    "related_path_count",
+    "encoded_bytes",
+    "available_bytes",
+    "maximum_identity_or_path_characters",
+    "maximum_symbol_characters",
+    "maximum_defect_kind_characters",
+    "finding_limit",
+    "maximum_bytes",
+    "identity_or_path_character_limit",
+    "symbol_character_limit",
+    "defect_kind_character_limit"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "reasons": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "finding-count",
+          "encoded-bytes",
+          "field-width"
+        ]
+      }
+    },
+    "finding_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "reviewed_path_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "related_path_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "encoded_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "available_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "maximum_identity_or_path_characters": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "maximum_symbol_characters": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "maximum_defect_kind_characters": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "finding_limit": {
+      "const": 2
+    },
+    "maximum_bytes": {
+      "const": 11264
+    },
+    "identity_or_path_character_limit": {
+      "const": 256
+    },
+    "symbol_character_limit": {
+      "const": 256
+    },
+    "defect_kind_character_limit": {
+      "const": 128
+    }
+  }
+}

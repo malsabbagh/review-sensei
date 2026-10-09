@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0",
+  "reasons": [
+    "finding-count"
+  ],
+  "finding_count": 3,
+  "finding_limit": 2,
+  "reviewed_path_count": 2,
+  "related_path_count": 2,
+  "encoded_bytes": 1749,
+  "available_bytes": 11264,
+  "maximum_bytes": 11264,
+  "maximum_identity_or_path_characters": 13,
+  "identity_or_path_character_limit": 256,
+  "maximum_symbol_characters": 0,
+  "symbol_character_limit": 256,
+  "maximum_defect_kind_characters": 17,
+  "defect_kind_character_limit": 128,
+  "path": "private.py"
+}
