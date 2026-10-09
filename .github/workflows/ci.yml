@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# Superseded PR heads need no more compute; reviewed main runs still finish.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
@@ -32,6 +37,10 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements/ci.txt
+            pyproject.toml
       - name: Install package and CI tools
         run: |
           python -m pip install -r requirements/ci.txt
@@ -39,7 +48,11 @@ jobs:
       - name: Compile sources
         run: python -m compileall -q src
       - name: Run tests
+        if: runner.os != 'Windows'
         run: python -m unittest discover -s tests -v
+      - name: Run every Windows test in isolated processes
+        if: runner.os == 'Windows'
+        run: python scripts/run_checkout_tests.py --workers 4
 
   quality:
     name: Quality gates
@@ -49,6 +62,10 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements/ci.txt
+            pyproject.toml
       - name: Install package and CI tools
         run: |
           python -m pip install -r requirements/ci.txt
@@ -74,6 +91,10 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements/ci.txt
+            pyproject.toml
       - name: Install package and CI tools
         run: |
           python -m pip install -r requirements/ci.txt
@@ -147,6 +168,10 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements/ci.txt
+            pyproject.toml
       - name: Install build tools
         run: python -m pip install -r requirements/ci.txt
       - name: Build sdist and wheel
@@ -219,6 +244,10 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements/ci.txt
+            pyproject.toml
       - name: Install package and CI tools
         run: |
           python -m pip install -r requirements/ci.txt
