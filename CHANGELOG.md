@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Preserve every validated finding when a review exceeds durable checkpoint
+  capacity (#232). Record a partial result and one failed attempt, clear the
+  owned reservation, and retain prior complete history. Withhold approval and
+  completed-round credit until complete evidence can be persisted.
+- Add opt-in checkpoint evidence and numeric capacity diagnostics for both
+  review workflow lanes. Keep the full pre-checkpoint result in a nonpublishable
+  diagnostic envelope; upload it only after fresh workspace cleanup. Existing
+  artifact opt-out, durable limits and approval gates remain unchanged.
+
 ## 0.6.17 - 2026-10-09
 
 - Add opt-in Release Marshal signing with a dedicated GPG key after full
