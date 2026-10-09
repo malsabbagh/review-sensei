@@ -22,8 +22,25 @@ consumer_image=public.ecr.aws/docker/library/debian:12-slim@sha256:3783cc01769c7
 
 # Admit both images before spending time on a build; never switch to a mutable
 # tag or silently retry against a different registry during either smoke test.
-docker pull --platform "$platform" "$build_image"
-docker pull --platform "$platform" "$consumer_image"
+pull_pinned_image() {
+  local image=$1 attempt
+  for attempt in 1 2 3; do
+    if docker pull --platform "$platform" "$image"; then
+      return 0
+    fi
+    if [[ "$attempt" -lt 3 ]]; then
+      # Anonymous ECR pulls have a per-second quota. Back off with jitter when
+      # shared runners collide; preserve the same registry/platform/digest.
+      echo "Pinned image pull failed (attempt $attempt/3); retrying after backoff" >&2
+      sleep "$((attempt * 5 + RANDOM % 5))"
+    fi
+  done
+  echo "Pinned image admission failed after 3 attempts: $image" >&2
+  return 1
+}
+
+pull_pinned_image "$build_image"
+pull_pinned_image "$consumer_image"
 
 docker run --rm --pull never --platform "$platform" \
   --user "$(id -u):$(id -g)" \
