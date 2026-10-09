@@ -620,7 +620,7 @@ provider or arbitrary model endpoint.
 The current-state diagrams and tables above remain pinned to main `a598d4a`.
 This section is separately reconciled against draft
 [PR #236](https://github.com/malsabbagh/review-sensei/pull/236), inspected at
-[`bd827391d8c1bd57045d57d81ed7dd7267fd4f79`](https://github.com/malsabbagh/review-sensei/tree/bd827391d8c1bd57045d57d81ed7dd7267fd4f79).
+[`9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d`](https://github.com/malsabbagh/review-sensei/tree/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d).
 It describes that implementation proposal, **not a merged, released or deployed
 feature**. Its [decision record][proposed-adr] remains Proposed.
 
@@ -658,20 +658,27 @@ sequenceDiagram
     alt Full inventory plus future resolution list fits
         Writer->>Human: Whole immutable inventory<br/> mutable resolutions outside encoding
         Human->>Gate: Exact eligibility<br/> version 3 when inventory is encoded
-        Gate->>Gate: Preserve pending obligations and all current approval gates
-        opt Later reply to encoded inventory
-            Human->>Reply: Automatically select bounded evidence batches
-            Note over Reply: Even with legacy work default<br/>Normally 4 findings per batch / 16 KiB response<br/>8 total dispatches / 120 s by default<br/>Batching does not expand whole-inventory caps
-            Reply->>Gate: Validated decisions plus unresolved remainder
+        Gate->>Gate: Format overview plus complete finding prose and authority markers
+        Note over Gate: Input overview default 32 KiB<br/>Finding prose has separate allowance<br/>Complete framed body still at most 65,536 B
+        alt Complete framed review fits
+            Gate->>Gate: Publish and retain pending obligations and approval gates
+            opt Later reply to encoded inventory
+                Human->>Reply: Automatically select bounded evidence batches
+                Note over Reply: Even with legacy work default<br/>Normally 4 findings per batch / 16 KiB response<br/>8 total dispatches / 120 s by default<br/>Batching does not expand whole-inventory caps
+                Reply->>Gate: Validated decisions plus unresolved remainder
+            end
+        else Framed publication cannot fit
+            Gate-->>Analysis: Visible refusal<br/> no smaller obligation set or replaced prior authority
         end
-    else Human inventory or formatted publication cannot fit
+    else Human inventory cannot fit
         Writer-->>Gate: Visible refusal<br/> no shortened obligation set
     end
 ```
 
 Sources: [proposed baseline writer][proposed-baseline],
 [human inventory and resolution reserve][proposed-human],
-[capacity checkpoint][proposed-cli], [eligibility versions/propagation][proposed-approval].
+[capacity checkpoint][proposed-cli], [eligibility versions/propagation][proposed-approval],
+[publication formatting and final body admission][proposed-publication].
 When the proposed runtime is actually adopted, this diagram replaces the
 persistence-specific portion of the main flows and encoded human inventories
 automatically select the existing bounded reassessment planner on replies.
@@ -692,6 +699,7 @@ selected. Lens invocation behavior remains as described above.
 | Reassessment per request | At most 20 decisions; unified normally packs 4 | Same per-request caps; trusted multi-batch aggregate can retain whole inventory |
 | Rich-inventory reply routing | Whole inventory limited to 20; unified mode explicitly selected | Encoded inventories automatically enter bounded multi-batch reassessment even with the legacy default; the direct legacy request still refuses more than 20 pending findings |
 | Latest human eligibility | Versions 1/2 | Versions 1/2 readable; encoded inventory requires version `3` |
+| Publication text allowance | Formatted summary, including body-placed findings, charged to input-summary limit (default 32 KiB); final body at most 65,536 B | Finding prose charged separately from input overview; complete framed review still at most 65,536 B |
 | Baseline capacity status | `partial` with `coverage-partial` | `partial` remains fail-closed, adds `persistence_status: capacity-exceeded` and diagnostic `baseline_capacity_exceeded`; analysis manifest is preserved |
 
 Sources: [baseline bounds/shape][proposed-baseline], [human bounds and request guard][proposed-human],
@@ -712,24 +720,66 @@ publication. Result limits, provider budgets, complete-patch requirements,
 transport scans, current source/head fences and approval gates remain independent.
 ([strict decoder][proposed-encoding], [writer checks][proposed-baseline], [human marker checks][proposed-human], [publication][proposed-publication])
 
-The proposal removes the current three-finding persistence cliff, but the
-single-record byte budget remains material for larger **normal** review results.
-Its tests retain 12 and 24 distinct findings, and 13 findings plus 500 reviewed
-paths; another test deliberately refuses 250 findings because their encoded
-baseline exceeds capacity. These findings use independent SHA-256 identities
-and criteria with short paths, so this failure does not require long prose or
-path names. The baseline stores identity/criterion metadata, not comment bodies.
-([capacity and lifecycle fixtures][proposed-capacity-tests], [baseline encoding][proposed-baseline])
+The proposal removes the current three-finding persistence cliff and an
+additional publication bottleneck. The publisher now allows the validated
+input-summary allowance plus admitted finding-body bytes, capped at 65,536
+bytes, for its formatted overview. The original input summary, per-finding
+prose and total-result limits still apply. The complete review body, including
+eligibility, finding-identity and discussion markers, must separately fit
+65,536 bytes before publication. A 41,425-byte formatted fifty-finding review
+can therefore publish as a 58,449-byte framed body; it is no longer incorrectly
+charged entirely to the 32,768-byte input-summary allowance.
+([publication admission][proposed-publication], [qualification decision][proposed-adr])
 
-This supports a narrower conclusion: the design substantially improves capacity
-for modest finding sets and repetitive path inventories; it does **not** make
-every otherwise-valid 250-comment normal review durably reusable. Actual fit
-depends on distinct identities, paths, fields and the smaller allocation left
-by lifecycle state. Synthetic fixtures do not establish how often production
-reviews hit this limit. Full human prose also has its separate 24 KiB persisted
-envelope, and GitHub publication has its own body limit. Inspect the explicit
-capacity outcome instead of treating compression or a higher analysis target
-as a promise of complete persistence or approval.
+The following measurements use the final proposal's varied synthetic fixtures:
+distinct failure narratives, symbols, paths and request/receipt digests, with
+about 555 prose bytes per finding. Above 32 findings they reuse those 32 paths.
+These are **reproducible fixtures, not production-frequency estimates or a
+capacity guarantee**. Baselines retain identities and criteria, not prose.
+
+| Findings | Baseline encoded bytes | Human envelope needed with every finding resolved | Complete framed human review |
+| --- | ---: | ---: | --- |
+| 12 | 2,354 | 9,123 | 22,903 B; published |
+| 21 | 3,658 | 7,297 | 26,998 B; published |
+| 50 | 7,643 | 15,132 | 58,449 B; published |
+| 100 | 14,391; refused | 28,714; refused | No authority published |
+| 250 | 34,431; refused | 68,841; refused | No authority published |
+
+Twelve human findings retain plain legacy JSON; larger cases use compression,
+which explains the decrease at 21 findings. The baseline fixture first exceeds
+the 11,264-byte ceiling at 77 findings. With four maximal dispositions and four
+maximal retained continuation attestations, the remaining allowance is 10,897
+bytes and the first refusal is at 75. Fifty findings plus retained state, a
+publication transaction and three full progress entries occupy a valid
+16,765-byte record, below 20,480 bytes. These thresholds apply to these fixtures;
+longer distinct fields or different retained state can fit fewer findings.
+([varied capacity/publication fixtures][proposed-varied-capacity-tests],
+[lifecycle/restart fixtures][proposed-capacity-tests], [measured qualification][proposed-adr])
+
+Persistence and publication still need separate checks. Fifty findings with
+about 1,110 prose bytes each fit the human envelope at 22,320 bytes including
+all resolutions, but their complete framed review exceeds the GitHub body
+limit and is refused without replacing prior authority. Fifty findings with
+about 1,665 prose bytes each exceed the human envelope itself. A separate
+65-unique-path case fails the whole-inventory path restriction before any
+remote mutation. Smaller provider batches do not change these limits.
+([refusal and authority-preservation tests][proposed-varied-capacity-tests], [qualification][proposed-adr])
+
+The triggering public PR #231 workload provides twelve published explanations
+and paths, plus its exact two-obligation human eligibility. Its discarded
+original baseline metadata is unavailable. A reconstruction using those
+explanations with replacement symbol/evidence identities and fixture cache
+metadata needs 2,162 encoded baseline bytes; the exact published human inventory
+grows from 2,055 to 2,188 bytes when both obligations are resolved. This supports
+useful capacity for the triggering workload without claiming a byte-for-byte
+replay of the missing baseline. ([reconstruction and limitation][proposed-adr])
+
+The unchanged single-record bounds remain material for larger normal review
+results. The design improves capacity for modest inventories, but does **not**
+make every otherwise-valid 250-comment review durably reusable or publishable.
+Inspect the explicit capacity outcome and remaining human obligations instead
+of treating compression or a higher analysis target as a promise of complete
+persistence or approval.
 
 Deploy compatible ledger readers, reply readers and delayed approval finalizers
 **before enabling these writers**. Existing valid small records need no forced
@@ -815,28 +865,30 @@ rationale, see [ADR 0070](adr/0070-bounded-checkpoint-overflow.md) and
 
 [openrouter-adapter]: https://github.com/malsabbagh/review-sensei/blob/a598d4ae47892d243ce67333bcc5c182da95637a/src/review_sensei/providers/openrouter.py
 
-[proposed-adr]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/docs/adr/0071-lossless-inline-review-evidence.md
+[proposed-adr]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/docs/adr/0072-lossless-inline-review-evidence.md
 
-[proposed-encoding]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/bounded_evidence.py
+[proposed-encoding]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/bounded_evidence.py
 
-[proposed-baseline]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/baseline.py
+[proposed-baseline]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/baseline.py
 
-[proposed-human]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/human_assessment.py
+[proposed-human]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/human_assessment.py
 
-[proposed-cli]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/cli.py
+[proposed-cli]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/cli.py
 
-[proposed-approval]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/hosting/github/approval.py
+[proposed-approval]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/hosting/github/approval.py
 
-[proposed-models]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/models.py
+[proposed-models]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/models.py
 
-[proposed-presentation]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/presentation.py
+[proposed-presentation]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/presentation.py
 
-[proposed-checks]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/hosting/github/checks.py
+[proposed-checks]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/hosting/github/checks.py
 
-[proposed-publication]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/hosting/github/publication.py
+[proposed-publication]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/hosting/github/publication.py
 
-[proposed-reader-check]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/scripts/check_review_reader_compatibility.py
+[proposed-reader-check]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/scripts/check_review_reader_compatibility.py
 
-[proposed-human-controller]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/hosting/github/human_assessment.py
+[proposed-human-controller]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/src/review_sensei/hosting/github/human_assessment.py
 
-[proposed-capacity-tests]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/tests/test_complete_evidence.py
+[proposed-capacity-tests]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/tests/test_complete_evidence.py
+
+[proposed-varied-capacity-tests]: https://github.com/malsabbagh/review-sensei/blob/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d/tests/test_evidence_capacity.py
