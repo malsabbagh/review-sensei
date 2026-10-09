@@ -14,6 +14,10 @@ unified planner admits that exact required patch and the authorized factual repl
 as one 21,714-byte prompt under its unchanged 49,152-byte admission bound, with
 zero unprocessed requirements. This is an admission proof, not a model decision
 or approval. Missing, incomplete or oversized required evidence remains pending.
+These measurements describe the PR #236 evidence captured on 2026-10-09; they
+are not a capacity guarantee for later heads. Rebuild the exact required patches
+and factual reply through that runtime's work planner and measure the UTF-8
+request before using this admission result for a different source identity.
 
 ## Candidate and prerequisites
 
@@ -46,6 +50,14 @@ new encoded baseline and rich eligibility contract; they must not recover
 approval from older markers. Qualify every shared-ledger reader and delayed
 reply/approval finalizer before activating new writers. Do not delete an
 obligation or reset a ledger to simplify this rollout.
+
+Before merging this configuration into trusted `main`, record the executing
+workflow/package identities for every active or delayed reader of this
+repository's authority and require compatible-reader qualification. A green
+source CI run or this document does not prove that no legacy deployment remains.
+If the reader inventory is incomplete or any reader is incompatible, keep the
+policy change pending; holding package publication alone does not prevent the
+configuration from becoming active after a merge. Preserve the release hold.
 
 ## Prepare, build, verify and publish
 
@@ -117,6 +129,10 @@ After recording the freshly verified `old_v5_object` and
 ```bash
 git verify-tag v0.6.19
 test "$(git rev-parse 'v0.6.19^{commit}')" = "$qualified_release_sha"
+reviewed_old_v5_object=$old_v5_object
+old_v5_object=$(git ls-remote --exit-code origin refs/tags/v5 | awk '$2 == "refs/tags/v5" {print $1}')
+[[ "$old_v5_object" =~ ^[a-f0-9]{40}$ ]]
+test "$old_v5_object" = "$reviewed_old_v5_object"
 git tag -s -f v5 "$qualified_release_sha" -m "ReviewSensei setup v5, library 0.6.19"
 git verify-tag v5
 git push origin refs/tags/v5 --force-with-lease="refs/tags/v5:$old_v5_object"
