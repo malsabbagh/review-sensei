@@ -710,6 +710,25 @@ publication. Result limits, provider budgets, complete-patch requirements,
 transport scans, current source/head fences and approval gates remain independent.
 ([strict decoder][proposed-encoding], [writer checks][proposed-baseline], [human marker checks][proposed-human], [publication][proposed-publication])
 
+The proposal removes the current three-finding persistence cliff, but the
+single-record byte budget remains material for larger **normal** review results.
+Its tests retain 12 and 24 distinct findings, and 13 findings plus 500 reviewed
+paths; another test deliberately refuses 250 findings because their encoded
+baseline exceeds capacity. These findings use independent SHA-256 identities
+and criteria with short paths, so this failure does not require long prose or
+path names. The baseline stores identity/criterion metadata, not comment bodies.
+([capacity and lifecycle fixtures][proposed-capacity-tests], [baseline encoding][proposed-baseline])
+
+This supports a narrower conclusion: the design substantially improves capacity
+for modest finding sets and repetitive path inventories; it does **not** make
+every otherwise-valid 250-comment normal review durably reusable. Actual fit
+depends on distinct identities, paths, fields and the smaller allocation left
+by lifecycle state. Synthetic fixtures do not establish how often production
+reviews hit this limit. Full human prose also has its separate 24 KiB persisted
+envelope, and GitHub publication has its own body limit. Inspect the explicit
+capacity outcome instead of treating compression or a higher analysis target
+as a promise of complete persistence or approval.
+
 Deploy compatible ledger readers, reply readers and delayed approval finalizers
 **before enabling these writers**. Existing valid small records need no forced
 reset. Older readers cannot safely consume richer encoded evidence/version 3;
@@ -817,3 +836,5 @@ rationale, see [ADR 0070](adr/0070-bounded-checkpoint-overflow.md) and
 [proposed-reader-check]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/scripts/check_review_reader_compatibility.py
 
 [proposed-human-controller]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/src/review_sensei/hosting/github/human_assessment.py
+
+[proposed-capacity-tests]: https://github.com/malsabbagh/review-sensei/blob/bd827391d8c1bd57045d57d81ed7dd7267fd4f79/tests/test_complete_evidence.py
