@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -98,8 +99,30 @@ def main() -> int:
                     str(manifest),
                 ]
             )
+
+        def run_worker(index: int) -> int:
+            with (
+                (Path(scratch) / f"worker-{index}.stdout").open("wb") as stdout,
+                (Path(scratch) / f"worker-{index}.stderr").open("wb") as stderr,
+            ):
+                return subprocess.call(commands[index], stdout=stdout, stderr=stderr)
+
+        # Await all workers before replaying separate logs in stable worker
+        # order. Keep manifests/logs alive until execution and reporting finish.
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(groups)) as pool:
-            results = list(pool.map(subprocess.call, commands))
+            results = list(pool.map(run_worker, range(len(groups))))
+        for index, code in enumerate(results):
+            label = (
+                f"[checkout worker {index + 1}/{len(groups)}: "
+                f"{len(groups[index])} tests, exit {code}]"
+            )
+            for suffix, stream in (("stdout", sys.stdout), ("stderr", sys.stderr)):
+                print(label, file=stream, flush=True)
+                with (Path(scratch) / f"worker-{index}.{suffix}").open(
+                    encoding="utf-8", errors="replace"
+                ) as output:
+                    shutil.copyfileobj(output, stream)
+                stream.flush()
     return 0 if all(code == 0 for code in results) else 1
 
 

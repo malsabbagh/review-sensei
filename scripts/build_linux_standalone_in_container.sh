@@ -23,6 +23,9 @@ consumer_image=public.ecr.aws/docker/library/debian:12-slim@sha256:3783cc01769c7
 # Admit both images before spending time on a build; never switch to a mutable
 # tag or silently retry against a different registry during either smoke test.
 pull_pinned_image() {
+  # Docker diagnostics are not a stable machine-readable error contract.
+  # Retry all failures at most twice (up to 23 s of sleep); keep the original
+  # output visible and fail terminally rather than guessing permanent errors.
   local image=$1 attempt
   for attempt in 1 2 3; do
     if docker pull --platform "$platform" "$image"; then

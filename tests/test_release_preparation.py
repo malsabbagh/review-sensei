@@ -131,6 +131,13 @@ class PreparationRenderingTests(unittest.TestCase):
         self.assertEqual(self.run_git("status", "--porcelain"), "")
         self.assertEqual(self.run_git("remote"), "")
         self.assertFalse((self.root / ".git/objects/info/alternates").exists())
+        objects = list((self.fixture / ".git/objects").glob("*/*"))
+        shared_objects = [path for path in objects if path.is_file()]
+        self.assertTrue(shared_objects)
+        for path in shared_objects:
+            clone = self.root / path.relative_to(self.fixture)
+            self.assertTrue(clone.is_file())
+            self.assertFalse(os.path.samefile(path, clone))
         for relative in self.run_git("ls-files").splitlines():
             self.assertEqual(
                 (self.root / relative).read_bytes(),
@@ -143,6 +150,12 @@ class PreparationRenderingTests(unittest.TestCase):
                 ["git", "-C", str(self.fixture), "rev-parse", "HEAD"], text=True
             ).strip(),
             source_head,
+        )
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "-C", str(self.fixture), "status", "--porcelain"], text=True
+            ).strip(),
+            "",
         )
 
     def run_git(self, *args):
