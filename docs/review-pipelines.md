@@ -611,21 +611,104 @@ to existing local/private egress constraints; it does not authorize a new cloud
 provider or arbitrary model endpoint.
 ([stage template validation][stages], [stage binding][provider-config], [execution][service])
 
-## Pending persistence redesign
+## Proposed persistence redesign (PR #236, not deployed)
 
-The separately developed baseline/human-inventory redesign is **not shipped in
-the inspected main revision**. Its proposed larger lossless encoded inventories
-and more precise persistence status must not be inferred from these current-state
-diagrams. Reconcile this section, persistence table, status explanation and
-immutable source links against the final reviewed implementation before adopting
-that version. Encoding would still have bounded encoded/decoded sizes and would
-not settle human obligations or bypass approval. Deployment must also account for
-compatible readers before expanded records are written; changing a YAML target
-cannot migrate durable authority.
+The current-state diagrams and tables above remain pinned to main `a598d4a`.
+This section is separately reconciled against draft
+[PR #236](https://github.com/malsabbagh/review-sensei/pull/236), inspected at
+[`6c4202962e2971db582945163a61b8419472c1a2`](https://github.com/malsabbagh/review-sensei/tree/6c4202962e2971db582945163a61b8419472c1a2).
+It describes that implementation proposal, **not a merged, released or deployed
+feature**. Its [decision record][proposed-adr] remains Proposed.
 
-For existing experimental unified-work deployment and reader rollout constraints,
-see [shared review work](shared-review-work.md). For current checkpoint rationale,
-see [ADR 0070](adr/0070-bounded-checkpoint-overflow.md) and
+The change keeps the existing authenticated inline ledger and atomic lifecycle.
+Small legacy-shaped evidence stays readable in its existing form. Larger
+inventories use `zlib-json-v1`: canonical JSON compressed with zlib, base64 data,
+exact decoded length and SHA-256. The digest checks content integrity; it does
+not replace producer/ledger authentication. Encoding is neither encryption nor
+redaction. No external evidence service, split-comment store or new YAML capacity
+knob is introduced. ([encoder/decoder][proposed-encoding], [baseline writer][proposed-baseline])
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Analysis as Complete analysis
+    participant Writer as Proposed complete-evidence writer
+    participant Ledger as Existing authenticated ledger
+    participant Human as Human eligibility marker
+    participant Gate as Publication and approval gates
+    Analysis->>Writer: All finding identities, criteria and covered paths
+    Writer->>Writer: Validate and deduplicate paths before counting
+    Writer->>Writer: Keep small legacy shape or encode full canonical inventory
+    Note over Writer,Ledger: Baseline 512 metadata findings maximum<br/>Decoded 2 MiB<br/> encoded at most 11,264 B, possibly less
+    alt Complete baseline fits actual allocation and lifecycle reserve
+        Writer->>Ledger: Atomic checkpoint of whole evidence and exact result
+    else Encoded, decoded or field bounds exceeded
+        Writer->>Ledger: Established partial checkpoint<br/> preserve prior baseline
+        Writer->>Gate: Full comments plus persistence_status capacity-exceeded
+        Note over Gate: Outcome remains partial<br/>Diagnostic baseline_capacity_exceeded<br/> approval withheld
+    end
+    Analysis->>Writer: Complete human inventory, if present
+    Writer->>Writer: Reserve space for all future resolved identities
+    Note over Writer,Human: 250 findings<br/> 16 KiB body each<br/>2 MiB decoded<br/> complete marker inventory at most 24 KiB
+    alt Full inventory plus future resolution list fits
+        Writer->>Human: Whole immutable inventory<br/> mutable resolutions outside encoding
+        Human->>Gate: Exact eligibility<br/> version 3 when inventory is encoded
+        Gate->>Gate: Preserve pending obligations and all current approval gates
+    else Human inventory or formatted publication cannot fit
+        Writer-->>Gate: Visible refusal<br/> no shortened obligation set
+    end
+```
+
+Sources: [proposed baseline writer][proposed-baseline],
+[human inventory and resolution reserve][proposed-human],
+[capacity checkpoint][proposed-cli], [eligibility versions/propagation][proposed-approval].
+This diagram replaces only the persistence-specific portion of the main flows
+when the proposed runtime is actually adopted; provider/lens routing stays as
+described above.
+
+| Boundary | Current inspected main | PR #236 proposal at inspected head |
+| --- | --- | --- |
+| Complete baseline findings | 2 persisted findings | Whole runtime metadata inventory, at most 512; normal result still at most 250 comments |
+| Baseline byte capacity | 11,264 B maximum, allocation can be lower | Same encoded/allocation ceiling, plus strict 2 MiB decoded bound; compression does not guarantee fit |
+| Baseline path counting | 512 occurrences before deduplication | 512 validated unique paths after deduplication; related paths still at most 64 |
+| Baseline persisted fields | 256-character path/identity, 128-character defect kind | Canonical paths up to 4,096 UTF-8 bytes; symbol/defect-kind validation at 256 bytes; closed expanded schema/runtime checks |
+| History and record growth | 12,288 B history / 20,480 B record, 1,024 B baseline reserve | Unchanged envelopes and reserve; no whole-inventory projection |
+| Human inventory | 20 findings; 2 KiB/body; 24 KiB whole JSON inventory | 250 findings; full validated 16 KiB/body; 2 MiB decoded; 24 KiB persisted envelope **including all future resolution identities** |
+| Human resolutions | Included in existing bounded JSON | Mutable resolved list outside immutable compressed inventory; every subset preflighted against all-resolved capacity |
+| Reassessment per request | At most 20 decisions; unified normally packs 4 | Same per-request caps; trusted multi-batch aggregate can retain whole inventory |
+| Large legacy reassessment | Whole inventory limited to 20 | Legacy dedicated request refuses more than 20 pending findings; unified mode is needed to attempt larger batched reassessment, within unchanged budgets |
+| Latest human eligibility | Versions 1/2 | Versions 1/2 readable; encoded inventory requires version `3` |
+| Baseline capacity status | `partial` with `coverage-partial` | `partial` remains fail-closed, adds `persistence_status: capacity-exceeded` and diagnostic `baseline_capacity_exceeded`; analysis manifest is preserved |
+
+Sources: [baseline bounds/shape][proposed-baseline], [human bounds and request guard][proposed-human],
+[status construction][proposed-cli], [eligibility facts][proposed-approval].
+No capacity status clears a human-adjudication obligation. The persistence cause
+is included in the exact result digest and retained across delayed finalization
+and broader-discovery eligibility union. CLI/review/check presentation names
+complete analysis, unavailable baseline persistence and withheld approval rather
+than claiming incomplete analysis. Ordinary incomplete-analysis results retain
+their prior semantics. ([result contract][proposed-models], [presentation][proposed-presentation], [check mapping][proposed-checks])
+
+Readers bound encoded bytes before decoding, bound decompression to the claimed
+length plus one, require exact length/digest and terminated streams without
+trailing data, reject noncanonical/duplicate-key JSON, then validate the expanded
+schema/runtime fields. A large high-entropy inventory can still exceed encoded
+capacity; oversized human markers or formatted review bodies still refuse
+publication. Result limits, provider budgets, complete-patch requirements,
+transport scans, current source/head fences and approval gates remain independent.
+([strict decoder][proposed-encoding], [writer checks][proposed-baseline], [human marker checks][proposed-human], [publication][proposed-publication])
+
+Deploy compatible ledger readers, reply readers and delayed approval finalizers
+**before enabling these writers**. Existing valid small records need no forced
+reset. Older readers cannot safely consume richer encoded evidence/version 3;
+rollback requires restoring compatible readers, not deleting obligations or
+falling back to an earlier clean marker. The implementation PR itself does not
+merge, release, deploy, move a channel or rerun an affected hosted review.
+([rollout decision][proposed-adr], [reader-compatibility gate][proposed-reader-check])
+
+For existing experimental unified-work deployment constraints, see
+[shared review work](shared-review-work.md). For the current-main count/reserve
+rationale, see [ADR 0070](adr/0070-bounded-checkpoint-overflow.md) and
 [ADR 0053](adr/0053-bounded-durable-convergence-history.md).
 
 [cli]: https://github.com/malsabbagh/review-sensei/blob/a598d4ae47892d243ce67333bcc5c182da95637a/src/review_sensei/cli.py
@@ -697,3 +780,25 @@ see [ADR 0070](adr/0070-bounded-checkpoint-overflow.md) and
 [openai-adapter]: https://github.com/malsabbagh/review-sensei/blob/a598d4ae47892d243ce67333bcc5c182da95637a/src/review_sensei/providers/openai_compatible.py
 
 [openrouter-adapter]: https://github.com/malsabbagh/review-sensei/blob/a598d4ae47892d243ce67333bcc5c182da95637a/src/review_sensei/providers/openrouter.py
+
+[proposed-adr]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/docs/adr/0071-lossless-inline-review-evidence.md
+
+[proposed-encoding]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/src/review_sensei/bounded_evidence.py
+
+[proposed-baseline]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/src/review_sensei/baseline.py
+
+[proposed-human]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/src/review_sensei/human_assessment.py
+
+[proposed-cli]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/src/review_sensei/cli.py
+
+[proposed-approval]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/src/review_sensei/hosting/github/approval.py
+
+[proposed-models]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/src/review_sensei/models.py
+
+[proposed-presentation]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/src/review_sensei/presentation.py
+
+[proposed-checks]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/src/review_sensei/hosting/github/checks.py
+
+[proposed-publication]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/src/review_sensei/hosting/github/publication.py
+
+[proposed-reader-check]: https://github.com/malsabbagh/review-sensei/blob/6c4202962e2971db582945163a61b8419472c1a2/scripts/check_review_reader_compatibility.py
