@@ -4,7 +4,7 @@ Status: Proposed
 Date: 2026-10-09
 Owners/Reviewers: Maintainers
 GitHub Issue: None; maintainer-requested Release Marshal correction
-Related PR: Pending; fixes the release prerequisite exposed after [PR #232](https://github.com/malsabbagh/review-sensei/pull/232)
+Related PR: [PR #234](https://github.com/malsabbagh/review-sensei/pull/234); fixes the release prerequisite exposed after [PR #232](https://github.com/malsabbagh/review-sensei/pull/232)
 
 ## Context
 
