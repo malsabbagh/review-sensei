@@ -53,6 +53,40 @@ class PreparationRenderingTests(unittest.TestCase):
         changelog.write_text(
             prefix + "\n\n- Synthetic reviewed release notes.\n\n" + rest
         )
+        # Build one complete, normalized reviewed Git snapshot per worker.
+        # Every test still gets an independent checkout/object store; repeatedly
+        # copying, hashing and committing this same tree dominates Windows CI.
+        for relative in PREP.ALLOWED_PATHS:
+            path = cls.fixture / relative
+            if path.is_file():
+                path.write_text(
+                    path.read_text(encoding="utf-8"), encoding="utf-8", newline="\n"
+                )
+        for args in (
+            ("init", "-q"),
+            ("config", "maintenance.auto", "false"),
+            ("config", "gc.auto", "0"),
+            ("config", "core.autocrlf", "false"),
+            ("add", "."),
+            ("commit", "-qm", "Reviewed source"),
+        ):
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(cls.fixture),
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    *args,
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
 
     @classmethod
     def tearDownClass(cls):
@@ -62,8 +96,24 @@ class PreparationRenderingTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name) / "source"
-        shutil.copytree(self.fixture, self.root)
-        self.run_git("init", "-q")
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "--quiet",
+                "--no-hardlinks",
+                "--config",
+                "core.autocrlf=false",
+                "--origin",
+                "fixture-seed",
+                str(self.fixture),
+                str(self.root),
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.run_git("remote", "remove", "fixture-seed")
         # Background Git maintenance can recreate .git entries while the
         # temporary fixture is being removed, especially with docs snapshots.
         self.run_git("config", "maintenance.auto", "false")
@@ -71,15 +121,29 @@ class PreparationRenderingTests(unittest.TestCase):
         # Model production's Linux checkout even when ROOT is checked out with
         # Windows CRLF. The explicit filter test still rejects changed blobs.
         self.run_git("config", "core.autocrlf", "false")
-        for relative in PREP.ALLOWED_PATHS:
-            path = self.root / relative
-            if path.is_file():
-                path.write_text(
-                    path.read_text(encoding="utf-8"), encoding="utf-8", newline="\n"
-                )
-        self.run_git("add", ".")
-        self.run_git("commit", "-qm", "Reviewed source")
         self.base = self.run_git("rev-parse", "HEAD")
+
+    def test_fixture_clone_preserves_source_and_isolates_git_mutations(self):
+        source_head = subprocess.check_output(
+            ["git", "-C", str(self.fixture), "rev-parse", "HEAD"], text=True
+        ).strip()
+        self.assertEqual(self.base, source_head)
+        self.assertEqual(self.run_git("status", "--porcelain"), "")
+        self.assertEqual(self.run_git("remote"), "")
+        self.assertFalse((self.root / ".git/objects/info/alternates").exists())
+        for relative in self.run_git("ls-files").splitlines():
+            self.assertEqual(
+                (self.root / relative).read_bytes(),
+                (self.fixture / relative).read_bytes(),
+            )
+        self.generated()
+        self.assertNotEqual(self.commit_generated(), source_head)
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "-C", str(self.fixture), "rev-parse", "HEAD"], text=True
+            ).strip(),
+            source_head,
+        )
 
     def run_git(self, *args):
         return subprocess.check_output(
