@@ -4,7 +4,7 @@ Status: Proposed
 Date: 2026-10-09
 Owners/Reviewers: Maintainers
 Related issue: reproduction and scope recorded in [PR #231 review](https://github.com/malsabbagh/review-sensei/pull/231#pullrequestreview-5467025468)
-Implementation PR: pending
+Implementation PR: [#236](https://github.com/malsabbagh/review-sensei/pull/236)
 Related decisions: ADR 0053, ADR 0065, ADR 0066, ADR 0070
 
 ## Context
