@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.6.18 - 2026-10-09
+
+Changes since [v0.6.17](https://github.com/malsabbagh/review-sensei/releases/tag/v0.6.17), from [d1f445caf3f416ba01c21cd4f76962bfceba54b5](https://github.com/malsabbagh/review-sensei/commit/d1f445caf3f416ba01c21cd4f76962bfceba54b5) through [c569ce22ec0beaca0377d708e122f4f0a540c350](https://github.com/malsabbagh/review-sensei/commit/c569ce22ec0beaca0377d708e122f4f0a540c350).
+
+Previous annotated tag object: `31ca010c895f41d1840218aaa13d0d06e4f30319`.
+
+- docs: record released v0.6.17 ([e0e43104f27b0ba8d901c9bfc94cf865272c317c](https://github.com/malsabbagh/review-sensei/commit/e0e43104f27b0ba8d901c9bfc94cf865272c317c)).
+- Preserve full reviews when durable checkpoint metadata overflows \(\#232\) ([7709397f75ff25e3b7d786839bf71228d869e16b](https://github.com/malsabbagh/review-sensei/commit/7709397f75ff25e3b7d786839bf71228d869e16b)).
+- fix: generate missing release notes in Release Marshal \(\#234\) ([c569ce22ec0beaca0377d708e122f4f0a540c350](https://github.com/malsabbagh/review-sensei/commit/c569ce22ec0beaca0377d708e122f4f0a540c350)).
+
 ## 0.6.17 - 2026-10-09
 
 - Add opt-in Release Marshal signing with a dedicated GPG key after full
