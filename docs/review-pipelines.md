@@ -461,7 +461,8 @@ uses it. Source inspection identifies these current limitations:
 - Normal CLI orchestration reads `--orchestrate-large-changes` or unified mode,
   rather than `advanced.large_changes.orchestrate`. Symbol selection reads
   `--enable-symbol-context`, `--symbol-context-allowed-path` and the
-  `--symbol-context-max-files/bytes/depth` flags, rather than the parsed YAML
+  `--symbol-context-max-files`, `--symbol-context-max-bytes` and
+  `--symbol-context-max-depth` flags, rather than the parsed YAML
   symbol section. `advanced.egress` is not consumed by normal inference;
   explicit endpoint/profile gates still apply. Direct custom endpoint settings
   also require the applicable `--allow-custom-endpoint` invocation gate.
@@ -544,7 +545,7 @@ persistence possible. A trusted library may supply exact-provider/model
 bound, framing, reserved output and safety margin. Neither YAML nor a PR can
 self-certify that capability. Required broader discovery additionally needs
 `github.automatic_reviews`, writes, unified mode and explicit
-`github-reply --enable-broader-review`, plus a validated assessment context
+`review-sensei github reply --enable-broader-review`, plus a validated assessment context
 request of kind `discovery`; unified mode or the flag alone does not start it.
 ([work capability admission][budgets], [broader CLI gate][cli])
 
