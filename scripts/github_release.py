@@ -127,7 +127,7 @@ def qualify_source(root: Path, tag: str) -> Context:
     notes = prepare.released_notes(
         (root / "CHANGELOG.md").read_text(encoding="utf-8"),
         receipt["version"],
-        receipt["date"],
+        receipt["release_date"],
     )
     return Context(tag, tag_object, source, run_id, attempt, notes)
 

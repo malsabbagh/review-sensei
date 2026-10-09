@@ -461,7 +461,9 @@ class GitHubReleaseTests(unittest.TestCase):
     def test_source_uses_existing_exact_local_tag_receipt_and_ci_qualification(self):
         receipt = self.root / RELEASE.prepare.RECEIPT
         receipt.parent.mkdir()
-        receipt.write_text(json.dumps({"version": "1.2.3", "date": "2026-10-09"}))
+        receipt.write_text(
+            json.dumps({"version": "1.2.3", "release_date": "2026-10-09"})
+        )
         (self.root / "CHANGELOG.md").write_text(
             "# Changelog\n\n## Unreleased\n\n## 1.2.3 - 2026-10-09\n\n- Reviewed change.\n"
         )
@@ -496,6 +498,38 @@ class GitHubReleaseTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "identity changed"):
                 RELEASE.qualify_source(self.root, CONTEXT.tag)
+
+    def test_source_consumes_actual_marshal_preparation_receipt(self):
+        receipt_text = (ROOT / RELEASE.prepare.RECEIPT).read_text(encoding="utf-8")
+        receipt = json.loads(receipt_text)
+        self.assertNotIn("date", receipt)
+        path = self.root / RELEASE.prepare.RECEIPT
+        path.parent.mkdir()
+        path.write_text(receipt_text, encoding="utf-8")
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        (self.root / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
+        env = {
+            "GITHUB_REPOSITORY": RELEASE.docs.REPOSITORY,
+            "GITHUB_EVENT_NAME": "push",
+            "GITHUB_REF": f"refs/tags/{receipt['tag']}",
+            "GITHUB_SHA": CONTEXT.source,
+            "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "2",
+        }
+        with (
+            patch.dict("os.environ", env, clear=True),
+            patch.object(RELEASE.prepare, "qualify_tag") as qualify,
+        ):
+            result = RELEASE.qualify_source(self.root, receipt["tag"])
+        qualify.assert_called_once_with(self.root, receipt["tag"])
+        self.assertEqual(result.tag, receipt["tag"])
+        self.assertEqual(result.source, CONTEXT.source)
+        self.assertEqual(
+            result.notes,
+            RELEASE.prepare.released_notes(
+                changelog, receipt["version"], receipt["release_date"]
+            ),
+        )
 
     def test_workflow_draft_precedes_approvals_and_finalizer_waits_for_both(self):
         text = (ROOT / ".github/workflows/release.yml").read_text()
