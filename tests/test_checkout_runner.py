@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/run_checkout_tests.py"
+# Checkout-only: the sdist contract excludes this module from installed lanes.
 SPEC = importlib.util.spec_from_file_location("checkout_runner", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 RUNNER = importlib.util.module_from_spec(SPEC)
@@ -32,6 +33,8 @@ class CheckoutRunnerTests(unittest.TestCase):
                     groups, RUNNER.partition(list(reversed(identities)), workers)
                 )
                 self.assertLessEqual(max(map(len, groups)) - min(map(len, groups)), 10)
+                # This count bound describes the uniform ten-method fixture,
+                # not equal execution time for arbitrary test classes.
                 placements = {}
                 for index, group in enumerate(groups):
                     for identity in group:
@@ -95,16 +98,46 @@ class CaseD(Case):
         )
         self.assertIn("synthetic failure", result.stderr)
         self.assertIn("synthetic skip", result.stderr)
+        for index in range(1, 5):
+            self.assertIn(f"[checkout worker {index}/4: 1 tests, exit ", result.stderr)
+        failure = result.stderr.index("synthetic failure")
+        self.assertLess(result.stderr.index("[checkout worker 2/4:"), failure)
+        self.assertLess(failure, result.stderr.index("[checkout worker 3/4:"))
 
     def test_discovery_error_empty_suite_and_missing_worker_test_fail_closed(self):
-        for source, manifest in (
-            ("raise ImportError('synthetic discovery failure')", None),
-            ("import unittest", None),
-            ("import unittest", ["test_example.Missing.test_case"]),
+        for source, manifest, diagnostic in (
+            (
+                "raise ImportError('synthetic discovery failure')",
+                None,
+                "synthetic discovery failure",
+            ),
+            (
+                "import unittest",
+                None,
+                "discovery must produce distinct nonempty test IDs",
+            ),
+            (
+                "import unittest",
+                ["test_example.Missing.test_case"],
+                "Worker failed to load its exact assigned test inventory",
+            ),
         ):
             with self.subTest(source=source, manifest=manifest):
                 result, _ = self.run_fixture(source, manifest=manifest)
                 self.assertEqual(result.returncode, 1)
+                self.assertIn(diagnostic, result.stderr)
+
+    def test_fewer_classes_than_workers_reports_only_nonempty_workers(self):
+        result, _ = self.run_fixture("""import unittest
+class CaseA(unittest.TestCase):
+    def test_a(self): pass
+class CaseB(unittest.TestCase):
+    def test_b(self): pass
+""")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Discovered 2 tests; running 2 disjoint workers", result.stdout)
+        self.assertIn("[checkout worker 1/2: 1 tests, exit 0]", result.stderr)
+        self.assertIn("[checkout worker 2/2: 1 tests, exit 0]", result.stderr)
 
     def test_real_workers_report_success_for_the_complete_inventory(self):
         source = """import pathlib, unittest
