@@ -1,4 +1,4 @@
-# ADR 0071 — Lossless inline review evidence with lifecycle capacity
+# ADR 0072 — Lossless inline review evidence with lifecycle capacity
 
 Status: Proposed
 Date: 2026-10-09
@@ -88,8 +88,15 @@ fit. Oversized evidence is refused rather than clipped. Finding prose remains
 out of session baselines; the human marker continues to contain the full prose
 already required for reassessment. Encoding is not encryption or redaction.
 
-Published review bodies still obey the configured formatted-summary budget and
-GitHub body limit. An enormous prose inventory may be valid in memory yet too
+Published review bodies account for finding prose separately from the validated
+input overview: the formatted-text allowance is the input-summary allowance plus
+the admitted finding-body bytes, capped by the existing host-body limit. The
+complete framed body, including eligibility, finding identity and discussion
+markers, must fit 65,536 bytes. This removes an accidental second inventory cap
+where a 41,425-byte formatted fifty-finding review was charged entirely to the
+32,768-byte input-summary allowance, although its 58,449-byte framed body fits.
+Narrower overview allowances, per-finding prose and total-result limits remain
+enforced. An enormous prose inventory may be valid in memory yet too
 large to publish in one review. Such publication is refused visibly;
 it does not silently publish a smaller human-obligation set. Existing path,
 required-path, work and HTTP pagination limits also remain intentional bounds.
@@ -117,6 +124,64 @@ local restart, GitHub comment reconstruction, publication failure/retry, human
 prose above 2 KiB, 25-obligation multi-batch reassessment and resolution growth.
 Run all local gates, packaged wheel lanes, immutable legacy-reader qualification,
 approved-model source review, and exact-head CI before rollout.
+
+### Representative measured capacity
+
+The acceptance sweep uses twenty different failure narratives with distinct
+code symbols, paths, request/receipt digests and reproductions. Supporting
+observations are independently identified, rather than repeated characters or
+paragraphs. Counts above 32 reuse those 32 paths; the separate 65-distinct-path
+case exercises the intentional 64-human-evidence-path refusal. The synthetic
+profiles contain approximately 555, 1,110 or 1,665 prose bytes per finding.
+These are reproducible qualification workloads, not production-frequency data
+or a universal capacity promise. Three independent digest fields and distinct
+symbols are retained in baseline metadata; prose is never stored there.
+
+| Findings | Baseline encoded bytes | Whole human inventory, all resolved, ~555-byte prose | Full framed human review |
+| --- | ---: | ---: | --- |
+| 12 | 2,354 | 9,123 | 22,903 bytes; published |
+| 21 | 3,658 | 7,297 | 26,998 bytes; published |
+| 50 | 7,643 | 15,132 | 58,449 bytes; published |
+| 100 | 14,391; refused | 28,714; refused | No authority published |
+| 250 | 34,431; refused | 68,841; refused | No authority published |
+
+Twelve findings retain legacy plain human JSON; twenty-one and above use encoded
+human inventory, so the table need not grow monotonically at the format boundary.
+The baseline sweep first refuses 77 findings at the 11,264-byte allowance. With
+four maximal dispositions and four maximal retained continuation attestations,
+the allocator reserves a 10,897-byte baseline allowance and first refuses 75.
+Fifty varied findings plus that retained state, a publication transaction and
+three full blocker-bearing progress entries form a 16,765-byte valid record
+within 20,480 bytes. A separate test passes the fifty-finding local restart,
+publication failure/retry and GitHub comment round trip.
+
+Human inventory preflight first refuses 85, 56 and 41 findings for the three
+prose profiles respectively. All-resolution growth is included: twenty-one
+findings fit at 7,297 / 10,353 / 13,333 bytes, and fifty fit at 15,132 / 22,320
+bytes for the first two profiles. Fifty longer findings exceed 24 KiB. Twenty-one
+verbose findings publish a 58,355-byte framed review. Fifty medium-length
+findings fit persistence but still exceed one GitHub review body's publication
+capacity and are refused without replacing prior authority. A 250-finding
+varied-prose inventory and the 65-unique-path case fail before any remote write.
+All resolution subsets and the complete inventory survive current-reader
+round trips; omission never clears an obligation.
+
+The public PR #231 review supplies all twelve exact published explanations and
+paths (9,008 prose bytes), plus its exact two-obligation human eligibility. No
+artifacts remain on run 37898058657, so the discarded 5,441-byte original
+baseline cannot be recovered byte-for-byte. A reconstruction with distinct
+replacement symbol/evidence identities and fixture cache metadata fits at
+2,162 encoded bytes (5,260 decoded). With the retained lifecycle state above,
+its valid record is 11,284 bytes. The exact published human inventory grows
+from 2,055 to 2,188 bytes with both obligations resolved. This confirms useful
+capacity for the triggering workload without inventing its missing metadata.
+
+The 250-finding result ceiling is an in-memory structural maximum, not a claim
+that every such result fits inline storage or publication. Shorter/repeated
+identities can admit more than the measured baseline range; diverse long paths,
+symbols and prose can admit fewer. Capacity diagnostics and separate approval
+blockers remain necessary. Supporting numeric measurements contain no finding
+prose, paths, provider output or credentials.
 
 ## Rollout and rollback
 

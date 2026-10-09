@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Qualify complete evidence with varied finding prose and retained lifecycle
+  state, and account for published finding text separately from the input
+  summary allowance while preserving the fully framed GitHub body limit.
+
 - Persist complete review baselines with lossless bounded inline evidence instead
   of projecting findings down to two. Keep the existing authenticated ledger,
   atomic transactions, byte reserves and fail-closed retries. Preserve all

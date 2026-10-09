@@ -221,6 +221,8 @@ class CompleteEvidenceTests(unittest.TestCase):
         self.assertNotIn("src/", json.dumps(caught.exception.persistence_diagnostics))
 
     def test_large_baseline_local_and_github_lifecycle_round_trip(self):
+        from tests.test_evidence_capacity import varied_baseline
+
         with tempfile.TemporaryDirectory() as directory:
             ledger = LocalSessionLedger(Path(directory))
             prepared = prepare_review_transaction(
@@ -235,7 +237,7 @@ class CompleteEvidenceTests(unittest.TestCase):
                 now=fixture.NOW,
             )
             baseline = replace(
-                fixture._baseline(prepared.record.generation + 1), findings=findings(24)
+                varied_baseline(50), generation=prepared.record.generation + 1
             )
             result = checkpoint_review_analysis(
                 ledger,

@@ -96,4 +96,4 @@ Create or update an ADR for changes that affect:
 
 Use `.project-ai/templates/adr.md.tmpl` as the starter template.
 
-- [0071 — Lossless inline review evidence with lifecycle capacity](0071-lossless-inline-review-evidence.md) — Proposed
+- [0072 — Lossless inline review evidence with lifecycle capacity](0072-lossless-inline-review-evidence.md) — Proposed

@@ -294,6 +294,21 @@ def _with_discussion_instruction(text: str) -> str:
     return f"{text}\n\n{DISCUSSION_INSTRUCTION}"
 
 
+def _published_summary_byte_limit(result: ReviewResult) -> int:
+    """Account for finding prose separately from the validated input summary.
+
+    Body-placed findings retain their full text. Charging that text to the
+    overview's limit imposes a second, accidental inventory cap. The final
+    framed body, including authority and discussion markers, still has to fit
+    the host bound. Narrower input-summary limits and prose validation remain.
+    """
+    return min(
+        MAX_PUBLISHED_REVIEW_BODY_BYTES,
+        result.limits.max_summary_bytes
+        + sum(len(comment.body.encode("utf-8")) for comment in result.comments),
+    )
+
+
 def review_result_digest(result: ReviewResult) -> str:
     """Return the canonical digest that binds a decision to one review result."""
 
@@ -1795,7 +1810,7 @@ class ReviewPublisher:
             continuation_body_parts = (prepared_comments, continuation_summary)
             validate_bounded_text(
                 continuation_summary,
-                result.limits.max_summary_bytes,
+                _published_summary_byte_limit(result),
                 label="published review summary",
                 allow_empty=False,
             )
@@ -1869,7 +1884,7 @@ class ReviewPublisher:
             )
             validate_bounded_text(
                 summary,
-                result.limits.max_summary_bytes,
+                _published_summary_byte_limit(result),
                 label="published review summary",
                 allow_empty=False,
             )
@@ -1887,10 +1902,9 @@ class ReviewPublisher:
                         f"{render_check_permission_warning(concise=concise)}\n\n"
                         f"{summary}"
                     )
-                    if (
-                        len(warned_summary.encode("utf-8"))
-                        > result.limits.max_summary_bytes
-                    ):
+                    if len(
+                        warned_summary.encode("utf-8")
+                    ) > _published_summary_byte_limit(result):
                         continue
                     warned_body = body_for_summary(warned_summary)
                     if (
