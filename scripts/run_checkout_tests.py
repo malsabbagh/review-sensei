@@ -31,8 +31,18 @@ def partition(identities: list[str], workers: int) -> list[list[str]]:
         raise ValueError("workers must be between 1 and 16")
     if not identities or len(set(identities)) != len(identities):
         raise ValueError("discovery must produce distinct nonempty test IDs")
-    ordered = sorted(identities)
-    return [ordered[index::workers] for index in range(min(workers, len(ordered)))]
+    classes: dict[str, list[str]] = {}
+    for identity in sorted(identities):
+        classes.setdefault(identity.rpartition(".")[0] or identity, []).append(identity)
+    groups: list[list[str]] = [[] for _ in range(min(workers, len(classes)))]
+    # Keep class fixtures and any class-local state together. Splitting methods
+    # repeats expensive setup and amplifies Windows filesystem contention.
+    for _name, members in sorted(
+        classes.items(), key=lambda item: (-len(item[1]), item[0])
+    ):
+        index = min(range(len(groups)), key=lambda index: (len(groups[index]), index))
+        groups[index].extend(members)
+    return [sorted(group) for group in groups]
 
 
 def main() -> int:

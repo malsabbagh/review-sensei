@@ -97,10 +97,14 @@ the documented way, from an unpacked sdist against an installed wheel.
 
 Windows CI runs that same discovered checkout inventory through
 `python scripts/run_checkout_tests.py --workers 4`. It partitions sorted test IDs
-into disjoint processes, verifies each worker loaded its exact inventory, and
+into disjoint processes with intact test classes, verifies each worker loaded
+its exact inventory, and
 waits for every worker even when a test fails. Discovery errors, empty inventories
 and failed workers fail the lane. Module/class fixtures run inside each worker;
-cross-test mutable state must not be shared. The quality lane still runs the
+cross-class mutable state must not be shared. Release-preparation fixtures clone
+one precommitted, normalized source seed into independent object stores instead
+of repeatedly copying, hashing and committing the same tree. No live repository
+or production release preparation is cached. The quality lane still runs the
 complete serial branch-coverage suite with the 80% floor.
 
 CI's Python jobs cache public pip downloads using the pinned tool requirements
