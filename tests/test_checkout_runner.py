@@ -18,18 +18,31 @@ SPEC.loader.exec_module(RUNNER)
 
 class CheckoutRunnerTests(unittest.TestCase):
     def test_partition_covers_every_identity_once_and_stays_deterministic(self):
-        identities = [f"module.Case.test_{index:04d}" for index in range(2700)]
+        identities = [
+            f"module.Case_{index // 10:03d}.test_{index:04d}" for index in range(2700)
+        ]
         for workers in (1, 2, 4, 16):
             with self.subTest(workers=workers):
                 groups = RUNNER.partition(identities, workers)
+                self.assertEqual(len(groups), workers)
                 flat = [identity for group in groups for identity in group]
                 self.assertEqual(sorted(flat), sorted(identities))
                 self.assertEqual(len(set(flat)), len(flat))
                 self.assertEqual(
                     groups, RUNNER.partition(list(reversed(identities)), workers)
                 )
-                self.assertLessEqual(max(map(len, groups)) - min(map(len, groups)), 1)
+                self.assertLessEqual(max(map(len, groups)) - min(map(len, groups)), 10)
+                placements = {}
+                for index, group in enumerate(groups):
+                    for identity in group:
+                        placements.setdefault(identity.rpartition(".")[0], set()).add(
+                            index
+                        )
+                self.assertTrue(
+                    all(len(indices) == 1 for indices in placements.values())
+                )
         self.assertEqual(RUNNER.partition(["one"], 4), [["one"]])
+        self.assertEqual(RUNNER.partition(["one", "two"], 4), [["one"], ["two"]])
         for identities, workers in (([], 4), (["a", "a"], 4), (["a"], 0), (["a"], 17)):
             with self.assertRaises(ValueError):
                 RUNNER.partition(identities, workers)
@@ -64,9 +77,13 @@ class Case(unittest.TestCase):
         assert self.ready
     def tearDown(self):
         pathlib.Path(__file__).with_name("receipt-" + self._testMethodName).touch()
+class CaseA(Case):
     def test_a(self): pass
+class CaseB(Case):
     def test_b(self): self.fail("synthetic failure")
+class CaseC(Case):
     def test_c(self): pass
+class CaseD(Case):
     @unittest.skip("synthetic skip")
     def test_d(self): pass
 """
@@ -90,11 +107,14 @@ class Case(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
 
     def test_real_workers_report_success_for_the_complete_inventory(self):
-        source = """import unittest
+        source = """import pathlib, unittest
 class Case(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        pathlib.Path(__file__).with_name("setup.once").touch(exist_ok=False)
     def test_a(self): pass
     def test_b(self): pass
 """
         result, _ = self.run_fixture(source)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Discovered 2 tests; running 2 disjoint workers", result.stdout)
+        self.assertIn("Discovered 2 tests; running 1 disjoint workers", result.stdout)
