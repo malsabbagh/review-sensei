@@ -4,7 +4,7 @@ import copy
 import json
 import tempfile
 import unittest
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +16,7 @@ from review_sensei.baseline import (
     BaselinePersistenceError,
     admission_context_document,
     admission_context_from_document,
+    baseline_from_history_document,
     baseline_from_review,
     baseline_history_document,
     plan_verification_scope,
@@ -259,7 +260,7 @@ class ContextCapacityTests(unittest.TestCase):
         self.assertEqual(outcomes[55, 52], ["fallback-full", "incremental"])
         self.assertEqual(outcomes[64, 52], ["fallback-full", "incremental"])
 
-    def test_valid_41_unicode_paths_cannot_fit_and_do_not_truncate(self):
+    def test_valid_41_unicode_paths_round_trip_without_truncation(self):
         policy, baseline, current = capacity_fixture(41, unicode=True)
         original = baseline_history_document(baseline)
         scope = plan_verification_scope(
@@ -269,9 +270,9 @@ class ContextCapacityTests(unittest.TestCase):
             changed_paths=current,
             related_paths=current,
         )
-        self.assertEqual(scope.coverage_mode, "fallback-full")
-        self.assertEqual(scope.invalidation_reason, "related-context-overflow")
-        self.assertIsNone(scope.incremental)
+        self.assertEqual(scope.coverage_mode, "incremental")
+        self.assertIsNone(scope.invalidation_reason)
+        self.assertIsNotNone(scope.incremental)
         self.assertEqual(baseline_history_document(baseline), original)
         with self.assertRaises(ReviewInputError):
             plan_verification_scope(
@@ -503,8 +504,10 @@ class ContextCapacityTests(unittest.TestCase):
             findings=baseline.findings
             + (replace(baseline.findings[0], fingerprint="f" * 64),),
         )
-        with self.assertRaisesRegex(ReviewInputError, "persisted bound"):
+        restored = baseline_from_history_document(
             baseline_history_document(too_many, require_complete=True)
+        )
+        self.assertEqual(len(restored.findings), 3)
         with self.assertRaisesRegex(ReviewInputError, "require_complete"):
             baseline_history_document(baseline, require_complete="yes")
 
@@ -530,33 +533,29 @@ class ContextCapacityTests(unittest.TestCase):
                 {**diagnostics, "path": "private.py"}, "checkpoint-diagnostics"
             )
 
-    def test_finding_projection_is_explicitly_incomplete_and_strict_counts_all(self):
-        _policy, baseline, _current = capacity_fixture(16)
-        self.assertEqual(len(baseline.findings), 2)
+    def test_whole_finding_inventory_is_lossless_in_all_contexts(self):
+        _policy, baseline, current = capacity_fixture(16)
         expanded = replace(
             baseline,
-            findings=baseline.findings
-            + (replace(baseline.findings[0], fingerprint="f" * 64),),
+            reviewed_paths=tuple(sorted(baseline.reviewed_paths)),
+            related_paths=tuple(sorted(baseline.related_paths)),
+            findings=tuple(
+                replace(baseline.findings[0], fingerprint=f"{i:064x}")
+                for i in range(12)
+            ),
         )
-        projected = baseline_history_document(expanded)
-        self.assertEqual(len(projected["findings"]), 2)
-        self.assertFalse(projected["complete"])
-        self.assertFalse(projected["coverage_complete"])
-        with self.assertRaises(BaselinePersistenceError) as caught:
-            baseline_history_document(expanded, require_complete=True)
-        diagnostics = caught.exception.persistence_diagnostics
-        complete_document = {
-            **projected,
-            "complete": True,
-            "coverage_complete": True,
-            "findings": [
-                *projected["findings"],
-                asdict(expanded.findings[-1]),
-            ],
-        }
-        self.assertEqual(diagnostics["finding_count"], 3)
-        self.assertEqual(diagnostics["reasons"], ["finding-count"])
-        self.assertEqual(diagnostics["encoded_bytes"], len(encoded(complete_document)))
+        document = baseline_history_document(expanded)
+        restored = baseline_from_history_document(document)
+        self.assertEqual(restored, expanded)
+        self.assertTrue(restored.complete)
+        self.assertTrue(restored.coverage_complete)
+        self.assertEqual(
+            baseline_history_document(expanded, require_complete=True), document
+        )
+        prior, _key_value = admission_context_from_document(
+            admission_context_document(expanded, expanded.cache_key)
+        )
+        self.assertEqual(prior, expanded)
 
     def test_field_width_overflow_reports_lengths_without_content(self):
         _policy, baseline, _current = capacity_fixture(16)

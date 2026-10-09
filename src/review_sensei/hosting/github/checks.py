@@ -161,13 +161,23 @@ def check_outcome_for_result(
 
     if not isinstance(result, ReviewResult):
         raise ReviewInputError("check outcome requires a validated review result")
-    return review_check_outcome(
+    outcome = review_check_outcome(
         policy=policy,
         review_status=result.review_status,
         required_fixes=(
             has_blocking_findings(result) if required_fixes is None else required_fixes
         ),
     )
+    if result.persistence_status == "capacity-exceeded":
+        detail = "Analysis completed, but complete evidence could not fit the durable baseline; approval is withheld. Publication retains the full validated finding inventory."
+        if any(comment.needs_human for comment in result.comments):
+            detail += " Human assessment obligations remain open independently."
+        return CheckOutcome(
+            conclusion=outcome.conclusion,
+            title="Analysis complete — baseline capacity exceeded",
+            summary=detail,
+        )
+    return outcome
 
 
 class ReviewCheckPublisher:

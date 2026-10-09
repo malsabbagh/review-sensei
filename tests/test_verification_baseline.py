@@ -306,7 +306,7 @@ class BaselinePlanTests(unittest.TestCase):
             _comment(), _comment(path="src/one.py"), _comment(path="src/two.py")
         )
         self.assertEqual(
-            reconcile_overflow_review(too_many, baseline).review_status, "partial"
+            reconcile_overflow_review(too_many, baseline).review_status, "complete"
         )
         multiply_claimed = reconcile_overflow_review(
             _result(_comment(), _comment(body="A second claim for the same concern")),
@@ -767,14 +767,13 @@ class BaselinePlanTests(unittest.TestCase):
                     for index in range(MAX_CACHE_METADATA_ITEMS + 1)
                 ),
             )
-        with self.assertRaises(ReviewInputError):
-            VerificationScope(
-                status="baseline-required",
-                round_kind="initial",
-                late_admission_required=False,
-                coverage_mode="full",
-                reviewed_paths=("src/duplicate.py",) * (MAX_CACHE_METADATA_ITEMS + 1),
-            )
+        scope = VerificationScope(
+            status="baseline-required",
+            round_kind="initial",
+            late_admission_required=False,
+            coverage_mode="full",
+            reviewed_paths=("src/duplicate.py",) * (MAX_CACHE_METADATA_ITEMS + 1),
+        )
         with self.assertRaises(ReviewInputError):
             VerificationScope(
                 status="baseline-required",
@@ -783,6 +782,7 @@ class BaselinePlanTests(unittest.TestCase):
                 coverage_mode="full",
                 existing_concerns=MAX_VERIFICATION_CONCERNS + 1,
             )
+        self.assertEqual(scope.reviewed_paths, ("src/duplicate.py",))
 
     def test_complete_clean_baseline_requires_reviewed_scope(self) -> None:
         policy = ReviewConvergencePolicy(mode="merge-focused")

@@ -43,6 +43,7 @@
       }
     },
     "provider": {"type": "string", "minLength": 1},
+    "persistence_status": {"const": "capacity-exceeded"},
     "review_status": {
       "type": "string",
       "enum": ["complete", "partial", "incomplete", "summary-only"]
@@ -155,5 +156,6 @@
         }
       }
     }
-  }
+  },
+  "allOf": [{"if": {"required": ["persistence_status"]}, "then": {"properties": {"review_status": {"const": "partial"}}, "required": ["review_status"]}}]
 }

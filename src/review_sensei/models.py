@@ -141,6 +141,7 @@ _CONTENT_DIGEST_FIELDS = (
     "coverage_mode",
     "finding_lifecycles",
     "coverage",
+    "persistence_status",
 )
 _CONTENT_DIGEST_REQUIRED_FIELDS = (
     "summary",
@@ -1415,8 +1416,14 @@ class ReviewResult:
     # means comments were selected by deterministic evidence verification.
     evidence_policy: str = "legacy"
     transaction: ReviewTransaction | None = None
+    persistence_status: str | None = None
 
     def __post_init__(self) -> None:
+        if self.persistence_status is not None and (
+            self.persistence_status != "capacity-exceeded"
+            or self.review_status != "partial"
+        ):
+            raise ReviewInputError("review persistence status is invalid")
         if not isinstance(self.limits, ReviewLimits):
             raise ReviewInputError("review limits must be a ReviewLimits value")
         validate_bounded_text(
@@ -1588,6 +1595,8 @@ class ReviewResult:
         # can distinguish an omitted legacy status (parsed as incomplete) from
         # a trusted service aggregate (explicitly complete).
         value["review_status"] = self.review_status
+        if self.persistence_status is not None:
+            value["persistence_status"] = self.persistence_status
         if self.source_context_coverage is not None:
             from .context import SourceContextCoverage
 
@@ -1797,6 +1806,7 @@ class ReviewResult:
             model=cast(str | None, model),
             learning_proposals=tuple(parsed_proposals),
             review_status=review_status,
+            persistence_status=cast(str | None, value.get("persistence_status")),
             source_context_coverage=source_context_coverage,
             evidence_policy=evidence_policy,
             coverage_mode=coverage_mode,

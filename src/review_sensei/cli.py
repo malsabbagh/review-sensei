@@ -4258,9 +4258,15 @@ def main(argv: list[str] | None = None) -> int:
                             # prior baseline with a narrowed projection. The
                             # normal partial checkpoint charges one attempt
                             # and retains exact-result/idempotency fencing.
-                            result = replace(result, review_status="partial")
+                            result = replace(
+                                result,
+                                review_status="partial",
+                                persistence_status="capacity-exceeded",
+                            )
                             outcome = replace(
-                                outcome, status="partial", diagnostic="coverage-partial"
+                                outcome,
+                                status="partial",
+                                diagnostic="baseline_capacity_exceeded",
                             )
                             checkpoint_baseline = None
                     result = checkpoint_review_analysis(

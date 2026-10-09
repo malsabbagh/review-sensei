@@ -95,3 +95,5 @@ Create or update an ADR for changes that affect:
 - irreversible or expensive-to-reverse decisions
 
 Use `.project-ai/templates/adr.md.tmpl` as the starter template.
+
+- [0071 — Lossless inline review evidence with lifecycle capacity](0071-lossless-inline-review-evidence.md) — Proposed

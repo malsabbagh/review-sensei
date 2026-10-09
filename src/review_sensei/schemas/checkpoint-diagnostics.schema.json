@@ -28,13 +28,14 @@
     "reasons": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 3,
+      "maxItems": 4,
       "uniqueItems": true,
       "items": {
         "enum": [
           "finding-count",
           "encoded-bytes",
-          "field-width"
+          "field-width",
+          "decoded-bytes"
         ]
       }
     },
@@ -71,19 +72,26 @@
       "minimum": 0
     },
     "finding_limit": {
-      "const": 2
+      "const": 512
     },
     "maximum_bytes": {
       "const": 11264
     },
     "identity_or_path_character_limit": {
-      "const": 256
+      "const": 4096
     },
     "symbol_character_limit": {
       "const": 256
     },
     "defect_kind_character_limit": {
-      "const": 128
+      "const": 256
+    },
+    "decoded_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "maximum_decoded_bytes": {
+      "const": 2097152
     }
   }
 }

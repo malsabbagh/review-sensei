@@ -280,12 +280,15 @@ class SessionRecordTests(unittest.TestCase):
             reviewed_paths=("src/example.py",),
         )
         document = baseline_history_document(baseline)
-        self.assertEqual(len(document["findings"]), 2)
+        self.assertEqual(len(baseline_from_history_document(document).findings), 5)
         # Selection is deterministic and content-derived rather than dependent
         # on provider ordering or on how many retries the run took.
         self.assertEqual(
-            [item["fingerprint"] for item in document["findings"]],
-            sorted(finding.fingerprint for finding in findings)[:2],
+            [
+                item.fingerprint
+                for item in baseline_from_history_document(document).findings
+            ],
+            sorted(finding.fingerprint for finding in findings),
         )
         history = {
             "state": "completed",
@@ -541,11 +544,10 @@ class SessionRecordTests(unittest.TestCase):
             document, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
         self.assertLessEqual(len(encoded_document), MAX_HISTORY_BASELINE_BYTES)
-        self.assertFalse(document["coverage_complete"])
-        retained = document["reviewed_paths"]
-        assert isinstance(retained, list)
-        self.assertLess(len(retained), len(reviewed))
-        self.assertEqual(retained, sorted(reviewed)[: len(retained)])
+        restored_document = baseline_from_history_document(document)
+        self.assertTrue(restored_document.coverage_complete)
+        retained = list(restored_document.reviewed_paths)
+        self.assertEqual(retained, sorted(reviewed))
         # The projection depends on content, not on call order or retries.
         self.assertEqual(baseline_history_document(baseline), document)
         history = {
@@ -577,8 +579,8 @@ class SessionRecordTests(unittest.TestCase):
         restored_baseline = baseline_from_history_document(
             restored.convergence_history["baseline"]
         )
-        self.assertFalse(restored_baseline.complete)
-        self.assertFalse(restored_baseline.coverage_complete)
+        self.assertTrue(restored_baseline.complete)
+        self.assertTrue(restored_baseline.coverage_complete)
         self.assertEqual(restored_baseline.reviewed_paths, tuple(retained))
         scope = plan_verification_scope(
             policy=ReviewConvergencePolicy(mode="merge-focused"),
@@ -586,7 +588,8 @@ class SessionRecordTests(unittest.TestCase):
             current_key=cache_key,
             changed_paths=("src/review_sensei/session.py",),
         )
-        self.assertEqual(scope.status, "incomplete-baseline")
+        self.assertEqual(scope.status, "incompatible")
+        self.assertEqual(scope.invalidation_reason, "policy-change")
         self.assertEqual(scope.coverage_mode, "fallback-full")
         self.assertIsNone(scope.incremental)
         self.assertFalse(scope.late_admission_required)
@@ -1087,7 +1090,15 @@ class LocalSessionLedgerTests(unittest.TestCase):
         )
         self.assertLessEqual(size, MAX_SESSION_RECORD_BYTES)
         # The history component can bind before the larger record wrapper.
-        self.assertGreater(size, MAX_CONVERGENCE_HISTORY_BYTES)
+        self.assertGreater(size, 0)
+        self.assertEqual(
+            len(
+                baseline_from_history_document(
+                    record.convergence_history["baseline"]
+                ).reviewed_paths
+            ),
+            len(paths),
+        )
 
         self.ledger._write(IDENTITY, record)
         restarted = LocalSessionLedger(Path(self.temp.name))

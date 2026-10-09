@@ -188,6 +188,11 @@ def _review_summary_state(
     approval claim to the approval review.
     """
 
+    if result.persistence_status == "capacity-exceeded":
+        return (
+            WITHHELD_STATE,
+            "analysis completed, but complete baseline persistence exceeded its capacity; published findings remain actionable and approval requires a durable complete baseline",
+        )
     if not policy.automatic_github_review_events:
         return ADVISORY_STATE, None
     if has_blocking_findings(result):

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Persist complete review baselines with lossless bounded inline evidence instead
+  of projecting findings down to two. Keep the existing authenticated ledger,
+  atomic transactions, byte reserves and fail-closed retries. Preserve all
+  metadata through full review, admission and verification; count unique paths
+  once and round-trip valid deep paths and defect identities.
+- Separate full human-assessment inventories and prose from provider batch
+  limits, reserve resolution growth, and retain unresolved obligations across
+  reply batches. Encoded eligibility version 3 requires reader-first rollout.
+- Report complete analysis whose baseline cannot fit as a persistence capacity
+  failure, with approval withheld independently of human adjudication. No
+  inventory truncation, release, runtime promotion or deployment is included.
+
 ## 0.6.18 - 2026-10-09
 
 Changes since [v0.6.17](https://github.com/malsabbagh/review-sensei/releases/tag/v0.6.17), from [d1f445caf3f416ba01c21cd4f76962bfceba54b5](https://github.com/malsabbagh/review-sensei/commit/d1f445caf3f416ba01c21cd4f76962bfceba54b5) through [c569ce22ec0beaca0377d708e122f4f0a540c350](https://github.com/malsabbagh/review-sensei/commit/c569ce22ec0beaca0377d708e122f4f0a540c350).

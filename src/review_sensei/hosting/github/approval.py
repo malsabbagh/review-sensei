@@ -60,9 +60,10 @@ class ApprovalFacts:
     qualification: str = "not-required"
     check_published: bool = True
     has_open_review_threads: bool | None = None
+    persistence_status: str | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "schema_version": APPROVAL_ELIGIBILITY_SCHEMA_VERSION,
             "enabled": self.enabled,
             "app_authored": self.app_authored,
@@ -74,6 +75,9 @@ class ApprovalFacts:
             "qualification": self.qualification,
             "check_published": self.check_published,
         }
+        if self.persistence_status is not None:
+            value["persistence_status"] = self.persistence_status
+        return value
 
     @classmethod
     def from_dict(cls, value: object) -> "ApprovalFacts":
@@ -93,7 +97,7 @@ class ApprovalFacts:
             "qualification",
             "check_published",
         }
-        if set(value) != expected:
+        if set(value) not in (expected, expected | {"persistence_status"}):
             raise ReviewInputError("approval facts must contain the documented fields")
         if value.get("schema_version") != APPROVAL_ELIGIBILITY_SCHEMA_VERSION:
             raise ReviewInputError("approval facts schema_version is invalid")
@@ -110,6 +114,12 @@ class ApprovalFacts:
             raise ReviewInputError("approval facts review_status is invalid")
         if value.get("evidence_policy") not in EVIDENCE_POLICIES:
             raise ReviewInputError("approval facts evidence_policy is invalid")
+        persistence_status = value.get("persistence_status")
+        if persistence_status is not None and (
+            persistence_status != "capacity-exceeded"
+            or value.get("review_status") != "partial"
+        ):
+            raise ReviewInputError("approval facts persistence status is invalid")
         coverage_blocker = value.get("coverage_blocker")
         if coverage_blocker is not None and coverage_blocker not in (
             _COVERAGE_BLOCKER_STATES
@@ -127,6 +137,7 @@ class ApprovalFacts:
             coverage_blocker=coverage_blocker,
             qualification=value["qualification"],
             check_published=value["check_published"],
+            persistence_status=persistence_status,
         )
 
 
@@ -152,8 +163,11 @@ class ReviewApprovalEligibility:
             "facts": self.facts.to_dict(),
         }
         if self.human_review is not None:
-            value["human_review"] = self.human_review.to_dict()
-            if any(item.required_paths for item in self.human_review.findings):
+            human_document = self.human_review.to_dict()
+            value["human_review"] = human_document
+            if "inventory" in human_document:
+                value["schema_version"] = "3"
+            elif any(item.required_paths for item in self.human_review.findings):
                 value["schema_version"] = APPROVAL_ELIGIBILITY_CROSS_FILE_VERSION
         return value
 
@@ -171,6 +185,7 @@ class ReviewApprovalEligibility:
         if value.get("schema_version") not in (
             APPROVAL_ELIGIBILITY_SCHEMA_VERSION,
             APPROVAL_ELIGIBILITY_CROSS_FILE_VERSION,
+            "3",
         ):
             raise ReviewInputError("approval eligibility schema_version is invalid")
         head_sha = value.get("head_sha")
@@ -193,7 +208,13 @@ class ReviewApprovalEligibility:
         cross_file = human_review is not None and any(
             item.required_paths for item in human_review.findings
         )
-        if cross_file != (
+        encoded = (
+            isinstance(value.get("human_review"), dict)
+            and "inventory" in value["human_review"]
+        )
+        if encoded != (value.get("schema_version") == "3"):
+            raise ReviewInputError("approval eligibility encoding version is invalid")
+        if not encoded and cross_file != (
             value.get("schema_version") == APPROVAL_ELIGIBILITY_CROSS_FILE_VERSION
         ):
             raise ReviewInputError(
@@ -246,6 +267,7 @@ def approval_facts_from_result(
         enabled=enabled,
         app_authored=app_authored,
         review_status=result.review_status,
+        persistence_status=result.persistence_status,
         evidence_policy=result.evidence_policy,
         has_blocking_findings=has_blocking_findings(result),
         has_human_adjudication_findings=has_human_adjudication_findings(result),
@@ -315,6 +337,7 @@ def approval_eligibility_from_result(
         human_review=inventory,
         facts=replace(
             new,
+            persistence_status=new.persistence_status or old.persistence_status,
             enabled=new.enabled and old.enabled,
             app_authored=new.app_authored or old.app_authored,
             review_status=(
@@ -374,7 +397,11 @@ def evaluate_approval_facts(facts: ApprovalFacts) -> AutoApprovalDecision:
         blockers.append("review-threads-open")
     status = facts.review_status
     if status in {"partial", "incomplete", "summary-only"}:
-        blockers.append(f"review-{status}")
+        blockers.append(
+            "baseline-capacity-exceeded"
+            if facts.persistence_status == "capacity-exceeded"
+            else f"review-{status}"
+        )
     elif status != "complete":
         blockers.append("review-status-invalid")
     if facts.evidence_policy not in {"legacy", "confirmed"}:
@@ -548,12 +575,14 @@ _WITHHELD_DIAGNOSTICS = {
     "review-threads-invalid": "approval_withheld",
     "review-threads-open": "required_fixes_open",
     "review-partial": "review_incomplete",
+    "baseline-capacity-exceeded": "baseline_capacity_exceeded",
     "review-incomplete": "review_incomplete",
     "review-summary-only": "review_incomplete",
     "review-status-invalid": "review_incomplete",
     "review-unverified": "review_incomplete",
     "evidence-policy-invalid": "review_incomplete",
     "coverage-partial": "review_incomplete",
+    "baseline_capacity_exceeded": "baseline_capacity_exceeded",
     "coverage-incomplete": "review_incomplete",
     "coverage-unknown": "review_incomplete",
     "qualification-missing": "qualification_unverified",

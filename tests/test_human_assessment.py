@@ -561,7 +561,7 @@ class HumanAssessmentTests(unittest.TestCase):
                 self.assertEqual(prepared.eligibility, state.eligibility)
                 self.assertEqual(state.events(), [])
 
-    def test_invalid_or_unbounded_inventory_is_visible_before_publication_writes(self):
+    def test_invalid_base_is_visible_before_publication_writes(self):
         comment = ReviewComment(
             path="src/app.py",
             line=1,
@@ -569,34 +569,36 @@ class HumanAssessmentTests(unittest.TestCase):
             needs_human=True,
             severity="high",
         )
-        cases = (
-            (self.human_result((comment,)), None),
-            (self.human_result((comment,)), "invalid"),
-            (self.human_result((replace(comment, body="x" * 2100),)), BASE),
-            (self.human_result((replace(comment, body="é" * 1025),)), BASE),
-            (
-                self.human_result(
-                    replace(comment, body=f"Concern {i}") for i in range(21)
-                ),
-                BASE,
-            ),
-            (
-                self.human_result(
-                    replace(comment, body=f"{i}" + "x" * 1500) for i in range(20)
-                ),
-                BASE,
-            ),
+        for base in (None, "invalid"):
+            with self.assertRaises(ReviewInputError):
+                PendingHumanReview.from_result(self.human_result((comment,)), base)
+
+    def test_complete_human_inventory_preserves_long_prose_and_more_than_one_batch(
+        self,
+    ):
+        comment = ReviewComment(
+            path="src/app.py",
+            line=1,
+            body="Human concern.",
+            needs_human=True,
+            severity="high",
         )
-        for result, base in cases:
-            with (
-                self.subTest(base=base, count=len(result.comments)),
-                self.assertRaises(ReviewInputError),
-            ):
-                PendingHumanReview.from_result(result, base)
-        state = State()
-        with self.assertRaises(ReviewInputError):
-            self.publish_initial(state, cases[2][0])
-        self.assertFalse(any(method == "POST" for method, _, _ in state.calls))
+        for comments in (
+            (replace(comment, body="é" * 1025),),
+            tuple(
+                replace(comment, body=f"Concern {i}: " + "x" * 500) for i in range(21)
+            ),
+        ):
+            result = self.human_result(comments)
+            inventory = PendingHumanReview.from_result(result, BASE)
+            self.assertEqual(len(inventory.findings), len(comments))
+            self.assertEqual(
+                PendingHumanReview.from_dict(inventory.to_dict()), inventory
+            )
+            state = State()
+            self.publish_initial(state, result)
+            self.assertTrue(any(method == "POST" for method, _, _ in state.calls))
+            self.assertFalse(any(event == "APPROVE" for event in state.events()))
 
     def publish_initial(self, state, result):
         return ReviewPublisher(http=state.http).publish(
@@ -1651,8 +1653,8 @@ class HumanAssessmentTests(unittest.TestCase):
                 review_status="complete",
             )
         )
-        with self.assertRaises(ReviewInputError):
-            PendingHumanReview.from_result(oversized, BASE)
+        retained = PendingHumanReview.from_result(oversized, BASE)
+        self.assertEqual(retained.findings[0].body, "x" * 2100)
 
     def test_inventory_roundtrip_consistency_and_duplicate_marker_fail_closed(self):
         original = prior()

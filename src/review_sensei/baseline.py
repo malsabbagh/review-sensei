@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Sequence
 
+from .bounded_evidence import decode_evidence, encode_evidence
 from .context import (
     MAX_CACHE_METADATA_ITEMS,
     FindingLifecycle,
@@ -40,7 +41,12 @@ from .errors import ContextLoadError, ReviewInputError
 from .models import FindingLifecycleRecord, ReviewComment, ReviewResult
 from .planning import MAX_RELATED_PATHS, related_paths_for_change
 from .schemas import validate_public_document
-from .validation import validate_repository_path
+from .validation import (
+    DEFAULT_REVIEW_LIMITS,
+    MAX_REPOSITORY_PATH_BYTES,
+    validate_bounded_text,
+    validate_repository_path,
+)
 
 PUBLIC_SCHEMA_VERSION = "1.0"
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
@@ -125,15 +131,13 @@ LINEAGE_REASONS = frozenset(
 )
 COVERAGE_MODES = frozenset({"full", "incremental", "fallback-full", "unscoped"})
 MAX_VERIFICATION_CONCERNS = MAX_CACHE_METADATA_ITEMS
-# ADR 0053 reserves room in the history envelope for three trusted blocker-set
-# identities, so the persisted baseline retains at most two findings. The
-# runtime baseline keeps the wider shared metadata budget; only its persisted
-# projection is narrowed here.
-MAX_HISTORY_FINDINGS = 2
-# New F3 writes retain two findings to reserve space for blocker progress, but
-# readers accept the three-finding F2 envelope during rolling upgrades. A
-# later checkpoint rewrites the bounded projection using MAX_HISTORY_FINDINGS.
-MAX_HISTORY_READ_FINDINGS = 3
+# Whole inventories use the existing runtime metadata ceiling. The historical
+# two-finding projection is retained only as a legacy wire-format threshold.
+MAX_HISTORY_FINDINGS = MAX_CACHE_METADATA_ITEMS
+MAX_HISTORY_READ_FINDINGS = MAX_CACHE_METADATA_ITEMS
+MAX_LEGACY_HISTORY_READ_FINDINGS = 3
+LEGACY_HISTORY_WRITE_FINDINGS = 2
+MAX_BASELINE_DECODED_BYTES = DEFAULT_REVIEW_LIMITS.max_result_bytes
 # The persisted projection must fit the session envelope's 12288-byte bound
 # (ADR 0053) beside the framing a checkpoint also carries: the lifecycle state,
 # up to three blocker-bearing progress markers, and the provenance digest.
@@ -176,11 +180,11 @@ def _bounded_paths(values: Sequence[str], *, label: str) -> tuple[str, ...]:
         raise ReviewInputError(f"{label} must be a sequence of paths")
     paths: list[str] = []
     seen: set[str] = set()
-    for index, path in enumerate(values):
-        if index >= MAX_CACHE_METADATA_ITEMS:
-            raise ReviewInputError(f"{label} paths exceed MAX_CACHE_METADATA_ITEMS")
+    for path in values:
         validate_repository_path(path, label=label)
         if path not in seen:
+            if len(paths) >= MAX_CACHE_METADATA_ITEMS:
+                raise ReviewInputError(f"{label} paths exceed MAX_CACHE_METADATA_ITEMS")
             seen.add(path)
             paths.append(path)
     return tuple(paths)
@@ -346,38 +350,6 @@ def _history_encoding_size(value: object) -> int:
     return len(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8"))
 
 
-def _history_path_projection(
-    baseline: ReviewBaseline, *, available: int
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Return the deterministic path evidence that fits the reserved budget.
-
-    Persisted path evidence is narrowed, never refused: a review with more
-    path evidence than the envelope reserves still checkpoints, exactly as the
-    finding projection already keeps an oversized finding set from wedging the
-    ledger. Paths are ordered by value so the projection is content-derived
-    rather than provider- or retry-ordered, and reviewed evidence is admitted
-    before related context because the next round classifies findings against
-    it.
-    """
-
-    reviewed: list[str] = []
-    related: list[str] = []
-    used = 0
-    for target, paths in (
-        (reviewed, sorted(baseline.reviewed_paths)),
-        (related, sorted(baseline.related_paths)),
-    ):
-        for path in paths:
-            # One byte over the encoded entry covers its array separator, so
-            # the projection cannot exceed the budget it was given.
-            cost = len(json.dumps(path).encode("utf-8")) + 1
-            if used + cost > available:
-                return tuple(reviewed), tuple(related)
-            used += cost
-            target.append(path)
-    return tuple(reviewed), tuple(related)
-
-
 class BaselinePersistenceError(ReviewInputError):
     """A valid complete baseline cannot fit the durable metadata contract.
 
@@ -397,19 +369,11 @@ def baseline_history_document(
     max_bytes: int = MAX_HISTORY_BASELINE_BYTES,
     require_complete: bool = False,
 ) -> dict[str, object]:
-    """Return the closed metadata needed to rebuild a completed baseline.
+    """Persist every finding and path within the reserved lifecycle allocation.
 
-    This is deliberately identity and evidence metadata only: it never carries
-    review prompts, diffs, provider output, or rendered finding text.
-
-    The bounds enforced here are the ones the published session-record schema
-    enforces on the persisted envelope. Checking them before serialization
-    keeps a checkpoint that Python accepts from becoming a record the schema
-    rejects on the next read, which would strand the pull request in an
-    unreadable session state. The persisted projection is narrowed to fit the
-    envelope's reserved budget rather than refused, and a narrowed projection
-    reports itself incomplete so a later round falls back to a full pass
-    instead of reading dropped path evidence as a complete reviewed scope.
+    Small inventories retain the established JSON wire shape. Larger inventories
+    use lossless inline encoding; optional admission contexts use the same full
+    evidence and reader. No prompts, diffs or finding prose enter the ledger.
     """
 
     if not isinstance(baseline, ReviewBaseline):
@@ -425,13 +389,10 @@ def baseline_history_document(
         raise ReviewInputError("baseline reviewed paths exceed the persisted bound")
     if len(baseline.related_paths) > MAX_RELATED_PATHS:
         raise ReviewInputError("baseline related paths exceed the persisted bound")
-    # The envelope carries a bounded finding set. Selecting by fingerprint is
-    # deterministic and content-derived, so the persisted history does not
-    # depend on provider ordering or on how many retries a run took.
-    # Only optional cache projections may be narrowed. Strict checkpoints
-    # measure the complete document, including findings beyond the write cap.
+    # Canonical ordering makes complete evidence independent of provider order
+    # and retries. Every context carries the same whole finding inventory.
     all_findings = sorted(baseline.findings, key=lambda item: item.fingerprint)
-    findings = all_findings if require_complete else all_findings[:MAX_HISTORY_FINDINGS]
+    findings = all_findings
     identity_or_path_characters = max(
         map(
             len,
@@ -451,9 +412,9 @@ def baseline_history_document(
         (len(item.defect_kind) for item in findings), default=0
     )
     fields_exceed_bound = (
-        identity_or_path_characters > 256
-        or symbol_characters > 256
-        or defect_kind_characters > 128
+        identity_or_path_characters > MAX_REPOSITORY_PATH_BYTES
+        or symbol_characters > DEFAULT_REVIEW_LIMITS.max_model_bytes
+        or defect_kind_characters > DEFAULT_REVIEW_LIMITS.max_model_bytes
     )
     if fields_exceed_bound and not require_complete:
         raise ReviewInputError("baseline evidence exceeds persisted field bounds")
@@ -479,68 +440,59 @@ def baseline_history_document(
         "reviewed_paths": [],
         "related_paths": [],
     }
-    if require_complete:
-        # Mandatory evidence uses its exact canonical encoding, including both
-        # arrays. Optional legacy projection below retains its conservative
-        # separator allowance and explicit incomplete flags.
-        document["reviewed_paths"] = sorted(baseline.reviewed_paths)
-        document["related_paths"] = sorted(baseline.related_paths)
-        size = _history_encoding_size(document)
-        reasons = []
-        if not baseline.complete or not baseline.coverage_complete:
-            # Incomplete analysis is not a capacity fallback. It must still
-            # fail closed rather than gaining a publication transaction here.
-            raise ReviewInputError("only complete evidence can be persisted")
-        if len(findings) > MAX_HISTORY_FINDINGS:
-            reasons.append("finding-count")
-        if size > max_bytes:
-            reasons.append("encoded-bytes")
-        if fields_exceed_bound:
-            reasons.append("field-width")
-        if reasons:
-            raise BaselinePersistenceError(
-                {
-                    "schema_version": "1.0",
-                    "reasons": reasons,
-                    "finding_count": len(findings),
-                    "finding_limit": MAX_HISTORY_FINDINGS,
-                    "reviewed_path_count": len(baseline.reviewed_paths),
-                    "related_path_count": len(baseline.related_paths),
-                    "encoded_bytes": size,
-                    "available_bytes": max_bytes,
-                    "maximum_bytes": MAX_HISTORY_BASELINE_BYTES,
-                    "maximum_identity_or_path_characters": identity_or_path_characters,
-                    "identity_or_path_character_limit": 256,
-                    "maximum_symbol_characters": symbol_characters,
-                    "symbol_character_limit": 256,
-                    "maximum_defect_kind_characters": defect_kind_characters,
-                    "defect_kind_character_limit": 128,
-                }
-            )
-        return document
-    available = max_bytes - _history_encoding_size(document)
-    if available < 0:
-        raise ReviewInputError("baseline identity exceeds the persisted envelope bound")
-    reviewed, related = _history_path_projection(baseline, available=available)
-    document["reviewed_paths"] = list(reviewed)
-    document["related_paths"] = list(related)
-    if (
-        len(findings) != len(baseline.findings)
-        or len(reviewed) != len(baseline.reviewed_paths)
-        or len(related) != len(baseline.related_paths)
+    document["reviewed_paths"] = sorted(baseline.reviewed_paths)
+    document["related_paths"] = sorted(baseline.related_paths)
+    if require_complete and (not baseline.complete or not baseline.coverage_complete):
+        raise ReviewInputError("only complete evidence can be persisted")
+    # Pick a stable format independently of a caller's current allocation.
+    # Small old records remain byte-for-byte readable by the legacy reader.
+    decoded_size = _history_encoding_size(document)
+    if decoded_size > MAX_BASELINE_DECODED_BYTES:
+        persisted = document
+    elif (
+        len(findings) > LEGACY_HISTORY_WRITE_FINDINGS
+        or _history_encoding_size(document) > MAX_HISTORY_BASELINE_BYTES
+        or identity_or_path_characters > 256
+        or symbol_characters > 256
+        or defect_kind_characters > 128
     ):
-        # A dropped path must never read as "not reviewed": a later finding on
-        # it would classify as pre-existing or new instead of a missed defect,
-        # which is the one direction ADR 0053 forbids. The stored baseline
-        # therefore reports itself incomplete, and the next round runs a
-        # fallback-full pass instead of an incremental round that would trust
-        # the narrowed scope. Both flags are cleared because a reader released
-        # before the projection was narrowed only degrades to a fallback-full
-        # pass when ``complete`` is false; a true value would let a rollback to
-        # that reader trust path evidence the record does not carry.
-        document["complete"] = False
-        document["coverage_complete"] = False
-    return document
+        persisted = encode_evidence(
+            document, max_decoded_bytes=MAX_BASELINE_DECODED_BYTES
+        )
+    else:
+        persisted = document
+    size = _history_encoding_size(persisted)
+    reasons = []
+    if decoded_size > MAX_BASELINE_DECODED_BYTES:
+        reasons.append("decoded-bytes")
+    if size > max_bytes:
+        reasons.append("encoded-bytes")
+    if fields_exceed_bound:
+        reasons.append("field-width")
+    if reasons:
+        raise BaselinePersistenceError(
+            {
+                "schema_version": "1.0",
+                "reasons": reasons,
+                "finding_count": len(findings),
+                "finding_limit": MAX_HISTORY_FINDINGS,
+                "reviewed_path_count": len(baseline.reviewed_paths),
+                "related_path_count": len(baseline.related_paths),
+                "encoded_bytes": size,
+                "decoded_bytes": decoded_size,
+                "maximum_decoded_bytes": MAX_BASELINE_DECODED_BYTES,
+                "available_bytes": max_bytes,
+                "maximum_bytes": MAX_HISTORY_BASELINE_BYTES,
+                "maximum_identity_or_path_characters": identity_or_path_characters,
+                "identity_or_path_character_limit": MAX_REPOSITORY_PATH_BYTES,
+                "maximum_symbol_characters": symbol_characters,
+                "symbol_character_limit": DEFAULT_REVIEW_LIMITS.max_model_bytes,
+                "maximum_defect_kind_characters": defect_kind_characters,
+                "defect_kind_character_limit": DEFAULT_REVIEW_LIMITS.max_model_bytes,
+            }
+        )
+    validate_public_document(document, "baseline-evidence")
+    return persisted
 
 
 _BASELINE_CACHE_KEY_FIELDS = frozenset(
@@ -606,6 +558,18 @@ def baseline_from_history_document(value: object) -> ReviewBaseline:
 
     if not isinstance(value, dict):
         raise ReviewInputError("persisted baseline is invalid")
+    if isinstance(value, dict) and "encoding" in value:
+        value = decode_evidence(
+            value,
+            max_encoded_bytes=MAX_HISTORY_BASELINE_BYTES,
+            max_decoded_bytes=MAX_BASELINE_DECODED_BYTES,
+        )
+    try:
+        validate_public_document(value, "baseline-evidence")
+    except ReviewInputError as exc:
+        raise ReviewInputError("persisted baseline has an invalid shape") from exc
+    if not isinstance(value, dict):
+        raise ReviewInputError("persisted baseline is invalid")
     required = {
         "cache_key",
         "policy_digest",
@@ -629,6 +593,14 @@ def baseline_from_history_document(value: object) -> ReviewBaseline:
     for item in findings_value:
         if not isinstance(item, dict) or set(item) != _BASELINE_FINDING_FIELDS:
             raise ReviewInputError("persisted baseline has an invalid shape")
+    for item in findings_value:
+        for field in ("symbol", "defect_kind"):
+            if item[field] is not None:
+                validate_bounded_text(
+                    item[field],
+                    DEFAULT_REVIEW_LIMITS.max_model_bytes,
+                    label="baseline identity",
+                )
     try:
         key = ReviewContextCacheKey(**value["cache_key"])
         findings = tuple(BaselineFinding(**item) for item in findings_value)
@@ -1699,6 +1671,7 @@ __all__ = [
     "LINEAGE_REASONS",
     "MAX_HISTORY_FINDINGS",
     "MAX_HISTORY_READ_FINDINGS",
+    "MAX_LEGACY_HISTORY_READ_FINDINGS",
     "MAX_VERIFICATION_CONCERNS",
     "PUBLIC_SCHEMA_VERSION",
     "RECOVERABLE_FALLBACK_REASONS",

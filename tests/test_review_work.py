@@ -484,6 +484,41 @@ class AssessingProvider:
 
 
 class UnifiedAdaptersTests(unittest.TestCase):
+    def test_twenty_five_obligations_reassess_across_batches_without_losing_inventory(
+        self,
+    ):
+        pending, bundle = self.fixture((100,))
+        pending = PendingHumanReview(
+            pending.base_sha,
+            tuple(
+                replace(
+                    pending.findings[0],
+                    fingerprint=f"{i:064x}",
+                    body=f"Distinct concern {i}: " + "x" * 2500,
+                )
+                for i in range(25)
+            ),
+        )
+        provider = AssessingProvider()
+        run = reassess(
+            provider=provider,
+            pending=pending,
+            bundle=bundle,
+            source_body=HUMAN,
+            authority_digest="f" * 64,
+            work_budgets=ReviewWorkBudgets(mode="unified"),
+        )
+        self.assertGreaterEqual(len(provider.calls), 2)
+        self.assertEqual(len(run.reply.decisions), 25)
+        self.assertFalse(pending.apply(run.reply.decisions).pending)
+        validate_work(
+            run,
+            pending=pending,
+            bundle=bundle,
+            source_body=HUMAN,
+            authority_digest="f" * 64,
+        )
+
     def test_citation_failure_has_no_semantic_correction_retry(self):
         pending, bundle = self.fixture((100,))
 

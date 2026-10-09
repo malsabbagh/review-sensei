@@ -30,6 +30,12 @@ def marker(document):
 
 def fixtures():
     sys.path.insert(0, str(ROOT / "src"))
+    from review_sensei.baseline import (
+        BaselineFinding,
+        ReviewBaseline,
+        baseline_history_document,
+    )
+    from review_sensei.context import ReviewContextCacheKey
     from review_sensei.hosting.github.approval import (
         ApprovalFacts,
         ReviewApprovalEligibility,
@@ -78,7 +84,52 @@ def fixtures():
     )
     unified = deepcopy(configuration)
     unified["orchestration"]["work_policy_digest"] = "d" * 64
+    richer_human = replace(
+        eligibility,
+        human_review=replace(
+            pending,
+            findings=tuple(
+                replace(
+                    finding, fingerprint=f"{i:064x}", body=f"Concern {i}: " + "x" * 2100
+                )
+                for i in range(21)
+            ),
+        ),
+    )
+    baseline = ReviewBaseline(
+        cache_key=ReviewContextCacheKey(
+            repository="owner/repo",
+            pull_request=1,
+            base_sha="a" * 40,
+            head_sha="b" * 40,
+            engine="fixture",
+            model="fixture",
+            profile="default",
+            stage_digest="c" * 64,
+            context_digest="d" * 64,
+            learning_digest="e" * 64,
+        ),
+        policy_digest="f" * 64,
+        complete=True,
+        findings=tuple(
+            BaselineFinding(f"{i:064x}", f"{i + 20:064x}", path="src/a.py")
+            for i in range(12)
+        ),
+        reviewed_paths=("src/a.py",),
+    )
+    richer_session = SessionRecord.create(
+        SessionIdentity("owner/repo", 1, 99),
+        now=now,
+        convergence_history={
+            "state": "completed",
+            "baseline": baseline_history_document(baseline, require_complete=True),
+            "progress": [],
+            "provenance": {"ledger_digest": "a" * 64},
+        },
+    )
     return {
+        "v3": richer_human.to_dict(),
+        "encoded_baseline_session": richer_session.to_dict(),
         "v1": eligibility.to_dict(),
         "v2": v2.to_dict(),
         "clean": marker(clean.to_dict()),
@@ -134,6 +185,17 @@ def worker(source: Path, fixture: Path, legacy: bool):
     else:
         assert ReviewApprovalEligibility.from_dict(data["v2"]).to_dict() == data["v2"]
     assert SessionRecord.from_dict(data["session"]).to_dict() == data["session"]
+    for parser, document in (
+        (ReviewApprovalEligibility.from_dict, data["v3"]),
+        (SessionRecord.from_dict, data["encoded_baseline_session"]),
+    ):
+        try:
+            restored = parser(document)
+        except ReviewInputError:
+            assert legacy
+        else:
+            assert not legacy
+            assert restored.to_dict() == document
     ReviewTransaction.compute_configuration_digest(data["configuration"])
     try:
         ReviewTransaction.compute_configuration_digest(data["unified_configuration"])
@@ -161,6 +223,7 @@ def worker(source: Path, fixture: Path, legacy: bool):
 
     for body in (
         marker(data["v2"]),
+        marker(data["v3"]),
         data["unsupported"],
         "<!-- reviewsensei:eligibility:v1 broken -->",
     ):
@@ -177,8 +240,9 @@ def worker(source: Path, fixture: Path, legacy: bool):
             head_sha="b" * 40,
             app_slug="sensei[bot]",
         )
-        if not legacy and body == marker(data["v2"]):
-            assert finalizer.load_eligibility(**args).to_dict() == data["v2"]
+        if not legacy and body in (marker(data["v2"]), marker(data["v3"])):
+            expected = data["v2"] if body == marker(data["v2"]) else data["v3"]
+            assert finalizer.load_eligibility(**args).to_dict() == expected
             continue
         assert finalizer.load_eligibility(**args) is None
         try:
@@ -220,7 +284,7 @@ def worker(source: Path, fixture: Path, legacy: bool):
         else:
             raise AssertionError("upgraded reader reset unreadable authority")
     print(
-        f"PASS {'v0.6.16' if legacy else 'current'}: v1/v2, latest authority, transaction identity, ledger reads"
+        f"PASS {'v0.6.16' if legacy else 'current'}: legacy and encoded evidence, latest authority, transaction identity, ledger reads"
     )
     if legacy:
         print(

@@ -962,3 +962,15 @@ held reservation to its OIDC run. `@reviewsensei review continue` requires live 
 completion evidence before reclaiming analysis, including a constrained origin
 proof for older PR-triggered runs. Recovery preserves session budgets and saved
 publication work; cooperating command/review jobs serialize the comment write.
+
+Complete review evidence now uses the lossless inline contract proposed in
+[ADR 0071](adr/0071-lossless-inline-review-evidence.md). Small baseline and human
+inventories retain their legacy JSON shape; larger inventories share a bounded
+canonical JSON/zlib/base64 reader. The existing authenticated ledger atomically
+binds the full baseline and preserves its lifecycle reserve. Human eligibility
+version 3 stores immutable full prose separately from the mutable resolution
+list and reserves room for every possible resolution. Whole inventories are
+independent of provider batches. Capacity failure carries an exact-result-bound
+`persistence_status` and `baseline_capacity_exceeded` outcome; it withholds
+approval while reporting analysis coverage accurately. All shared readers must
+be upgraded before richer writes; rollback readers fail closed on those records.
