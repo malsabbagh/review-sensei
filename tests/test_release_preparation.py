@@ -63,6 +63,10 @@ class PreparationRenderingTests(unittest.TestCase):
         self.root = Path(self.temporary.name) / "source"
         shutil.copytree(self.fixture, self.root)
         self.run_git("init", "-q")
+        # Background Git maintenance can recreate .git entries while the
+        # temporary fixture is being removed, especially with docs snapshots.
+        self.run_git("config", "maintenance.auto", "false")
+        self.run_git("config", "gc.auto", "0")
         # Model production's Linux checkout even when ROOT is checked out with
         # Windows CRLF. The explicit filter test still rejects changed blobs.
         self.run_git("config", "core.autocrlf", "false")
