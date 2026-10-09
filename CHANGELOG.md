@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Add opt-in Release Marshal signing with a dedicated GPG key after full
+  prepared-main CI. Retain Mo's separate npm/PyPI approval gates and wait for
+  both package publications before GitHub release assets. Provide a user-run
+  private-backup/public-registration/secret-upload script and read-only metadata
+  verification; personal SSH keys, rules and movable channels are unchanged.
+  Report fixed signing-operation names and exit codes without private command
+  diagnostics. Attempt every cleanup action, preserve an earlier signing error
+  if cleanup also fails, and fail a successful signing run if cleanup fails.
+
 - Prepare version metadata, dated reviewed changelog notes, current installation
   pins and generated source docs through an owner-only main workflow. The narrow
   dedicated App pushes one allowlisted, byte-verified commit; full exact-head CI

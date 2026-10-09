@@ -666,10 +666,11 @@ def main() -> int:
                     handle.write(
                         f"## Prepared v{args.version}\n\nSource: `{args.sha}`. "
                         f"[Full exact-head CI](https://github.com/{docs.REPOSITORY}/actions/runs/{run['id']}) passed.\n\n"
-                        "No tag or package was published. Complete the readers-first "
-                        "qualification and use the owner's existing signing identity:\n\n"
-                        f"```bash\ngit fetch origin main\ngit tag -s v{args.version} {args.sha} -m 'ReviewSensei {args.version}'\n"
-                        f"git push origin refs/tags/v{args.version}\n```\n\n"
+                        "This qualification created no tag or package. Complete "
+                        "readers-first qualification before signing. With `sign_tag=true`, "
+                        "the separate job signs this exact source using only the dedicated "
+                        "release GPG key. Otherwise retain this SHA for the authorized "
+                        "local signing handoff. Never place a personal SSH key in Actions.\n\n"
                         "Hold if main/CI advances or this tag exists. Release builds "
                         "Python/npm from this exact signed source. Channel/Worker changes remain separate.\n"
                     )

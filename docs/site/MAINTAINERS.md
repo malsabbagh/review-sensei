@@ -85,7 +85,7 @@ for bootstrap, retry, supersession, historical snapshots and rollback policy.
 Before tagging, the owner-dispatched preparation workflow generates aligned
 Python/npm/changelog/current-installation/source-site files and commits one
 explicitly allowlisted payload to main. Full exact-head CI precedes the owner
-signed tag, and Release re-verifies its generation receipt before all builds.
+or explicitly opted-in dedicated-key signed tag, and Release re-verifies its generation receipt before all builds.
 The App can update only those preparation files and the separate released snapshot
 through the reviewed workflows; GitHub itself does not enforce a file-path scope.
 
@@ -100,3 +100,8 @@ main-only, and ordinary source PR requirements remain unchanged. Complete
 `docs/release-docs-bot.md` and the real App readiness probe before first use;
 keep 0.6.17 held until that succeeds and the generated main commit passes exact
 CI. PR #226 remains an unmerged comparison reference.
+
+Dedicated release signing is described in `docs/release-signing.md` and ADR 0068.
+The user runs credential setup; npm/PyPI retain separate owner approvals, which
+authorize publication and do not cryptographically sign a tag. No automatic
+key setup, signing dispatch, tag bypass or channel promotion occurs on merge.

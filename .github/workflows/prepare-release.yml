@@ -12,6 +12,11 @@ on:
         description: Release changelog date in YYYY-MM-DD (retained on retries)
         required: true
         type: string
+      sign_tag:
+        description: Create the dedicated-key signed tag after CI (complete readers-first qualification before dispatch)
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -95,7 +100,7 @@ jobs:
           --version "$RELEASE_VERSION" --date "$RELEASE_DATE" --base-sha "$SOURCE_SHA"
 
   qualify-prepared:
-    name: Qualify exact generated commit before owner signing
+    name: Qualify exact generated commit before signing
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 65
@@ -119,4 +124,62 @@ jobs:
           RELEASE_DATE: ${{ inputs.release_date }}
         run: >-
           python scripts/prepare_release.py wait-ci
+          --sha "$PREPARED_SHA" --version "$RELEASE_VERSION" --date "$RELEASE_DATE"
+
+  sign-tag:
+    name: Sign immutable release tag with the dedicated release key
+    needs: [prepare, qualify-prepared]
+    if: >-
+      inputs.sign_tag && github.repository == 'malsabbagh/review-sensei' &&
+      github.ref == 'refs/heads/main' && github.actor == 'malsabbagh' &&
+      github.triggering_actor == 'malsabbagh'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release-docs-main
+    steps:
+      # Trusted helper is dispatch-reviewed code; it never executes scripts
+      # from the generated checkout while the private signing key is present.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: prepared-source
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install pinned validator before any secret-bearing step
+        run: python -m pip install --disable-pip-version-check jsonschema==4.26.0
+      - name: Mint the existing repository-only release token
+        id: release-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_DOCS_APP_CLIENT_ID || vars.RELEASE_DOCS_APP_ID }}
+          private-key: ${{ secrets.RELEASE_DOCS_APP_PRIVATE_KEY }}
+          owner: malsabbagh
+          repositories: review-sensei
+          permission-contents: write
+          permission-actions: read
+          permission-metadata: read
+          skip-token-revoke: false
+      - name: Requalify source, sign, locally verify, push once and require GitHub verification
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+          RELEASE_DOCS_APP_ID: ${{ vars.RELEASE_DOCS_APP_ID }}
+          RELEASE_DOCS_APP_SLUG: ${{ steps.release-token.outputs.app-slug }}
+          RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY }}
+          RELEASE_SIGNING_PASSPHRASE: ${{ secrets.RELEASE_SIGNING_PASSPHRASE }}
+          RELEASE_SIGNING_FINGERPRINT: ${{ vars.RELEASE_SIGNING_FINGERPRINT }}
+          RELEASE_SIGNING_EMAIL: ${{ vars.RELEASE_SIGNING_EMAIL }}
+          PREPARED_SHA: ${{ needs.prepare.outputs.source_sha }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_DATE: ${{ inputs.release_date }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: >-
+          python scripts/sign_release.py --root "$GITHUB_WORKSPACE/prepared-source"
           --sha "$PREPARED_SHA" --version "$RELEASE_VERSION" --date "$RELEASE_DATE"

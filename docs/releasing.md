@@ -207,24 +207,27 @@ changes the main metadata through the dedicated App; tagging an unchanged
    unused tag and all seven registry versions before the handoff. A successful
    preparation does not publish packages or make new source docs live on Pages.
 6. Complete the existing readers-first, compatibility/canary and protected
-   publication qualification below. Using the owner's **existing signing identity**,
-   create the signed annotated tag on exactly the SHA emitted in the successful
-   preparation summary, then push only that tag:
+   publication qualification below. To automate the signed tag, complete the
+   [dedicated release-key user-run setup](release-signing.md) and dispatch with
+   `-f sign_tag=true`. A separate main-only job waits for generated CI, rechecks
+   the receipt, source, all unused versions, registered key/email, narrow App
+   identity and Mo's publication reviewer gates, then creates and verifies a
+   dedicated-key signed annotated tag on the exact qualified SHA. It pushes
+   only the new immutable tag and requires GitHub's verified-object readback.
+   No personal SSH key is placed in Actions and no tag/ruleset bypass is added.
+   `sign_tag=false` (default) retains the local owner signing handoff; use only
+   the SHA emitted by the successful preparation, and stop if main/CI changed
+   or the tag exists.
 
-   ```bash
-   git fetch origin main
-   git tag -s v0.6.17 <qualified-prepared-sha> -m "ReviewSensei 0.6.17"
-   git push origin refs/tags/v0.6.17
-   ```
-
-   Stop if main/CI changed or the tag exists. Signing is deliberately an owner
-   checkpoint; no automated signing secret, tag-permission bypass or movable-tag
-   update is added. The Release source gate verifies the signed remote tag/object,
-   event/local SHA, main ancestry, receipt-bound single-parent allowlisted commit,
-   all versions/docs and terminal exact-head main CI before any docs/Python/native
-   build. Python/npm then build, attest and publish from **that tagged commit**.
-   Package/environment approvals remain required; later snapshot commits never
-   become a replacement package source.
+   The Release source gate verifies the signed remote tag/object, event/local
+   SHA, main ancestry, receipt-bound single-parent allowlisted commit, all
+   versions/docs and terminal exact-head main CI before any docs/Python/native
+   build. It also rechecks Mo's sole-reviewer npm/PyPI environments. Python/npm
+   build from that tagged commit and await **separate publication approvals**.
+   Approval is authorization, not a cryptographic signature. GitHub release
+   assets wait for both package publications; final Pages/snapshot deployment
+   remains bound to successful Release completion. Later snapshot commits do
+   not become a replacement package source.
 
 For a transient CI issue, rerun the failed CI job, then retry the failed
 `qualify-prepared` job. A new dispatch from unchanged prepared main with the same
