@@ -145,11 +145,11 @@ With diagnostics enabled, `checkpoint-evidence.json` retains the full validated
 result before the durable checkpoint, even if checkpointing subsequently fails.
 Its `publishable: false` envelope is diagnostic evidence, not a publication or
 recovery authorization. The evidence retains the pre-checkpoint status; on
-overflow its digest differs
-from the post-fallback partial result bound to the ledger. Publication retries
+overflow its digest differs from the post-fallback partial result bound to the
+ledger. Publication retries
 use `review.json` and trusted contexts instead. `checkpoint-diagnostics.json`,
-when present, contains
-only fixed overflow reason labels, counts, lengths and actual byte limits;
+when present, contains only fixed overflow reason labels, counts, lengths and
+actual byte limits;
 the same sanitized document is logged on overflow. The opted-in bundle is
 uploaded on checkpoint failure when the evidence file exists. It retains the
 existing seven-day window and does not opt a repository into content uploads.

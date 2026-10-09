@@ -4,7 +4,7 @@ Status: Proposed
 Date: 2026-10-09
 Owners/Reviewers: Maintainers
 Related work: user-authorized recovery of [PR #231](https://github.com/malsabbagh/review-sensei/pull/231) hosted review [run 37883954080](https://github.com/malsabbagh/review-sensei/actions/runs/37883954080)
-Implementation PR: pending
+Implementation PR: [#232](https://github.com/malsabbagh/review-sensei/pull/232)
 
 ## Context
 
@@ -50,11 +50,9 @@ Opt-in checkpoint evidence retains the complete pre-checkpoint validated
 result in a distinct `publishable: false` diagnostic envelope. It is not a
 recovery artifact or trusted publication input. After overflow, its original
 complete-analysis digest intentionally differs from the ledger-bound partial
-publication result digest. Publication/recovery
-uses `review.json` and its trusted contexts, never this evidence envelope.
+publication result digest. Publication/recovery uses `review.json` and its trusted contexts, never this evidence envelope.
 Diagnostics uploads retain this file even on checkpoint failure, only when
-`github.artifacts: diagnostics`
-is already enabled. `artifacts: none` uploads no content. Stale runner files
+`github.artifacts: diagnostics` is already enabled. `artifacts: none` uploads no content. Stale runner files
 are cleared before inference. Evidence and numeric diagnostic schemas are
 additive; no durable session fields or storage limits change.
 Failure uploads additionally require a fresh per-step cleanup marker, so an
