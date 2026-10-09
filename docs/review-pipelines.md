@@ -217,6 +217,7 @@ sequenceDiagram
     participant Publish as Reply and review publishers
     Human->>Host: Authorized exact-source reassessment request
     Host->>GitHub: Read latest complete pending inventory and current PR snapshot
+    Note over Host: Whole current inventory at most 20 findings / 24 KiB<br/>8 paths per finding / 64 unique paths overall
     Host->>GitHub: Acquire immutable complete file patches
     Note over Host,GitHub: 512 KiB response<br/> 1,000 items<br/> at most 64 reads / 60 s
     Host->>Planner: Pending finding requirements and shared run budget
@@ -653,14 +654,14 @@ sequenceDiagram
     end
     Analysis->>Writer: Complete human inventory, if present
     Writer->>Writer: Reserve space for all future resolved identities
-    Note over Writer,Human: 250 findings<br/> 16 KiB body each<br/>2 MiB decoded<br/> complete marker inventory at most 24 KiB
+    Note over Writer,Human: Whole inventory count ceiling 250<br/>16 KiB body each / 2 MiB decoded<br/>8 paths per finding / 64 unique paths overall<br/>24 KiB persisted including every future resolution ID
     alt Full inventory plus future resolution list fits
         Writer->>Human: Whole immutable inventory<br/> mutable resolutions outside encoding
         Human->>Gate: Exact eligibility<br/> version 3 when inventory is encoded
         Gate->>Gate: Preserve pending obligations and all current approval gates
         opt Later reply to encoded inventory
             Human->>Reply: Automatically select bounded evidence batches
-            Note over Reply: Even with legacy work default<br/>Existing call, evidence, prompt and output caps
+            Note over Reply: Even with legacy work default<br/>Normally 4 findings per batch / 16 KiB response<br/>8 total dispatches / 120 s by default<br/>Batching does not expand whole-inventory caps
             Reply->>Gate: Validated decisions plus unresolved remainder
         end
     else Human inventory or formatted publication cannot fit
@@ -687,6 +688,7 @@ selected. Lens invocation behavior remains as described above.
 | History and record growth | 12,288 B history / 20,480 B record, 1,024 B baseline reserve | Unchanged envelopes and reserve; no whole-inventory projection |
 | Human inventory | 20 findings; 2 KiB/body; 24 KiB whole JSON inventory | 250 findings; full validated 16 KiB/body; 2 MiB decoded; 24 KiB persisted envelope **including all future resolution identities** |
 | Human resolutions | Included in existing bounded JSON | Mutable resolved list outside immutable compressed inventory; every subset preflighted against all-resolved capacity |
+| Human evidence paths | At most 8/finding, 64 unique/inventory | Unchanged whole-inventory restriction; smaller provider batches do not enlarge it |
 | Reassessment per request | At most 20 decisions; unified normally packs 4 | Same per-request caps; trusted multi-batch aggregate can retain whole inventory |
 | Rich-inventory reply routing | Whole inventory limited to 20; unified mode explicitly selected | Encoded inventories automatically enter bounded multi-batch reassessment even with the legacy default; the direct legacy request still refuses more than 20 pending findings |
 | Latest human eligibility | Versions 1/2 | Versions 1/2 readable; encoded inventory requires version `3` |
