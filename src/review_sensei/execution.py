@@ -379,6 +379,7 @@ def execute_plan(
     request_digests: dict[str, str | None] = {}
     checkpoint_loaded = False
     admission_checked = False
+    recovery_admission_checked = False
     admitted_digests: Mapping[str, str | None] | None = None
     if checkpoint is not None and recovery is not None and recovery.enabled:
         raise ReviewInputError(
@@ -404,6 +405,26 @@ def execute_plan(
                 for identity, reason in prior.pending
                 if reason != "queued"
             }
+    elif checkpoint is None and recovery is not None and recovery.enabled:
+        load_recovery_admission = getattr(recovery, "load_admission", None)
+        if callable(load_recovery_admission):
+            if (
+                encode_recovery is None
+                or decode_recovery is None
+                or revalidate_cached is None
+            ):
+                raise ReviewInputError(
+                    "work recovery requires normalized codecs and fresh semantic validation"
+                )
+            admission = load_recovery_admission(plan, tracker, budgets, decode_recovery)
+            recovery_admission_checked = True
+            if admission is not None:
+                prior, admitted_digests = admission
+                terminal_pending = {
+                    identity: reason
+                    for identity, reason in prior.pending
+                    if reason != "interrupted"
+                }
     for batch in plan.batches:
         try:
             request = render(batch)
@@ -432,7 +453,9 @@ def execute_plan(
         )
     if admitted_digests is not None and dict(admitted_digests) != request_digests:
         raise ReviewInputError(
-            "durable receipt request binding changed after admission"
+            "work recovery request binding changed after admission"
+            if recovery_admission_checked
+            else "durable receipt request binding changed after admission"
         )
     if recovery is not None and recovery.enabled:
         if (
@@ -443,8 +466,10 @@ def execute_plan(
             raise ReviewInputError(
                 "work recovery requires normalized codecs and fresh semantic validation"
             )
-        recovered = recovery.load(
-            plan, tracker, budgets, decode_recovery, request_digests
+        recovered = (
+            None
+            if recovery_admission_checked
+            else recovery.load(plan, tracker, budgets, decode_recovery, request_digests)
         )
         if recovered is not None:
             prior = recovered

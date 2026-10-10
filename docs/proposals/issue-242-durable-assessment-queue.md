@@ -460,3 +460,23 @@ complete original receipt and emits no provider request. These tests use
 synthetic durable storage, not a consuming broker or hosted grant.
 Whole hosted 64-call/60-second feasibility and joint authority storage remain
 unqualified; the two-activation count alone supplies no hosted support claim.
+
+### Diagnostic admission before request binding
+
+The separate executor amendment consumes the coordinator's frozen
+`WorkRecoveryStore.load_admission(plan, tracker, budgets, decode)` only when no
+public checkpoint exists and diagnostics are explicitly enabled. Authenticated
+original elapsed time, counters and execution identity restore before executor
+request rendering. Every fresh provider/framing request digest must equal the
+complete stored batch table before cached semantic validation or dispatch.
+Successful early lookup, including proven absence, suppresses a second legacy
+`load`; stores without the optional method retain their original fallback.
+
+At an expired original deadline, a deadline-dependent renderer precisely refuses
+without dispatch. A deterministic renderer may bind and semantically revalidate
+accepted cached results with zero new inference. Terminal diagnostic pending
+reasons retain their original meaning: only `interrupted` is resumable. The
+checkpoint path, disabled diagnostics, wire schema, authentication, TTL and
+public queue authority remain unchanged. Tests use actual private HMAC receipts,
+changed provider/request/framing negatives, original terminal reasons and exact
+zero-call replay. Shared architecture acceptance remains coordinator-owned.
