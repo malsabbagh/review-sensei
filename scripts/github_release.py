@@ -64,6 +64,8 @@ def write_api(path: str, method: str, payload: dict[str, Any]) -> None:
 
 def qualify_run(context: Context, *, publish: bool) -> None:
     run = docs.api(f"actions/runs/{context.run_id}")
+    # Both commands execute inside the active Release attempt. A job rerun
+    # increments GITHUB_RUN_ATTEMPT; a completed attempt is not write authority.
     if (
         run.get("id") != context.run_id
         or run.get("run_attempt") != context.attempt
@@ -357,7 +359,7 @@ def manage(context: Context, assets: dict[str, Path], *, publish: bool) -> None:
                 },
             )
         except subprocess.CalledProcessError:
-            pass
+            pass  # A lost PATCH response may already have published the draft.
         published = find_release(context.tag)
         if published is None or published["id"] != release["id"]:
             raise ValueError("published release identity differs")

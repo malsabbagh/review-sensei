@@ -3,11 +3,13 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
 from contextlib import ExitStack
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -109,6 +111,7 @@ class GitHubReleaseTests(unittest.TestCase):
             self.assertEqual(key, "jobs")
             return copy.deepcopy(self.jobs)
         if path == "actions/runs/123/artifacts":
+            self.assertEqual(key, "artifacts")
             return copy.deepcopy(self.artifacts)
         self.assertEqual(path, "releases/42/assets")
         return copy.deepcopy(self.remote_assets)
@@ -290,6 +293,36 @@ class GitHubReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "tag identity"):
                 self.draft()
         self.assertEqual(self.writes, [])
+
+    def test_tag_moved_at_publication_holds_patch(self):
+        self.draft()
+        with patch.object(
+            RELEASE.docs,
+            "tag_identity",
+            side_effect=[
+                (CONTEXT.tag_object, CONTEXT.source),
+                ("c" * 40, CONTEXT.source),
+            ],
+        ):
+            with self.assertRaisesRegex(ValueError, "tag identity"):
+                RELEASE.manage(CONTEXT, self.assets, publish=True)
+        self.assertTrue(self.releases[0]["draft"])
+        self.assertEqual([method for _, method, _ in self.writes], ["POST"])
+
+    def test_completed_or_superseded_attempt_cannot_publish_but_active_rerun_can(self):
+        self.draft()
+        for status, attempt in (("completed", 2), ("in_progress", 3)):
+            with self.subTest(status=status, attempt=attempt):
+                self.run.update(status=status, run_attempt=attempt)
+                with self.assertRaisesRegex(ValueError, "Release run"):
+                    RELEASE.manage(CONTEXT, self.assets, publish=True)
+                self.assertTrue(self.releases[0]["draft"])
+                self.assertEqual([method for _, method, _ in self.writes], ["POST"])
+        # A publisher-only rerun keeps successful jobs/assets from earlier
+        # attempts, but must carry the current attempt's execution identity.
+        RELEASE.manage(replace(CONTEXT, attempt=3), self.assets, publish=True)
+        self.assertFalse(self.releases[0]["draft"])
+        self.assertEqual([method for _, method, _ in self.writes], ["POST", "PATCH"])
 
     def test_foreign_or_edited_release_is_never_overwritten(self):
         self.draft()
@@ -533,15 +566,36 @@ class GitHubReleaseTests(unittest.TestCase):
 
     def test_workflow_draft_precedes_approvals_and_finalizer_waits_for_both(self):
         text = (ROOT / ".github/workflows/release.yml").read_text()
-        self.assertIn("needs: [assemble-npm, draft-release]", text)
-        self.assertIn("needs: [build, draft-release]", text)
-        self.assertIn("needs: [build, draft-release, publish, publish-npm]", text)
+        # Bound every job block at the next job key, including appended jobs.
+        # No YAML dependency is added to the standard-library checkout lane.
+        parts = re.split(r"(?m)^  ([a-z][a-z-]*):\n", text)
+        jobs = dict(zip(parts[1::2], parts[2::2]))
+        self.assertIn("needs: [assemble-npm, draft-release]", jobs["publish-npm"])
+        self.assertIn("needs: [build, draft-release]", jobs["publish"])
+        self.assertIn(
+            "needs: [build, draft-release, publish, publish-npm]",
+            jobs["github-release"],
+        )
+        self.assertEqual(
+            RELEASE.BUILD_JOBS,
+            {
+                re.search(r"(?m)^    name: (.+)$", jobs[job])[1]
+                for job in ("qualify-source", "build", "docs-build", "assemble-npm")
+            },
+        )
+        self.assertEqual(
+            RELEASE.PUBLISH_JOBS,
+            {
+                re.search(r"(?m)^    name: (.+)$", jobs[job])[1]
+                for job in ("publish", "publish-npm", "draft-release")
+            },
+        )
         self.assertLess(
             text.index("Generate SPDX SBOM"), text.index("Create release checksums")
         )
         self.assertIn("sha256sum -- review-sensei-sbom.spdx.json", text)
         for job in ("draft-release", "github-release"):
-            body = text.split(f"  {job}:\n", 1)[1].split("\n  github-release:", 1)[0]
+            body = jobs[job]
             self.assertIn("actions: read", body)
             self.assertIn("attestations: read", body)
             self.assertIn("persist-credentials: false", body)
