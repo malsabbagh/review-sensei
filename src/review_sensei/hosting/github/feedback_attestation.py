@@ -177,6 +177,7 @@ def _parse_feedback_attestation(
         _integer(mutation[key], 0, 2147483647)
     if mutation["reason"] not in {
         "admission",
+        "admission-dispatch",
         "dispatch",
         "accounting",
         "accepted",
@@ -188,6 +189,8 @@ def _parse_feedback_attestation(
     for key in ("request_digest", "dispatch_digest"):
         if mutation[key] is not None:
             _hash(mutation[key])
+        elif mutation["reason"] == "admission-dispatch":
+            _refuse()
     accounting = _object(
         mutation["read_accounting"], {"schema_version", "calls", "deadline_unix_ms"}
     )
