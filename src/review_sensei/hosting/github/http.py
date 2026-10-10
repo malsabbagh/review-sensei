@@ -379,7 +379,9 @@ class GitHubHttp:
                 raise GitHubHTTPPaginationLimitError(
                     "GitHub evidence acquisition exhausted its time budget"
                 )
-            return value
+            # Float addition/subtraction at high uptime can round above the
+            # original timeout. Bound this one positive sample, not the deadline.
+            return min(value, timeout_seconds)
 
         def charge() -> float:
             nonlocal reads, deadline

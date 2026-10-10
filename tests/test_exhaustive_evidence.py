@@ -9,6 +9,7 @@ from copy import deepcopy
 from dataclasses import replace
 from urllib.parse import parse_qs, urlsplit
 
+from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.budgets import ReviewWorkBudgets
 from review_sensei.errors import ReviewInputError
 from review_sensei.evidence import (
@@ -49,6 +50,48 @@ def file_item(index):
 
 
 class ExhaustiveAcquisitionTests(unittest.TestCase):
+    def test_high_uptime_acquisition_preserves_fresh_and_restored_shared_deadlines(
+        self,
+    ):
+        start = float.fromhex("0x1.ffff100000003p+22")
+        self.assertGreater(start + 60 - start, 60)
+        for shared in ("none", "fresh", "restored"):
+            with self.subTest(shared=shared):
+                clock = [start]
+                snapshot = (
+                    {"schema_version": "1.0", "calls": 7, "deadline_unix_ms": 1060000}
+                    if shared == "restored"
+                    else None
+                )
+                budget = EvidenceReadBudget(
+                    clock=lambda: clock[0], wall_clock=lambda: 1000, snapshot=snapshot
+                )
+                original_deadline = budget.deadline
+                original_snapshot = budget.snapshot()
+                http, _, calls, _ = self.fixture(clock=clock, timeout=60)
+                before_read = None if shared == "none" else budget.consume
+                bundle = self.load(
+                    http, monotonic=lambda: clock[0], before_read=before_read
+                )
+                self.assertTrue(bundle.enumeration_complete)
+                self.assertEqual(len(calls), 3)
+                self.assertEqual(calls[0][2], 60)
+                self.assertTrue(all(0 < timeout <= 60 for _, _, timeout in calls))
+                self.assertLess(calls[-1][2], calls[0][2])
+                self.assertEqual(budget.deadline, original_deadline)
+                self.assertEqual(
+                    budget.wall_deadline_ms, original_snapshot["deadline_unix_ms"]
+                )
+                if shared != "none":
+                    self.assertEqual(budget.calls, original_snapshot["calls"] + 3)
+                    clock[0] = original_deadline
+                    with self.assertRaisesRegex(ReviewInputError, "deadline"):
+                        self.load(
+                            http, monotonic=lambda: clock[0], before_read=budget.consume
+                        )
+                    self.assertEqual(len(calls), 3)
+                    self.assertEqual(budget.calls, original_snapshot["calls"] + 3)
+
     def test_shared_read_guard_charges_each_attempt_and_does_not_reset(self):
         http, _, calls, _ = self.fixture(
             102, oversized=lambda size, offset: offset == 100 and size > 1
@@ -75,7 +118,7 @@ class ExhaustiveAcquisitionTests(unittest.TestCase):
             self.load(http, monotonic=lambda: clock[0], before_read=lambda: 1.0)
         self.assertEqual(len(calls), 2)
 
-    def fixture(self, count=1, *, oversized=None, mutate=None, clock=None):
+    def fixture(self, count=1, *, oversized=None, mutate=None, clock=None, timeout=30):
         files = [file_item(index) for index in range(count)]
         calls = []
         fences = []
@@ -103,7 +146,7 @@ class ExhaustiveAcquisitionTests(unittest.TestCase):
                     mutate(body, len(fences))
             return Response(json.dumps(body, ensure_ascii=False).encode())
 
-        return GitHubHttp(opener=opener), files, calls, fences
+        return GitHubHttp(opener=opener, timeout=timeout), files, calls, fences
 
     def load(self, http, **kwargs):
         return http.load_review_evidence(
