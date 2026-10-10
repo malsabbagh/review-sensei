@@ -178,7 +178,8 @@ def check_outcome_for_result(
             detail += " Human assessment obligations remain open independently."
         return CheckOutcome(
             conclusion=outcome.conclusion,
-            title="Analysis complete — baseline capacity exceeded",
+            title="Analysis complete — baseline capacity exceeded"
+            + (" (approval withheld)" if policy != "advisory" else ""),
             summary=detail,
         )
     return outcome

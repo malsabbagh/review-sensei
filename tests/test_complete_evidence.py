@@ -429,6 +429,15 @@ class CompleteEvidenceTests(unittest.TestCase):
             "Analysis complete",
             check_outcome_for_result(result, policy="auto-approve").title,
         )
+        for policy in ("auto-approve", "blocking"):
+            self.assertIn(
+                "approval withheld",
+                check_outcome_for_result(result, policy=policy).title,
+            )
+        self.assertNotIn(
+            "approval withheld",
+            check_outcome_for_result(result, policy="advisory").title,
+        )
         self.assertIn("analysis: complete", render_review_text(result))
         state, reason = _review_summary_state(
             result, policy=fixture.POLICY, auto_approve=True
