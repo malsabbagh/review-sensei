@@ -39,6 +39,12 @@ Not done:
 | `verify` is still a no-op command. | The four-trigger entry has no live verify. |
 | The journal and authorizer TypeScript modules and tests remain. | Dead SQLite code contradicts the decision. |
 | ADR 0076 still describes the "SQL prepays" order and G0 in terms of an "authoritative SQL transaction". | The ADR contradicts itself. |
+| The `github.operation_entry` switch is named here but does not exist in `configuration.py` or any schema. | There is no rollback lever. |
+| Dispositions are honored only when a review is published (`convergence.py`, `disposition_honors_fingerprint` with `head_sha`). Verify does not load them, and the response instructions do not say to comment verify after an override. | An override is stored but changes nothing until some later review. |
+| Result-part comments (D-A) have no author fence, size bound or readback rule. | A forged result part could be published as the accepted review. |
+| The command job will read the review result and finding ids from GitHub. `setup.py`, `setup-content.ts` and the example workflow do not grant or pass that. | Installed repositories cannot run verify, media approval or `RS-` overrides. |
+| No step removes the legacy paths. | With the route on by default, two paths stay indefinitely. |
+| `DeliveryLedger` stores the repository name in clear in `setup_outcomes.repository`, and repository slugs plus the permission map in `setup_continuations.cursor`. | Repository names are stored outside GitHub. |
 
 ## Decisions
 
@@ -108,8 +114,24 @@ trigger name and `AcceptedPacket` fields. Under D-A, result bytes live in
 separate result-part comments, never in the operation record. Add a test that
 a prompt or provider body never appears in any operation comment.
 
+0.6 **Result-part comments (D-A).** Use their own marker,
+`<!-- review-sensei-result -->`, with the same rules as the operation record:
+
+- Load only comments written by the App (`user.id` and `user.type` `Bot`).
+  Ignore any other author.
+- Each part carries the operation event key, its index, the part count and
+  the sha256 of the whole result. Refuse a missing, duplicate or extra part.
+- Each part stays under 60,000 bytes. Refuse before the provider call when the
+  bounded result would need more parts than the policy cap.
+- Create, then GET by id and compare byte for byte.
+- On restore, join the parts and require that the sha256 equals the accepted
+  packet's `payload_digest` before anything is published.
+- The allow-list test from 0.5 also runs on result parts. They hold the
+  validated result only, never prompts or provider bodies.
+
 Exit: authorship, duplicate, oversize, lost-response and readback-mismatch
-tests pass. The per-trigger request count is recorded.
+tests pass for operation and result-part comments. The per-trigger request
+count is recorded.
 
 ## Phase 1: admission proof from GitHub-hosted auth
 
@@ -140,6 +162,15 @@ comment write.
 
 Routing is in `GitHubApplication`. CLI changes only pass inputs.
 
+2.0 **Policy switch.** Add `github.operation_entry: enabled|disabled` to
+`configuration.py`. Accept it in the `github` root field, and add it to the
+policy schema and the generated `.reviewsensei.yml` defaults in `setup.py` and
+`setup-content.ts`. The default is `enabled`. An unknown value refuses at load.
+It is read from the trusted base-branch policy, never from the pull request
+head. `disabled` routes all four triggers to the legacy paths. Document it in
+`docs/public-contracts.md` with the sentence "The 64/60 budget for this route
+is not yet measured (#267)." Remove that sentence when Phase 6 passes.
+
 2.1 **Full review.** In `review-sensei review --transaction --github-session-ledger`:
 
 1. begin, then consume, then `execute_and_accept`. The provider call happens
@@ -161,6 +192,18 @@ validation run in `execute_and_accept`. Reply publication is the remote.
 `run_review_trigger(trigger="verify")`. It replaces the current
 "requires an evidence-backed review result" no-op.
 
+Verify loads `session_dispositions` from the session ledger and passes them as
+`authorized_dispositions` to the reassessment and the finalizer. This is the
+same input `application.py` already gives to publication. An override applies
+only to the head it was recorded on. After a new push, verify reports the
+override as stale and the finding blocks again. Tests:
+
+- Override then verify: the overridden finding no longer blocks, the AI
+  result stays partial, and no extra provider call is made when nothing else
+  is pending.
+- Override, then push, then verify: the finding blocks again and the reply
+  names the stale override.
+
 2.5 **Media sentence.** `approve-media` goes through verify. Those are two
 invocations of the same source comment, as measured: confirm, then finalize
 with `publish_mixed_approval`. The AI result stays partial. Requires
@@ -172,6 +215,17 @@ with `publish_mixed_approval`. The AI result stays partial. Requires
   and pass `finding_fingerprints`.
 - Read `/collaborators/{actor}/permission` and pass `actor_permission`.
 - Keep the hosted path's broker-attested actor.
+
+2.7 **Response instructions.** Update `MAINTAINER_RESPONSE_INSTRUCTIONS` in
+`presentation.py` so every review and reply also says:
+
+- After an override, comment `@reviewsensei verify` to apply it.
+- An override applies to the current commit only. A new push needs a new
+  override.
+
+`append_response_instructions` must still skip the block when it is already
+present. Update the publication and conversation tests, plus
+`docs/public-contracts.md`, `docs/human-assessment.md` and `README.md`.
 
 Exit: an end-to-end synthetic GitHub test for each trigger. A kill after
 acceptance makes provider calls 1 then 1 on rerun. The live `RS-` override and
@@ -189,6 +243,22 @@ media sentence pass through the CLI.
   file.
 - Do not change the frozen caller fixtures. The grammar change on PR 271
   already covers the live templates.
+- Update all four live copies of the caller workflow:
+  `.github/workflows/review-sensei-review.yml`,
+  `examples/github-actions/review-sensei-review.yml`, the live template in
+  `setup.py` and the live template in `setup-content.ts`. The workflow
+  `GITHUB_TOKEN` stays read-only (`contents`, `pull-requests` and `issues`
+  read). Operation and result-part comments are written with the broker's
+  existing `review_session` capability (`pull_requests: write`), so the broker
+  gains no new permission. The command job requests that capability and
+  `review_status`, and passes no caller-supplied result file. The collaborator
+  permission read uses the App's existing metadata access.
+  `tests/test_entry_point_parity.py` and
+  `deploy/cloudflare/test/setup-content.test.ts` must pass for both setup
+  copies.
+- Raise `SETUP_VERSION` from 5 to 6 in both `setup.py` and `setup-content.ts`
+  so installed repositories get an update pull request. The frozen version 4
+  and version 5 fixtures stay unchanged.
 
 ## Phase 4: remove the journal
 
@@ -206,6 +276,30 @@ media sentence pass through the CLI.
   Add a test that lists their `CREATE TABLE` columns and fails if a review,
   prompt, finding or result column appears.
 - Retitle #268 to the GitHub record, or close it as superseded.
+
+## Phase 4b: worker stores no repository names
+
+- `setup_outcomes.repository` stores the sha256 of the repository id instead
+  of the name. Use the same `digest` helper as the broker's `scope_hash`. A
+  numeric id does not reveal the name, and a guessed name cannot be confirmed
+  against a hash of the full name. Today the continuation carries only slugs
+  (`failedRepository`). The id comes from the `/installation/repositories`
+  listing in the next bullet, so do both changes in one commit. Diagnostics
+  show the hash. An operator matches it against the installation's
+  repositories on GitHub.
+- `setup_continuations.cursor` stops storing repository slugs and the
+  permission map. It stores only the installation id, a page number and an
+  offset. Each step re-reads `/installation/repositories` and the permissions
+  from GitHub with the installation token. If the listing changed under the
+  cursor, setup restarts from the first page. Setup is idempotent, so this is
+  safe.
+- Add a migration in `DeliveryLedger` that rewrites or drops existing rows.
+  Rows expire within the retention window anyway, so dropping in-flight
+  continuations and recording `setup_continuation_invalid` is acceptable.
+- Extend the column test: no column may hold a repository name, slug,
+  permission map, comment body or file path in clear.
+- Update the `DeliveryLedger` header comment and `deploy/cloudflare/README.md`
+  to say the worker stores only hashes, ids, counters and timestamps.
 
 ## Phase 5: ADR 0076 corrections
 
@@ -227,17 +321,35 @@ media sentence pass through the CLI.
 - Then run one trace on a sandbox repository.
 - If it does not fit 60/64 and 60 seconds, change the default to `disabled`
   and reopen #267 with the trace. Do not raise the caps.
+- If it fits, close #267 and remove the "not yet measured" sentence from 2.0.
+
+## Phase 7: remove the legacy paths (after Phase 6 passes)
+
+- Delete the old separate review, reply, reassessment and verify routes in
+  `GitHubApplication` and the CLI that bypass `run_review_trigger`.
+- Remove `github.operation_entry` from `configuration.py`, the schema and the
+  setup defaults. An existing `disabled` value refuses at load with "the
+  operation entry is the only route; remove github.operation_entry".
+- Delete the tests that only cover the legacy routes. Keep every behavior test
+  by moving it onto the single entry.
+- Exit: a search for the old route functions finds no callers, and the full
+  pytest suite passes.
+
+Phase 7 runs only if Phase 6 passes. Otherwise the switch stays and #267
+stays open.
 
 ## Order and parallel work
 
-1. Phase 0 runs first.
-2. After Phase 0, three streams can run in parallel:
-   - Phases 1 and 2.1
-   - Phase 2.6, which is independent
+1. Phase 0, including 0.6, runs first.
+2. After Phase 0, four streams can run in parallel:
+   - Phases 2.0, 1 and 2.1
+   - Phases 2.6 and 2.7, which are independent
    - Phases 4 and 5, which are docs and deletion
+   - Phase 4b, which is worker-only
 3. Phases 2.2 to 2.5 follow Phase 1.
 4. Phase 3 follows Phase 2.
-5. Phase 6 runs last.
+5. Phase 6 follows Phase 3.
+6. Phase 7 runs last, and only if Phase 6 passes.
 
 Each phase is its own commit on `feat/pr253-gap-closure`.
 
@@ -247,15 +359,28 @@ Each phase is its own commit on `feat/pr253-gap-closure`.
 - `PYTHONPATH=src python3 -m pytest` on the touched tests, plus
   `tests/test_github_trigger.py`, `tests/test_pr253_context_policy.py` and the
   publication and conversation suites.
-- `cd deploy/cloudflare && ./node_modules/.bin/vitest run` after Phase 4.
+- `cd deploy/cloudflare && ./node_modules/.bin/vitest run` after Phases 3, 4
+  and 4b.
+- `npx tsc --noEmit` in `deploy/cloudflare` after Phases 4 and 4b.
 
 ## Out of scope
 
-Publishing packages, deploying the Worker, canary activation, live provider
-calls outside the Phase 6 sandbox trace, and raising any limit.
+- Publishing packages, deploying the Worker, canary activation, live provider
+  calls outside the Phase 6 sandbox trace, and raising any limit.
+- [#269](https://github.com/malsabbagh/review-sensei/issues/269), qualifying
+  joint history capacity and deployed readers. It is separate from this route
+  and stays open.
+- [#270](https://github.com/malsabbagh/review-sensei/issues/270), re-auditing
+  the mandatory architecture rules for the 49,152-byte frame. Phase 5 only
+  reruns the existing parity test when `docs/architecture.md` changes. It does
+  not do the re-audit.
 
 ## Rollback
 
-Set `github.operation_entry: disabled` in the repository policy. The legacy
-paths still exist until Phase 6 passes, so the switch restores them. Operation comments stay on the pull request for audit and are
+Before Phase 7, set `github.operation_entry: disabled` in the repository
+policy. The legacy paths still exist, so the switch restores them. After
+Phase 7, rollback is reverting the Phase 7 commit.
+
+Phase 4b's migration drops in-flight setup continuations. Rollback does not
+restore them. Setup for an affected installation is rerun from the start. Operation comments stay on the pull request for audit and are
 never deleted. A disabled route does not reset a recorded charge.
