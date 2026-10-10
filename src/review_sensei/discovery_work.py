@@ -7,8 +7,18 @@ from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING
 
 from .budgets import provider_output_tokens
-from .context import IncrementalReviewPlan, ReviewContextCacheKey
+from .context import (
+    PROMPT_CONTEXT_POLICY,
+    IncrementalReviewPlan,
+    PromptContextAdmission,
+    PromptContextDeadline,
+    PromptContextDiagnosticOverflow,
+    PromptContextOutputOverflow,
+    ReviewContextCacheKey,
+    admit_prompt_context,
+)
 from .diff import analyze_diff
+from .document_context import DocumentSelectionReport
 from .errors import ReviewFormatError, ReviewInputError
 from .evidence import EvidenceBundle, EvidenceRecord, EvidenceSnapshot, evidence_digest
 from .execution import CompletedBatch, execute_plan
@@ -42,6 +52,47 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class DiscoveryBatchOutput(_ValidatedStageOutput):
     context_requests: tuple[ContextRequest, ...] = ()
+
+
+CONTEXT_APPENDIX_RESERVE = 8192
+PENDING_APPENDIX_RESERVE = 2048
+
+
+def _context_appendix(entries: list[dict[str, object]]) -> str:
+    if not entries:
+        return ""
+    originals: dict[str, object] = {}
+    batches = []
+    for entry in entries:
+        inventories = entry["original_inventories"]
+        assert isinstance(inventories, list)
+        for inventory in inventories:
+            originals[evidence_digest(inventory)] = inventory
+        batches.append(
+            {
+                key: value
+                for key, value in entry.items()
+                if key not in {"original_inventories", "selected_inventories"}
+            }
+            | {
+                "executed_selection_sha256": evidence_digest(
+                    entry["selected_inventories"]
+                )
+            }
+        )
+    return (
+        "\n\nHost document context admission (executed batches only):\n"
+        + json.dumps(
+            {
+                "policy": PROMPT_CONTEXT_POLICY,
+                "original_inventories": list(originals.values()),
+                "batches": batches,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
 
 
 def discover(
@@ -114,6 +165,25 @@ def discover(
     failed = False
     comment_stage = False
     scope_wave_used = not allow_expansion
+    context_diagnostics: list[dict[str, object]] = []
+    refusal_reasons: dict[str, int] = {}
+    mandatory_refused_documents: dict[str, int] = {}
+    context_incomplete = False
+    context_enabled = any(
+        context.documents or context.document_selection
+        for context in request.lens_contexts
+    )
+    # Document-bearing unified runs use full current diff authority. A later
+    # optional omission cannot inherit an earlier incremental closure/cache.
+    if context_enabled and incremental is not None:
+        coverage_decision = replace(
+            coverage_decision,
+            mode="fallback-full",
+            skip_provider=False,
+            reviewed_paths=analysis.changed_paths,
+            reviewed_paths_bound=None,
+            evidence_confirmed=(),
+        )
 
     for stage in service.stages:
         categories = tuple(
@@ -144,6 +214,31 @@ def discover(
             capabilities=service.capabilities,
             output_tokens=provider_output_tokens(stage_provider),
         )
+        reserve = CONTEXT_APPENDIX_RESERVE if context_enabled else 0
+        if reserve:
+            budgets = replace(
+                budgets,
+                batch_output_bytes=max(0, budgets.batch_output_bytes - reserve),
+                max_total_output_bytes=max(0, budgets.max_total_output_bytes - reserve),
+            )
+        suffix = "\n" + CONTEXT_REQUEST_INSTRUCTION
+        if reserve:
+            suffix += f"\nHost reserves {reserve} UTF-8 summary bytes for admission diagnostics. Provider summary must fit {request.limits.max_summary_bytes - reserve} UTF-8 bytes."
+        correction_bytes = len(("\n\n" + _PROVIDER_OUTPUT_CORRECTION).encode("utf-8"))
+        frame_bytes = len(suffix.encode("utf-8")) + correction_bytes
+        admissions: dict[str, PromptContextAdmission] = {}
+
+        def check_deadline() -> None:
+            if tracker.remaining_seconds() <= 0:
+                raise PromptContextDeadline(
+                    "original review planning deadline exhausted"
+                )
+
+        def context_diagnostic(
+            batch: WorkBatch, admission: PromptContextAdmission
+        ) -> dict[str, object]:
+            value = admission.diagnostic_document()
+            return {"stage": stage.name, "batch_id": batch.batch_id, **value}
 
         def render(batch: WorkBatch) -> ProviderRequest:
             # All metadata/documents and JSON escaping are included before
@@ -152,18 +247,55 @@ def discover(
                 request, diff=batch.diff_context, orchestrate_large_changes=False
             )
             batch_analysis = analyze_diff(batch.diff_context, limits=request.limits)
-            prompt = service._format_prompt(
-                stage,
+            if reserve and (
+                request.limits.max_summary_bytes <= reserve
+                or budgets.batch_output_bytes <= 0
+                or budgets.max_total_output_bytes <= 0
+            ):
+                raise PromptContextOutputOverflow(
+                    "host context diagnostics exceed the output budget"
+                )
+            admission = admit_prompt_context(
                 batch_request,
-                active_categories=categories,
-                coverage_mode=coverage_decision.mode,
-                reviewed_paths=batch.paths,
-                related_paths=coverage_decision.related_paths,
-                max_prompt_bytes=budgets.batch_prompt_bytes,
-                analysis=batch_analysis,
+                active_category_ids=tuple(category.id for category in categories),
+                changed_paths=batch.paths,
+                render=lambda selected: (
+                    service._format_prompt(
+                        stage,
+                        selected,
+                        active_categories=categories,
+                        coverage_mode=coverage_decision.mode,
+                        reviewed_paths=batch.paths,
+                        related_paths=coverage_decision.related_paths,
+                        max_prompt_bytes=max(
+                            0, budgets.batch_prompt_bytes - frame_bytes
+                        ),
+                        analysis=batch_analysis,
+                    )
+                    + suffix
+                ),
+                fits=lambda prompt: budgets.fits_prompt(
+                    prompt + "\n\n" + _PROVIDER_OUTPUT_CORRECTION,
+                    output_tokens=budgets.max_output_tokens,
+                ),
+                before_probe=check_deadline,
             )
+            if reserve:
+                # Conservative per-run bound, checked before any dispatch.
+                # Planner probes never enter the durable summary.
+                ceiling = _context_appendix(
+                    [context_diagnostic(batch, admission)]
+                    * tracker.budget.max_provider_calls
+                )
+                if len(ceiling.encode("utf-8")) > reserve - PENDING_APPENDIX_RESERVE:
+                    raise PromptContextDiagnosticOverflow(
+                        "host context diagnostic inventory exceeds its reserved bound"
+                    )
+            if len(admissions) >= 8:
+                admissions.pop(next(iter(admissions)))
+            admissions[batch.batch_id] = admission
             return ProviderRequest(
-                prompt=prompt + "\n" + CONTEXT_REQUEST_INSTRUCTION,
+                prompt=admission.prompt,
                 model=request.model,
                 limits=request.limits,
                 max_prompt_bytes=budgets.batch_prompt_bytes,
@@ -234,6 +366,10 @@ def discover(
                     "stage_outputs": stage.outputs,
                     "categories": tuple(category.id for category in categories),
                     "cache": asdict(current_key) if current_key is not None else None,
+                    "context_policy": PROMPT_CONTEXT_POLICY,
+                    "context_inventories": [
+                        context.to_prompt_dict() for context in request.lens_contexts
+                    ],
                 }
             ),
         )
@@ -278,11 +414,31 @@ def discover(
             return fields
 
         def accept(item: CompletedBatch[DiscoveryBatchOutput]) -> bool:
+            nonlocal context_incomplete
             output = item.value
             try:
+                admission = admissions.get(item.batch.batch_id)
+                if admission is None:
+                    render(item.batch)
+                    admission = admissions[item.batch.batch_id]
+                entries = (
+                    [*context_diagnostics, context_diagnostic(item.batch, admission)]
+                    if reserve
+                    else []
+                )
+                appendix = _context_appendix(entries)
+                if len(appendix.encode("utf-8")) > reserve:
+                    return False
+                prospective_summary = (
+                    "\n\n".join([*summaries, output.summary or ""]) + appendix
+                )
+                if (
+                    len(prospective_summary.encode("utf-8")) + PENDING_APPENDIX_RESERVE
+                    > request.limits.max_summary_bytes
+                ):
+                    return False
                 ReviewResult(
-                    summary="\n\n".join([*summaries, output.summary or ""])
-                    or "Review complete.",
+                    summary=prospective_summary or "Review complete.",
                     comments=tuple([*comments, *output.comments]),
                     provider=stage_provider.name,
                     model=request.model,
@@ -296,6 +452,9 @@ def discover(
                 summaries.append(output.summary)
             comments.extend(output.comments)
             proposals.extend(output.proposals)
+            if reserve:
+                context_diagnostics.append(context_diagnostic(item.batch, admission))
+                context_incomplete = context_incomplete or not admission.complete
             return True
 
         if coverage_decision.skip_provider:
@@ -439,6 +598,27 @@ def discover(
         if bridge_pending:
             stage_summary[stage.name] = "partial"
         failed = failed or bool(execution.pending)
+        for _, reason in execution.pending:
+            refusal_reasons[reason] = refusal_reasons.get(reason, 0) + 1
+        if any(
+            reason == "mandatory-context-and-evidence-oversized"
+            for _, reason in execution.pending
+        ):
+            category_ids = {category.id for category in categories}
+            for context in request.lens_contexts:
+                if context.category_id not in category_ids:
+                    continue
+                report = context.document_selection
+                pinned = (
+                    {item.path for item in report.decisions if item.reason == "pinned"}
+                    if isinstance(report, DocumentSelectionReport)
+                    else {doc.path for doc in context.documents}
+                )
+                for doc in context.documents:
+                    if doc.path in pinned:
+                        mandatory_refused_documents[doc.path] = len(
+                            doc.content.encode("utf-8")
+                        )
         by_id = {item.identity: item for item in plan.requirements}
         evidence_by_id = bundle.by_id()
         for identity, reason in execution.pending:
@@ -472,14 +652,33 @@ def discover(
         hunk_outcomes=hunk_outcomes,
         limits=request.limits,
     )
-    status = "partial" if failed or not coverage.fully_reviewed else "complete"
+    status = (
+        "partial"
+        if failed or context_incomplete or not coverage.fully_reviewed
+        else "complete"
+    )
     if not comment_stage:
         status = "summary-only"
+    refusal_summary = (
+        "\n\nRequired work pending: "
+        + "; ".join(
+            f"{reason} ({count})" for reason, count in sorted(refusal_reasons.items())
+        )
+        + "."
+        if refusal_reasons
+        else ""
+    )
+    if mandatory_refused_documents:
+        refusal_summary += f"\nMandatory document overflow: {len(mandatory_refused_documents)} unique document(s), {sum(mandatory_refused_documents.values())} UTF-8 payload bytes."
     try:
         result = service._finalize_result(
             request,
-            summary="\n\n".join(summaries)
-            or "Review work could not be completed within the configured bounds.",
+            summary=(
+                "\n\n".join(summaries)
+                or "Review work could not be completed within the configured bounds."
+            )
+            + _context_appendix(context_diagnostics)
+            + refusal_summary,
             comments=tuple(comments),
             proposals=tuple(proposals),
             provider=provider.name,

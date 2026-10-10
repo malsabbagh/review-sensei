@@ -8,10 +8,10 @@ import re
 import stat
 import threading
 from collections import OrderedDict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
-from typing import Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
 from .errors import ContextLoadError, ReviewInputError
 from .learnings import LearningStore
@@ -547,6 +547,230 @@ class ReviewContextSelection:
     active_category_ids: tuple[str, ...]
     lens_contexts: tuple[ReviewLensContext, ...]
     source_context: SourceContextSelection | None = None
+
+
+PROMPT_CONTEXT_POLICY = "whole-supplemental-rendered-v1"
+
+
+class PromptContextOverflow(ReviewInputError):
+    error_category = "mandatory_context_oversized"
+
+
+class PromptContextDeadline(ReviewInputError):
+    error_category = "planning_deadline_exhausted"
+
+
+class PromptContextOutputOverflow(ReviewInputError):
+    error_category = "host_context_output_oversized"
+
+
+class PromptContextDiagnosticOverflow(ReviewInputError):
+    error_category = "host_context_diagnostics_oversized"
+
+
+@dataclass(frozen=True)
+class PromptContextAdmission:
+    """One rendered batch's immutable selection proof; no approval authority."""
+
+    request: ReviewRequest
+    prompt: str
+    original_reports: tuple[tuple[str, str, int, int, int, int], ...]
+    selected_reports: tuple[tuple[str, str], ...]
+    complete: bool
+    prompt_omitted: int
+    original_omission_reasons: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] = ()
+    selected_count: int = 0
+    mandatory_count: int = 0
+
+    def diagnostic_document(self) -> dict[str, object]:
+        return {
+            "policy": PROMPT_CONTEXT_POLICY,
+            "complete": self.complete,
+            "prompt_bytes": len(self.prompt.encode("utf-8")),
+            "prompt_omitted": self.prompt_omitted,
+            "selected": self.selected_count,
+            "mandatory": self.mandatory_count,
+            "mandatory_overflow": 0,
+            "omission_reason": "prompt-budget"
+            if self.prompt_omitted
+            else "original-selection",
+            "original_inventories": [
+                {
+                    "category": category,
+                    "inventory_sha256": digest,
+                    "discovered": discovered,
+                    "selected": selected,
+                    "summarized": summarized,
+                    "omitted": omitted,
+                    "omission_reasons": dict(
+                        dict(self.original_omission_reasons).get(category, ())
+                    ),
+                }
+                for category, digest, discovered, selected, summarized, omitted in self.original_reports
+            ],
+            "selected_inventories": [
+                {
+                    "category": category,
+                    "inventory_sha256": digest,
+                    "selected": len(
+                        next(
+                            context
+                            for context in self.request.lens_contexts
+                            if context.category_id == category
+                        ).documents
+                    ),
+                }
+                for category, digest in self.selected_reports
+            ],
+        }
+
+
+def admit_prompt_context(
+    request: ReviewRequest,
+    *,
+    active_category_ids: tuple[str, ...],
+    changed_paths: tuple[str, ...],
+    render: Callable[[ReviewRequest], str],
+    fits: Callable[[str], bool],
+    before_probe: Callable[[], None] | None = None,
+) -> PromptContextAdmission:
+    """Remove whole supplemental documents until the actual rendered frame fits.
+
+    Required/pinned documents and contexts lacking a selection report remain
+    mandatory. Instructions, learnings, categories, source context and diff are
+    untouched. Only previously admitted declared payloads participate: no new
+    reads, extraction, clipping, inference or PR-supplied path expansion.
+    """
+    from .document_context import DocumentSelectionReport, _score
+
+    if before_probe is not None:
+        before_probe()
+    active = set(active_category_ids)
+    original_reports = []
+    original_omission_reasons = []
+    optional: dict[str, tuple[int, int, int, int]] = {}
+    mandatory: set[str] = set()
+    payloads: dict[str, str] = {}
+    for context in request.lens_contexts:
+        if context.category_id not in active:
+            continue
+        report = context.document_selection
+        by_path = {}
+        if isinstance(report, DocumentSelectionReport):
+            summary = report.to_prompt_dict()
+            reasons: dict[str, int] = {}
+            for item in report.decisions:
+                if item.status == "omitted":
+                    reasons[item.reason] = reasons.get(item.reason, 0) + 1
+            original_omission_reasons.append(
+                (context.category_id, tuple(sorted(reasons.items())))
+            )
+            original_reports.append(
+                (
+                    context.category_id,
+                    str(summary["inventory_sha256"]),
+                    len(report.decisions),
+                    sum(item.status != "omitted" for item in report.decisions),
+                    sum(item.status == "summarized" for item in report.decisions),
+                    sum(item.status == "omitted" for item in report.decisions),
+                )
+            )
+            by_path = {item.path: item for item in report.decisions}
+        for document in context.documents:
+            if before_probe is not None:
+                before_probe()
+            prior = payloads.setdefault(document.path, document.sha256)
+            if prior != document.sha256:
+                raise ReviewInputError(
+                    "prompt context contains conflicting document payloads"
+                )
+            decision = by_path.get(document.path)
+            if decision is None or decision.reason == "pinned":
+                mandatory.add(document.path)
+            else:
+                score = _score(document.path, document.content, changed_paths)
+                optional[document.path] = max(optional.get(document.path, score), score)
+    # Shared documents are mandatory in every lens if any active lens pins them.
+    candidates = sorted(
+        set(optional) - mandatory, key=lambda path: (optional[path], path)
+    )
+    omitted: set[str] = set()
+
+    def selected_request() -> ReviewRequest:
+        contexts = []
+        for context in request.lens_contexts:
+            if context.category_id not in active or not omitted:
+                contexts.append(context)
+                continue
+            report = context.document_selection
+            if not isinstance(report, DocumentSelectionReport):
+                contexts.append(context)
+                continue
+            decisions = tuple(
+                replace(
+                    item,
+                    status="omitted",
+                    reason="prompt-budget",
+                    payload_sha256="",
+                    line_ranges=(),
+                )
+                if item.path in omitted and item.status != "omitted"
+                else item
+                for item in report.decisions
+            )
+            contexts.append(
+                replace(
+                    context,
+                    documents=tuple(
+                        doc for doc in context.documents if doc.path not in omitted
+                    ),
+                    document_selection=DocumentSelectionReport(decisions),
+                )
+            )
+        return replace(request, lens_contexts=tuple(contexts))
+
+    # At most 65 exact formatter probes for the existing <=64-document envelope.
+    # The enclosing original run deadline also bounds planning CPU work.
+    for index in range(len(candidates) + 1):
+        if before_probe is not None:
+            before_probe()
+        selected = selected_request()
+        prompt = render(selected)
+        if fits(prompt):
+            reports = tuple(
+                (context.category_id, context.document_selection)
+                for context in selected.lens_contexts
+                if context.category_id in active
+                and isinstance(context.document_selection, DocumentSelectionReport)
+            )
+            return PromptContextAdmission(
+                selected,
+                prompt,
+                tuple(original_reports),
+                tuple(
+                    (category, str(report.to_prompt_dict()["inventory_sha256"]))
+                    for category, report in reports
+                ),
+                not any(
+                    bool(report.to_prompt_dict()["lossy"]) for _, report in reports
+                ),
+                len(omitted),
+                tuple(original_omission_reasons),
+                len(
+                    {
+                        doc.path
+                        for context in selected.lens_contexts
+                        if context.category_id in active
+                        for doc in context.documents
+                    }
+                ),
+                len(mandatory),
+            )
+        if index < len(candidates):
+            omitted.add(candidates[index])
+    raise PromptContextOverflow(
+        "mandatory context and complete evidence exceed the rendered prompt budget"
+    )
 
 
 @dataclass(frozen=True)
