@@ -97,7 +97,7 @@ Neither prototype is merged by this review.
 | GitHub generation checks are atomic CAS / workflow concurrency is FIFO | [ledger race boundary][ledger], [workflow groups][workflow], historical guide | Contradicted. GitHub PATCH remains non-atomic; local independent processes require serialization; a queued GitHub job can be replaced. |
 | Retry/cancel/restart grants fresh resources automatically | [executor][execution], [tracker][outcomes], `test_work_recovery`, `test_review_transaction` | Contradicted. Dispatches/retries are charged and recovery retains expiry. Proposed default receipts must preserve this across process boundaries. |
 | Remaining human concern, required fix, incomplete coverage or stale latest authority can approve | [facts][approval-facts], [finalizer][finalizer], `test_human_assessment`, `test_github_approval` | Withheld by current tested gates. New parts/receipts must retain the same negatives. |
-| Missing published check always prevents APPROVE | [facts contract][approval-facts], [approval evaluator][approval-evaluator], [positive contrary test][missing-check-test], [ADR 0057](adr/0057-one-check-run-as-the-single-merge-authority.md) | **Contradicted by deliberate existing policy.** Epic238's negative matrix requires disposition before qualification; do not change policy incidentally. |
+| Missing published check always prevents APPROVE | [facts contract][approval-facts], [approval evaluator][approval-evaluator], [positive contrary test][missing-check-test], [installation guidance][check-installation], [App permissions][check-registration], [ADR 0057](adr/0057-one-check-run-as-the-single-merge-authority.md) | **Contradicted by deliberate documented existing policy.** Otherwise-eligible approval may proceed without Checks write; branch-protection satisfaction is separate. Epic238's unconditional negative needs explicit product-policy disposition; preserve current behavior pending that decision. |
 | Successful reply, check, CI or manual thread resolution proves assessment/approval | [separate outcomes][application], [finalizer][finalizer], `test_gate_and_default_approval` | Unsupported. Source delivery, decision receipts, pending inventory, enforcement availability and final review state are separate observations. |
 | Current source parity proves wheel/npm/action v5/old-reader deployment parity | [distribution contract][distribution], [reader harness][readers], [workflow][workflow], #246 | Unverified. Each actual artifact and each active/delayed reader requires its own exact-byte evidence. |
 | PR231's verified draft establishes complete-evidence runtime qualification | [release workflow][release-workflow], [draft helper][release-helper], `test_github_release`; ADR 0069 | Contradicted if asserted. Latest main binds four GitHub assets/notes to source/run/tag/checksums/attestations and checks registry-job success before draft publication. First authorized live observation and registry-installed/runtime/v5 qualification remain separate. |
@@ -151,7 +151,7 @@ sequenceDiagram
 | I3 Activation | Parts and original publication inputs are staged and fully read back before their root becomes complete authority. | Kill after every write/readback/root boundary: old valid root or complete new root, never partial authority. |
 | I4 Authentication | Root and each part/source require observed owner and association; self-asserted hashes grant no authority. | Foreign numeric author, wrong PR/producer/purpose/schema and tampered parts refuse. |
 | I5 Obligation identity | Targeting limits dispatch, not inventory; resolution applies only to exact instance; broader discovery unions obligations. | Similar findings with one old display/lifecycle ID remain individually addressable; metadata/evidence changes do not misapply a receipt. |
-| I6 Original operation | Immutable operation identity is separate from mutable cursor/root/receipt revision. Resume retains calls/bytes/retries/deadline/expiry. | Own checkpoint/root changes cannot mint another allowance; kill after charged dispatch cannot erase charge. |
+| I6 Original operation | Immutable operation identity is separate from mutable cursor/root/receipt revision. Resume retains calls/bytes/retries/deadline/expiry and conservative liabilities for unfinished activation. | Own checkpoint/root changes cannot mint another allowance; kill after charged dispatch or a callback-time accounting snapshot cannot erase charge or subsequent activation calls. |
 | I7 Fair bounded visits | Every admitted pending item is visited under continued authorized runs; semantic rejection rotates without false resolution. | Late target reaches provider; repeated early rejection does not starve later IDs; no promise of successful semantic resolution. |
 | I8 Feedback completeness | Explicit ordered authenticated sources remain verbatim, edit/delete/role change invalidates reuse; context clipping cannot certify resolution. | Exact source body/digest/author/time before reply and activation; required selected feedback and provenance fit real rendered prompts. |
 | I9 Publication recovery | Source acknowledgment, decision activation, COMMENT readback and APPROVE are ordered and replayable; lost response reconciles exact mutation. | New process with artifacts none preserves accepted receipts and original publication input; no extra inference/round charge or duplicate sequential mutation. |
@@ -175,7 +175,7 @@ sequenceDiagram
 | P1 R8 | Confirmed unchanged-path limitation and route context differences. | E/#244 and coordinator. Decide trusted exact-source materialization/citations and normal-vs-broader lens contract; omission, historical hunks or chat excerpts cannot substitute. |
 | P1 R9 | Confirmed main replay gap corroborated by independent injected source-ack failure before COMMENT; F separately reports an OS-kill reproduction. Lost response-arrival accounting is another proposed recovery risk. | F/C + coordinator #245. Real kill/restart and barriers; source ack cannot prevent activating/replaying accepted authority. Reserve the trusted maximum response budget before dispatch, retain unknown reservation after loss, convert only on durable capture; do not claim uncaptured bytes restored. Preserve race limitations rather than promise exactly-once universally. |
 | P0 qualification R10 | Unverified exact combined artifact and reader-first rollout. | Coordinator #246. Final combined source and installed candidate bytes, then separately authorized published registry/action/deployed observations. Source-only closure is prohibited. |
-| P1 R11 | Proposed grant/root-generation composition risk: [A's hosted replace][a-ledger] verifies a one-attempt broker grant on every replace; stage/readback is enclosed within one mutation callback. C requires multiple durable charge/acceptance writes. Codec success does not establish authorization for the entire journal. | Coordinator A/C/#240/#242/#245. Specify grant issuance per allowed mutation, exact expected root digest/generation, and latest immutable inventory authority. Run with a real consuming fake broker and full hosted root writes; never reuse the old grant or change original operation identity after its own root mutation. |
+| P1 R11 | Proposed grant/root-generation composition risk: [A's hosted replace][a-ledger] verifies a one-attempt broker grant on every replace; stage/readback is enclosed within one mutation callback. C requires multiple durable charge/acceptance writes. A later immutable prototype also reproduces callback-time persisted accounting below actual completed activation cost (supplement below). | Coordinator A/C/#240/#242/#245. Specify grant issuance per allowed mutation, exact expected root digest/generation, immutable inventory authority and bounded nonrefundable activation-tail liability. Run with a consuming fake broker and full hosted root writes; never replay a grant, reset original operation identity after its own root mutation or restore a counter omitting tail/bootstrap calls. |
 | P1 R12 | Proposed bounded-history/retention risk: C's 32-operation journal plus cumulative accepted receipts, live queue, baseline, feedback/evidence parts, disposition/grant and tombstone retention can hit root/aggregate/scan ceilings before all 250 concerns complete. | A/B/C + coordinator #240/#241/#242. Qualify 250 varied concerns over at least eight runs, repeated rejected visits and same-source restart. Preflight whole root lifecycle and retained objects; retain no-reset tombstones through expiry and refuse capacity before inference. A documented maintainer recovery path must preserve obligations, not silently drop old receipts or start clean. |
 
 R1 has an independent synthetic reproduction. Separately, the PR231 owner retained
@@ -199,6 +199,58 @@ serialization in [formatter][formatter]. It also reports one provider call and
 durable source reply before injected source-ack failure, followed by a new call
 on fresh-process retry before COMMENT/APPROVE. These are separately retained
 synthetic observations, not live-provider or OS-kill observations by this review.
+
+### Supplemental prototype activation accounting
+
+This extends R11/R12 without changing the release authority or the shipped-main
+verdict. The independently isolated **unmerged** A prototype
+`0ca0f8e82e6f94e026cfcb027b43ff684ef00a54` was exercised with synthetic HTTP,
+genuinely consuming distinct mutation grants, one shared original 64-dispatch
+budget and changing tiny one-part queue payloads. Provider, source-acknowledgment,
+finalizer and complete product integration were not exercised. The probe follows
+the proposed caller pattern of storing `active_operation.read_accounting` inside
+the replace callback. [The adapter][a-activation-tail] then validates manifests,
+reloads latest authority, checks live head, PATCHes and reads the root/parts back.
+
+| Tiny checkpoint | Calls persisted inside callback | Actual after activation | Tail omitted on restore |
+| --- | --- | --- | --- |
+| 1 | 10 | 16 | 6 |
+| 2 | 24 | 31 | 7 |
+| 3 | 39 | 46 | 7 |
+
+Initialization used four dispatches. A fresh budget restored the first root's
+**10**, not the observed **16** calls. A requested five-checkpoint run refused
+before checkpoint four at 51 calls: [the staging preflight][a-staging-budget]
+requires `4 * parts + 16` ordinary calls. Three checkpoints leave only 14 ordinary
+calls under the 60-call limit (four are reserved), before omitted product work.
+These are measured lower-bound costs, not a qualified three-checkpoint workflow.
+History pages, baseline parts, queue rereads, retries and retained orphans can
+increase them. Coalescing C's successful checkpoints may reduce cost but does not
+establish final/source-ack feasibility.
+
+Required disposition: reserve a bounded, nonrefundable activation-tail liability
+**before** the authoritative write; derive it from all admitted pages/parts and
+fences, and refuse before inference if the complete operation cannot fit. A
+reservation is conservative charged allowance, not a claim that reserved calls
+ran. Never refund an ambiguous or uncaptured tail, extend the original deadline,
+reset a resumed allowance, or recursively write another root per request merely
+to record the last root's readback. Bootstrap reads needed to load a resumed
+receipt must also be charged or conservatively covered, not overwritten when
+the old snapshot is restored. Failed activation and pre-root crashes need an
+explicit no-refill/recovery contract preserving old authority and obligations.
+The measured six/seven-call tail already exceeds four; a fixed reserve cannot be
+justified without a whole-profile upper bound.
+
+Acceptance extends the existing A/C/F seams: kill/fail after callback snapshot,
+each manifest read, preactivation scan, head check, PATCH response and root/part
+readback; compare observed dispatches with restored measured-plus-reserved
+liability. Test history/part pressure and three/five checkpoints including actual
+source acknowledgment and finalization, immutable operation/grant identity and
+unchanged expiry. No new infrastructure or interface is selected by this review.
+Evidence: workspace `activation_tail_probe.py` SHA256
+`8c8f8d1969af579b67a52eb34921c8f204c2490547dea58767646d49896a61e7`,
+`activation-tail-results.json` SHA256
+`2c41bbdb504a521c049ddc5b2f7efd1c8c07df5df618463acad622468197b074`.
 
 ## Executable journey and failure coverage
 
@@ -294,8 +346,9 @@ both clean full suites passed **2,714 tests** (coverage: 94.365 s; ordinary:
 88.392 s), with **83.02%** branch coverage above the unchanged 80% floor.
 Action pins, JSON contracts, Ruff formatting/lint, mypy, compileall, build, sdist
 contract and diff checks passed. All five sequence diagrams parsed with
-Mermaid 11.12.0; 95 immutable source links/line anchors and local references
-resolved. Immutable v0.6.16/current reader checks
+Mermaid 11.12.0; 95 original immutable source links/line anchors and local
+references resolved, increasing to 99 with the supplemental prototype and policy
+citations. Immutable v0.6.16/current reader checks
 passed for legacy and encoded inputs, while explicitly reporting the historical
 oversized-comment-as-missing limitation; this does not qualify proposed manifests
 or permit rolling back required readers. Full source/doc validation is recorded
@@ -380,3 +433,7 @@ actions, never infinite capacity or a zero-regression promise.
 [a-ledger]: https://github.com/malsabbagh/review-sensei/blob/ba89418d21898d14e6d1e535a5409c47c7cff3b2/src/review_sensei/hosting/github/session_ledger.py#L813
 [release-workflow]: https://github.com/malsabbagh/review-sensei/blob/e8fdcd18f8256b1ceaab323701a2570b208d4e75/.github/workflows/release.yml
 [release-helper]: https://github.com/malsabbagh/review-sensei/blob/e8fdcd18f8256b1ceaab323701a2570b208d4e75/scripts/github_release.py
+[a-activation-tail]: https://github.com/malsabbagh/review-sensei/blob/0ca0f8e82e6f94e026cfcb027b43ff684ef00a54/src/review_sensei/hosting/github/session_ledger.py#L841
+[a-staging-budget]: https://github.com/malsabbagh/review-sensei/blob/0ca0f8e82e6f94e026cfcb027b43ff684ef00a54/src/review_sensei/bounded_evidence.py#L332
+[check-installation]: https://github.com/malsabbagh/review-sensei/blob/70305207647c22595660e5ebb9e4a33991489ffe/docs/installation.md#L70
+[check-registration]: https://github.com/malsabbagh/review-sensei/blob/70305207647c22595660e5ebb9e4a33991489ffe/docs/github-app-registration.md#L60
