@@ -116,6 +116,36 @@ maintainer operations documented in the release runbook.
 
 ## Follow-up work
 
+### Proposed JSON-syntax recovery amendment (2026-10-10)
+
+The legacy `HumanAssessmentService.reply` permits exactly one fresh strict-JSON
+correction after `json.loads` syntax rejection. The original application resource
+tracker is required through preparation and both attempts; direct callers may
+supply the same tracker. Calls, aggregate input/output bytes, configured output
+tokens and remaining absolute timeout bound both attempts. The service retains
+the existing 48 KiB request and 16 KiB response ceilings. The correction contains
+only a fixed instruction after the unchanged original prompt, never malformed
+provider output. Schema or citation failures do not qualify for correction.
+Transport and explicit incomplete completion failures remain provider failures.
+
+Diagnostics retain numeric parser geometry, response bytes and closed
+correction/budget status only. They do not retain JSON parser documents or
+messages, response excerpts, source text or exception chains. All decisions
+continue through the original evidence and publication fences. The existing
+batched executor's broader structural correction and transport retry policy is
+unchanged; this narrower legacy bug fix reuses its resource tracker contract
+without adopting that retry policy. No broker, persistence or approval authority
+changes are introduced.
+
+Validation uses synthetic public service/application and real adapter fake-HTTP
+tests for one-call valid output, malformed then valid, repeated malformed,
+lower/exhausted budgets, schema/citation rejection, incomplete envelopes and
+length termination, safe CLI errors and zero writes on failure. Local source and
+package qualification precede any separately authorized publication. Rollback
+reverts the syntax loop and tracker call-site plumbing; there is no wire-state
+migration. ADR status remains Proposed, and installed/deployed qualification is
+follow-up work.
+
 After separately approved publication, verify a fresh real needs_human review,
 a supported explanation and a partial/unrelated reply against the released
 workflow and package. Keep ADR status Proposed until maintainer review.

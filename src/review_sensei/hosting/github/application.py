@@ -1506,6 +1506,7 @@ class GitHubApplication:
                             pending=inventory,
                             source_body=human.source_body,
                             model=model,
+                            tracker=work_tracker,
                         )
                     else:
                         assessment = HumanAssessmentReply(
