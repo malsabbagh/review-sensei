@@ -79,6 +79,11 @@ class BaselineRecoveryTests(unittest.TestCase):
         self.identity = SessionIdentity(repository="example/repo", pull_request=7)
         self.provider = Provider()
         self.ledger = LocalSessionLedger(self.root / "ledger")
+        # This suite qualifies legacy fallback, independently of operator policy.
+        config = self.root / "review-config.yml"
+        config.write_text(
+            "schema: 1\nadvanced:\n  review_work:\n    mode: legacy\n", encoding="utf-8"
+        )
         (self.root / "fixture.json").write_text(
             '{"summary":"ok","comments":[]}', encoding="utf-8"
         )
@@ -93,6 +98,8 @@ class BaselineRecoveryTests(unittest.TestCase):
                 "@@ -1 +1,2 @@\n keep\n+related\n"
             )
         self.argv = [
+            "--config",
+            str(config),
             "--diff",
             str(self.root / "diff.patch"),
             "--provider",
