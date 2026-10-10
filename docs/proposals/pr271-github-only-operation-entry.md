@@ -1,6 +1,6 @@
 # Plan: GitHub-only operation entry for PR 271
 
-Status: Proposed
+Status: Accepted (decisions D-A, D-B, D-C recorded)
 Date: 2026-10-10
 Branch: `feat/pr253-gap-closure` ([PR 271](https://github.com/malsabbagh/review-sensei/pull/271))
 Related: [#267](https://github.com/malsabbagh/review-sensei/issues/267), [#268](https://github.com/malsabbagh/review-sensei/issues/268), ADR 0074, ADR 0076, ADR 0077
@@ -40,30 +40,26 @@ Not done:
 | The journal and authorizer TypeScript modules and tests remain. | Dead SQLite code contradicts the decision. |
 | ADR 0076 still describes the "SQL prepays" order and G0 in terms of an "authoritative SQL transaction". | The ADR contradicts itself. |
 
-## Decisions needed before Phase 2
+## Decisions
 
-**D-A. Where the accepted full-review result lives across a crash.** The
-provider step and the publish step are separate workflow steps. `review.json`
-is runner-local. The operation record holds only its digest. A rerun after a
-crash restores the accepted packet, but it has no bytes to publish.
+**D-A. Where the accepted full-review result lives across a crash.** Decided:
+App-authored part comments. The provider step and the publish step are
+separate workflow steps, and `review.json` is runner-local. So the validated
+review result, not prompts or model transcripts, is stored as App-authored
+part comments on the same pull request. These reuse the session ledger's
+bounded part pattern. The result is published on that pull request anyway, so
+nothing leaves the repository. A rerun after a crash publishes from those
+parts and makes no second provider call.
 
-- Recommended: store the validated review result, not prompts or model
-  transcripts, as App-authored part comments on the same pull request. Reuse
-  the session ledger's bounded part pattern. The result is published on that
-  pull request anyway, so nothing leaves the repository.
-- Alternative: keep only the digest. A crash after acceptance stays pending
-  and needs a fresh maintainer-requested review, which makes another provider
-  call.
+**D-B. Default for the new route.** Decided: enabled by default. All four
+triggers go through `run_review_trigger` without waiting for the #267
+measurement. The trusted policy switch `github.operation_entry:
+enabled|disabled` stays, default `enabled`, as the rollback lever. Until Phase
+6 passes, docs and the PR say the 64/60 claim is unmeasured. The caps are
+still never raised. A trigger that would exceed the budget fails closed as
+`unavailable`.
 
-**D-B. Default for the new route before the #267 measurement.**
-
-- Recommended: wire all four triggers behind the trusted policy switch
-  `github.operation_entry: enabled|disabled`, default `disabled`. Enable it
-  after the Phase 6 trace fits 60/64.
-- Alternative: default enabled now and accept that the 64/60 claim is
-  unmeasured.
-
-**D-C. What verify does.** Recommended: verify is the existing-inventory
+**D-C. What verify does.** Decided: verify is the existing-inventory
 reassessment contract on the current head. It makes at most one provider
 request, then runs the approval finalizer. When mixed media coverage is the
 only blocker, it posts the explicit mixed APPROVE. A verify with no pending
@@ -228,9 +224,9 @@ media sentence pass through the CLI.
 - Run the P1 profile with synthetic HTTP that counts every physical request:
   one pull request, four pending instances, one provider request, two
   checkpoints.
-- Then run one trace on a sandbox repository with the policy switch on.
-- If it does not fit 60/64 and 60 seconds, the switch stays `disabled`. Do not
-  raise the caps.
+- Then run one trace on a sandbox repository.
+- If it does not fit 60/64 and 60 seconds, change the default to `disabled`
+  and reopen #267 with the trace. Do not raise the caps.
 
 ## Order and parallel work
 
@@ -260,6 +256,6 @@ calls outside the Phase 6 sandbox trace, and raising any limit.
 
 ## Rollback
 
-Set `github.operation_entry: disabled`. The legacy paths still exist until
-Phase 6 passes. Operation comments stay on the pull request for audit and are
+Set `github.operation_entry: disabled` in the repository policy. The legacy
+paths still exist until Phase 6 passes, so the switch restores them. Operation comments stay on the pull request for audit and are
 never deleted. A disabled route does not reset a recorded charge.
