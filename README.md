@@ -111,8 +111,8 @@ provider-neutral `@reviewsensei/cli` launcher:
 
 <!-- release-installation:package-npm-1:start -->
 ```bash
-npx --yes @reviewsensei/cli@0.6.18 --version
-npx --yes @reviewsensei/cli@0.6.18 --help
+npx --yes @reviewsensei/cli@0.6.19 --version
+npx --yes @reviewsensei/cli@0.6.19 --help
 ```
 <!-- release-installation:package-npm-1:end -->
 
@@ -748,6 +748,9 @@ an explicitly named `--api-key-env` remains an operator opt-in.
 The canonical handle is `@reviewsensei`; `@ReviewSensei` and other ASCII case
 variants work too. `@sensei` remains supported, with its existing case behavior.
 Both handles use the same authorization, publication policy, and bounded context.
+For concrete factual replies, verified operator commands, human-inventory
+boundaries and the complete-feedback API's current integration status, see
+[human assessment workflows](docs/human-assessment.md).
 Existing installations need a caller update as well as the matching runtime and
 broker update; see [the caller rollout guide](docs/mention-handle-rollout.md).
 

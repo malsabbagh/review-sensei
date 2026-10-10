@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/assessment-queue-root.schema.json",
+  "title": "ReviewSensei provisional durable assessment queue root v1",
+  "description": "Prototype queue-slot amendment; writers disabled by default. Runtime additionally enforces root/summary/session allocation, matching immutable generation, ordered UTC instants and actual plus reserved response bytes <= 1048576. C validates complete journal, receipts and original accounting.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "inventory_digest",
+    "inventory_generation",
+    "state_manifest",
+    "active_operation"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "inventory_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "inventory_generation": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    },
+    "state_manifest": {
+      "allOf": [
+        {
+          "$ref": "https://reviewsensei.dev/schemas/v1/evidence-manifest.schema.json"
+        },
+        {
+          "properties": {
+            "binding": {
+              "properties": {
+                "purpose": {
+                  "const": "queue"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "active_operation": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation_id",
+            "source_digest",
+            "authority_digest",
+            "execution_identity",
+            "deadline_at",
+            "expires_at",
+            "provider_calls",
+            "transport_retries",
+            "structural_retries",
+            "prompt_bytes",
+            "response_bytes",
+            "response_bytes_reserved",
+            "read_accounting"
+          ],
+          "properties": {
+            "operation_id": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "source_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "authority_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "execution_identity": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{32}$"
+            },
+            "deadline_at": {
+              "type": "string",
+              "format": "date-time",
+              "maxLength": 32,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?(?:Z|\\+00:00)$"
+            },
+            "expires_at": {
+              "type": "string",
+              "format": "date-time",
+              "maxLength": 32,
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?(?:Z|\\+00:00)$"
+            },
+            "provider_calls": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 8
+            },
+            "transport_retries": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2
+            },
+            "structural_retries": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2
+            },
+            "prompt_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2097152
+            },
+            "response_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1048576
+            },
+            "response_bytes_reserved": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1048576
+            },
+            "read_accounting": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "calls",
+                "deadline_at_ms"
+              ],
+              "properties": {
+                "calls": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 64
+                },
+                "deadline_at_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 253402300799999
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -31,6 +31,7 @@ from review_sensei.hosting.github.publication import (
     finding_blocks_approval,
     finding_declares_blocking,
     finding_fingerprint_from_body,
+    finding_instance_marker,
     finding_marker,
     review_marker,
 )
@@ -913,6 +914,7 @@ class ReviewPublisherTests(unittest.TestCase):
             fingerprint=fingerprint,
             state="still-present",
         )
+        existing += "\n\n" + finding_instance_marker(current.comments[0])
         outcome, calls = self.publish(
             [
                 json_response(pr_payload(head_sha=head)),
@@ -979,6 +981,7 @@ class ReviewPublisherTests(unittest.TestCase):
             fingerprint=fingerprint,
             state="still-present",
         )
+        existing += "\n\n" + finding_instance_marker(current.comments[0])
         outcome, calls = self.publish(
             [
                 json_response(pr_payload(head_sha=head)),
@@ -1018,8 +1021,8 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(posted_events(calls), ["REQUEST_CHANGES"])
         self.assertEqual(outcome.diagnostic, "required_fixes_open")
 
-    def test_legacy_v1_marker_suppresses_by_inline_location(self):
-        """Legacy v1 roots without fingerprints still participate in dedupe."""
+    def test_legacy_location_cannot_prove_exact_instance_duplicate(self):
+        """Legacy locations do not prove equality of the full explanation."""
 
         head = "b" * 40
         current = result()
@@ -1062,7 +1065,7 @@ class ReviewPublisherTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "published")
         body = __import__("json").loads(calls[4][2].decode("utf-8"))
-        self.assertEqual(body["comments"], [])
+        self.assertEqual(len(body["comments"]), 1)
         self.assertEqual(body["event"], "REQUEST_CHANGES")
 
     def test_changed_blocking_classification_is_not_suppressed(self):
@@ -1135,6 +1138,7 @@ class ReviewPublisherTests(unittest.TestCase):
             fingerprint=fingerprint,
             state="still-present",
         )
+        existing += "\n\n" + finding_instance_marker(current.comments[0])
         outcome, calls = self.publish(
             [
                 json_response(pr_payload(head_sha=head)),

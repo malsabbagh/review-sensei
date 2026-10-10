@@ -16,6 +16,9 @@ describe("worker bundle", () => {
       {
         cwd: fileURLToPath(new URL("..", import.meta.url)),
         stdio: "pipe",
+        // A Wrangler build is a subprocess, not a five-second unit test.
+        // Bound the process itself so a stalled dry-run is still a failure.
+        timeout: 30_000,
       },
     );
     const bundle = readFileSync(join(outdir, "worker.js"), "utf8");
@@ -37,5 +40,5 @@ describe("worker bundle", () => {
     expect(createHash("sha256").update(bundledFixture).digest("hex")).toBe(
       RELEASED_RUNNER_SWITCH_V4_SHA256,
     );
-  });
+  }, 35_000);
 });

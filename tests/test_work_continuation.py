@@ -597,6 +597,23 @@ class WorkContinuationTests(unittest.TestCase):
             self.assertEqual(first.reply, resumed.reply)
             self.assertEqual(first.inventory, resumed.inventory)
 
+    def test_high_uptime_hosted_scope_retains_pending_authority_and_never_approves(
+        self,
+    ):
+        from unittest.mock import patch
+
+        from review_sensei.hosting.github.http import GitHubHttp
+
+        start = float.fromhex("0x1.ffff100000003p+22")
+        self.assertGreater(start + 60 - start, 60)
+        original = GitHubHttp.load_review_evidence
+
+        def high_uptime_load(http, **kwargs):
+            return original(http, **kwargs, monotonic=lambda: start)
+
+        with patch.object(GitHubHttp, "load_review_evidence", high_uptime_load):
+            self.test_hosted_scope_writes_richer_pending_authority_and_never_approves()
+
     def test_hosted_scope_writes_richer_pending_authority_and_never_approves(self):
         from review_sensei.hosting.github.publication import (
             approval_eligibility_from_body,

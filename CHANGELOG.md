@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.19 - 2026-10-10
+
 - Cache immutable human-inventory encodings without exposing mutable authority,
   and accept closed historical checkpoint-diagnostic profiles in current readers.
 
@@ -20,6 +22,11 @@
 - Report complete analysis whose baseline cannot fit as a persistence capacity
   failure, with approval withheld independently of human adjudication. No
   inventory truncation, release, runtime promotion or deployment is included.
+
+- Prepare a GitHub Release draft from verified signed-tag builds, reviewed
+  changelog notes and attested wheel, source archive and SBOM assets. Publish
+  it only after both approved npm/PyPI jobs succeed. Reconcile retries against
+  exact notes, source and asset digests without replacing existing content.
 
 ## 0.6.18 - 2026-10-09
 

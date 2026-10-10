@@ -676,7 +676,7 @@ class SigningWorkflowTests(unittest.TestCase):
         text = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertIn("sign_release.py --check-publication-gates", text)
         self.assertIn(
-            "needs: [build, publish, publish-npm]",
+            "needs: [build, draft-release, publish, publish-npm]",
             text.split("  github-release:\n", 1)[1],
         )
         self.assertIn("name: npm", text)

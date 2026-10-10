@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
 
 from ...coverage import coverage_approval_state
 from ...errors import ReviewInputError
 from ...human_assessment import PendingHumanReview
 from ...models import ReviewResult
+
+if TYPE_CHECKING:
+    from .eligibility_parts import (
+        PartitionedEligibilityContext,
+        PartitionedEligibilityRoot,
+        PartitionReader,
+        VisibleReader,
+    )
 
 APPROVAL_ELIGIBILITY_SCHEMA_VERSION = "1"
 APPROVAL_ELIGIBILITY_CROSS_FILE_VERSION = "2.0"
@@ -161,8 +169,11 @@ class ReviewApprovalEligibility:
     result_digest: str
     facts: ApprovalFacts
     human_review: PendingHumanReview | None = None
+    partitioned_root: PartitionedEligibilityRoot | None = None
 
     def to_dict(self) -> dict[str, object]:
+        if self.partitioned_root is not None:
+            return self.partitioned_root.to_document(self)
         value: dict[str, object] = {
             "schema_version": APPROVAL_ELIGIBILITY_SCHEMA_VERSION,
             "head_sha": self.head_sha,
@@ -179,7 +190,23 @@ class ReviewApprovalEligibility:
         return value
 
     @classmethod
-    def from_dict(cls, value: object) -> "ReviewApprovalEligibility":
+    def from_dict(
+        cls,
+        value: object,
+        *,
+        partition_reader: PartitionReader | None = None,
+        expected_context: PartitionedEligibilityContext | None = None,
+        visible_reader: VisibleReader | None = None,
+    ) -> "ReviewApprovalEligibility":
+        if isinstance(value, Mapping) and value.get("schema_version") == "4":
+            from .eligibility_parts import parse_partitioned_eligibility
+
+            return parse_partitioned_eligibility(
+                value,
+                partition_reader=partition_reader,
+                expected_context=expected_context,
+                visible_reader=visible_reader,
+            )
         if not isinstance(value, Mapping):
             raise ReviewInputError("approval eligibility must be an object")
         if set(value) not in (
@@ -329,9 +356,11 @@ def approval_eligibility_from_result(
             previous = findings[item.fingerprint]
             if previous.path != item.path or previous.body != item.body:
                 raise ReviewInputError("broader review finding authority conflicts")
-            # The ordinary discovery result has a v1 inventory; rediscovering
-            # the same finding must not discard its stricter v2 requirement.
-            item = replace(item, required_paths=previous.required_paths)
+            # Stable display identity alone cannot transfer a resolution into
+            # different metadata/requirements. Retain the original immutable
+            # obligation, including unknown legacy metadata. New result facts
+            # still contribute their independently stricter approval blockers.
+            item = previous
         findings[item.fingerprint] = item
     inventory = PendingHumanReview(
         retained.human_review.base_sha,

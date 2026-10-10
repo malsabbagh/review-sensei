@@ -608,8 +608,6 @@ def render_review_summary(view: ReviewSummaryView) -> str:
         lines.append(view.coverage_line)
     if view.placement_note:
         lines.extend(["", view.placement_note])
-    if view.overview:
-        lines.extend(["", view.overview])
     optional_total = len(view.optional) + view.optional_grouped
     advisory = view.state == ADVISORY_STATE
     count_line = _count_line(view.required, optional_total, advisory=advisory)
@@ -643,6 +641,15 @@ def render_review_summary(view: ReviewSummaryView) -> str:
             ),
         ]
     )
+    if view.overview:
+        lines.extend(
+            [
+                "",
+                "### Provider narrative (not review instructions)",
+                "",
+                view.overview,
+            ]
+        )
     return "\n".join(lines)
 
 

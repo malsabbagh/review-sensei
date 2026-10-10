@@ -14,6 +14,7 @@ Process: `docs/process/adr-process.md`
 | [0072](0072-lossless-inline-review-evidence.md) | Proposed | Lossless inline review evidence with lifecycle capacity | User-authorized PR #231 recovery | Complete bounded inventories, reader-first rollout and distinct capacity status |
 | [0071](0071-generated-release-notes.md) | Proposed | Generate missing release notes from exact first-parent merged-source history | Maintainer-requested Release Marshal correction | Existing direct App commit, exact tag/source provenance and unchanged publication gates |
 | [0070](0070-bounded-checkpoint-overflow.md) | Proposed | Preserve full finding publication as partial when durable baseline metadata cannot fit | User-authorized PR #231 recovery | Exact sanitized limits, unchanged bounded history, withheld approval and opt-in failure evidence |
+| [0069](0069-verified-draft-github-release.md) | Proposed | Prepare exact verified GitHub Release drafts before package approval | User-requested release process | Reviewed notes, attested assets, retry reconciliation and preserved publication gates |
 | [0068](0068-dedicated-release-key-and-publication-approval.md) | Proposed | Sign prepared release tags with a dedicated GPG key and retain Mo's publication approvals | User-requested automation | User-run setup; no personal key, new App permission or tag bypass |
 | [0067](0067-shared-review-work-mechanics.md) | Proposed | Share discovery and human reassessment planning, evidence and execution | User-authorized implementation | Opt-in routing, complete evidence groups, bounded continuation and reader-first rollout |
 | [0065](0065-complete-human-inventory-and-approval-retry.md) | Proposed | Persist complete human inventories and retry exact-head approval | PR #216; [PR #222](https://github.com/malsabbagh/review-sensei/pull/222) | Distinct collision identities, bounded pending-patch priority, safe diagnostics and preserved approval gates |
@@ -79,6 +80,10 @@ Process: `docs/process/adr-process.md`
 | [0056](0056-remove-pr-wide-review-count-caps.md) | Proposed | Remove the PR-wide review count cap | #181 C | Rounds are uncapped; only live causes refuse; counters are diagnostic history |
 | [0056](0056-host-fact-placement-and-honest-approval-presentation.md) | Proposed | Host-fact placement and honest approval presentation | #181 D | Conversation resolution is host authority; approval only from an eligible admitted artifact |
 | [0057](0057-one-check-run-as-the-single-merge-authority.md) | Proposed | One head-bound `ReviewSensei` check run as the only merge authority, with evidence-bound default approval | #181 F | Review events stay `COMMENT`; required-check setup and stale change-request reconciliation remain administrator/transition work |
+
+| [0073](0073-authenticated-feedback-mutation-grants.md) | Proposed | Authenticate complete human feedback as a distinct session mutation source | #238, #242, #243, #245 | Live numeric actor/source authorization; version-1 compatibility; original-attempt and whole-budget composition remain activation gates |
+| [0074](0074-durable-original-attempt-accounting.md) | Proposed | Retain original accounting and unknown transitions without renewing an allowance | #238, #240, #242, #245 | Dormant SQLite storage primitive; independent authorizer, bootstrap, restore and whole-budget qualification required |
+| [0075](0075-complete-provider-response-contract.md) | Proposed | Refuse unsafe completion metadata and bind exact qualified adapter endpoints | #238, #244, #245 | Strict library contract remains opt-in; no model qualification, producer adoption or writer activation |
 
 ## Policy
 

@@ -5,6 +5,19 @@ approval bounds, see [Review pipelines and customization](review-pipelines.md).
 That guide is a fixed snapshot of `a598d4a` (0.6.18), not a live mirror of this
 architecture page. Refresh ownership and validation steps live in the guide itself.
 
+## Provider response completeness and capability identity
+
+Qualified library capabilities bind the exact credential-free endpoint, model,
+provider and `bounded-complete-text-v1` adapter contract. Shared discovery and
+reassessment check that identity before planning and dispatch. Ollama advertises
+the contract only with explicit fixed-model `require_completion_metadata=True`:
+it requires normal completion, exact model and bounded integer token usage before
+returning text. Present incomplete, length-terminated or over-cap metadata also
+refuses in legacy mode; absent legacy metadata retains its prior disposition.
+This change activates no qualified profile or workflow. Remote tokenizer mapping,
+producer authority and full lifecycle qualification remain separate gates. See
+[ADR 0075](adr/0075-complete-provider-response-contract.md).
+
 ## npm launcher and standalone boundary (issue #103)
 
 The npm surface is an adapter around the existing Python engine, not a second
@@ -675,7 +688,7 @@ compute. A hosted review service would require a new ADR and a fresh issue set.
 The optional OIDC installation-token broker is a narrow boundary outside the
 provider-neutral review core: `oidc.py` verifies GitHub Actions identity and
 `broker.py` applies workflow policy before reusing `GitHubAppAuth`. The App
-private key remains in managed storage, the broker handles no review content,
+private key remains in managed storage, the broker receives no diff or provider response,
 and forks, missing or suspended installations, rate limits, and verification
 or GitHub failures are rejected fail-closed.
 
@@ -692,6 +705,13 @@ GitHub Actions OIDC id_token (audience=sts.reviewsensei.dev, id-token: write)
 ```
 
 ## Issue-64 setup-v4 tagged publication architecture
+
+The proposed [feedback mutation protocol](adr/0073-authenticated-feedback-mutation-grants.md)
+adds a distinct version-2 session grant. The Worker transiently reloads complete
+human sources to verify numeric actors, exact snapshot and selection digests;
+credentials and ledger records retain metadata and hashes. It does not receive
+review diffs or provider responses. This grant alone cannot authenticate original
+attempt accounting or authorize the disabled richer hosted queue route.
 
 Setup-v4 separates the customer caller, public execution workflow, and
 issuance-only Worker:

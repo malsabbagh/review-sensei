@@ -1,14 +1,21 @@
-# Unmerged persistence proposal: PR #236 snapshot
+# Historical persistence proposal: PR #236 snapshot
 
-This is a separate review snapshot of an **unmerged proposal**, not the current
-runtime reference. For shipped behavior at the inspected main revision, use
-[review pipelines](review-pipelines.md). No ADR 0072 file is added to this tree
-by the documentation PR; the ADR link below targets the proposal commit.
+**Historical proposal status:** PR236 was unmerged at the inspected `9fb5ad6`
+snapshot below and subsequently merged into main. This page preserves that
+proposal's claims and measurements. See the
+[independent architecture review](epic238-architecture-review.md) for current
+`7030520` source behavior, remaining gaps and separate qualification status.
+
+This is a separate review snapshot of a **then-unmerged proposal**, not the current
+runtime reference. For source behavior at the historical inspected main revision,
+use [review pipelines](review-pipelines.md). PR235 added no ADR 0072 file at that
+inspection; the ADR link below targets the proposal commit.
 This section is separately reconciled against draft
 [PR #236](https://github.com/malsabbagh/review-sensei/pull/236), inspected at
 [`9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d`](https://github.com/malsabbagh/review-sensei/tree/9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d).
-It describes that implementation proposal, **not a merged, released or deployed
-feature**. Its [decision record][proposed-adr] remains Proposed.
+It describes the implementation proposal **as reviewed before merge**, without
+establishing released or deployed behavior. Its [decision record][proposed-adr]
+remains Proposed.
 
 The inspected PR #236 head was `9fb5ad6bf74c8cd169b730df4bd5232f59ef2d7d`; all
 14 source paths were verified at that commit. These are immutable commit URLs,
