@@ -9,8 +9,9 @@ from dataclasses import dataclass, field, replace
 from typing import Mapping
 
 from .bounded_evidence import canonical_bytes, decode_evidence, encode_evidence
+from .budgets import provider_output_tokens
 from .context import finding_lifecycle_for_comment
-from .errors import ReviewFormatError, ReviewInputError
+from .errors import ProviderError, ReviewFormatError, ReviewInputError
 from .feedback import FeedbackSelection
 from .models import (
     ConversationContext,
@@ -19,10 +20,12 @@ from .models import (
     ReviewComment,
     ReviewResult,
 )
+from .outcomes import ResourceBudget, ResourceBudgetTracker
 from .providers.base import ReviewProvider
 from .scope import CONTEXT_REQUEST_INSTRUCTION, ContextRequest, parse_context_requests
 from .validation import (
     DEFAULT_REVIEW_LIMITS,
+    utf8_size,
     validate_bounded_text,
     validate_repository_path,
 )
@@ -33,6 +36,22 @@ MAX_HUMAN_DECODED_BYTES = DEFAULT_REVIEW_LIMITS.max_result_bytes
 MAX_HUMAN_REVIEW_BYTES = 24 * 1024
 MAX_HUMAN_SOURCE_BYTES = 4096
 MAX_HUMAN_INVENTORY_PATHS = MAX_HUMAN_INVENTORY_FINDINGS * 8
+_JSON_CORRECTION = (
+    "The previous response was not valid JSON. Return a fresh strict JSON object "
+    "with body and assessments, using only the supplied pending fingerprints. "
+    "Use the same reference evidence and all original validation requirements. "
+    "Do not include Markdown fences or text outside the JSON object. "
+    "Unsupported findings must remain unresolved."
+)
+_BUDGET_REASONS = frozenset(
+    {
+        "deadline_exceeded",
+        "provider_call_limit",
+        "prompt_budget",
+        "output_budget",
+        "structural_retry_limit",
+    }
+)
 
 FINDING_INSTANCE_IDENTITY_VERSION = "1"
 
@@ -91,14 +110,41 @@ HUMAN_ASSESSMENT_VALIDATION_REASONS = frozenset(
 class HumanAssessmentValidationError(ReviewFormatError):
     """Expose only a closed reason code, never source or provider payload."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        json_position: tuple[int, int, int] | None = None,
+        response_bytes: int | None = None,
+        correction_attempted: bool = False,
+        budget_diagnostic: str | None = None,
+    ) -> None:
         self.diagnostic = (
             reason
             if reason in HUMAN_ASSESSMENT_VALIDATION_REASONS
             else "human_assessment_invalid_response"
         )
+        # Retain numeric parser geometry only, never JSONDecodeError.doc/msg.
+        self.details: dict[str, int | bool | str] = {}
+        if (
+            json_position is not None
+            and len(json_position) == 3
+            and all(
+                type(value) is int and 0 <= value <= 2**31 - 1
+                for value in json_position
+            )
+        ):
+            self.details.update(
+                zip(("json_line", "json_column", "json_offset"), json_position)
+            )
+        if type(response_bytes) is int and 0 <= response_bytes <= 2**31 - 1:
+            self.details["response_bytes"] = response_bytes
+        self.details["correction_attempted"] = correction_attempted is True
+        if budget_diagnostic in _BUDGET_REASONS:
+            self.details["budget"] = budget_diagnostic
+        fields = ", ".join(f"{key}={value}" for key, value in self.details.items())
         super().__init__(
-            f"human assessment reply failed validation (reason={self.diagnostic})"
+            f"human assessment reply failed validation (reason={self.diagnostic}, {fields})"
         )
 
 
@@ -738,6 +784,7 @@ class HumanAssessmentService:
         source_body: str = "",
         model: str | None = None,
         feedback: FeedbackSelection | None = None,
+        tracker: ResourceBudgetTracker | None = None,
     ) -> HumanAssessmentReply:
         if feedback is None:
             validate_bounded_text(
@@ -780,6 +827,8 @@ class HumanAssessmentService:
                 "human assessment evidence is insufficient (reason=human_assessment_evidence_missing_patch)",
                 diagnostic="human_assessment_evidence_missing_patch",
             )
+        tracker = tracker or ResourceBudgetTracker(ResourceBudget.create())
+        tracker.budget.validate_against_limits()
         request = self._request(
             head_sha=context.head_sha,
             pending=pending,
@@ -787,14 +836,127 @@ class HumanAssessmentService:
             diff_context=context.diff_context,
             model=model,
             feedback=feedback,
+            max_prompt_bytes=min(48 * 1024, tracker.budget.max_prompt_bytes),
+            max_response_bytes=min(16 * 1024, tracker.budget.max_output_bytes),
+            max_output_tokens=provider_output_tokens(self.provider),
         )
-        response = self.provider.complete(request)
-        return self._parse(
-            response,
-            pending=pending,
-            source_body=source_body,
-            diff_context=context.diff_context,
-            feedback=feedback,
+        original = request
+        syntax_error: HumanAssessmentValidationError | None = None
+        corrected_dispatched = False
+        for attempt in range(2):
+            prompt_bytes = utf8_size(request.prompt, label="human assessment prompt")
+            diagnostic = tracker.admit_call(request.prompt)
+            if tracker.prompt_bytes + prompt_bytes > tracker.budget.max_prompt_bytes:
+                diagnostic = diagnostic or "prompt_budget"
+            output_limit = min(
+                request.max_response_bytes,
+                tracker.budget.max_output_bytes - tracker.response_bytes,
+            )
+            if output_limit <= 0:
+                diagnostic = diagnostic or "output_budget"
+            if diagnostic:
+                if syntax_error is not None:
+                    raise self._syntax_failure(
+                        syntax_error, corrected_dispatched, diagnostic
+                    ) from None
+                raise ReviewInputError(
+                    f"human assessment budget exhausted (reason={diagnostic})",
+                    diagnostic=diagnostic,
+                )
+            bounded = replace(
+                request,
+                max_response_bytes=output_limit,
+                timeout_seconds=tracker.remaining_seconds(),
+            )
+            tracker.record_prompt_attempt(request.prompt)
+            tracker.record_provider_call()
+            corrected_dispatched = attempt > 0
+            try:
+                response = self.provider.complete(bounded)
+            except ProviderError as exc:
+                # Incomplete envelopes and transport failures are not JSON syntax.
+                raise ProviderError(
+                    "human assessment provider transport or completion failed",
+                    transient=exc.transient,
+                ) from None
+            except (ReviewFormatError, ReviewInputError):
+                raise HumanAssessmentValidationError(
+                    "human_assessment_invalid_response",
+                    correction_attempted=corrected_dispatched,
+                ) from None
+            except Exception:
+                raise ProviderError(
+                    "human assessment provider transport or completion failed"
+                ) from None
+            if not isinstance(response, ProviderResponse):
+                raise HumanAssessmentValidationError(
+                    "human_assessment_invalid_response"
+                ) from None
+            tracker.record_response(response.text)
+            validate_bounded_text(
+                response.text,
+                output_limit,
+                label="human assessment response",
+                allow_empty=False,
+            )
+            if tracker.elapsed_ms() >= tracker.budget.timeout_ms:
+                raise ReviewInputError(
+                    "human assessment budget exhausted (reason=deadline_exceeded)",
+                    diagnostic="deadline_exceeded",
+                )
+            try:
+                result = self._parse(
+                    response,
+                    pending=pending,
+                    source_body=source_body,
+                    diff_context=context.diff_context,
+                    feedback=feedback,
+                )
+                if tracker.elapsed_ms() >= tracker.budget.timeout_ms:
+                    raise ReviewInputError(
+                        "human assessment budget exhausted (reason=deadline_exceeded)",
+                        diagnostic="deadline_exceeded",
+                    )
+                return result
+            except HumanAssessmentValidationError as exc:
+                if exc.diagnostic != "human_assessment_invalid_json":
+                    raise HumanAssessmentValidationError(
+                        exc.diagnostic, correction_attempted=corrected_dispatched
+                    ) from None
+                syntax_error = exc
+                if (
+                    attempt
+                    or tracker.structural_retries >= tracker.budget.max_retry_attempts
+                ):
+                    raise self._syntax_failure(
+                        exc, attempt > 0, "structural_retry_limit"
+                    ) from None
+                tracker.structural_retries += 1
+                # Regenerate from the exact original reference data. The malformed
+                # response is never echoed to the provider, diagnostics or storage.
+                corrected_prompt = original.prompt + "\n\n" + _JSON_CORRECTION
+                if (
+                    utf8_size(corrected_prompt, label="human assessment correction")
+                    > original.max_prompt_bytes
+                ):
+                    raise self._syntax_failure(exc, False, "prompt_budget") from None
+                request = replace(original, prompt=corrected_prompt)
+        raise AssertionError("bounded correction loop exhausted")  # pragma: no cover
+
+    @staticmethod
+    def _syntax_failure(
+        error: HumanAssessmentValidationError, attempted: bool, budget: str
+    ) -> HumanAssessmentValidationError:
+        return HumanAssessmentValidationError(
+            error.diagnostic,
+            json_position=(
+                int(error.details["json_line"]),
+                int(error.details["json_column"]),
+                int(error.details["json_offset"]),
+            ),
+            response_bytes=int(error.details["response_bytes"]),
+            correction_attempted=attempted,
+            budget_diagnostic=budget,
         )
 
     @staticmethod
@@ -888,7 +1050,16 @@ class HumanAssessmentService:
     ) -> HumanAssessmentReply:
         reason = "human_assessment_invalid_json"
         try:
-            value = json.loads(response.text)
+            try:
+                value = json.loads(response.text)
+            except json.JSONDecodeError as exc:
+                raise HumanAssessmentValidationError(
+                    reason,
+                    json_position=(exc.lineno, exc.colno, exc.pos),
+                    response_bytes=utf8_size(
+                        response.text, label="human assessment response"
+                    ),
+                ) from None
             reason = "human_assessment_reply_fields_invalid"
             if not isinstance(value, dict) or set(value) not in (
                 {"body", "assessments"},
@@ -991,6 +1162,12 @@ class HumanAssessmentService:
             )
             pending.apply(result.decisions)
             return result
+        except HumanAssessmentValidationError:
+            raise
+        except RecursionError:
+            raise HumanAssessmentValidationError(
+                "human_assessment_invalid_response"
+            ) from None
         except (
             ValueError,
             TypeError,

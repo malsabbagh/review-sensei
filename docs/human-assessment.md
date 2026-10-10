@@ -64,6 +64,27 @@ broker/OIDC contract; this example creates no new credential. The additional
 `--enable-broader-review` flag needs trusted unified mode, automatic-review policy
 and writes. It does not clear old findings by omission.
 
+## Malformed provider JSON
+
+The legacy human reassessment service can request one fresh JSON response when
+the first response has invalid JSON syntax. It reuses the complete original
+reference data and never sends the malformed output back as correction context.
+Both calls consume the original call, byte, token and time allowances; a lower
+budget can prevent the correction. Valid JSON uses one call. Invalid schema,
+unsupported citations, oversize output and incomplete provider transport or
+completion are terminal failures, without a syntax correction. Every corrected
+decision still passes the same schema and literal evidence checks before any
+reply or eligibility refresh can be published.
+
+Failure messages report a closed reason code and, for JSON syntax, numeric
+parser line/column/offset and response bytes, with correction/budget status.
+They contain no source text, output excerpts or parser message. A syntax error
+alone cannot prove that output was truncated; explicit incomplete or
+length-terminated completion metadata is rejected by the provider adapter.
+Provider adapters must enforce their transport and token ceilings. This local
+reliability change does not activate a rich feedback route, grant durable
+recovery, or change approval policy.
+
 ## Complete selection API: isolated implementation, integration pending
 
 Epic [#238](https://github.com/malsabbagh/review-sensei/issues/238), lane

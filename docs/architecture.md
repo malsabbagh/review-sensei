@@ -895,7 +895,15 @@ separate insufficient-evidence outcome, with no inference, review capability or
 eligibility/approval mutation. Ordinary conversation selection remains unchanged.
 Provider output rejection exposes a closed reason code without source or model
 payload, and accepted decisions still require verbatim human and relevant current
-diff evidence. That path adds no corrective provider retry.
+diff evidence. The legacy service permits at most one fresh JSON-syntax correction
+within the original resource tracker, provider token limit, 48 KiB per-request
+prompt and 16 KiB per-response bounds. The application passes its existing
+tracker through preparation and both calls; counters and deadlines are never
+reset. Schema/citation rejection and provider transport/completion failures do
+not trigger this syntax correction. Safe parser diagnostics contain only fixed
+reason labels, numeric line/column/offset, response byte count, correction status
+and a closed budget reason. Raw output is neither echoed in the correction nor
+logged. This does not add durable replay authority to the legacy path.
 
 [ADR 0067](adr/0067-shared-review-work-mechanics.md) introduces the opt-in
 `advanced.review_work.mode: unified` mechanism. Both full discovery and human

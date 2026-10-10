@@ -1343,7 +1343,9 @@ class HumanAssessmentTests(unittest.TestCase):
                     )
                 else:
                     self.fail("Invalid provider output was accepted")
-                self.assertEqual(len(provider.calls), 1)
+                self.assertEqual(
+                    len(provider.calls), 2 if reason == "invalid_json" else 1
+                )
         self.assertEqual(
             HumanAssessmentValidationError(secret).diagnostic,
             "human_assessment_invalid_response",
