@@ -210,6 +210,7 @@ def execute_call(
     before_dispatch: Callable[[str], None] | None = None,
     after_accounting: Callable[[], None] | None = None,
     output_accounting: OutputAccounting | None = None,
+    defer_response_accounting: bool = False,
 ) -> CallResult[T]:
     """Count every dispatch, bound correction and transport retries, fail closed."""
     tracker.budget.validate_against_limits(request.limits)
@@ -299,7 +300,7 @@ def execute_call(
             return CallResult(diagnostic="invalid_provider_output")
         tracker.record_response(response.text)
         output_accounting.inflight_response_bytes = 0
-        if after_accounting is not None:
+        if after_accounting is not None and not defer_response_accounting:
             after_accounting()
         if (
             tracker.response_bytes + output_accounting.unknown_response_bytes
@@ -493,6 +494,7 @@ def execute_plan(
         if prior is not None
         else 0,
     )
+    last_saved: tuple[WorkExecution[T], tuple[int, ...]] | None = None
 
     def save_state(
         next_index: int,
@@ -502,6 +504,7 @@ def execute_plan(
         batch: WorkBatch | None = None,
         dispatch_digest: str | None = None,
     ) -> None:
+        nonlocal last_saved
         if encode_recovery is not None and (
             recovery is not None or checkpoint is not None
         ):
@@ -549,6 +552,25 @@ def execute_plan(
                 accounting.unknown_response_bytes,
                 accounting.inflight_response_bytes,
             )
+            counters = tuple(
+                getattr(tracker, name)
+                for name in (
+                    "provider_calls",
+                    "transport_retries",
+                    "structural_retries",
+                    "prompt_bytes",
+                    "response_bytes",
+                )
+            )
+            signature = (execution, counters)
+            # The last per-batch receipt already accounts for all obligations.
+            # Repeating its activation cannot add durability or replenish time.
+            if (
+                checkpoint is not None
+                and reason == "finalize"
+                and last_saved == signature
+            ):
+                return
             if checkpoint is not None:
                 checkpoint.save(
                     execution,
@@ -566,6 +588,7 @@ def execute_plan(
                 )
             else:
                 store.save(execution, tracker, encode_recovery, request_digests)
+            last_saved = signature
 
     # Persist zero-call admission before any remote side effect. A subsequent
     # restart sees the same origin/deadline even if the runner dies immediately.
@@ -653,6 +676,7 @@ def execute_plan(
                 else None
             ),
             output_accounting=accounting,
+            defer_response_accounting=checkpoint is not None,
         )
         if result.value is None or result.diagnostic is not None:
             pending.extend(

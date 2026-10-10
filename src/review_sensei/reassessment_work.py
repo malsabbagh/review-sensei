@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .assessment_queue import AssessmentQueue
 from .budgets import ProviderCapabilities, ReviewWorkBudgets, provider_output_tokens
@@ -50,6 +51,47 @@ _REPAIRABLE_VALIDATION = frozenset(
 )
 
 
+def _feedback_handoff(
+    feedback: object | None,
+    bundle: EvidenceBundle,
+) -> tuple[dict[str, Any], str | None]:
+    """Pass the frozen D value whole to B's reviewed assessment codecs.
+
+    Optional import keeps legacy callers usable before the dependency rollout.
+    Digests are bindings only; the host still authenticates every source.
+    """
+    if feedback is None:
+        return {}, None
+    try:
+        model = importlib.import_module(".feedback", __package__).FeedbackSelection
+    except ImportError:
+        raise ReviewInputError("complete feedback assessment is unavailable") from None
+    if not isinstance(feedback, model):
+        raise ReviewInputError("complete feedback selection is invalid")
+    selected: Any = feedback
+    snapshot = bundle.snapshot
+    if (
+        selected.repository != snapshot.repository
+        or selected.pull_request != snapshot.pull_request
+        or selected.base_sha != snapshot.base_sha
+        or selected.head_sha != snapshot.head_sha
+    ):
+        raise ReviewInputError("complete feedback snapshot authority changed")
+    return {"feedback": selected}, selected.digest
+
+
+def _feedback_authority(authority: str, feedback_digest: str | None) -> str:
+    if feedback_digest is None:
+        return authority
+    return evidence_digest(
+        {
+            "domain": "reviewsensei:assessment-feedback:v1",
+            "authority": authority,
+            "feedback": feedback_digest,
+        }
+    )
+
+
 @dataclass(frozen=True)
 class HumanAssessmentWork:
     reply: HumanAssessmentReply
@@ -60,6 +102,7 @@ class HumanAssessmentWork:
     queue: AssessmentQueue | None = None
     selected_ids: tuple[str, ...] | None = None
     admitted_queue: AssessmentQueue | None = None
+    feedback_digest: str | None = None
 
     def apply_to(self, current: PendingHumanReview) -> PendingHumanReview:
         """Union a revalidated receipt into latest resolutions without reopening.
@@ -97,10 +140,21 @@ def reassess(
     queue: AssessmentQueue | None = None,
     targets: tuple[str, ...] | None = None,
     checkpoint: WorkCheckpointStore | None = None,
+    feedback: object | None = None,
 ) -> HumanAssessmentWork:
-    validate_bounded_text(
-        source_body, MAX_HUMAN_SOURCE_BYTES, label="human reply", allow_empty=False
-    )
+    feedback_options, feedback_digest = _feedback_handoff(feedback, bundle)
+    original_authority = authority_digest
+    authority_digest = _feedback_authority(authority_digest, feedback_digest)
+    if feedback is None:
+        validate_bounded_text(
+            source_body, MAX_HUMAN_SOURCE_BYTES, label="human reply", allow_empty=False
+        )
+    else:
+        selected_targets = feedback_options["feedback"].target_ids
+        if selected_targets:
+            if targets is not None and targets != selected_targets:
+                raise ReviewInputError("complete feedback target selection changed")
+            targets = selected_targets
     if bundle.snapshot.base_sha != pending.base_sha or not bundle.snapshot.head_sha:
         raise ReviewInputError("human assessment exact snapshot is missing")
     tracker = tracker or ResourceBudgetTracker(ResourceBudget.create())
@@ -175,6 +229,7 @@ def reassess(
             max_response_bytes=budgets.batch_output_bytes,
             max_output_tokens=budgets.max_output_tokens,
             allow_context_requests=True,
+            **feedback_options,
         )
 
     def validate(response: ProviderResponse, batch: WorkBatch) -> HumanAssessmentReply:
@@ -185,6 +240,7 @@ def reassess(
             diff_context=batch.diff_context,
             allow_context_requests=True,
             allowed_context_paths=set(records),
+            **feedback_options,
         )
 
     def encode_reply(value: HumanAssessmentReply) -> object:
@@ -499,13 +555,15 @@ def reassess(
         updated_queue,
         selected_ids,
         queue,
+        feedback_digest,
     )
     validate_work(
         result,
         pending=latest_pending,
         bundle=bundle,
         source_body=source_body,
-        authority_digest=authority_digest,
+        authority_digest=original_authority,
+        feedback=feedback,
     )
     return result
 
@@ -517,8 +575,13 @@ def validate_work(
     bundle: EvidenceBundle,
     source_body: str,
     authority_digest: str,
+    feedback: object | None = None,
 ) -> None:
     """Revalidate every accepted decision against its original complete batch."""
+    feedback_options, feedback_digest = _feedback_handoff(feedback, bundle)
+    if work.feedback_digest != feedback_digest:
+        raise ReviewInputError("complete feedback receipt authority changed")
+    authority_digest = _feedback_authority(authority_digest, feedback_digest)
     latest = pending
     if work.admitted_queue is not None:
         from .assessment_queue import inventory_digest
@@ -596,6 +659,7 @@ def validate_work(
                 diff_context=completed.batch.diff_context,
                 allow_context_requests=True,
                 allowed_context_paths=set(bundle.by_path()),
+                **feedback_options,
             )
             if validated != completed.value:
                 raise ReviewInputError("human assessment scope receipt is invalid")
@@ -651,6 +715,7 @@ def validate_work(
                 by_id[decision.fingerprint],
                 source_body=source_body,
                 diff_context=batch.diff_context,
+                **feedback_options,
             )
             decisions.append(decision)
     if tuple(decisions) != work.reply.decisions:
