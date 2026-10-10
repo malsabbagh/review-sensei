@@ -237,3 +237,108 @@ raised, and combined256-part/8MiB retention remains unqualified. The frozen B/D
 dependency profile exercises full feedback and the original eight-call 250
 domain fixture; those passes do not qualify hosted throughput or durable
 activation-tail accounting. Diagnostic early admission remains unchanged.
+
+## Explicit factored history prototype
+
+`FactoredAssessmentJournal` uses the new closed wire `assessment-history-v2`;
+legacy `AssessmentJournal` and `assessment-queue-v1` receipts/queue remain
+unchanged. `from_legacy(legacy)` reconstructs and retains every original receipt
+and source binding. `from_document`, `to_document`, `receipt(source_digest,
+operation_id)` and `record(queue,source_digest,receipt)` preserve existing C
+semantics. No eviction or expiration mints admission. The journal source key
+binds D's stable authenticated event kind/numeric ID/repository/PR, scoped by
+the host to initial inventory digest/generation. Full D content/actors/timestamp/
+targets bind the operation ID. An edit of the same event refuses changed
+authority rather than generating a new source allowance.
+
+The wire has exactly `schema_version`, complete `queue`, unique `strings` and
+`operations`. Strings are interned once in first-encounter order under sorted
+object keys. Each operation is a lossless typed tree: an integer references the
+string table, `{"integer": n}` represents an original integer, arrays represent
+original arrays, `{"fields": {...}}` represents an original object, and booleans
+and null retain their native meaning. Other numbers/types, unknown references,
+duplicate/unused strings, extra fields, alternative encoding, noncanonical
+tables and excessive nesting refuse. Reencoding must equal the exact input.
+The full accepted/pending/attempted records, original timestamps/budgets/
+reservations, and full text are reconstructed without clipping or reordering.
+
+Admission bounds are independent: at most32 active operations,256 total retained
+operations,16,384 pooled strings,32 tree depth,2MiB actual decoded factored JSON,
+2MiB reconstructed single record and8MiB total reconstructed records. Logical
+reconstruction sizes are charged while traversing references, before allocating
+a large serialized expansion. Active means a receipt still has a response
+reservation or neither exhausts its original call limit nor completes every
+admitted batch. Classifying a receipt as settled does not erase its original
+limits or supply authority. The256 history ceiling accommodates the measured64
+source profile and is not a provider/root/control-budget increase. Every old
+source remains exactly queryable; source257 refuses finite capacity.
+
+The genuine frozen-B engine runs use one enforced provider call per fresh source
+and one initial semantic rejection.100 findings complete across26 sources;
+250 complete across64. Same-source rejection replay makes zero provider calls;
+edited authority and expired original receipts refuse without inference. Source33
+continues without deleting earlier source authority. Representative measured
+final decoded/reconstructed bytes are99,094/541,714 for100 and
+372,162/3,028,681 for250, well inside the unchanged decoded ceiling. Timing fields
+vary slightly across runs. These are domain qualification, not hosted success.
+
+Whole-document compression still couples all retained history to every mutation.
+A's actual partition codec, including closed host envelope and framing, measures
+100/26sources at78 queue-only retained parts/about1.1MiB;250/64sources at300 parts/
+about6.58MiB. The first256-part pressure appears at source56's accepted transition
+(258 candidate parts). A complete activation must preflight this before storage
+writes and preserve the previously authenticated root/receipts. Other authority
+artifacts reduce available retention further. Thus this version fixes32-slot/
+decoded-history refusal but does not qualify whole-host250 retention. A binary/
+base64 SHA pool probe reduced decoded bytes but increased compressed bytes
+(36,514 to43,949 on a representative final journal), so that representation is
+not adopted merely to claim fewer parts.
+
+Reviewable continuation alternatives are domain-specific lossless factoring of
+admitted queues/pending reason runs, or immutable settled-operation segments plus
+a complete authenticated inventory/reference root and bounded exact source index.
+Segments must keep all old receipts/tombstones bound to that root and require
+authenticated exact same-source lookup before new budgets mint; they cannot GC
+old source authority or impose an unbounded history scan. Merely raising the
+retention/control caps or dropping undispatched admission bindings is rejected.
+
+## Closed host adapter prototype
+
+`AssessmentQueueHostAdapter(queue,binding,source_digest,operation_id,
+attempt_reservation_id,read,activate)` is opt-in and does not authenticate itself.
+The host supplies exact immutable A binding and its authenticated original
+attempt reservation, never a randomly minted replay ID. It exposes
+`checkpoint(now,retention_seconds)` for the existing reassessment entry point.
+
+`read() -> QueueHostState(envelope,root_generation,binding,item_count,
+attempt_witness)` is the latest authenticated source/head/root-fenced read.
+Proven absence is envelope=None with item_count=0; otherwise the manifest count
+must equal the entire immutable inventory count, not selected targets. The closed
+envelope remains exactly `{schema_version:'1.0',kind:'assessment-queue-state',
+journal:<v1 or v2 document>}`. The adapter validates shape,2MiB envelope limit,
+immutable binding, snapshot/inventory identity/count, monotonic generation and
+original source-operation lookup. Legacy import is explicit and lossless.
+
+`activate(QueueHostMutation) -> QueueHostState` receives the complete envelope,
+expected_generation, exact binding/count, stable source_digest, operation_id,
+original attempt_reservation_id, typed CheckpointMutation and request_identity.
+The latter hashes the exact C mutation envelope/binding/source/operation/attempt/
+context; it is not a capability or a substitute for the sealed final root digest
+and original read accounting in the broker grant. Each activation needs a fresh
+dedicated consuming grant bound to those actual final root/accounting/source
+inputs. Source/head/session fencing, original control64/60s allowance, A's sealed
+prepaid tail and ambiguous-write reconciliation remain trusted activate duties.
+The exact activated envelope must read back at a later generation with the
+authenticated original witness before C returns durability. No unfenced fallback
+exists. Restored mutations without original-attempt proof refuse while receipt
+reads remain available. The active root accounting carrier remains until ack.
+
+The adapter tests check contract refusal and original-root preservation using
+synthetic callbacks; they do not qualify the consuming broker or A's physical
+tail. Whole lifecycle measurement must include every original OIDC/grant/source/
+root/part/head/provider/ack dispatch and retained baseline/human/feedback/evidence/
+prose artifact. Fixed planning multipliers, restored allowance replenishment,
+or standalone codec constructor passes cannot qualify hosted admission. Public
+writers remain off; numbered ADR/shared schemas/public call sites remain owned
+by the coordinator. Diagnostic early restore and multistage durable scope
+expansion are still pending.
