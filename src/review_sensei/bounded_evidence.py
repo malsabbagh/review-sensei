@@ -166,11 +166,15 @@ class EvidenceReadBudget:
             raise ReviewInputError("partition read deadline exhausted")
 
     def consume(self, *, fence: bool = False) -> float:
-        self.check()
+        remaining = self.deadline - self.clock()
+        if remaining <= 0:
+            raise ReviewInputError("partition read deadline exhausted")
         if self.calls >= MAX_PART_READS - (0 if fence else 4):
             raise ReviewInputError("partition shared request budget exhausted")
         self.calls += 1
-        return self.deadline - self.clock()
+        # Addition/subtraction near a float exponent boundary can round above
+        # the transport ceiling. Clamp the timeout, never the original deadline.
+        return min(remaining, PART_READ_SECONDS)
 
     def preflight(self, calls: int) -> None:
         self.check()

@@ -18,6 +18,7 @@ from review_sensei.baseline import (
 )
 from review_sensei.bounded_evidence import (
     MAX_PARTITION_DECODED_BYTES,
+    PART_READ_SECONDS,
     PARTITION_ENCODING,
     AuthenticatedPart,
     EvidenceReadBudget,
@@ -200,6 +201,47 @@ class CodecTests(unittest.TestCase):
         self.assertEqual(restored.snapshot(), original.snapshot())
         with self.assertRaises(ReviewInputError):
             EvidenceReadBudget(wall_clock=lambda: 1060, snapshot=original.snapshot())
+
+    def test_high_uptime_timeout_is_bounded_without_refilling_deadline(self):
+        # Crossing a float exponent boundary rounds the sum upward by one ULP.
+        start = float.fromhex("0x1.ffff100000003p+22")
+        self.assertGreater(start + PART_READ_SECONDS - start, PART_READ_SECONDS)
+        for restored in (False, True):
+            with self.subTest(restored=restored):
+                now = [start]
+                snapshot = (
+                    {"schema_version": "1.0", "calls": 7, "deadline_unix_ms": 1060000}
+                    if restored
+                    else None
+                )
+                budget = EvidenceReadBudget(
+                    clock=lambda: now[0], wall_clock=lambda: 1000, snapshot=snapshot
+                )
+                deadline, wall_deadline = budget.deadline, budget.wall_deadline_ms
+                original_calls = budget.calls
+                self.assertEqual(budget.consume(), PART_READ_SECONDS)
+                now[0] += 1
+                self.assertEqual(budget.consume(), deadline - now[0])
+                self.assertEqual(budget.deadline, deadline)
+                self.assertEqual(budget.wall_deadline_ms, wall_deadline)
+                self.assertEqual(budget.calls, original_calls + 2)
+                now[0] = deadline
+                with self.assertRaisesRegex(ReviewInputError, "deadline"):
+                    budget.consume()
+                self.assertEqual(budget.calls, original_calls + 2)
+
+    def test_timeout_admission_uses_one_positive_deadline_relative_sample(self):
+        samples = iter((0.0, 59.5, 60.0))
+        budget = EvidenceReadBudget(
+            clock=lambda: next(samples), wall_clock=lambda: 1000
+        )
+        self.assertEqual(budget.consume(), 0.5)
+        self.assertEqual(budget.calls, 1)
+        with self.assertRaisesRegex(ReviewInputError, "deadline"):
+            budget.consume()
+        self.assertEqual(budget.calls, 1)
+        self.assertEqual(budget.deadline, 60.0)
+        self.assertEqual(budget.wall_deadline_ms, 1060000)
 
     def test_whole_resource_preflight_has_no_writes_on_refusal(self):
         calls = []
