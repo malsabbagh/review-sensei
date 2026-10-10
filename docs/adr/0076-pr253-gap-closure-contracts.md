@@ -10,8 +10,9 @@ Related PR: this change
 ## Context
 
 PR 253 revalidated composition gaps that remain after the merged storage,
-evidence and provider-guard primitives on main `f8f6a639`. ADR 0074 stores
-original-attempt metadata and is not an authorizer. ADR 0075 refuses unsafe
+evidence and provider-guard primitives on main `f8f6a639`. ADR 0074 is
+superseded by this record: the original-attempt journal is removed, and the
+GitHub operation comments are the store. ADR 0075 refuses unsafe
 provider completion metadata and does not qualify a model. Public reply
 construction still uses the legacy assessor path. A separate human-media
 recording implementation exists outside this tree and does not yet approve.
