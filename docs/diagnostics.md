@@ -6,7 +6,8 @@ with a closed diagnostic and no raw source/token/provider payload. Examples are
 `feedback_source_missing`, `feedback_source_changed`,
 `feedback_source_unauthorized`, `feedback_source_association_invalid`,
 `feedback_read_budget_exhausted`, `feedback_targets_invalid` and
-`feedback_prompt_oversized`. These describe admission or fencing failure, not
+`feedback_prompt_oversized`, `feedback_selector_invalid` and
+`feedback_selector_oversized`. These describe admission or fencing failure, not
 resolution or approval. The integrated caller must preserve prior authority and
 report the refused assessment separately from chat delivery. See
 [human assessment workflows](human-assessment.md) for finite limits and the

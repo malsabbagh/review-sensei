@@ -120,3 +120,70 @@ to B, and operation/target/receipt accounting to C. This lane creates no alterna
 part codec or authority store. Failed admission/fencing/prompt preflight leaves
 prior authority and all pending obligations intact. Report reply delivery,
 assessed/resolved/unprocessed counts and finalizer results separately.
+
+## Explicit rich preparation helpers: activation still pending
+
+The isolated source API now supports `HumanAssessmentPublisher.prepare_feedback`
+with a caller-bound `FeedbackBudgetHttp`, or `before_read` supplied to the publisher
+constructor. It selects the complete authenticated trigger by default, using the
+already trusted kind, numeric comment ID and exact updated timestamp. The ordinary
+`prepare` route and installed CLI defaults retain the legacy 4 KiB limit. No
+conversation text, URL, marker, short ID or model output opts into rich selection.
+
+For an operator-selected set, `FeedbackSelector` carries repository, PR, exact
+base/head, the triggering `FeedbackReference`, ordered source references and full
+target IDs. `FeedbackSelector.from_json(bytes)` accepts a closed document with
+`interface: "feedback-selector-v1"`, `repository`, `pull_request`, `base_sha`,
+`head_sha`, `trigger`, `sources` and `target_ids` only. Each reference contains only
+`kind`, `comment_id` and `updated_at`. The parser accepts at most 32 KiB, refuses
+duplicate/unknown fields, invalid UTF-8, duplicate source identities, ambiguous
+prefix targets and more than 32 sources/250 targets. Bodies and authors are
+reloaded; a selector does not attest authorization. Multiple source selection
+requires explicit full targets under the reviewed engineering scope. Public CLI
+exposure and activation still require coordinated product qualification.
+
+The host can call `load_selected_feedback` separately for admission or
+`prepare_feedback` for current inventory/evidence preparation. Direct rich
+preparation authenticates every participant again, including numeric actors and
+inline root, before using the selection. `PreparedHumanAssessment.feedback` is
+passed intact to the core service or queue assessment and its validators. Publishing
+checks all selected sources before replying and again before recording assessment
+authority; broader publication uses the same `source_fence` helper. These calls
+still need the coordinator's dedicated live-source broker grants and C's exact
+inventory/operation receipt binding before public activation.
+
+`FeedbackSelection.event_key` hashes a canonical document with domain
+`reviewsensei:feedback-event:v1`, repository, PR and trigger `{kind, comment_id}`.
+It excludes updated timestamps, source bodies/actors, order/targets and mutable
+base/head. The coordinator scopes journal lookup to the original inventory.
+An edit of the same trigger finds the existing event; a changed complete operation
+binding refuses rather than creating a fresh allowance. A genuinely new numeric
+trigger ID is a distinct event. `FeedbackSelection.digest` remains the unchanged
+`feedback-v1` complete content/snapshot binding.
+
+`authorization_document()` returns exactly `to_dict()` metadata with body omitted
+from each ordered source, plus `event_key` and `selection_digest`. `total_bytes`,
+each complete body length/SHA256, numeric author/login/association, exact timestamp
+and inline root remain. This metadata is not a grant. The broker must independently
+reload the exact canonical issue/inline endpoints, verify current human authority
+and trigger OIDC login/numeric actor match, recompute the full selection digest,
+and issue a fresh scoped consuming grant for each mutation. Raw body text is not
+included in the attestation/ledger metadata.
+
+The operation transport charges every GET/POST/PATCH/DELETE before physical
+dispatch, including inherited evidence pagination retries, eligibility/finalizer
+reads and reply/assessment writes. Pass the same original caller callback to all
+source phases; the wrapper creates no phase deadlines, counter or retry allowance.
+Use its inherited evidence methods without an additional `before_read` callback
+to avoid double charging. Broker calls, source fences and storage-tail liabilities
+must fit the same original host-owned envelope. D cannot consume an A storage-tail
+ticket. Expired/exhausted callbacks refuse before transport; late responses refuse
+without refund. An ambiguous write may already exist remotely, so reconciliation
+must retain the original event, operation and failed attempt witness. Creating a
+new budget during restart is unsupported.
+
+Synthetic source and installed-wheel fixtures exercise complete long triggers,
+ordered selectors, stable edit lookup, both source fences, secondary source edits
+and revoked authorization, whole-operation dispatch accounting, and preserved
+legacy behavior. These fixtures do not establish broker deployment, durable
+activation-tail recovery, live provider qualification or published product support.
