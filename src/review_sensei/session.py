@@ -29,6 +29,19 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence, cast
 
+from .bounded_evidence import (
+    MAX_PART_BYTES,
+    MAX_STORED_PART_BYTES,
+    MAX_STORED_PARTS,
+    PARTITION_ENCODING,
+    AuthenticatedPart,
+    EvidenceReadBudget,
+    canonical_bytes,
+    partition_evidence,
+    read_partitioned_evidence,
+    stage_partitioned_evidence,
+    validate_manifest,
+)
 from .convergence import (
     DIAGNOSTIC_ROUND_CEILING,
     MAX_FAILED_ATTEMPTS,
@@ -192,7 +205,13 @@ def _stored_convergence_history(
         # so schema validation alone cannot protect this boundary.
         from .baseline import baseline_from_history_document
 
-        baseline_from_history_document(baseline)
+        if (
+            isinstance(baseline, dict)
+            and baseline.get("encoding") == PARTITION_ENCODING
+        ):
+            validate_manifest(baseline)
+        else:
+            baseline_from_history_document(baseline)
     progress = normalized.get("progress")
     if (
         not isinstance(progress, list)
@@ -1735,6 +1754,8 @@ def _checkpoint_transaction_record(
     baseline: object | None = None,
     review_complete: bool = True,
     now: datetime | None = None,
+    partition_writer: Callable[[dict[str, object], int, int], dict[str, object]]
+    | None = None,
 ) -> SessionRecord:
     if (
         record.transaction is None
@@ -1815,6 +1836,7 @@ def _checkpoint_transaction_record(
                 baseline,
                 max_bytes=checkpoint_baseline_capacity(record),
                 require_complete=True,
+                partition_writer=partition_writer,
             ),
             "progress": [
                 *prior_progress,
@@ -1911,6 +1933,29 @@ def checkpoint_review_analysis(
             baseline=baseline,
             review_complete=result.review_status == "complete",
             now=now,
+            partition_writer=(
+                lambda document, count, allowance: getattr(ledger, "stage_evidence")(
+                    identity,
+                    binding={
+                        "repository": transaction.repository,
+                        "repository_id": identity.repository_id,
+                        "pull_request": transaction.pull_request,
+                        "base_sha": transaction.base_sha,
+                        "head_sha": transaction.head_sha,
+                        "policy_digest": transaction.policy_digest,
+                        "configuration_digest": transaction.configuration_digest,
+                        "generation": record.generation + 1,
+                        "producer": getattr(ledger, "evidence_producer")(),
+                        "purpose": "baseline",
+                        "schema_version": "1.0",
+                    },
+                    document=document,
+                    item_count=count,
+                    max_manifest_bytes=allowance,
+                )
+            )
+            if getattr(ledger, "enable_partition_writes", False)
+            else None,
         ),
         now=now,
     )
@@ -2585,6 +2630,46 @@ def _safe_ledger_name(repository: str) -> str:
     return repository.replace("/", "%2F")
 
 
+def read_session_baseline(ledger: object, record: SessionRecord) -> object:
+    """Read the complete inventory from this integrity-checked authority root.
+
+    Immutable review generation may precede mutable receipt generation. Snapshot
+    comparisons for the current operation still belong to the caller/planner.
+    This seam never projects or rehashes a persisted record.
+    """
+    from .baseline import baseline_from_history_document
+
+    if (
+        record.convergence_history is None
+        or "baseline" not in record.convergence_history
+    ):
+        return None
+    value = record.convergence_history["baseline"]
+    if not isinstance(value, dict) or value.get("encoding") != PARTITION_ENCODING:
+        return baseline_from_history_document(value)
+    manifest = validate_manifest(value)
+    binding = manifest["binding"]
+    assert isinstance(binding, dict)
+    if (
+        binding["repository"] != record.repository
+        or binding["repository_id"] != record.repository_id
+        or binding["pull_request"] != record.pull_request
+        or binding["generation"] > record.generation
+        or binding["purpose"] != "baseline"
+        or binding["producer"] != getattr(ledger, "evidence_producer")()
+    ):
+        raise ReviewInputError("partition root does not match authenticated session")
+    identity = SessionIdentity(
+        record.repository, record.pull_request, repository_id=record.repository_id
+    )
+    return baseline_from_history_document(
+        value,
+        reader=lambda root: getattr(ledger, "read_evidence")(
+            identity, root, expected_binding=binding
+        ),
+    )
+
+
 class LocalSessionLedger:
     """Filesystem ledger under an operator-supplied directory.
 
@@ -2602,10 +2687,189 @@ class LocalSessionLedger:
 
     SINGLE_WRITER_PER_IDENTITY = True
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        evidence_budget: EvidenceReadBudget | None = None,
+        enable_partition_writes: bool = False,
+    ) -> None:
         if not isinstance(root, Path):
             raise ReviewInputError("session ledger root is invalid")
         self.root = root
+        self.evidence_budget = evidence_budget or EvidenceReadBudget()
+        self.enable_partition_writes = enable_partition_writes
+
+    @staticmethod
+    def evidence_producer() -> str:
+        return "local-ledger"
+
+    def _part_directory(self, identity: SessionIdentity) -> Path:
+        root = self.root.resolve()
+        directory = (
+            self.root
+            / ".evidence"
+            / _safe_ledger_name(identity.repository)
+            / str(identity.pull_request)
+        )
+        for path in (self.root, self.root / ".evidence", directory.parent, directory):
+            if path.is_symlink():
+                raise ReviewInputError("partition directory must not be a symlink")
+        resolved = directory.resolve()
+        if root not in resolved.parents or (
+            resolved.exists() and not resolved.is_dir()
+        ):
+            raise ReviewInputError("partition directory is outside ledger root")
+        return resolved
+
+    def _read_part(
+        self, identity: SessionIdentity, storage_id: str
+    ) -> AuthenticatedPart:
+        if not re.fullmatch(r"[a-f0-9]{64}", storage_id):
+            raise ReviewInputError("local partition identity is invalid")
+        self.evidence_budget.consume()
+        path = self._part_directory(identity) / storage_id
+        if path.is_symlink():
+            raise ReviewInputError("local partition must not be a symlink")
+        try:
+            with path.open("rb") as handle:
+                raw = handle.read(MAX_PART_BYTES + 1)
+            if (
+                len(raw) > MAX_PART_BYTES
+                or hashlib.sha256(raw).hexdigest() != storage_id
+            ):
+                raise ValueError("invalid part")
+            document = json.loads(raw)
+            if canonical_bytes(document) != raw:
+                raise ValueError("noncanonical part")
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise ReviewInputError("local partition is missing or invalid") from exc
+        self.evidence_budget.check()
+        return AuthenticatedPart(document, self.evidence_producer())
+
+    def read_evidence(
+        self,
+        identity: SessionIdentity,
+        manifest: dict[str, object],
+        *,
+        expected_binding: Mapping[str, object],
+    ) -> object:
+        if (
+            expected_binding.get("repository") != identity.repository
+            or expected_binding.get("pull_request") != identity.pull_request
+            or expected_binding.get("repository_id") != identity.repository_id
+            or expected_binding.get("producer") != self.evidence_producer()
+        ):
+            raise ReviewInputError("local partition binding does not match")
+        return read_partitioned_evidence(
+            manifest,
+            reader=lambda storage_id: self._read_part(identity, storage_id),
+            expected_binding=expected_binding,
+            budget=self.evidence_budget,
+        )
+
+    def stage_evidence(
+        self,
+        identity: SessionIdentity,
+        *,
+        binding: dict[str, object],
+        document: object,
+        item_count: int,
+        max_manifest_bytes: int,
+    ) -> dict[str, object]:
+        if not self.enable_partition_writes:
+            raise ReviewInputError(
+                "partition writers require explicit reader-first enablement"
+            )
+        if (
+            binding.get("repository") != identity.repository
+            or binding.get("pull_request") != identity.pull_request
+            or binding.get("repository_id") != identity.repository_id
+            or binding.get("producer") != self.evidence_producer()
+        ):
+            raise ReviewInputError("local partition binding does not match")
+        directory = self._part_directory(identity)
+        directory.mkdir(parents=True, exist_ok=True)
+        sizes: dict[str, int] = {}
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if (
+                    len(sizes) >= MAX_STORED_PARTS
+                    or entry.is_symlink()
+                    or not entry.is_file()
+                    or not re.fullmatch(
+                        r"(?:[a-f0-9]{64}|\.staging-[A-Za-z0-9_-]{1,64})", entry.name
+                    )
+                ):
+                    raise ReviewInputError(
+                        "partition retention scan exceeded finite bounds"
+                    )
+                sizes[entry.name] = entry.stat().st_size
+        if sum(sizes.values()) > MAX_STORED_PART_BYTES:
+            raise ReviewInputError("partition retention byte capacity exceeded")
+        prospective_parts = partition_evidence(
+            document, binding=binding, item_count=item_count
+        )
+        missing_sizes = [
+            len(canonical_bytes(part))
+            for part in prospective_parts
+            if hashlib.sha256(canonical_bytes(part)).hexdigest() not in sizes
+        ]
+        if (
+            len(sizes) + len(missing_sizes) > MAX_STORED_PARTS
+            or sum(sizes.values()) + sum(missing_sizes) > MAX_STORED_PART_BYTES
+        ):
+            raise ReviewInputError(
+                "partition whole retention capacity exceeded before staging"
+            )
+
+        def write(part: dict[str, object]) -> str:
+            raw = canonical_bytes(part)
+            storage_id = hashlib.sha256(raw).hexdigest()
+            if storage_id not in sizes:
+                if (
+                    len(sizes) >= MAX_STORED_PARTS
+                    or sum(sizes.values()) + len(raw) > MAX_STORED_PART_BYTES
+                ):
+                    raise ReviewInputError("partition retention capacity exceeded")
+                self.evidence_budget.consume()
+                path = directory / storage_id
+                # Install a complete fsynced inode atomically without replacing
+                # an existing immutable object. A crash leaves only .staging
+                # debris charged to retention, never referenced as authority.
+                temporary = tempfile.NamedTemporaryFile(
+                    dir=directory, prefix=".staging-", delete=False
+                )
+                try:
+                    temporary.write(raw)
+                    temporary.flush()
+                    os.fsync(temporary.fileno())
+                    temporary.close()
+                    try:
+                        os.link(temporary.name, path)
+                    except FileExistsError:
+                        pass
+                    if os.name != "nt":
+                        fd = os.open(directory, os.O_RDONLY)
+                        try:
+                            os.fsync(fd)
+                        finally:
+                            os.close(fd)
+                finally:
+                    temporary.close()
+                    os.unlink(temporary.name)
+                sizes[storage_id] = len(raw)
+            return storage_id
+
+        return stage_partitioned_evidence(
+            document,
+            binding=binding,
+            item_count=item_count,
+            max_manifest_bytes=max_manifest_bytes,
+            writer=write,
+            reader=lambda storage_id: self._read_part(identity, storage_id),
+            budget=self.evidence_budget,
+        )
 
     def _path(self, identity: SessionIdentity) -> Path:
         return (
@@ -2940,6 +3204,7 @@ class LocalSessionLedger:
                     return SessionLoadResult(status="expired")
                 return SessionLoadResult(status="migrated", record=migrated_record)
             record = SessionRecord.from_dict(document)
+            read_session_baseline(self, record)
         except ReviewInputError:
             return SessionLoadResult(status="integrity-failed")
         if (
@@ -2994,6 +3259,16 @@ class LocalSessionLedger:
         if loaded.status != "ok" or loaded.record is None:
             raise ReviewInputError("session record is missing")
         updated = mutate(loaded.record)
+        read_session_baseline(self, updated)
+        current_document = self._read_document(self._path(identity))
+        if current_document is None:
+            raise ReviewInputError("session generation conflict before activation")
+        current = SessionRecord.from_dict(current_document)
+        if (
+            current.generation != loaded.record.generation
+            or current.record_sha256 != loaded.record.record_sha256
+        ):
+            raise ReviewInputError("session generation conflict before activation")
         self._write(identity, updated)
         return updated
 

@@ -22,6 +22,18 @@ import re
 from datetime import datetime
 from typing import Any, Callable, Mapping
 
+from ...bounded_evidence import (
+    MAX_PART_BYTES,
+    MAX_STORED_PART_BYTES,
+    MAX_STORED_PARTS,
+    PARTITION_ENCODING,
+    AuthenticatedPart,
+    EvidenceReadBudget,
+    canonical_bytes,
+    partition_evidence,
+    read_partitioned_evidence,
+    stage_partitioned_evidence,
+)
 from ...errors import ReviewInputError
 from ...session import (
     MAX_SESSION_COMMENT_BYTES,
@@ -34,6 +46,7 @@ from ...session import (
     mutate_abort,
     mutate_commit,
     mutate_reserved,
+    read_session_baseline,
 )
 from .errors import (
     GitHubBrokerClientError,
@@ -206,6 +219,8 @@ class GitHubIssueCommentSessionLedger:
         reservation_owner: Mapping[str, object] | None = None,
         actions_read_token: str | None = None,
         actions_token_provider: Callable[[], str] | None = None,
+        evidence_budget: EvidenceReadBudget | None = None,
+        enable_partition_writes: bool = False,
     ) -> None:
         if not isinstance(http, GitHubHttp):
             raise ReviewInputError("GitHub session ledger requires GitHubHttp")
@@ -250,6 +265,220 @@ class GitHubIssueCommentSessionLedger:
         self._reservation_owner = reservation_owner
         self._actions_read_token = actions_read_token
         self._actions_token_provider = actions_token_provider
+        self.evidence_budget = evidence_budget
+        self.enable_partition_writes = enable_partition_writes
+        self._evidence_author_id: int | None = None
+        self._mutation_active = False
+
+    def evidence_producer(self) -> str:
+        if self.app_slug is None or self._evidence_author_id is None:
+            raise ReviewInputError(
+                "partition authority requires exact configured Bot numeric ownership"
+            )
+        return f"github-bot:{self._evidence_author_id}"
+
+    def _part_owner(self, item: object, identity: SessionIdentity) -> dict[str, object]:
+        if not isinstance(item, dict):
+            raise ReviewInputError("GitHub partition object is invalid")
+        author = item.get("user")
+        expected_issue = f"{self.http.api_url}/repos/{identity.repository}/issues/{identity.pull_request}"
+        if (
+            not isinstance(author, dict)
+            or author.get("type") != "Bot"
+            or self.app_slug is None
+            or not isinstance(author.get("login"), str)
+            or author["login"].casefold() != self.app_slug.casefold()
+            or isinstance(author.get("id"), bool)
+            or author.get("id") != self._evidence_author_id
+            or item.get("issue_url") != expected_issue
+        ):
+            raise ReviewInputError(
+                "GitHub partition owner or repository/PR association does not match"
+            )
+        return item
+
+    def _read_part(
+        self, identity: SessionIdentity, storage_id: str
+    ) -> AuthenticatedPart:
+        if not re.fullmatch(r"[1-9][0-9]{0,18}", storage_id):
+            raise ReviewInputError("GitHub partition identity is invalid")
+        path = self.http.repository_path(
+            identity.repository, f"/issues/comments/{storage_id}"
+        )
+        status, payload = self._request("GET", path)
+        if status != 200:
+            raise ReviewInputError("GitHub partition is missing")
+        item = self._part_owner(payload, identity)
+        if item.get("id") != int(storage_id):
+            raise ReviewInputError("GitHub partition identity does not match")
+        body = item.get("body")
+        if (
+            not isinstance(body, str)
+            or len(body.encode()) > MAX_PART_BYTES
+            or not body.startswith("ReviewSensei immutable evidence part v1\n```json\n")
+            or not body.endswith("\n```\n<!-- reviewsensei:evidence-part:v1 -->")
+        ):
+            raise ReviewInputError("GitHub partition framing is invalid")
+        raw = body.split("\n```json\n", 1)[1].rsplit("\n```\n", 1)[0]
+        try:
+            document = json.loads(raw)
+            if canonical_bytes(document).decode() != raw:
+                raise ValueError("noncanonical part")
+        except (ValueError, UnicodeError) as exc:
+            raise ReviewInputError("GitHub partition JSON is invalid") from exc
+        return AuthenticatedPart(document, self.evidence_producer())
+
+    def read_evidence(
+        self,
+        identity: SessionIdentity,
+        manifest: dict[str, object],
+        *,
+        expected_binding: Mapping[str, object],
+    ) -> object:
+        if (
+            expected_binding.get("repository") != identity.repository
+            or expected_binding.get("pull_request") != identity.pull_request
+            or expected_binding.get("repository_id") != identity.repository_id
+            or expected_binding.get("producer") != self.evidence_producer()
+        ):
+            raise ReviewInputError("GitHub partition binding does not match")
+        if self.evidence_budget is None:
+            raise ReviewInputError(
+                "partition reader requires shared metadata/read budget"
+            )
+        return read_partitioned_evidence(
+            manifest,
+            reader=lambda storage_id: self._read_part(identity, storage_id),
+            expected_binding=expected_binding,
+            budget=self.evidence_budget,
+        )
+
+    def stage_evidence(
+        self,
+        identity: SessionIdentity,
+        *,
+        binding: dict[str, object],
+        document: object,
+        item_count: int,
+        max_manifest_bytes: int,
+    ) -> dict[str, object]:
+        if (
+            not self.enable_partition_writes
+            or not self._mutation_active
+            or self.evidence_budget is None
+        ):
+            raise ReviewInputError(
+                "GitHub partition staging requires enabled conditional mutation and shared budget"
+            )
+        if (
+            binding.get("repository") != identity.repository
+            or binding.get("pull_request") != identity.pull_request
+            or binding.get("repository_id") != identity.repository_id
+            or binding.get("producer") != self.evidence_producer()
+        ):
+            raise ReviewInputError("GitHub partition binding does not match")
+        items = self._bounded_comments(identity)
+        existing: dict[str, str] = {}
+        stored_bytes = 0
+        stored_count = 0
+        for item in items:
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("body"), str)
+                or not item["body"].endswith("<!-- reviewsensei:evidence-part:v1 -->")
+            ):
+                continue
+            author = item.get("user")
+            if (
+                not isinstance(author, dict)
+                or author.get("id") != self._evidence_author_id
+                or author.get("type") != "Bot"
+            ):
+                continue
+            self._part_owner(item, identity)
+            body = item["body"]
+            stored_bytes += len(body.encode())
+            stored_count += 1
+            existing[body] = str(item["id"])
+        if stored_count > MAX_STORED_PARTS or stored_bytes > MAX_STORED_PART_BYTES:
+            raise ReviewInputError("GitHub partition retention capacity exceeded")
+        prospective_parts = partition_evidence(
+            document, binding=binding, item_count=item_count
+        )
+        prospective_bodies = [
+            "ReviewSensei immutable evidence part v1\n```json\n"
+            + canonical_bytes(part).decode()
+            + "\n```\n<!-- reviewsensei:evidence-part:v1 -->"
+            for part in prospective_parts
+        ]
+        missing_bodies = [body for body in prospective_bodies if body not in existing]
+        if (
+            stored_count + len(missing_bodies) > MAX_STORED_PARTS
+            or stored_bytes + sum(len(body.encode()) for body in missing_bodies)
+            > MAX_STORED_PART_BYTES
+        ):
+            raise ReviewInputError(
+                "GitHub whole retention capacity exceeded before staging"
+            )
+
+        def write(part: dict[str, object]) -> str:
+            body = (
+                "ReviewSensei immutable evidence part v1\n```json\n"
+                + canonical_bytes(part).decode()
+                + "\n```\n<!-- reviewsensei:evidence-part:v1 -->"
+            )
+            if body in existing:
+                return existing[body]
+            if (
+                len(existing) >= MAX_STORED_PARTS
+                or sum(len(old.encode()) for old in existing) + len(body.encode())
+                > MAX_STORED_PART_BYTES
+                or len(body.encode()) > MAX_PART_BYTES
+            ):
+                raise ReviewInputError("GitHub partition retention capacity exceeded")
+            self._verify_live_head(identity)
+            status, payload = self._request(
+                "POST", self._comments_path(identity), body={"body": body}
+            )
+            if (
+                status != 201
+                or not isinstance(payload, dict)
+                or isinstance(payload.get("id"), bool)
+                or not isinstance(payload.get("id"), int)
+                or payload["id"] < 1
+            ):
+                raise GitHubPublicationTransientError(
+                    "GitHub partition create not confirmed; resume must rediscover"
+                )
+            self._part_owner(payload, identity)
+            storage_id = str(payload["id"])
+            existing[body] = storage_id
+            return storage_id
+
+        return stage_partitioned_evidence(
+            document,
+            binding=binding,
+            item_count=item_count,
+            max_manifest_bytes=max_manifest_bytes,
+            writer=write,
+            reader=lambda storage_id: self._read_part(identity, storage_id),
+            budget=self.evidence_budget,
+        )
+
+    def _bounded_comments(self, identity: SessionIdentity) -> list[Any]:
+        assert self.evidence_budget is not None
+        items: list[Any] = []
+        # Five maximum-size comments fit the retained 512 KiB transport bound.
+        for page in range(1, 201):
+            status, payload = self._request(
+                "GET", f"{self._comments_path(identity)}?per_page=5&page={page}"
+            )
+            if status != 200 or not isinstance(payload, list) or len(payload) > 5:
+                raise ReviewInputError("partition metadata enumeration is unavailable")
+            items.extend(payload)
+            if len(payload) < 5:
+                return items
+        raise ReviewInputError("partition metadata enumeration exceeds item bound")
 
     def _require_identity(self, identity: SessionIdentity) -> int:
         if identity.repository_id is None:
@@ -328,6 +557,13 @@ class GitHubIssueCommentSessionLedger:
         body: dict[str, object] | None = None,
     ) -> tuple[int, dict[str, Any] | list[Any] | None]:
         try:
+            if self.evidence_budget is not None:
+                remaining = self.evidence_budget.consume()
+                response = self.http.request(
+                    method, path, token=self.token, body=body, timeout_seconds=remaining
+                )
+                self.evidence_budget.check()
+                return response
             return self.http.request(method, path, token=self.token, body=body)
         except GitHubHTTPTransientError as exc:
             raise GitHubPublicationTransientError(
@@ -341,8 +577,12 @@ class GitHubIssueCommentSessionLedger:
     ) -> tuple[int | None, SessionRecord | None]:
         repository_id = self._require_identity(identity)
         try:
-            items = self.http.paginate(
-                path=self._comments_path(identity), token=self.token
+            items = (
+                self._bounded_comments(identity)
+                if self.evidence_budget is not None
+                else self.http.paginate(
+                    path=self._comments_path(identity), token=self.token
+                )
             )
         except GitHubHTTPTransientError as exc:
             raise GitHubPublicationTransientError(
@@ -418,12 +658,49 @@ class GitHubIssueCommentSessionLedger:
                     "session comment repository_id does not match",
                 )
             found.append((comment_id, record))
+            author_id = author.get("id") if isinstance(author, dict) else None
+            if (
+                not isinstance(author_id, bool)
+                and isinstance(author_id, int)
+                and author_id > 0
+            ):
+                self._evidence_author_id = author_id
         if len(found) > 1:
             raise SessionLoadError(
                 SessionLoadReason.CONFLICT, "multiple session comments are present"
             )
         if not found:
             return None, None
+        record = found[0][1]
+        stored_baseline = (
+            record.convergence_history.get("baseline")
+            if isinstance(record.convergence_history, Mapping)
+            else None
+        )
+        if (
+            isinstance(stored_baseline, dict)
+            and stored_baseline.get("encoding") == PARTITION_ENCODING
+        ):
+            if self.evidence_budget is None:
+                raise SessionLoadError(
+                    SessionLoadReason.INTEGRITY_FAILED,
+                    "partition session requires shared read budget",
+                )
+            try:
+                self._part_owner(
+                    next(
+                        item
+                        for item in items
+                        if isinstance(item, dict) and item.get("id") == found[0][0]
+                    ),
+                    identity,
+                )
+                read_session_baseline(self, record)
+            except ReviewInputError as exc:
+                raise SessionLoadError(
+                    SessionLoadReason.INTEGRITY_FAILED,
+                    "partition authority is unreadable",
+                ) from exc
         return found[0]
 
     def load(
@@ -555,7 +832,21 @@ class GitHubIssueCommentSessionLedger:
         ):
             raise ReviewInputError("session generation conflict")
         record = latest_record
-        updated = mutate(record)
+        self._mutation_active = True
+        try:
+            updated = mutate(record)
+            read_session_baseline(self, updated)
+        finally:
+            self._mutation_active = False
+        if self.evidence_budget is not None:
+            preactivation_id, preactivation = self._discover(identity, now=now)
+            if (
+                preactivation_id != comment_id
+                or preactivation is None
+                or preactivation.record_sha256 != record.record_sha256
+                or preactivation.generation != record.generation
+            ):
+                raise ReviewInputError("session generation conflict before activation")
         self._verify_live_head(identity)
         repository_id = self._require_identity(identity)
         path = self.http.repository_path(

@@ -227,7 +227,8 @@
                   "pattern": "^[A-Za-z0-9+/]*={0,2}$"
                 }
               }
-            }
+            },
+            {"$ref": "https://reviewsensei.dev/schemas/v1/evidence-manifest.schema.json"}
           ]
         },
         "progress": {
