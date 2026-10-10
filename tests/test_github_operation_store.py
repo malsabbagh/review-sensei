@@ -10,8 +10,10 @@ from review_sensei.hosting.github.operation_host import (
     AdmissionProof,
     ExecutionResult,
     GitHubCommentOperationStore,
+    OperationComment,
     OperationHost,
     OperationRequest,
+    OperationWriteUnconfirmed,
     ProviderOutput,
     TransitionPlan,
     run_review_trigger,
@@ -69,25 +71,48 @@ def _accept(output: ProviderOutput, measured: int) -> bool:
 
 
 class MemoryComments:
-    def __init__(self) -> None:
-        self.comments: dict[int, str] = {}
+    def __init__(self, *, app_user_id: int = 42) -> None:
+        self.comments: dict[int, OperationComment] = {}
         self.next_id = 1
+        self.requests = 0
+        self.methods: list[str] = []
+        self.app_user_id = app_user_id
+        self.lose_post = False
+        self.mismatch = False
 
-    def find(self, marker: str) -> tuple[int, str] | None:
-        for comment_id, body in self.comments.items():
-            if marker in body:
-                return comment_id, body
-        return None
+    def list_comments(self) -> tuple[OperationComment, ...]:
+        self.requests += 1
+        self.methods.append("GET")
+        return tuple(self.comments.values())
 
-    def create(self, body: str) -> tuple[int, str]:
+    def create(self, body: str) -> OperationComment:
+        self.requests += 1
+        self.methods.append("POST")
         comment_id = self.next_id
         self.next_id += 1
-        self.comments[comment_id] = body
-        return comment_id, body
+        comment = OperationComment(comment_id, body, self.app_user_id, "Bot")
+        self.comments[comment_id] = comment
+        if self.lose_post:
+            raise OperationWriteUnconfirmed("lost")
+        self.requests += 1
+        self.methods.append("GET")
+        if self.mismatch:
+            return OperationComment(
+                comment_id,
+                '<!-- review-sensei-operation -->\n```json\n{"no":1}\n```\n',
+                self.app_user_id,
+                "Bot",
+            )
+        return comment
 
-    def update(self, comment_id: int, body: str) -> str:
-        self.comments[comment_id] = body
-        return body
+    def update(self, comment_id: int, body: str) -> OperationComment:
+        self.requests += 1
+        self.methods.append("PATCH")
+        comment = OperationComment(comment_id, body, self.app_user_id, "Bot")
+        self.comments[comment_id] = comment
+        self.requests += 1
+        self.methods.append("GET")
+        return comment
 
 
 class GitHubOperationStoreTests(unittest.TestCase):
@@ -105,7 +130,8 @@ class GitHubOperationStoreTests(unittest.TestCase):
             strict=True,
         ):
             host = OperationHost(
-                GitHubCommentOperationStore(comments), now=lambda: 1_000
+                GitHubCommentOperationStore(comments, app_user_id=42),
+                now=lambda: 1_000,
             )
             result = run_review_trigger(
                 host,
@@ -129,14 +155,16 @@ class GitHubOperationStoreTests(unittest.TestCase):
             )
 
         self.assertEqual(calls["n"], 4)
-        self.assertEqual(len(comments.comments), 1)
-        body = next(iter(comments.comments.values()))
-        self.assertNotIn("known-output", body)
+        bodies = [comment.body for comment in comments.comments.values()]
+        self.assertEqual(len(bodies), 5)
+        joined = "\n".join(bodies)
+        self.assertNotIn("known-output", joined)
         for trigger in REVIEW_TRIGGERS:
-            self.assertIn(trigger, body)
+            self.assertIn(trigger, joined)
 
         replay_host = OperationHost(
-            GitHubCommentOperationStore(comments), now=lambda: 1_000
+            GitHubCommentOperationStore(comments, app_user_id=42),
+            now=lambda: 1_000,
         )
         replay = run_review_trigger(
             replay_host,
@@ -153,11 +181,13 @@ class GitHubOperationStoreTests(unittest.TestCase):
         assert isinstance(replay, ExecutionResult)
         self.assertEqual(replay.status, "accepted")
         self.assertEqual(calls["n"], 4)
-        self.assertEqual(len(comments.comments), 1)
+        self.assertEqual(len(comments.comments), 5)
 
     def test_a_refused_trigger_does_not_write_a_comment(self):
         comments = MemoryComments()
-        host = OperationHost(GitHubCommentOperationStore(comments), now=lambda: 1_000)
+        host = OperationHost(
+            GitHubCommentOperationStore(comments, app_user_id=42), now=lambda: 1_000
+        )
         refused = run_review_trigger(
             host,
             trigger="not-a-trigger",
@@ -171,3 +201,156 @@ class GitHubOperationStoreTests(unittest.TestCase):
         )
         self.assertEqual(getattr(refused, "reason", None), "trigger")
         self.assertEqual(comments.comments, {})
+        self.assertEqual(comments.methods, ["GET"])
+
+    def test_one_trigger_writes_the_event_and_the_index(self):
+        comments = MemoryComments()
+        host = OperationHost(
+            GitHubCommentOperationStore(comments, app_user_id=42), now=lambda: 1_000
+        )
+        result = run_review_trigger(
+            host,
+            trigger="full-review",
+            proof=_proof("b"),
+            request=_request("b"),
+            plan=_plan("b"),
+            provider_call=_output,
+            validator=_accept,
+            consume_grant=lambda: True,
+            server_started_ms=1_000,
+        )
+        self.assertIsInstance(result, ExecutionResult)
+        # list, create event, read it back, create index, read it back,
+        # then patch+readback for consume, charge, and the accepted packet.
+        self.assertEqual(
+            comments.methods,
+            [
+                "GET",
+                "POST",
+                "GET",
+                "POST",
+                "GET",
+                "PATCH",
+                "GET",
+                "PATCH",
+                "GET",
+                "PATCH",
+                "GET",
+            ],
+        )
+        self.assertEqual(comments.requests, 11)
+
+    def test_a_foreign_marker_is_ignored(self):
+        comments = MemoryComments()
+        comments.comments[1] = OperationComment(
+            1,
+            "<!-- review-sensei-operation -->\n```json\n{}\n```\n",
+            99,
+            "User",
+        )
+        comments.next_id = 2
+        with self.assertLogs(
+            "review_sensei.hosting.github.operation", level="WARNING"
+        ) as logs:
+            GitHubCommentOperationStore(comments, app_user_id=42)
+        self.assertIn("ignored", logs.output[0])
+
+    def test_two_app_indexes_are_ambiguous(self):
+        from review_sensei.hosting.github.operation_host import encode_index_comment
+
+        comments = MemoryComments()
+        body = encode_index_comment(
+            {"events": {}, "transitions": {}, "grants": {}, "scopes": {}}
+        )
+        comments.comments[1] = OperationComment(1, body, 42, "Bot")
+        comments.comments[2] = OperationComment(2, body, 42, "Bot")
+        with self.assertRaisesRegex(ValueError, "ambiguous operation index"):
+            GitHubCommentOperationStore(comments, app_user_id=42)
+
+    def test_a_lost_create_is_not_retried_and_reloads(self):
+        comments = MemoryComments()
+        comments.lose_post = True
+        host = OperationHost(
+            GitHubCommentOperationStore(comments, app_user_id=42), now=lambda: 1_000
+        )
+        with self.assertRaises(OperationWriteUnconfirmed):
+            run_review_trigger(
+                host,
+                trigger="reply",
+                proof=_proof("b"),
+                request=_request("b"),
+                plan=_plan("b"),
+                provider_call=_output,
+                validator=_accept,
+                consume_grant=lambda: True,
+                server_started_ms=1_000,
+            )
+        self.assertEqual(comments.methods.count("POST"), 1)
+        comments.lose_post = False
+        restored = OperationHost(
+            GitHubCommentOperationStore(comments, app_user_id=42), now=lambda: 1_000
+        )
+        result = run_review_trigger(
+            restored,
+            trigger="reply",
+            proof=_proof("b"),
+            request=_request("b"),
+            plan=_plan("b"),
+            provider_call=_output,
+            validator=_accept,
+            consume_grant=lambda: True,
+            server_started_ms=1_000,
+        )
+        self.assertIsInstance(result, ExecutionResult)
+        event_posts = [
+            comment.body
+            for comment in comments.comments.values()
+            if '"kind":"event"' in comment.body
+        ]
+        self.assertEqual(len(event_posts), 1)
+
+    def test_readback_mismatch_refuses(self):
+        comments = MemoryComments()
+        comments.mismatch = True
+        host = OperationHost(
+            GitHubCommentOperationStore(comments, app_user_id=42), now=lambda: 1_000
+        )
+        with self.assertRaisesRegex(ValueError, "readback failed"):
+            run_review_trigger(
+                host,
+                trigger="verify",
+                proof=_proof("b"),
+                request=_request("b"),
+                plan=_plan("b"),
+                provider_call=_output,
+                validator=_accept,
+                consume_grant=lambda: True,
+                server_started_ms=1_000,
+            )
+
+    def test_a_prompt_field_is_not_written(self):
+        comments = MemoryComments()
+        store = GitHubCommentOperationStore(comments, app_user_id=42)
+        host = OperationHost(store, now=lambda: 1_000)
+        run_review_trigger(
+            host,
+            trigger="full-review",
+            proof=_proof("b"),
+            request=_request("b"),
+            plan=_plan("b"),
+            provider_call=_output,
+            validator=_accept,
+            consume_grant=lambda: True,
+            server_started_ms=1_000,
+        )
+        proof = _proof("b")
+        key = (proof.scope_digest, _request("b").event_id)
+        with store.transaction() as txn:
+            event = store._live()["events"][key]
+            assert isinstance(event, dict)
+            event["prompt"] = "SECRET PROMPT"
+            with self.assertRaisesRegex(ValueError, "not allowed"):
+                txn.commit()
+        joined = "\n".join(comment.body for comment in comments.comments.values())
+        self.assertNotIn("SECRET PROMPT", joined)
+        self.assertNotIn("known-output", joined)

@@ -5,12 +5,14 @@ and verify. Callers that opt in must present a server-authenticated admission
 proof. A fresh budget, a raw snapshot, or a consumed grant cannot restore an
 operation or mint another allowance.
 
-The public record is one App-owned GitHub issue comment of digests, counters,
-and the accepted packet. It does not hold prompts, model text, or file bytes.
-The worker authenticates the App so it can write that comment. It does not
+The public record is App-owned GitHub issue comments: one index comment for
+the scope cursor and event keys, and one comment per event for that event's
+transitions and accepted packet. Validated result bytes live in separate
+result-part comments. None of these hold prompts or model transcripts.
+The worker authenticates the App so it can write those comments. It does not
 store the review. ``InMemoryOperationStore`` is the transactional stand-in
-inside one process. ``GitHubCommentOperationStore`` reloads that record from
-the comment. Durable Object SQL is not this store. Debit and grant consumption
+inside one process. ``GitHubCommentOperationStore`` reloads the record from
+comments the App wrote. Durable Object SQL is not this store. Debit and grant consumption
 commit or roll back together inside this store when the grant callback returns
 false. This host does not claim cross-store atomicity with a provider: a
 rollback after an observed external effect must not reopen dispatch.
@@ -25,12 +27,15 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import re
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol
+
+_LOG = logging.getLogger("review_sensei.hosting.github.operation")
 
 ORDINARY_DISPATCH_LIMIT = 60
 TOTAL_DISPATCH_LIMIT = 64
@@ -276,6 +281,20 @@ class OperationRefusal:
 
 
 @dataclass(frozen=True, slots=True)
+class OperationComment:
+    """One issue comment plus the author the store is allowed to trust."""
+
+    comment_id: int
+    body: str
+    user_id: int
+    user_type: str
+
+
+class OperationWriteUnconfirmed(ValueError):
+    """The write response was lost. This call must not send it again."""
+
+
+@dataclass(frozen=True, slots=True)
 class RetainedTransition:
     """A writer reservation that restore must not clear."""
 
@@ -499,6 +518,7 @@ class OperationHost:
         request: OperationRequest,
         server_started_ms: int,
         bootstrap_dispatches: int,
+        trigger: str | None = None,
     ) -> OperationHandle | OperationRefusal:
         """Admit a sticky event, or return the original allowance unchanged."""
 
@@ -523,6 +543,8 @@ class OperationHost:
             or not 1 <= bootstrap_dispatches <= ORDINARY_DISPATCH_LIMIT
         ):
             return OperationRefusal("invalid")
+        if trigger is not None and trigger not in REVIEW_TRIGGERS:
+            return OperationRefusal("trigger")
         binding = _binding(proof, request)
         key = (proof.scope_digest, request.event_id)
         with self.store.transaction() as txn:
@@ -578,6 +600,8 @@ class OperationHost:
                 "quarantine": False,
                 "ack_attempted": False,
             }
+            if trigger is not None:
+                record["trigger"] = trigger
             events[key] = record
             txn.commit()
             return _handle(record)
@@ -1194,49 +1218,226 @@ def _wall_now() -> int:
 
 REVIEW_TRIGGERS = frozenset({"full-review", "reply", "reassessment", "verify"})
 OPERATION_COMMENT_MARKER = "<!-- review-sensei-operation -->"
+RESULT_COMMENT_MARKER = "<!-- review-sensei-result -->"
 _COMMENT_BOUND = 60_000
+_STAMP_MAX = 9_007_199_254_740_991
+_TRANSITION_STATES = frozenset({"inflight", "unknown", "pending", "confirmed"})
+_PLAN_KEY = re.compile(r"^[A-Za-z0-9._|,:-]{1,4096}$")
+_EVENT_FIELDS = frozenset(
+    {
+        "scope_digest",
+        "event_id",
+        "operation_id",
+        "binding",
+        "created_at_ms",
+        "control_deadline_ms",
+        "calls",
+        "sequence",
+        "root_sha",
+        "root_generation",
+        "observed_at_ms",
+        "expired_observed",
+        "accepted",
+        "provider_charged",
+        "provider_unknown",
+        "inference_blocked",
+        "quarantine",
+        "ack_attempted",
+        "trigger",
+    }
+)
+_EVENT_REQUIRED = _EVENT_FIELDS - {"trigger"}
+_TRANSITION_FIELDS = frozenset(
+    {
+        "scope_digest",
+        "event_id",
+        "attempt_id",
+        "encoded",
+        "state",
+        "sequence",
+        "ordinary",
+        "fence",
+        "prior_root_sha",
+        "prior_root_generation",
+        "target_root_sha",
+        "target_root_generation",
+        "request_digest",
+        "dispatch_digest",
+        "obligation_ids",
+    }
+)
 
 
 class OperationCommentPort(Protocol):
-    """App-owned pull-request comment. The worker is not this store."""
+    """App-owned pull-request comments. The worker is not this store."""
 
-    def find(self, marker: str) -> tuple[int, str] | None: ...
+    requests: int
 
-    def create(self, body: str) -> tuple[int, str]: ...
+    def list_comments(self) -> tuple[OperationComment, ...]: ...
 
-    def update(self, comment_id: int, body: str) -> str: ...
+    def create(self, body: str) -> OperationComment: ...
+
+    def update(self, comment_id: int, body: str) -> OperationComment: ...
 
 
 class GitHubCommentOperationStore(InMemoryOperationStore):
-    """Load and publish the operation record as one GitHub issue comment.
+    """Load and publish the operation record as App-authored issue comments.
 
-    A rolled-back transaction does not write. The comment is metadata only.
+    One index comment holds the scope cursor, grant ids, and event keys.
+    Each event comment holds that event, its transitions, and its accepted
+    packet. A rolled-back transaction does not write. Comments from any other
+    author are ignored.
     """
 
-    def __init__(self, port: OperationCommentPort) -> None:
+    def __init__(self, port: OperationCommentPort, *, app_user_id: int) -> None:
         super().__init__()
+        if (
+            isinstance(app_user_id, bool)
+            or not isinstance(app_user_id, int)
+            or app_user_id <= 0
+        ):
+            raise ValueError("invalid app user id")
         self._port = port
-        self._comment_id: int | None = None
+        self._app_user_id = app_user_id
+        self._index_id: int | None = None
+        self._event_comment_ids: dict[tuple[str, str], int] = {}
+        self._index_needs_rewrite = False
         self._load()
-
-    def _load(self) -> None:
-        found = self._port.find(OPERATION_COMMENT_MARKER)
-        if found is None:
-            return
-        comment_id, body = found
-        self._comment_id = comment_id
-        self._committed = _decode_comment(body)
 
     def _publish(self) -> None:
         assert self._txn is not None
-        body = _encode_comment(self._txn)
-        if self._comment_id is None:
-            self._comment_id, echoed = self._port.create(body)
-        else:
-            echoed = self._port.update(self._comment_id, body)
-        if _comment_payload(echoed) != _comment_payload(body):
-            raise ValueError("operation comment readback failed")
+        self._write(self._committed, self._txn)
         super()._publish()
+
+    def _load(self) -> None:
+        owned: list[tuple[OperationComment, dict[str, object]]] = []
+        for comment in self._port.list_comments():
+            if OPERATION_COMMENT_MARKER not in comment.body:
+                continue
+            if comment.user_id != self._app_user_id or comment.user_type != "Bot":
+                _LOG.warning(
+                    "ignored review-sensei operation marker on comment %s from user %s type %s",
+                    comment.comment_id,
+                    comment.user_id,
+                    comment.user_type,
+                )
+                continue
+            payload = _loads(comment_payload(comment.body))
+            if not isinstance(payload, dict):
+                raise ValueError("operation comment is invalid")
+            owned.append((comment, payload))
+        indexes = [
+            (comment, payload)
+            for comment, payload in owned
+            if payload.get("kind") == "index"
+        ]
+        events = [
+            (comment, payload)
+            for comment, payload in owned
+            if payload.get("kind") == "event"
+        ]
+        if len(indexes) + len(events) != len(owned):
+            raise ValueError("operation comment kind is invalid")
+        if len(indexes) > 1:
+            raise ValueError("ambiguous operation index")
+        decoded_events: dict[tuple[str, str], dict[str, object]] = {}
+        transitions: dict[object, object] = {}
+        for comment, payload in events:
+            key, event, event_transitions = _decode_event(payload)
+            if key in decoded_events:
+                raise ValueError("ambiguous operation event")
+            decoded_events[key] = event
+            transitions.update(event_transitions)
+            self._event_comment_ids[key] = comment.comment_id
+        listed: set[tuple[str, str]] = set()
+        scopes: dict[object, object] = {}
+        grants: dict[object, object] = {}
+        if indexes:
+            comment, payload = indexes[0]
+            self._index_id = comment.comment_id
+            scopes, grants, listed = _decode_index(payload)
+        missing = listed - set(decoded_events)
+        if missing:
+            raise ValueError("operation event comment is missing")
+        if set(decoded_events) - listed:
+            self._index_needs_rewrite = True
+        for key, event in decoded_events.items():
+            scope_key = event["scope_digest"]
+            observed = {
+                "root_sha": event["root_sha"],
+                "root_generation": event["root_generation"],
+            }
+            current = scopes.get(scope_key)
+            if current is None:
+                scopes[scope_key] = observed
+                self._index_needs_rewrite = True
+                continue
+            if not isinstance(current, dict):
+                raise ValueError("operation scope is invalid")
+            if current["root_sha"] == observed["root_sha"]:
+                continue
+            current_generation = _as_int(current["root_generation"])
+            observed_generation = _as_int(observed["root_generation"])
+            if observed_generation == current_generation:
+                raise ValueError("ambiguous operation scope")
+            if observed_generation > current_generation:
+                scopes[scope_key] = observed
+                self._index_needs_rewrite = True
+        self._committed = {
+            "events": decoded_events,
+            "transitions": transitions,
+            "grants": grants,
+            "scopes": scopes,
+        }
+
+    def _write(
+        self,
+        previous: dict[str, dict[object, object]],
+        pending: dict[str, dict[object, object]],
+    ) -> None:
+        previous_keys = set(previous["events"])
+        pending_keys = set(pending["events"])
+        if previous_keys - pending_keys:
+            raise ValueError("operation events are not deleted")
+        for key in pending_keys:
+            if not isinstance(key, tuple):
+                raise ValueError("operation record key is invalid")
+            typed = (str(key[0]), str(key[1]))
+            if _event_slice(previous, typed) != _event_slice(pending, typed):
+                self._write_event(typed, pending)
+        index_changed = (
+            previous["scopes"] != pending["scopes"]
+            or previous["grants"] != pending["grants"]
+            or previous_keys != pending_keys
+            or self._index_id is None
+            or self._index_needs_rewrite
+        )
+        if index_changed and (pending_keys or pending["scopes"] or pending["grants"]):
+            self._write_index(pending)
+            self._index_needs_rewrite = False
+
+    def _write_event(
+        self, key: tuple[str, str], pending: dict[str, dict[object, object]]
+    ) -> None:
+        body = encode_event_comment(key, pending)
+        comment_id = self._event_comment_ids.get(key)
+        echoed = (
+            self._port.update(comment_id, body)
+            if comment_id is not None
+            else self._port.create(body)
+        )
+        _require_readback(echoed, body, self._app_user_id)
+        self._event_comment_ids[key] = echoed.comment_id
+
+    def _write_index(self, pending: dict[str, dict[object, object]]) -> None:
+        body = encode_index_comment(pending)
+        echoed = (
+            self._port.update(self._index_id, body)
+            if self._index_id is not None
+            else self._port.create(body)
+        )
+        _require_readback(echoed, body, self._app_user_id)
+        self._index_id = echoed.comment_id
 
 
 def run_review_trigger(
@@ -1254,7 +1455,8 @@ def run_review_trigger(
 ) -> ExecutionResult | OperationRefusal:
     """Admit, restore, or finish one review trigger through the shared host.
 
-    An accepted packet is read back and returned without another provider call.
+    Begin and the trigger note commit together. An accepted packet is read
+    back and returned without another provider call.
     """
 
     if trigger not in REVIEW_TRIGGERS:
@@ -1268,7 +1470,11 @@ def run_review_trigger(
         if restored.reason != "not_admitted":
             return restored
         begun = host.begin_operation(
-            proof, request, server_started_ms, bootstrap_dispatches
+            proof,
+            request,
+            server_started_ms,
+            bootstrap_dispatches,
+            trigger=trigger,
         )
         if not isinstance(begun, OperationHandle):
             return begun
@@ -1282,6 +1488,9 @@ def run_review_trigger(
 
 
 def _note_trigger(host: OperationHost, handle: OperationHandle, trigger: str) -> bool:
+    event = host.store._live()["events"].get((handle.scope_digest, handle.event_id))
+    if isinstance(event, dict) and event.get("trigger") == trigger:
+        return True
     with host.store.transaction() as txn:
         event = host.store._live()["events"].get((handle.scope_digest, handle.event_id))
         if not isinstance(event, dict):
@@ -1299,19 +1508,18 @@ def _note_trigger(host: OperationHost, handle: OperationHandle, trigger: str) ->
         return True
 
 
-def _encode_comment(store: dict[str, dict[object, object]]) -> str:
-    payload = json.dumps(_export_store(store), sort_keys=True, separators=(",", ":"))
-    body = f"{OPERATION_COMMENT_MARKER}\n```json\n{payload}\n```\n"
+def render_marked_comment(marker: str, payload: dict[str, object]) -> str:
+    text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return f"{marker}\n```json\n{text}\n```\n"
+
+
+def bounded_comment(body: str) -> str:
     if len(body.encode("utf-8")) > _COMMENT_BOUND:
         raise ValueError("operation comment exceeds the GitHub bound")
     return body
 
 
-def _decode_comment(body: str) -> dict[str, dict[object, object]]:
-    return _import_store(json.loads(_comment_payload(body)))
-
-
-def _comment_payload(body: str) -> str:
+def comment_payload(body: str) -> str:
     start = body.find("```json\n")
     end = body.rfind("\n```")
     if start < 0 or end < 0 or end <= start:
@@ -1319,82 +1527,329 @@ def _comment_payload(body: str) -> str:
     return body[start + len("```json\n") : end]
 
 
-def _export_store(
-    store: dict[str, dict[object, object]],
-) -> dict[str, dict[str, object]]:
-    widths = {"events": 2, "transitions": 3, "grants": 1, "scopes": 1}
-    exported: dict[str, dict[str, object]] = {}
-    for name, width in widths.items():
-        bucket: dict[str, object] = {}
-        for key, value in store[name].items():
-            if width == 1:
-                encoded = str(key)
-            else:
-                if not isinstance(key, tuple) or len(key) != width:
-                    raise ValueError("operation record key is invalid")
-                encoded = "\t".join(str(part) for part in key)
-            bucket[encoded] = _export_value(value)
-        exported[name] = bucket
+def encode_event_comment(
+    key: tuple[str, str], pending: dict[str, dict[object, object]]
+) -> str:
+    event = pending["events"].get(key)
+    if not isinstance(event, dict):
+        raise ValueError("operation event is invalid")
+    transitions = {
+        str(item_key[2]): _public_transition(item)
+        for item_key, item in pending["transitions"].items()
+        if isinstance(item_key, tuple)
+        and len(item_key) == 3
+        and (str(item_key[0]), str(item_key[1])) == key
+        and isinstance(item, dict)
+    }
+    payload = {
+        "event": _public_event(event),
+        "key": _event_key_text(key),
+        "kind": "event",
+        "transitions": transitions,
+    }
+    return bounded_comment(render_marked_comment(OPERATION_COMMENT_MARKER, payload))
+
+
+def encode_index_comment(pending: dict[str, dict[object, object]]) -> str:
+    scopes = {
+        str(key): _public_scope(value)
+        for key, value in pending["scopes"].items()
+        if isinstance(value, dict)
+    }
+    if len(scopes) != len(pending["scopes"]):
+        raise ValueError("operation scope is invalid")
+    grants: dict[str, bool] = {}
+    for key, value in pending["grants"].items():
+        if (
+            not isinstance(key, str)
+            or _GRANT.fullmatch(key) is None
+            or value is not True
+        ):
+            raise ValueError("operation grant is invalid")
+        grants[key] = True
+    payload = {
+        "events": sorted(
+            _event_key_text((str(key[0]), str(key[1]))) for key in pending["events"]
+        ),
+        "grants": grants,
+        "kind": "index",
+        "scopes": scopes,
+    }
+    return bounded_comment(render_marked_comment(OPERATION_COMMENT_MARKER, payload))
+
+
+def _require_readback(echoed: OperationComment, body: str, app_user_id: int) -> None:
+    if comment_payload(echoed.body) != comment_payload(body):
+        raise ValueError("operation comment readback failed")
+    if echoed.user_id != app_user_id or echoed.user_type != "Bot":
+        raise ValueError("operation comment author mismatch")
+
+
+def _loads(payload: str) -> object:
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError("operation comment is invalid") from exc
+
+
+def _event_key_text(key: tuple[str, str]) -> str:
+    scope, event = key
+    _text(scope, _HEX64, "scope digest")
+    _text(event, _HEX64, "event id")
+    return f"{scope}\t{event}"
+
+
+def _parse_event_key(value: object) -> tuple[str, str]:
+    if not isinstance(value, str):
+        raise ValueError("operation record key is invalid")
+    scope, separator, event = value.partition("\t")
+    if not separator:
+        raise ValueError("operation record key is invalid")
+    return (_text(scope, _HEX64, "scope digest"), _text(event, _HEX64, "event id"))
+
+
+def _event_slice(
+    store: dict[str, dict[object, object]], key: tuple[str, str]
+) -> tuple[object, tuple[tuple[object, object], ...]]:
+    event = store["events"].get(key)
+    transitions = tuple(
+        sorted(
+            (
+                (item_key, item)
+                for item_key, item in store["transitions"].items()
+                if isinstance(item_key, tuple)
+                and len(item_key) == 3
+                and (item_key[0], item_key[1]) == key
+            ),
+            key=lambda item: str(item[0]),
+        )
+    )
+    return event, transitions
+
+
+def _public_event(event: dict[str, object]) -> dict[str, object]:
+    if not _EVENT_REQUIRED <= set(event) <= _EVENT_FIELDS:
+        raise ValueError("operation record field is not allowed")
+    exported: dict[str, object] = {
+        "accepted": _public_packet(event["accepted"]),
+        "ack_attempted": _flag(event["ack_attempted"]),
+        "binding": _text(event["binding"], _HEX64, "binding"),
+        "calls": _whole(event["calls"], TOTAL_DISPATCH_LIMIT, "calls"),
+        "control_deadline_ms": _stamp(event["control_deadline_ms"]),
+        "created_at_ms": _stamp(event["created_at_ms"]),
+        "event_id": _text(event["event_id"], _HEX64, "event id"),
+        "expired_observed": _flag(event["expired_observed"]),
+        "inference_blocked": _flag(event["inference_blocked"]),
+        "observed_at_ms": _stamp(event["observed_at_ms"]),
+        "operation_id": _text(event["operation_id"], _HEX64, "operation id"),
+        "provider_charged": _flag(event["provider_charged"]),
+        "provider_unknown": _flag(event["provider_unknown"]),
+        "quarantine": _flag(event["quarantine"]),
+        "root_generation": _whole(
+            event["root_generation"], _MAX_GENERATION, "root generation"
+        ),
+        "root_sha": _text(event["root_sha"], _HEX64, "root sha"),
+        "scope_digest": _text(event["scope_digest"], _HEX64, "scope digest"),
+        "sequence": _whole(event["sequence"], MAX_TRANSITIONS_PER_EVENT, "sequence"),
+    }
+    if "trigger" in event:
+        trigger = event["trigger"]
+        if not isinstance(trigger, str) or trigger not in REVIEW_TRIGGERS:
+            raise ValueError("operation record field is not allowed")
+        exported["trigger"] = trigger
     return exported
 
 
-def _export_value(value: object) -> object:
-    if isinstance(value, AcceptedPacket):
-        return {
-            "kind": "accepted-packet",
-            "decisions_digest": value.decisions_digest,
-            "known_output_bytes": value.known_output_bytes,
-            "payload_digest": value.payload_digest,
-            "request_digest": value.request_digest,
-            "obligation_ids": list(value.obligation_ids),
-        }
-    if isinstance(value, tuple):
-        return {"kind": "tuple", "items": [_export_value(item) for item in value]}
-    if isinstance(value, dict):
-        return {str(key): _export_value(item) for key, item in value.items()}
-    return value
+def _public_packet(value: object) -> object:
+    if value is None:
+        return None
+    if not isinstance(value, AcceptedPacket):
+        raise ValueError("operation record field is not allowed")
+    return {
+        "decisions_digest": value.decisions_digest,
+        "kind": "accepted-packet",
+        "known_output_bytes": value.known_output_bytes,
+        "obligation_ids": list(value.obligation_ids),
+        "payload_digest": value.payload_digest,
+        "request_digest": value.request_digest,
+    }
 
 
-def _import_store(payload: object) -> dict[str, dict[object, object]]:
-    if not isinstance(payload, dict):
+def _public_transition(value: dict[str, object]) -> dict[str, object]:
+    if set(value) != _TRANSITION_FIELDS:
+        raise ValueError("operation record field is not allowed")
+    state = value["state"]
+    if not isinstance(state, str) or state not in _TRANSITION_STATES:
+        raise ValueError("operation transition is invalid")
+    encoded = value["encoded"]
+    if not isinstance(encoded, str) or _PLAN_KEY.fullmatch(encoded) is None:
+        raise ValueError("operation transition is invalid")
+    return {
+        "attempt_id": _text(value["attempt_id"], _HEX64, "attempt id"),
+        "dispatch_digest": _text(value["dispatch_digest"], _HEX64, "dispatch digest"),
+        "encoded": encoded,
+        "event_id": _text(value["event_id"], _HEX64, "event id"),
+        "fence": _whole(value["fence"], MAX_FENCE_DISPATCHES, "fence dispatches"),
+        "obligation_ids": list(_obligations(value["obligation_ids"])),
+        "ordinary": _whole(
+            value["ordinary"], ORDINARY_DISPATCH_LIMIT, "ordinary dispatches"
+        ),
+        "prior_root_generation": _whole(
+            value["prior_root_generation"], _MAX_GENERATION, "prior root generation"
+        ),
+        "prior_root_sha": _text(value["prior_root_sha"], _HEX64, "prior root"),
+        "request_digest": _text(value["request_digest"], _HEX64, "request digest"),
+        "scope_digest": _text(value["scope_digest"], _HEX64, "scope digest"),
+        "sequence": _whole(value["sequence"], MAX_TRANSITIONS_PER_EVENT, "sequence"),
+        "state": state,
+        "target_root_generation": _whole(
+            value["target_root_generation"], _MAX_GENERATION, "target root generation"
+        ),
+        "target_root_sha": _text(value["target_root_sha"], _HEX64, "target root"),
+    }
+
+
+def _public_scope(value: dict[str, object]) -> dict[str, object]:
+    if set(value) != {"root_sha", "root_generation"}:
+        raise ValueError("operation record field is not allowed")
+    return {
+        "root_generation": _whole(
+            value["root_generation"], _MAX_GENERATION, "root generation"
+        ),
+        "root_sha": _text(value["root_sha"], _HEX64, "root sha"),
+    }
+
+
+def _decode_index(
+    payload: dict[str, object],
+) -> tuple[dict[object, object], dict[object, object], set[tuple[str, str]]]:
+    if set(payload) != {"kind", "scopes", "grants", "events"}:
+        raise ValueError("operation record field is not allowed")
+    raw_scopes = payload["scopes"]
+    raw_grants = payload["grants"]
+    raw_events = payload["events"]
+    if (
+        not isinstance(raw_scopes, dict)
+        or not isinstance(raw_grants, dict)
+        or not isinstance(raw_events, list)
+    ):
         raise ValueError("operation record is invalid")
-    widths = {"events": 2, "transitions": 3, "grants": 1, "scopes": 1}
-    imported: dict[str, dict[object, object]] = {}
-    for name, width in widths.items():
-        raw = payload.get(name)
+    scopes: dict[object, object] = {}
+    for key, value in raw_scopes.items():
+        if not isinstance(value, dict):
+            raise ValueError("operation scope is invalid")
+        scopes[_text(key, _HEX64, "scope digest")] = _public_scope(value)
+    grants: dict[object, object] = {}
+    for key, value in raw_grants.items():
+        if (
+            not isinstance(key, str)
+            or _GRANT.fullmatch(key) is None
+            or value is not True
+        ):
+            raise ValueError("operation grant is invalid")
+        grants[key] = True
+    listed: set[tuple[str, str]] = set()
+    for item in raw_events:
+        key = _parse_event_key(item)
+        if key in listed:
+            raise ValueError("ambiguous operation event")
+        listed.add(key)
+    return scopes, grants, listed
+
+
+def _decode_event(
+    payload: dict[str, object],
+) -> tuple[tuple[str, str], dict[str, object], dict[object, object]]:
+    if set(payload) != {"kind", "key", "event", "transitions"}:
+        raise ValueError("operation record field is not allowed")
+    key = _parse_event_key(payload["key"])
+    raw_event = payload["event"]
+    raw_transitions = payload["transitions"]
+    if not isinstance(raw_event, dict) or not isinstance(raw_transitions, dict):
+        raise ValueError("operation event is invalid")
+    event = _import_event(raw_event)
+    if (event["scope_digest"], event["event_id"]) != key:
+        raise ValueError("operation record key is invalid")
+    transitions: dict[object, object] = {}
+    for attempt, raw in raw_transitions.items():
         if not isinstance(raw, dict):
-            raise ValueError("operation record is invalid")
-        bucket: dict[object, object] = {}
-        for key, value in raw.items():
-            if not isinstance(key, str):
-                raise ValueError("operation record key is invalid")
-            if width == 1:
-                decoded: object = key
-            else:
-                parts = key.split("\t")
-                if len(parts) != width:
-                    raise ValueError("operation record key is invalid")
-                decoded = tuple(parts)
-            bucket[decoded] = _import_value(value)
-        imported[name] = bucket
-    return imported
+            raise ValueError("operation transition is invalid")
+        transition = _import_transition(raw)
+        if (
+            transition["attempt_id"] != attempt
+            or (
+                transition["scope_digest"],
+                transition["event_id"],
+            )
+            != key
+        ):
+            raise ValueError("operation record key is invalid")
+        transitions[(key[0], key[1], attempt)] = transition
+    return key, event, transitions
 
 
-def _import_value(value: object) -> object:
-    if isinstance(value, dict) and value.get("kind") == "accepted-packet":
-        obligations = value.get("obligation_ids")
-        return AcceptedPacket(
-            decisions_digest=str(value.get("decisions_digest")),
-            known_output_bytes=_as_int(value.get("known_output_bytes")),
-            payload_digest=str(value.get("payload_digest")),
-            request_digest=str(value.get("request_digest")),
-            obligation_ids=tuple(obligations) if isinstance(obligations, list) else (),
-        )
-    if isinstance(value, dict) and value.get("kind") == "tuple":
-        items = value.get("items")
-        if not isinstance(items, list):
-            raise ValueError("operation record is invalid")
-        return tuple(_import_value(item) for item in items)
-    if isinstance(value, dict):
-        return {str(key): _import_value(item) for key, item in value.items()}
+def _import_event(value: dict[str, object]) -> dict[str, object]:
+    exported = _public_event(
+        {
+            **value,
+            "accepted": _import_packet(value.get("accepted")),
+        }
+    )
+    event = dict(exported)
+    packet = event["accepted"]
+    event["accepted"] = _import_packet(packet)
+    return event
+
+
+def _import_packet(value: object) -> AcceptedPacket | None:
+    if value is None:
+        return None
+    if isinstance(value, AcceptedPacket):
+        return value
+    if not isinstance(value, dict) or value.get("kind") != "accepted-packet":
+        raise ValueError("operation record field is not allowed")
+    if set(value) != {
+        "kind",
+        "decisions_digest",
+        "known_output_bytes",
+        "payload_digest",
+        "request_digest",
+        "obligation_ids",
+    }:
+        raise ValueError("operation record field is not allowed")
+    obligations = value["obligation_ids"]
+    return AcceptedPacket(
+        decisions_digest=_text(value["decisions_digest"], _HEX64, "decisions digest"),
+        known_output_bytes=_whole(
+            value["known_output_bytes"], 1_048_576, "known output bytes"
+        ),
+        payload_digest=_text(value["payload_digest"], _HEX64, "payload digest"),
+        request_digest=_text(value["request_digest"], _HEX64, "request digest"),
+        obligation_ids=_obligations(tuple(obligations))
+        if isinstance(obligations, list)
+        else (),
+    )
+
+
+def _import_transition(value: dict[str, object]) -> dict[str, object]:
+    obligations = value.get("obligation_ids")
+    normalized = dict(value)
+    normalized["obligation_ids"] = (
+        tuple(obligations) if isinstance(obligations, list) else obligations
+    )
+    exported = _public_transition(normalized)
+    exported["obligation_ids"] = tuple(exported["obligation_ids"])
+    return exported
+
+
+def _flag(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError("invalid flag")
     return value
+
+
+def _stamp(value: object) -> int:
+    number = _as_int(value)
+    if not 0 <= number <= _STAMP_MAX:
+        raise ValueError("invalid timestamp")
+    return number
