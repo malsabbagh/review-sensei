@@ -422,3 +422,9 @@ Absent a hook, the legacy adapter debit remains. A hook with a fresh budget or
 unreviewed wrapper refuses before verification. This does not account for
 Worker-internal requests by assumption: production acquisition/internal-call
 composition and its previously measured12/11 cost remain a release gate.
+
+The selected parser additionally carries the one-line integer trigger-ID
+strictness correction from coordinator
+`22dbfc481ee8cd7de69c549295ff7c59d0970f95`; broker_client remains byte-identical
+to0d8bfab. A fractional trigger ID that compares equal to an integer cannot
+reach authority issuance. No other coordinator parity files are imported.

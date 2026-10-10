@@ -103,6 +103,7 @@ def _parse_feedback_attestation(
         _refuse()
     _hash(selection["base_sha"], 40)
     trigger = _object(selection["trigger"], {"kind", "comment_id", "updated_at"})
+    _integer(trigger["comment_id"])
     if (
         trigger["kind"] not in {"issue", "inline"}
         or trigger["comment_id"] != data["source_comment_id"]

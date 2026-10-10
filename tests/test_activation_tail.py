@@ -691,6 +691,19 @@ class HostedTailTests(unittest.TestCase):
                     current,
                 )
 
+    def test_v2_fractional_trigger_identity_refuses_before_authority_issue(self):
+        from review_sensei.hosting.github.errors import GitHubBrokerClientError
+
+        state, broker, ledger = self.setup_host(feedback=True, callback=True)
+        broker.request["feedback"]["trigger"]["comment_id"] = 123.0
+        calls = len(broker.calls)
+        with self.assertRaises(GitHubBrokerClientError):
+            broker.issue(ledger.evidence_budget)
+        self.assertEqual(len(broker.calls), calls)
+        self.assertEqual(
+            state.ledger().load(fixture.IDENTITY, now=fixture.NOW).record.generation, 0
+        )
+
     def test_broker_hook_requires_same_original_budget_not_a_new_allowance(self):
         state, broker, ledger = self.setup_host(callback=True)
         broker.client.before_request = EvidenceReadBudget().consume
