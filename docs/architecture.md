@@ -287,7 +287,9 @@ same validated result.
   summary, using the same effective merge-impact classification as approval. A
   wholly legacy result is rendered unchanged.
 - Classification labels are bounded printable provider text, and GitHub
-  publication validates the formatted summary against `max_summary_bytes`,
+  publication validates the input overview against `max_summary_bytes` and
+  budgets formatted review text with the overview allowance plus admitted
+  finding prose, capped by the host-body ceiling. It validates
   each formatted inline body against `max_comment_body_bytes`, and the
   complete framed review body against its 65,536-byte transport ceiling before
   posting.
@@ -967,3 +969,20 @@ held reservation to its OIDC run. `@reviewsensei review continue` requires live 
 completion evidence before reclaiming analysis, including a constrained origin
 proof for older PR-triggered runs. Recovery preserves session budgets and saved
 publication work; cooperating command/review jobs serialize the comment write.
+
+Complete review evidence now uses the lossless inline contract proposed in
+[ADR 0072](adr/0072-lossless-inline-review-evidence.md). Small baseline and human
+inventories retain their legacy JSON shape; larger inventories share a bounded
+canonical JSON/zlib/base64 reader. The existing authenticated ledger atomically
+binds the full baseline and preserves its lifecycle reserve. Human eligibility
+version 3 stores immutable full prose separately from the mutable resolution
+list and reserves room for every possible resolution. Whole inventories are
+independent of provider batches. Capacity failure carries an exact-result-bound
+`persistence_status` and `baseline_capacity_exceeded` outcome; it withholds
+approval while reporting analysis coverage accurately. All shared readers must
+be upgraded before richer writes; rollback readers fail closed on those records.
+Representative capacity and retained-state measurements are recorded in the
+ADR: fifty varied findings fit the baseline and resolution-growth contracts;
+larger or more verbose inventories can still exceed inline bounds. Full finding
+text is budgeted separately from the input overview, while the framed review
+body remains bounded to 65,536 bytes.

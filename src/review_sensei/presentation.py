@@ -684,7 +684,11 @@ def render_review_text(result: ReviewResult) -> str:
 
     groups = _finding_groups(result)
     lines = [
-        f"ReviewSensei review: {result.review_status}",
+        (
+            "ReviewSensei analysis: complete; baseline persistence: capacity exceeded; approval: withheld"
+            if result.persistence_status == "capacity-exceeded"
+            else f"ReviewSensei review: {result.review_status}"
+        ),
         f"provider: {escape_terminal_text(result.provider)}",
     ]
     if result.model:
@@ -724,6 +728,11 @@ def render_review_markdown(result: ReviewResult) -> str:
     """
 
     parts = [escape_markdown_text(result.summary)]
+    if result.persistence_status == "capacity-exceeded":
+        parts[:0] = [
+            "Analysis complete; baseline persistence exceeded capacity; approval withheld.",
+            "",
+        ]
     for title, group in _finding_groups(result):
         if not group:
             continue

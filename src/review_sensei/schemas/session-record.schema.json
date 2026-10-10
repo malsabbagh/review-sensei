@@ -149,53 +149,86 @@
       "properties": {
         "state": {"enum": ["completed", "invalidated", "recovery-required"]},
         "baseline": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["cache_key", "policy_digest", "complete", "coverage_complete", "generation", "findings", "reviewed_paths", "related_paths"],
-          "properties": {
-            "cache_key": {
+          "oneOf": [
+            {
               "type": "object",
               "additionalProperties": false,
-              "required": ["repository", "pull_request", "base_sha", "head_sha", "engine", "model", "profile", "stage_digest", "context_digest", "learning_digest"],
+              "required": ["cache_key", "policy_digest", "complete", "coverage_complete", "generation", "findings", "reviewed_paths", "related_paths"],
               "properties": {
-                "repository": {"type": "string", "maxLength": 256},
-                "pull_request": {"type": "integer", "minimum": 1},
-                "base_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
-                "head_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
-                "engine": {"type": "string", "maxLength": 256},
-                "model": {"type": "string", "maxLength": 256},
-                "profile": {"type": "string", "maxLength": 256},
-                "stage_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-                "context_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-                "learning_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+                "cache_key": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["repository", "pull_request", "base_sha", "head_sha", "engine", "model", "profile", "stage_digest", "context_digest", "learning_digest"],
+                  "properties": {
+                    "repository": {"type": "string", "maxLength": 256},
+                    "pull_request": {"type": "integer", "minimum": 1},
+                    "base_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+                    "head_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+                    "engine": {"type": "string", "maxLength": 256},
+                    "model": {"type": "string", "maxLength": 256},
+                    "profile": {"type": "string", "maxLength": 256},
+                    "stage_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                    "context_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                    "learning_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+                  }
+                },
+                "policy_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                "complete": {"type": "boolean"},
+                "coverage_complete": {"type": "boolean"},
+                "generation": {"type": "integer", "minimum": 0},
+                "findings": {
+                  "type": "array",
+                  "maxItems": 3,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["fingerprint", "resolution_criterion", "concern", "path", "symbol", "defect_kind", "generation", "blocking"],
+                    "properties": {
+                      "fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                      "resolution_criterion": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                      "concern": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+                      "path": {"type": ["string", "null"], "maxLength": 256},
+                      "symbol": {"type": ["string", "null"], "maxLength": 256},
+                      "defect_kind": {"type": "string", "maxLength": 128},
+                      "generation": {"type": "integer", "minimum": 0},
+                      "blocking": {"type": "boolean"}
+                    }
+                  }
+                },
+                "reviewed_paths": {"type": "array", "maxItems": 512, "items": {"type": "string", "maxLength": 256}},
+                "related_paths": {"type": "array", "maxItems": 64, "items": {"type": "string", "maxLength": 256}}
               }
             },
-            "policy_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-            "complete": {"type": "boolean"},
-            "coverage_complete": {"type": "boolean"},
-            "generation": {"type": "integer", "minimum": 0},
-            "findings": {
-              "type": "array",
-              "maxItems": 3,
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["fingerprint", "resolution_criterion", "concern", "path", "symbol", "defect_kind", "generation", "blocking"],
-                "properties": {
-                  "fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-                  "resolution_criterion": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-                  "concern": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
-                  "path": {"type": ["string", "null"], "maxLength": 256},
-                  "symbol": {"type": ["string", "null"], "maxLength": 256},
-                  "defect_kind": {"type": "string", "maxLength": 128},
-                  "generation": {"type": "integer", "minimum": 0},
-                  "blocking": {"type": "boolean"}
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "encoding",
+                "decoded_bytes",
+                "sha256",
+                "data"
+              ],
+              "properties": {
+                "encoding": {
+                  "const": "zlib-json-v1"
+                },
+                "decoded_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 2097152
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "data": {
+                  "type": "string",
+                  "maxLength": 11264,
+                  "pattern": "^[A-Za-z0-9+/]*={0,2}$"
                 }
               }
-            },
-            "reviewed_paths": {"type": "array", "maxItems": 512, "items": {"type": "string", "maxLength": 256}},
-            "related_paths": {"type": "array", "maxItems": 64, "items": {"type": "string", "maxLength": 256}}
-          }
+            }
+          ]
         },
         "progress": {
           "type": "array",

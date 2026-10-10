@@ -18,7 +18,6 @@ from review_sensei.baseline import (
 )
 from review_sensei.cli import main
 from review_sensei.convergence import ReviewConvergencePolicy
-from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github.approval import (
     approval_facts_from_result,
     evaluate_approval_facts,
@@ -28,7 +27,6 @@ from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.outcomes import ResourceBudget
 from review_sensei.planning import MAX_RELATED_PATHS, related_paths_for_change
 from review_sensei.providers.base import ProviderResponse
-from review_sensei.schemas import validate_public_document
 from review_sensei.service import DEFAULT_STAGES
 from review_sensei.session import (
     LocalSessionLedger,
@@ -356,10 +354,22 @@ class BaselineRecoveryTests(unittest.TestCase):
         self,
     ):
         before = self.seed_overflow(long_paths=True)
-        code, stderr, outcome = self.run_cli(head="d")
+        # Inject the allocator's capacity seam because this otherwise valid
+        # compact fixture now fits. Real high-entropy overflow is separately
+        # covered by test_evidence_capacity; this proves CLI cleanup/status.
+        with patch(
+            "review_sensei.session.checkpoint_baseline_capacity", return_value=128
+        ):
+            code, stderr, outcome = self.run_cli(head="d")
         self.assertEqual(code, 0, stderr)
         self.assertEqual(outcome["status"], "partial")
+        self.assertEqual(outcome["diagnostic"], "baseline_capacity_exceeded")
+        result = ReviewResult.from_dict(
+            json.loads((self.root / "result.json").read_text())
+        )
+        self.assertEqual(result.persistence_status, "capacity-exceeded")
         self.assertIn('"encoded-bytes"', stderr)
+        self.assertNotIn('"decoded-bytes"', stderr)
         self.assertEqual(self.provider.calls, 2)
         self.assertEqual(self.record().convergence_history, before.convergence_history)
         self.assertEqual(self.record().failed_attempts, 1)
@@ -386,67 +396,36 @@ class BaselineRecoveryTests(unittest.TestCase):
             str(self.root / "checkpoint-diagnostics.json"),
         )
 
-    def test_three_findings_preserve_complete_inventory_withhold_approval(self):
-        self.provider.comments = self.oversized_comments()
+    def test_twelve_findings_establish_complete_baseline_without_rerunning_on_replay(
+        self,
+    ):
+        self.provider.comments = self.oversized_comments() * 4
+        # Use distinct stable defect identities, as ordinary reviews do.
+        for i, comment in enumerate(self.provider.comments):
+            self.provider.comments[i] = {
+                **comment,
+                "defect_kind": f"distinct-defect-{i}",
+                "body": f"Unique concern {i}: preserve this evidence.",
+            }
         code, stderr, outcome = self.run_cli(extra=self.checkpoint_outputs())
         self.assertEqual(code, 0, stderr)
-        self.assertEqual(outcome["status"], "partial")
+        self.assertEqual(outcome["status"], "reviewed")
         result = ReviewResult.from_dict(
             json.loads((self.root / "result.json").read_text())
         )
-        self.assertEqual(result.review_status, "partial")
-        self.assertEqual(len(result.comments), 3)
-        self.assertEqual(
-            [item.body for item in result.comments],
-            [item["body"] for item in self.provider.comments],
-        )
-        decision = evaluate_approval_facts(
-            replace(
-                approval_facts_from_result(result, enabled=True, app_authored=False),
-                has_open_review_threads=False,
-                has_blocking_findings=False,
-                has_human_adjudication_findings=False,
-            )
-        )
-        self.assertFalse(decision.approved)
-        self.assertEqual(decision.blockers, ("review-partial",))
-        evidence = json.loads((self.root / "checkpoint-evidence.json").read_text())
-        validate_public_document(evidence, "checkpoint-evidence")
-        self.assertFalse(evidence["publishable"])
-        self.assertEqual(evidence["result"]["review_status"], "complete")
-        self.assertEqual(len(evidence["result"]["comments"]), 3)
-        self.assertNotIn("transaction", evidence["result"])
-        # Diagnostic evidence retains the original complete analysis; only the
-        # post-fallback partial result is bound to the durable transaction.
-        self.assertNotEqual(
-            ReviewResult.from_dict(evidence["result"]).content_digest(),
-            result.content_digest(),
-        )
-        with self.assertRaises(ReviewInputError):
-            ReviewResult.from_dict(evidence)
-        diagnostics = json.loads(
-            (self.root / "checkpoint-diagnostics.json").read_text()
-        )
-        self.assertEqual(diagnostics["reasons"], ["finding-count"])
-        self.assertEqual(diagnostics["finding_count"], 3)
-        self.assertEqual(diagnostics["finding_limit"], 2)
-        self.assertLessEqual(diagnostics["available_bytes"], 11264)
-        self.assertNotIn("app.py", json.dumps(diagnostics))
-        record = self.record()
-        self.assertEqual(record.failed_attempts, 1)
-        self.assertEqual(record.completed_initial_reviews, 0)
-        self.assertIsNone(record.reservation_id)
-        self.assertIsNone(record.convergence_history)
-        self.assertEqual(record.transaction.result_sha256, result.content_digest())
-        completed = complete_review_publication(
+        self.assertEqual(result.review_status, "complete")
+        self.assertEqual(len(result.comments), 12)
+        self.assertEqual(len(self.baseline().findings), 12)
+        self.assertEqual(self.record().failed_attempts, 0)
+        self.assertEqual(self.record().completed_initial_reviews, 1)
+        self.assertIsNone(self.record().reservation_id)
+        complete_review_publication(
             self.ledger, self.identity, result.transaction, published=True
         )
-        self.assertEqual(completed.failed_attempts, 1)
-        self.assertEqual(completed.completed_initial_reviews, 0)
-        code, stderr, outcome = self.run_cli()
+        calls = self.provider.calls
+        code, stderr, _ = self.run_cli()
         self.assertEqual(code, 0, stderr)
-        self.assertEqual(outcome["status"], "skipped_policy")
-        self.assertEqual(self.record().failed_attempts, 1)
+        self.assertEqual(self.provider.calls, calls)
 
     def test_checkpoint_io_failure_retains_full_evidence_and_cleans_reservation(self):
         self.provider.comments = self.oversized_comments()
@@ -478,9 +457,12 @@ class BaselineRecoveryTests(unittest.TestCase):
 
     def test_overflow_diagnostics_do_not_opt_into_content_retention(self):
         self.provider.comments = self.oversized_comments()
-        code, stderr, _ = self.run_cli()
+        with patch(
+            "review_sensei.session.checkpoint_baseline_capacity", return_value=128
+        ):
+            code, stderr, _ = self.run_cli()
         self.assertEqual(code, 0, stderr)
-        self.assertIn('"finding_limit": 2', stderr)
+        self.assertIn('"finding_limit": 512', stderr)
         self.assertNotIn("app.py", stderr)
         self.assertNotIn("preserve this evidence", stderr)
         self.assertFalse((self.root / "checkpoint-evidence.json").exists())

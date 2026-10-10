@@ -188,7 +188,9 @@ class HumanAssessmentPublisher:
             )
         # Pending inventory paths are authoritative; historical inline hunks
         # and unrelated file order must not consume their evidence budget.
-        if work_budgets is not None and work_budgets.mode == "unified":
+        if (
+            work_budgets is not None and work_budgets.mode == "unified"
+        ) or eligibility.human_review.requires_batched_reassessment:
             bundle = self.conversation.load_review_evidence(
                 token=token,
                 repository=repository,

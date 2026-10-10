@@ -7,7 +7,7 @@ from pathlib import Path
 from review_sensei.baseline import (
     FINDING_CLASSIFICATIONS,
     LINEAGE_REASONS,
-    MAX_HISTORY_READ_FINDINGS,
+    MAX_LEGACY_HISTORY_READ_FINDINGS,
 )
 from review_sensei.context import MAX_CACHE_METADATA_ITEMS
 from review_sensei.convergence import ATTRIBUTIONS, LATE_REASONS
@@ -162,8 +162,8 @@ class PublicSchemaTests(unittest.TestCase):
         self.assertEqual(
             session_schema["properties"]["convergence_history"]["properties"][
                 "baseline"
-            ]["properties"]["findings"]["maxItems"],
-            MAX_HISTORY_READ_FINDINGS,
+            ]["oneOf"][0]["properties"]["findings"]["maxItems"],
+            MAX_LEGACY_HISTORY_READ_FINDINGS,
         )
 
     def test_later_finding_schema_enums_match_runtime_contract(self) -> None:
@@ -340,10 +340,12 @@ class PublicSchemaTests(unittest.TestCase):
         )
         baseline = schema["properties"]["convergence_history"]["properties"][
             "baseline"
-        ]["properties"]
+        ]["oneOf"][0]["properties"]
         # A Python-written envelope must never exceed these caps, or the record
         # fails schema validation on its next read.
-        self.assertEqual(baseline["findings"]["maxItems"], MAX_HISTORY_READ_FINDINGS)
+        self.assertEqual(
+            baseline["findings"]["maxItems"], MAX_LEGACY_HISTORY_READ_FINDINGS
+        )
         self.assertEqual(
             baseline["reviewed_paths"]["maxItems"], MAX_CACHE_METADATA_ITEMS
         )

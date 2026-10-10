@@ -484,6 +484,41 @@ class AssessingProvider:
 
 
 class UnifiedAdaptersTests(unittest.TestCase):
+    def test_twenty_five_obligations_reassess_across_batches_without_losing_inventory(
+        self,
+    ):
+        pending, bundle = self.fixture((100,))
+        pending = PendingHumanReview(
+            pending.base_sha,
+            tuple(
+                replace(
+                    pending.findings[0],
+                    fingerprint=f"{i:064x}",
+                    body=f"Distinct concern {i}: " + "x" * 2500,
+                )
+                for i in range(25)
+            ),
+        )
+        provider = AssessingProvider()
+        run = reassess(
+            provider=provider,
+            pending=pending,
+            bundle=bundle,
+            source_body=HUMAN,
+            authority_digest="f" * 64,
+            work_budgets=ReviewWorkBudgets(mode="unified"),
+        )
+        self.assertGreaterEqual(len(provider.calls), 2)
+        self.assertEqual(len(run.reply.decisions), 25)
+        self.assertFalse(pending.apply(run.reply.decisions).pending)
+        validate_work(
+            run,
+            pending=pending,
+            bundle=bundle,
+            source_body=HUMAN,
+            authority_digest="f" * 64,
+        )
+
     def test_citation_failure_has_no_semantic_correction_retry(self):
         pending, bundle = self.fixture((100,))
 
@@ -553,6 +588,164 @@ class UnifiedAdaptersTests(unittest.TestCase):
         self.assertEqual(run.reply.decisions[0].fingerprint, finding.fingerprint)
         self.assertEqual(len(run.execution.completed[0].batch.records), 2)
         self.assertEqual(len(run.reply.decisions[0].related_diff_evidence), 1)
+
+    def test_one_finding_admits_five_and_eight_complete_required_files(self):
+        for count in (5, 8):
+            with self.subTest(required_files=count):
+                pending, bundle = self.fixture((100,) * count)
+                finding = replace(
+                    pending.findings[0],
+                    required_paths=tuple(record.path for record in bundle.records),
+                )
+                pending = PendingHumanReview(pending.base_sha, (finding,))
+                provider = AssessingProvider()
+                run = reassess(
+                    provider=provider,
+                    pending=pending,
+                    bundle=bundle,
+                    source_body=HUMAN,
+                    authority_digest="f" * 64,
+                    work_budgets=ReviewWorkBudgets(mode="unified"),
+                )
+                self.assertEqual(len(provider.calls), 1)
+                self.assertFalse(run.execution.pending)
+                self.assertFalse(pending.apply(run.reply.decisions).pending)
+                self.assertEqual(
+                    run.execution.completed[0].batch.records, bundle.records
+                )
+                self.assertEqual(
+                    len(run.reply.decisions[0].related_diff_evidence), count - 1
+                )
+
+    def test_two_findings_share_eight_complete_files_in_one_batch(self):
+        pending, bundle = self.fixture((100,) * 8)
+        paths = tuple(record.path for record in bundle.records)
+        pending = PendingHumanReview(
+            pending.base_sha,
+            tuple(replace(item, required_paths=paths) for item in pending.findings[:2]),
+        )
+        provider = AssessingProvider()
+        run = reassess(
+            provider=provider,
+            pending=pending,
+            bundle=bundle,
+            source_body=HUMAN,
+            authority_digest="f" * 64,
+            work_budgets=ReviewWorkBudgets(mode="unified"),
+        )
+        self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(len(run.reply.decisions), 2)
+        self.assertFalse(pending.apply(run.reply.decisions).pending)
+        self.assertEqual(run.execution.completed[0].batch.records, bundle.records)
+        self.assertTrue(
+            all(len(item.related_diff_evidence) == 7 for item in run.reply.decisions)
+        )
+
+    def test_cross_file_groups_remain_pending_on_actual_diff_or_prompt_overflow(self):
+        for limit in ("diff", "prompt"):
+            with self.subTest(limit=limit):
+                size = 100 if limit == "diff" else 8000
+                pending, bundle = self.fixture((size,) * 8)
+                finding = replace(
+                    pending.findings[0],
+                    required_paths=tuple(record.path for record in bundle.records),
+                )
+                pending = PendingHumanReview(pending.base_sha, (finding,))
+                work_budgets = ReviewWorkBudgets(
+                    mode="unified", batch_diff_bytes=512 if limit == "diff" else 131072
+                )
+                diff_bytes = len(
+                    "\n".join(
+                        f"path={record.path}\n{record.patch}"
+                        for record in bundle.records
+                    ).encode("utf-8")
+                )
+                if limit == "diff":
+                    self.assertGreater(diff_bytes, work_budgets.batch_diff_bytes)
+                    self.assertLess(diff_bytes, 48 * 1024)
+                else:
+                    self.assertGreater(diff_bytes, 48 * 1024)
+                    self.assertLess(diff_bytes, work_budgets.batch_diff_bytes)
+                self.assertTrue(all(record.complete for record in bundle.records))
+                provider = AssessingProvider()
+                run = reassess(
+                    provider=provider,
+                    pending=pending,
+                    bundle=bundle,
+                    source_body=HUMAN,
+                    authority_digest="f" * 64,
+                    work_budgets=work_budgets,
+                )
+                self.assertFalse(provider.calls)
+                self.assertFalse(run.execution.completed)
+                self.assertEqual(
+                    run.execution.pending,
+                    ((finding.fingerprint, "required-evidence-oversized"),),
+                )
+                self.assertEqual(pending.apply(run.reply.decisions), pending)
+
+    def test_shared_cross_file_batches_have_stable_coverage_and_keep_call_limit(self):
+        pending, bundle = self.fixture((100,) * 8)
+        paths = tuple(record.path for record in bundle.records)
+        findings = tuple(
+            replace(item, required_paths=paths) for item in pending.findings[:7]
+        )
+        for calls in (1, 2):
+            with self.subTest(max_provider_calls=calls):
+                plans = []
+                for ordered in (findings, tuple(reversed(findings))):
+                    inventory = PendingHumanReview(pending.base_sha, ordered)
+                    provider = AssessingProvider()
+                    run = reassess(
+                        provider=provider,
+                        pending=inventory,
+                        bundle=bundle,
+                        source_body=HUMAN,
+                        authority_digest="f" * 64,
+                        work_budgets=ReviewWorkBudgets(mode="unified"),
+                        tracker=ResourceBudgetTracker(
+                            ResourceBudget.create(max_provider_calls=calls)
+                        ),
+                    )
+                    plans.append(run.execution.plan)
+                    self.assertEqual(len(provider.calls), calls)
+                    self.assertEqual(
+                        [
+                            len(item.batch.requirements)
+                            for item in run.execution.completed
+                        ],
+                        [4] if calls == 1 else [4, 3],
+                    )
+                    self.assertTrue(
+                        all(
+                            item.batch.records == bundle.records
+                            for item in run.execution.completed
+                        )
+                    )
+                    addressed = {item.fingerprint for item in run.reply.decisions}
+                    retained = set(run.execution.pending_ids)
+                    expected = {item.fingerprint for item in findings}
+                    self.assertFalse(addressed & retained)
+                    self.assertEqual(addressed | retained, expected)
+                    self.assertEqual(len(addressed), 4 if calls == 1 else 7)
+                    self.assertEqual(
+                        {
+                            item.fingerprint
+                            for item in inventory.apply(run.reply.decisions).pending
+                        },
+                        retained,
+                    )
+                    self.assertTrue(
+                        all(
+                            reason == "provider-call-budget"
+                            for _, reason in run.execution.pending
+                        )
+                    )
+                self.assertEqual(plans[0].plan_id, plans[1].plan_id)
+                self.assertEqual(
+                    [batch.batch_id for batch in plans[0].batches],
+                    [batch.batch_id for batch in plans[1].batches],
+                )
 
     def test_cross_file_citations_and_all_complete_files_are_mandatory(self):
         for missing in ("patch", "citation"):
