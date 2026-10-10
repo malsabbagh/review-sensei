@@ -148,6 +148,25 @@ and actual manifest allocation refusal. No activation root is written.
 
 ## Remaining qualification
 
+The discrete reader amendment implements the conditionally reviewed v4 proposal:
+complete result-bound inventory and visible receipt envelopes, exact independently
+authenticated PartitionedEligibilityContext, actual owned numeric root/App
+identity, closed manifests, original shared budget and mandatory complete fresh
+COMMENT readback. Legacy readers and raw schema-3 stage seams remain unchanged.
+Total framed root/all-resolution/future allocation is <=32 KiB and actual caller
+allocation, including maximum activation counter width. Synthetic detail-3
+100/250 v4 profiles use 22/46 dispatches before four fences, three/six inventory
+parts plus one visible receipt part, and 12,441/26,533 all-resolved marker bytes
+before outer framing/lifecycle reserves. Reader parsing is positive; finalization
+of v4 objects explicitly withholds until the remaining activation gates pass.
+
+Finalizer review scans use existing adaptive 100/50/25/5/1 pagination at the same
+offset with 64/60 maximum and original caller budget. Twenty synthetic legal
+33,774-byte roots now load in eight reads. Exact EOF and late malformed/newer
+owned authority remain fail-closed; 1,000-item, one-object transport and shared
+deadline/call exhaustion remain refusals. The unpublished-check exemption is
+unchanged pending separate explicit policy disposition.
+
 A's concrete immutable partition API is incorporated in the dependent prototype.
 The reviewed compact latest-root reader and coordinator call sites are still
 required for activation and complete 100/250 hosted lifecycle qualification.
