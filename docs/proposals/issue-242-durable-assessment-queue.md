@@ -480,3 +480,15 @@ checkpoint path, disabled diagnostics, wire schema, authentication, TTL and
 public queue authority remain unchanged. Tests use actual private HMAC receipts,
 changed provider/request/framing negatives, original terminal reasons and exact
 zero-call replay. Shared architecture acceptance remains coordinator-owned.
+
+### Structural profile acquisition clock
+
+The queue-only synthetic codec/retention profile uses an explicit deterministic
+acquisition clock and a fixed initial wall clock for each original control
+budget. Coverage CPU is excluded from this structural measurement; it is not a
+host elapsed-time or throughput qualification. Same-source replay retains the
+same budget object, calls and original deadline. A negative test advances that
+clock to the unchanged 60-second boundary and refuses a fresh archived receipt
+read without changing the journal, counters or deadline. Original provider
+execution accounting, changed-source refusal and seven-hour receipt expiry
+checks remain unchanged. Production time sources and limits are unchanged.
