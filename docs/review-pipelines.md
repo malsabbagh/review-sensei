@@ -1,5 +1,12 @@
 # Review pipelines, limits, lenses, and customization
 
+**Historical snapshot:** the diagrams and limit tables on this page describe
+`a598d4a`, not latest main or a deployed reader inventory. For the independent
+current-source claim matrix and Epic238 integration/release gaps, see the
+[architecture review](epic238-architecture-review.md), pinned to `7030520`.
+The PR236 proposal linked below was unmerged when inspected and later merged;
+its historical status and measurements are preserved separately.
+
 This guide describes the implementation inspected at
 [`a598d4ae47892d243ce67333bcc5c182da95637a`](https://github.com/malsabbagh/review-sensei/tree/a598d4ae47892d243ce67333bcc5c182da95637a)
 (main, package 0.6.18). Source links below pin that revision. A later branch or
@@ -46,10 +53,12 @@ and of `github.reviews`, the publication/approval policy. Historical convergence
 `legacy` and work mode `legacy` are different concepts.
 ([work budgets][budgets], [convergence policy][convergence], [configuration][config])
 
-This repository selects unified work in `.reviewsensei.yml`. Hosted jobs activate
-that choice only after the configuration reaches trusted `main`; ordinary
-customers still choose their own work mode. The [runtime rollout plan](review-runtime-rollout.md)
-binds the complete-evidence library release to the signed `v5` channel.
+Post-snapshot note: main `7030520` selects unified work in `.reviewsensei.yml`.
+Hosted jobs resolve that selection from trusted configuration; ordinary
+customers still choose their own work mode. The
+[runtime rollout plan](review-runtime-rollout.md) describes the proposed
+complete-evidence release and signed `v5` promotion. That later configuration
+does not update this page's historical diagrams or qualify installed artifacts.
 
 ```mermaid
 sequenceDiagram
@@ -393,7 +402,7 @@ Sources: [model context contracts][models], [document/source context][context],
 [GitHub context/evidence loader][controller], [REST client][http],
 [publication/thread scans][publication], [candidate verifier][verifier].
 
-### Persistence and human obligations (current main)
+### Persistence and human obligations (historical inspected main)
 
 | Boundary | Bound at inspected SHA | Why it is separate |
 | --- | --- | --- |
@@ -638,14 +647,15 @@ to existing local/private egress constraints; it does not authorize a new cloud
 provider or arbitrary model endpoint.
 ([stage template validation][stages], [stage binding][provider-config], [execution][service])
 
-## Unmerged persistence proposal
+## Historically unmerged persistence proposal
 
-[PR #236](https://github.com/malsabbagh/review-sensei/pull/236) proposes different
+[PR #236](https://github.com/malsabbagh/review-sensei/pull/236) proposed different
 persistence and publication behavior. Its [separate review snapshot](proposed-evidence-persistence.md)
 contains the proposed diagram, current-versus-proposed limits and capacity
-measurements. That snapshot is pinned to the inspected implementation commit;
-it does not describe a merged, released or deployed feature. The current-state
-pipelines and limits on this page remain pinned to main `a598d4a`.
+measurements. That snapshot preserves the proposal at its pre-merge implementation
+commit; it establishes no released or deployed qualification. The historical
+pipelines and limits on this page remain pinned to main `a598d4a`; current runtime
+differences are recorded in the independent architecture review linked above.
 
 ## Refreshing this guide
 
