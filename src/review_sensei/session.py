@@ -2894,11 +2894,24 @@ class LocalSessionLedger:
         self.evidence_budget = evidence_budget or EvidenceReadBudget()
         self.enable_partition_writes = enable_partition_writes
 
+    def _reserve_local_io(self, calls: int) -> None:
+        """Charge bounded physical work, including mandatory durable cleanup.
+
+        One durable file-write dispatch includes its mandatory sync/cleanup;
+        charges are never refunded after a fault. Metadata containment inspection
+        is one bounded dispatch;
+        enumeration and each enumerated stat are charged separately.
+        """
+        self.evidence_budget.preflight(calls)
+        for _ in range(calls):
+            self.evidence_budget.consume()
+
     @staticmethod
     def evidence_producer() -> str:
         return "local-ledger"
 
     def _part_directory(self, identity: SessionIdentity) -> Path:
+        self.evidence_budget.consume()
         root = self.root.resolve()
         directory = (
             self.root
@@ -2923,6 +2936,7 @@ class LocalSessionLedger:
             raise ReviewInputError("local partition identity is invalid")
         self.evidence_budget.consume()
         path = self._part_directory(identity) / storage_id
+        self.evidence_budget.consume()
         if path.is_symlink():
             raise ReviewInputError("local partition must not be a symlink")
         try:
@@ -2983,10 +2997,12 @@ class LocalSessionLedger:
         ):
             raise ReviewInputError("local partition binding does not match")
         directory = self._part_directory(identity)
+        self._reserve_local_io(2)  # directory creation and bounded enumeration
         directory.mkdir(parents=True, exist_ok=True)
         sizes: dict[str, int] = {}
         with os.scandir(directory) as entries:
             for entry in entries:
+                self.evidence_budget.consume()  # metadata/stat per retained entry
                 if (
                     len(sizes) >= MAX_STORED_PARTS
                     or entry.is_symlink()
@@ -3004,6 +3020,9 @@ class LocalSessionLedger:
         prospective_parts = partition_evidence(
             document, binding=binding, item_count=item_count
         )
+        # Physical local writes include durable sync/cleanup; reads include
+        # containment and object inspection. Reserve later root/fence work too.
+        self.evidence_budget.preflight(8 * len(prospective_parts) + 16)
         missing_sizes = [
             len(canonical_bytes(part))
             for part in prospective_parts
@@ -3026,7 +3045,9 @@ class LocalSessionLedger:
                     or sum(sizes.values()) + len(raw) > MAX_STORED_PART_BYTES
                 ):
                     raise ReviewInputError("partition retention capacity exceeded")
-                self.evidence_budget.consume()
+                # One durable immutable write includes temp write, mandatory
+                # sync and cleanup. Charge before any physical write.
+                self._reserve_local_io(1)
                 path = directory / storage_id
                 # Install a complete fsynced inode atomically without replacing
                 # an existing immutable object. A crash leaves only .staging
@@ -3039,6 +3060,7 @@ class LocalSessionLedger:
                     temporary.flush()
                     os.fsync(temporary.fileno())
                     temporary.close()
+                    self.evidence_budget.check()
                     try:
                         os.link(temporary.name, path)
                     except FileExistsError:
@@ -3094,6 +3116,7 @@ class LocalSessionLedger:
         never let that read or write escape the ledger.
         """
 
+        self.evidence_budget.consume()
         root = self.root.resolve()
         directory = self.root / ".enrollments"
         if directory.is_symlink():
@@ -3111,6 +3134,7 @@ class LocalSessionLedger:
         """Return the witness path after rejecting symlinks and non-files."""
 
         path = self._enrollment_directory() / self._enrollment_path(identity).name
+        self.evidence_budget.consume()
         if path.is_symlink():
             raise ReviewInputError("session enrollment witness is invalid")
         if path.exists() and not path.is_file():
@@ -3129,14 +3153,18 @@ class LocalSessionLedger:
         ).encode("ascii")
 
     def _has_enrollment_witness(self, identity: SessionIdentity) -> bool:
+        path = self._validated_enrollment_path(identity)
+        self.evidence_budget.consume()
         try:
-            raw = self._validated_enrollment_path(identity).read_bytes()
+            with path.open("rb") as handle:
+                raw = handle.read(66)
         except FileNotFoundError:
             return False
         except OSError as exc:
             raise ReviewInputError(
                 "session enrollment witness could not be read"
             ) from exc
+        self.evidence_budget.check()
         if raw != self._enrollment_witness(identity):
             raise ReviewInputError("session enrollment witness is invalid")
         return True
@@ -3170,7 +3198,16 @@ class LocalSessionLedger:
             raise ReviewInputError(
                 "only an expired or witness-only session can be re-enrolled"
             )
+        expired_document = self._read_document(self._path(identity))
+        if (
+            expired_document is not None
+            and SessionRecord.from_dict(expired_document).assessment_queue is not None
+        ):
+            raise ReviewInputError(
+                "assessment queue requires retained tombstone authority before re-enrollment"
+            )
         witness = self._validated_enrollment_path(identity)
+        self._reserve_local_io(2)  # explicit witness and root retirement
         try:
             witness.unlink()
         except FileNotFoundError:
@@ -3191,6 +3228,7 @@ class LocalSessionLedger:
 
     def _create_enrollment_witness(self, identity: SessionIdentity) -> None:
         path = self._validated_enrollment_path(identity)
+        self._reserve_local_io(1)  # durable enrollment write including sync
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with path.open("xb") as handle:
@@ -3220,13 +3258,18 @@ class LocalSessionLedger:
                 "session enrollment witness could not be written"
             ) from exc
 
-    def _read_document(self, path: Path) -> Mapping[str, object] | None:
+    def _read_document(
+        self, path: Path, *, fence: bool = False
+    ) -> Mapping[str, object] | None:
+        self.evidence_budget.consume(fence=fence)
         try:
-            raw = path.read_bytes()
+            with path.open("rb") as handle:
+                raw = handle.read(MAX_SESSION_RECORD_BYTES + 1)
         except FileNotFoundError:
             return None
         except OSError as exc:
             raise ReviewInputError("session ledger could not be read") from exc
+        self.evidence_budget.check()
         if len(raw) > MAX_SESSION_RECORD_BYTES:
             raise ReviewInputError("session record exceeds the configured size limit")
         try:
@@ -3245,6 +3288,9 @@ class LocalSessionLedger:
         exclusive: bool = False,
     ) -> None:
         path = self._path(identity)
+        # One durable temporary-write dispatch includes directory creation,
+        # file sync and unconditional cleanup. Activation is a separate fence.
+        self._reserve_local_io(1)
         path.parent.mkdir(parents=True, exist_ok=True)
         encoded = json.dumps(
             record.to_dict(), sort_keys=True, separators=(",", ":")
@@ -3267,6 +3313,9 @@ class LocalSessionLedger:
             os.fsync(handle.fileno())
             handle.close()
             handle_closed = True
+            # Deadline/count is checked again immediately before authority
+            # activation, after serialization, temp write and file sync.
+            self.evidence_budget.consume(fence=True)
             if exclusive:
                 # Link a fully fsynced temporary file into place without
                 # replacing an existing destination. This is the filesystem
@@ -3284,7 +3333,8 @@ class LocalSessionLedger:
                     os.fsync(directory_fd)
                 finally:
                     os.close(directory_fd)
-        except OSError as exc:
+            self.evidence_budget.check()
+        except (OSError, ReviewInputError) as exc:
             if not handle_closed:
                 try:
                     handle.close()
@@ -3299,6 +3349,8 @@ class LocalSessionLedger:
                 raise ReviewInputError(
                     "session already exists (concurrent initialization)"
                 ) from exc
+            if isinstance(exc, ReviewInputError):
+                raise
             if installed:
                 raise ReviewInputError(
                     "session ledger replaced but directory sync failed"
@@ -3457,7 +3509,7 @@ class LocalSessionLedger:
         _validate_queue_retention(loaded.record, updated)
         read_session_baseline(self, updated)
         read_session_assessment_queue(self, updated)
-        current_document = self._read_document(self._path(identity))
+        current_document = self._read_document(self._path(identity), fence=True)
         if current_document is None:
             raise ReviewInputError("session generation conflict before activation")
         current = SessionRecord.from_dict(current_document)
@@ -3467,6 +3519,14 @@ class LocalSessionLedger:
         ):
             raise ReviewInputError("session generation conflict before activation")
         self._write(identity, updated)
+        persisted = self._read_document(self._path(identity), fence=True)
+        if (
+            persisted is None
+            or SessionRecord.from_dict(persisted).record_sha256 != updated.record_sha256
+        ):
+            raise ReviewInputError(
+                "session activation readback is ambiguous or conflicting"
+            )
         return updated
 
     # Kept as a compatibility shim for older in-process callers. New code

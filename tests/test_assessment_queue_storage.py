@@ -8,6 +8,7 @@ import copy
 import random
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -287,6 +288,15 @@ class QueueAdapterTests(unittest.TestCase):
                 checkpoint(local, count)
                 prior = local.load(fixture.IDENTITY, now=fixture.NOW).record
                 previous_capacity = checkpoint_baseline_capacity(prior)
+                # The original acquisition allowance also included enrollment,
+                # reservation and analysis. It cannot silently replenish to admit
+                # a new queue. This is a distinct initial queue admission with no
+                # persisted active operation/receipt to resume.
+                with self.assertRaises(ReviewInputError):
+                    activate(local)
+                local = LocalSessionLedger(
+                    Path(directory), enable_partition_writes=True
+                )
                 record, _ = activate(local)
                 self.assertGreater(assessment_queue_manifest_capacity(record), 0)
                 self.assertLess(checkpoint_baseline_capacity(record), previous_capacity)
@@ -396,6 +406,27 @@ class QueueAdapterTests(unittest.TestCase):
         self.assertEqual(
             state.ledger().load(fixture.IDENTITY, now=fixture.NOW).record, original
         )
+
+    def test_expired_queue_reenrollment_refuses_without_dropping_receipts(self):
+        later = fixture.NOW + timedelta(days=31)
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = LocalSessionLedger(Path(directory), enable_partition_writes=True)
+            ledger.initialize(fixture.IDENTITY, now=fixture.NOW)
+            original, _ = activate(ledger)
+            reader = LocalSessionLedger(Path(directory))
+            with self.assertRaisesRegex(ReviewInputError, "tombstone"):
+                reader.reenroll(fixture.IDENTITY, now=later)
+            self.assertEqual(
+                reader.load(fixture.IDENTITY, now=fixture.NOW).record, original
+            )
+        state = GitHubState()
+        ledger = state.ledger()
+        ledger.initialize(fixture.IDENTITY, now=fixture.NOW)
+        activate(ledger)
+        before = copy.deepcopy(state.comments)
+        with self.assertRaisesRegex(ReviewInputError, "tombstone"):
+            state.ledger().reenroll(fixture.IDENTITY, now=later)
+        self.assertEqual(state.comments, before)
 
     def test_writers_off_and_shared_original_budget_refuse_before_activation(self):
         with tempfile.TemporaryDirectory() as directory:
