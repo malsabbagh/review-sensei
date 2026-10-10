@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -399,6 +400,49 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
 
 class LinuxStandaloneReleaseBaselineTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "Linux pull policy uses Bash")
+    def test_exhausted_pull_stops_the_actual_script_before_any_container(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            directory = Path(scratch)
+            for name, body in (
+                (
+                    "docker",
+                    '#!/bin/sh\nprintf "%s\\n" "$*" >> "$PULL_RECEIPT"\necho "synthetic manifest unknown" >&2\nexit 1\n',
+                ),
+                ("sleep", "#!/bin/sh\nexit 0\n"),
+            ):
+                path = directory / name
+                path.write_text(body)
+                path.chmod(0o755)
+            receipt = directory / "calls"
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(ROOT / "scripts/build_linux_standalone_in_container.sh"),
+                    "linux-arm64-gnu",
+                ],
+                cwd=ROOT,
+                env={
+                    **os.environ,
+                    "PATH": str(directory) + os.pathsep + os.environ["PATH"],
+                    "PULL_RECEIPT": str(receipt),
+                },
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            calls = receipt.read_text().splitlines()
+            self.assertEqual(len(calls), 3)
+            self.assertTrue(
+                all(call.startswith("pull --platform linux/arm64 ") for call in calls)
+            )
+            self.assertEqual(len(set(calls)), 1)
+            self.assertEqual(result.stderr.count("synthetic manifest unknown"), 3)
+            self.assertIn(
+                "Pinned image admission failed after 3 attempts", result.stderr
+            )
+
     @unittest.skipIf(sys.platform == "win32", "Linux pull policy uses Bash")
     def test_pinned_pull_retries_are_bounded_and_keep_the_exact_identity(self):
         script = (ROOT / "scripts/build_linux_standalone_in_container.sh").read_text()
