@@ -63,6 +63,7 @@ class DurableJournal:
         self.root, self.fault = root, fault
         self.source, self.operation = source, operation
         self.now = now
+        self.mutations = []
         if not (root / "root.json").exists():
             save(
                 root / "root.json",
@@ -86,6 +87,7 @@ class DurableJournal:
             )
 
         def mutate(document, context):
+            self.mutations.append(context.reason)
             barrier(self.root, self.fault, "before-" + context.reason)
             state = load(self.root / "root.json")
             if context.root_generation != state["generation"]:
@@ -162,13 +164,29 @@ def receipt(root: Path):
 
 
 class FrozenQueueFaultTests(unittest.TestCase):
+    def test_successful_path_has_exactly_three_atomic_saves(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            work, store = run(root)
+            self.assertEqual(store.mutations, ["admission", "dispatch", "accepted"])
+            self.assertEqual(load(root / "root.json")["generation"], 3)
+            stored = receipt(root)
+            self.assertEqual(stored["response_bytes_reserved"], 0)
+            self.assertEqual(
+                stored["counters"]["response_bytes"],
+                load(root / "response.json")["bytes"],
+            )
+            self.assertEqual(len(stored["completed"]), 1)
+            self.assertEqual(len(work.reply.decisions), 1)
+            self.assertEqual(len(store.queue().resolved_ids), 1)
+
     def test_real_parent_kill_original_reservation_and_target_replay(self):
+        # Successful response accounting and normalized acceptance now activate
+        # atomically. There is no separate accounting checkpoint on this path.
         for boundary in (
             "after-admission",
             "before-dispatch",
             "after-dispatch",
-            "before-accounting",
-            "after-accounting",
             "before-accepted",
             "after-accepted",
         ):
@@ -184,19 +202,21 @@ class FrozenQueueFaultTests(unittest.TestCase):
                     if (root / "provider.json").exists()
                     else 0
                 )
-                if boundary in ("after-dispatch", "before-accounting"):
+                if boundary in ("after-dispatch", "before-accepted"):
                     self.assertEqual(before["response_bytes_reserved"], 16 * 1024)
                     self.assertEqual(before["counters"]["response_bytes"], 0)
-                if boundary in (
-                    "after-accounting",
-                    "before-accepted",
-                    "after-accepted",
-                ):
+                    self.assertFalse(before["completed"])
+                    self.assertEqual(load(root / "root.json")["generation"], 2)
+                if boundary == "before-accepted":
+                    self.assertGreater(load(root / "response.json")["bytes"], 0)
+                if boundary == "after-accepted":
                     self.assertEqual(before["response_bytes_reserved"], 0)
                     self.assertEqual(
                         before["counters"]["response_bytes"],
                         load(root / "response.json")["bytes"],
                     )
+                    self.assertEqual(len(before["completed"]), 1)
+                    self.assertEqual(load(root / "root.json")["generation"], 3)
                 work, store = run(root)
                 after = receipt(root)
                 for field in (
@@ -227,6 +247,8 @@ class FrozenQueueFaultTests(unittest.TestCase):
                     self.assertEqual(total_calls, calls_before)
                     self.assertFalse(work.reply.decisions)
                     self.assertFalse(store.queue().resolved_ids)
+                    self.assertEqual(after["response_bytes_reserved"], 16 * 1024)
+                    self.assertEqual(after["counters"]["response_bytes"], 0)
                 self.assertLessEqual(after["counters"]["provider_calls"], 1)
                 self.assertGreaterEqual(
                     after["counters"]["prompt_bytes"],
