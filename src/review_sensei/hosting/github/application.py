@@ -953,6 +953,11 @@ class GitHubApplication:
         app_slug: str,
         source_comment_id: int | None = None,
         session_attestation: Mapping[str, object] | None = None,
+        actor_permission: str | None = None,
+        finding_fingerprints: Sequence[str] | None = None,
+        media_publisher: object | None = None,
+        review_result: object | None = None,
+        request_comment_id: int | None = None,
     ):
         """Apply a maintainer command through its applicable authority boundary.
 
@@ -966,6 +971,7 @@ class GitHubApplication:
             MaintainerCommandResult,
             apply_session_command,
             authorized_maintainer,
+            authorized_override,
             parse_maintainer_command,
         )
 
@@ -1068,6 +1074,54 @@ class GitHubApplication:
                 )
         if command is None:
             raise GitHubPublicationError("maintainer command reconstruction failed")
+        if command.action == "approve-media" or command.finding_reference:
+            attested_association = association
+            if hosted_mutation and isinstance(broker_attestation, Mapping):
+                attested = broker_attestation.get("association")
+                if isinstance(attested, str):
+                    attested_association = attested
+            if not authorized_override(
+                association=attested_association, permission=actor_permission
+            ):
+                return MaintainerCommandResult(
+                    action=command.action,
+                    applied=False,
+                    operator_paused=False,
+                    summary="unauthorized",
+                )
+        if command.action == "approve-media":
+            approver = getattr(media_publisher, "approve_reviewed_media", None)
+            if (
+                not callable(approver)
+                or review_result is None
+                or not isinstance(request_comment_id, int)
+                or isinstance(source_comment_id, bool)
+                or not isinstance(source_comment_id, int)
+            ):
+                return MaintainerCommandResult(
+                    action="approve-media",
+                    applied=False,
+                    operator_paused=False,
+                    summary="media approval requires the current review result",
+                )
+            assessment = approver(
+                request_comment_id=request_comment_id,
+                source_comment_id=source_comment_id,
+                result=review_result,
+            )
+            approved = bool(
+                getattr(getattr(assessment, "approval", None), "approved", False)
+            )
+            return MaintainerCommandResult(
+                action="approve-media",
+                applied=approved,
+                operator_paused=False,
+                summary=(
+                    "media files approved for this head"
+                    if approved
+                    else "media approval withheld"
+                ),
+            )
         identity = SessionIdentity(
             repository=repository,
             pull_request=pull_request,
@@ -1139,7 +1193,12 @@ class GitHubApplication:
             raise GitHubPublicationError(
                 "hosted maintainer mutations require atomic session initialization"
             )
-        _record, result = apply_session_command(ledger, identity, command)
+        _record, result = apply_session_command(
+            ledger,
+            identity,
+            command,
+            finding_fingerprints=finding_fingerprints,
+        )
         return result
 
     def _check_capability_token(self, exchange_input: str) -> str | None:

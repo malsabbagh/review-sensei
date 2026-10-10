@@ -1,16 +1,19 @@
 """Opt-in shared host for admission, restore, acceptance, and reconciliation.
 
-Default public review, reply, reassessment, and verify paths do not call this
-module. Callers that opt in must present a server-authenticated admission
+``run_review_trigger`` is the one entry for full review, reply, reassessment,
+and verify. Callers that opt in must present a server-authenticated admission
 proof. A fresh budget, a raw snapshot, or a consumed grant cannot restore an
 operation or mint another allowance.
 
-``InMemoryOperationStore`` is a local transactional stand-in so tests can run
-without Cloudflare. Production binding to ``OriginalAttemptJournal`` is a later
-adapter. Debit and grant consumption commit or roll back together inside this
-store when the grant callback returns false. This host does not claim
-cross-store atomicity with GitHub or with a provider: a broker rollback after
-an observed external effect must not reopen dispatch.
+The public record is one App-owned GitHub issue comment of digests, counters,
+and the accepted packet. It does not hold prompts, model text, or file bytes.
+The worker authenticates the App so it can write that comment. It does not
+store the review. ``InMemoryOperationStore`` is the transactional stand-in
+inside one process. ``GitHubCommentOperationStore`` reloads that record from
+the comment. Durable Object SQL is not this store. Debit and grant consumption
+commit or roll back together inside this store when the grant callback returns
+false. This host does not claim cross-store atomicity with a provider: a
+rollback after an observed external effect must not reopen dispatch.
 
 Ordinary dispatches stay 60, total dispatches stay 64, and the control
 deadline stays 60 seconds. Nothing in this module refunds a committed charge.
@@ -21,6 +24,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import re
 import time
 from collections.abc import Callable, Iterator
@@ -65,7 +69,11 @@ def _text(value: object, pattern: re.Pattern[str], label: str) -> str:
 
 
 def _whole(value: object, maximum: int, label: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= maximum
+    ):
         raise ValueError(f"invalid {label}")
     return value
 
@@ -160,8 +168,12 @@ class TransitionPlan:
             raise ValueError("invalid dispatch liability")
         _text(self.prior_root_sha, _HEX64, "prior root")
         _text(self.target_root_sha, _HEX64, "target root")
-        prior = _whole(self.prior_root_generation, _MAX_GENERATION - 1, "prior root generation")
-        target = _whole(self.target_root_generation, _MAX_GENERATION, "target root generation")
+        prior = _whole(
+            self.prior_root_generation, _MAX_GENERATION - 1, "prior root generation"
+        )
+        target = _whole(
+            self.target_root_generation, _MAX_GENERATION, "target root generation"
+        )
         if target != prior + 1:
             raise ValueError("invalid root generation")
         _text(self.request_digest, _HEX64, "request digest")
@@ -209,7 +221,9 @@ class RootObservation:
             self.root_sha is not None or self.root_generation is not None
         ):
             raise ValueError("invalid absence")
-        if self.kind == "read" and (self.root_sha is None or self.root_generation is None):
+        if self.kind == "read" and (
+            self.root_sha is None or self.root_generation is None
+        ):
             raise ValueError("invalid root read")
         if self.kind == "write" and (
             self.root_sha is None
@@ -230,7 +244,9 @@ class Acknowledgement:
 
     def __post_init__(self) -> None:
         _text(self.marker, _HEX64, "acknowledgement marker")
-        if not isinstance(self.committed, bool) or not isinstance(self.response_lost, bool):
+        if not isinstance(self.committed, bool) or not isinstance(
+            self.response_lost, bool
+        ):
             raise ValueError("invalid acknowledgement")
         if not isinstance(self.unknown, bool):
             raise ValueError("invalid acknowledgement")
@@ -314,7 +330,9 @@ class OperationRemote(Protocol):
 
     def read_root(self) -> tuple[RootObservation, ...]: ...
 
-    def read_acknowledgement(self, packet: AcceptedPacket) -> Acknowledgement | None: ...
+    def read_acknowledgement(
+        self, packet: AcceptedPacket
+    ) -> Acknowledgement | None: ...
 
     def acknowledge(self, packet: AcceptedPacket, marker: str) -> Acknowledgement: ...
 
@@ -411,7 +429,11 @@ def _obligations(value: object) -> tuple[str, ...]:
         raise ValueError("invalid obligation ids")
     seen: set[str] = set()
     for item in value:
-        if not isinstance(item, str) or _OBLIGATION.fullmatch(item) is None or item in seen:
+        if (
+            not isinstance(item, str)
+            or _OBLIGATION.fullmatch(item) is None
+            or item in seen
+        ):
             raise ValueError("invalid obligation ids")
         seen.add(item)
     return value
@@ -567,7 +589,11 @@ class OperationHost:
     ) -> RestoredOperation | OperationRefusal:
         """Return retained state. Never inserts an event or refreshes a budget."""
 
-        if proof is None or not isinstance(proof, AdmissionProof) or not proof.server_authenticated:
+        if (
+            proof is None
+            or not isinstance(proof, AdmissionProof)
+            or not proof.server_authenticated
+        ):
             return OperationRefusal("unauthenticated")
         if not isinstance(request, OperationRequest):
             return OperationRefusal("invalid")
@@ -593,7 +619,9 @@ class OperationHost:
     ) -> TransitionPermit | OperationRefusal:
         """Debit the declared liability and consume the grant in one transaction."""
 
-        if not isinstance(handle, OperationHandle) or not isinstance(plan, TransitionPlan):
+        if not isinstance(handle, OperationHandle) or not isinstance(
+            plan, TransitionPlan
+        ):
             return OperationRefusal("invalid")
         if not callable(consume_grant):
             return OperationRefusal("invalid")
@@ -611,10 +639,14 @@ class OperationHost:
             if event is None or event["binding"] != handle.binding:
                 txn.rollback()
                 return OperationRefusal("invalid")
-            if now < _as_int(event["created_at_ms"]) or now < _as_int(event["observed_at_ms"]):
+            if now < _as_int(event["created_at_ms"]) or now < _as_int(
+                event["observed_at_ms"]
+            ):
                 txn.rollback()
                 return OperationRefusal("clock_rollback")
-            if bool(event["expired_observed"]) or now >= _as_int(event["control_deadline_ms"]):
+            if bool(event["expired_observed"]) or now >= _as_int(
+                event["control_deadline_ms"]
+            ):
                 event["observed_at_ms"] = max(_as_int(event["observed_at_ms"]), now)
                 event["expired_observed"] = True
                 txn.commit()
@@ -721,7 +753,9 @@ class OperationHost:
         now = self._clock()
         if now is None:
             return ExecutionResult("refused", None, "invalid")
-        if bool(event["expired_observed"]) or now >= _as_int(event["control_deadline_ms"]):
+        if bool(event["expired_observed"]) or now >= _as_int(
+            event["control_deadline_ms"]
+        ):
             return ExecutionResult("refused", None, "expired")
         if not self._charge_provider(handle, str(held["attempt_id"])):
             return ExecutionResult("unknown", None, "provider_unknown")
@@ -748,7 +782,9 @@ class OperationHost:
             )
         except ValueError:
             return ExecutionResult("unknown", None, "provider_unknown")
-        stored = self._commit_packet(handle, str(held["attempt_id"]), accepted, measured)
+        stored = self._commit_packet(
+            handle, str(held["attempt_id"]), accepted, measured
+        )
         if stored is None:
             return ExecutionResult("unknown", None, "provider_unknown")
         return ExecutionResult("accepted", stored, None)
@@ -831,8 +867,14 @@ class OperationHost:
     def _charge_provider(self, handle: OperationHandle, attempt_id: str) -> bool:
         with self.store.transaction() as txn:
             event = self._event(handle.scope_digest, handle.event_id)
-            transition = self._transition(handle.scope_digest, handle.event_id, attempt_id)
-            if event is None or transition is None or event["binding"] != handle.binding:
+            transition = self._transition(
+                handle.scope_digest, handle.event_id, attempt_id
+            )
+            if (
+                event is None
+                or transition is None
+                or event["binding"] != handle.binding
+            ):
                 txn.rollback()
                 return False
             if event["accepted"] is not None or bool(event["provider_charged"]):
@@ -853,7 +895,9 @@ class OperationHost:
     ) -> AcceptedPacket | None:
         with self.store.transaction() as txn:
             event = self._event(handle.scope_digest, handle.event_id)
-            transition = self._transition(handle.scope_digest, handle.event_id, attempt_id)
+            transition = self._transition(
+                handle.scope_digest, handle.event_id, attempt_id
+            )
             if event is None or transition is None:
                 txn.rollback()
                 return None
@@ -869,7 +913,11 @@ class OperationHost:
             if transition["state"] == "unknown":
                 transition["state"] = "inflight"
             readback = _packet(event)
-            if readback != packet or readback is None or readback.known_output_bytes != measured:
+            if (
+                readback != packet
+                or readback is None
+                or readback.known_output_bytes != measured
+            ):
                 txn.rollback()
                 return None
             txn.commit()
@@ -915,7 +963,11 @@ class OperationHost:
                 held["state"] = "unknown"
                 txn.commit()
                 return ("pending", False)
-            if judgement == "confirmed" and packet_ready and not bool(event["quarantine"]):
+            if (
+                judgement == "confirmed"
+                and packet_ready
+                and not bool(event["quarantine"])
+            ):
                 held["state"] = "confirmed"
                 event["root_sha"] = held["target_root_sha"]
                 event["root_generation"] = held["target_root_generation"]
@@ -974,7 +1026,9 @@ class OperationHost:
             return found
         return None
 
-    def _transition(self, scope: str, event_id: str, attempt_id: str) -> dict[str, object] | None:
+    def _transition(
+        self, scope: str, event_id: str, attempt_id: str
+    ) -> dict[str, object] | None:
         found = self.store._live()["transitions"].get((scope, event_id, attempt_id))
         if isinstance(found, dict):
             return found
@@ -993,7 +1047,11 @@ class OperationHost:
 
     def _scope_held(self, scope: str) -> bool:
         for item in self.store._live()["transitions"].values():
-            if isinstance(item, dict) and item["scope_digest"] == scope and item["state"] in _HELD:
+            if (
+                isinstance(item, dict)
+                and item["scope_digest"] == scope
+                and item["state"] in _HELD
+            ):
                 return True
         return False
 
@@ -1018,7 +1076,9 @@ class OperationHost:
                 and item["state"] in _HELD
             ):
                 retained.append(
-                    RetainedTransition(attempt_id=str(item["attempt_id"]), state=str(item["state"]))
+                    RetainedTransition(
+                        attempt_id=str(item["attempt_id"]), state=str(item["state"])
+                    )
                 )
         retained.sort(key=lambda item: item.attempt_id)
         return tuple(retained)
@@ -1068,7 +1128,9 @@ def _handle(event: dict[str, object]) -> OperationHandle:
 
 
 def _ack_marker(handle: OperationHandle, packet: AcceptedPacket) -> str:
-    material = "\n".join((handle.event_id, packet.payload_digest, packet.request_digest))
+    material = "\n".join(
+        (handle.event_id, packet.payload_digest, packet.request_digest)
+    )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
@@ -1080,7 +1142,9 @@ def _exact(observation: RootObservation, transition: dict[str, object]) -> bool:
     )
 
 
-def _judge(observations: tuple[RootObservation, ...], transition: dict[str, object]) -> str:
+def _judge(
+    observations: tuple[RootObservation, ...], transition: dict[str, object]
+) -> str:
     reads = [item for item in observations if item.kind == "read"]
     writes = [item for item in observations if item.kind == "write"]
     for write in writes:
@@ -1126,3 +1190,211 @@ def _recon(
 
 def _wall_now() -> int:
     return int(time.time() * 1000)
+
+
+REVIEW_TRIGGERS = frozenset({"full-review", "reply", "reassessment", "verify"})
+OPERATION_COMMENT_MARKER = "<!-- review-sensei-operation -->"
+_COMMENT_BOUND = 60_000
+
+
+class OperationCommentPort(Protocol):
+    """App-owned pull-request comment. The worker is not this store."""
+
+    def find(self, marker: str) -> tuple[int, str] | None: ...
+
+    def create(self, body: str) -> tuple[int, str]: ...
+
+    def update(self, comment_id: int, body: str) -> str: ...
+
+
+class GitHubCommentOperationStore(InMemoryOperationStore):
+    """Load and publish the operation record as one GitHub issue comment.
+
+    A rolled-back transaction does not write. The comment is metadata only.
+    """
+
+    def __init__(self, port: OperationCommentPort) -> None:
+        super().__init__()
+        self._port = port
+        self._comment_id: int | None = None
+        self._load()
+
+    def _load(self) -> None:
+        found = self._port.find(OPERATION_COMMENT_MARKER)
+        if found is None:
+            return
+        comment_id, body = found
+        self._comment_id = comment_id
+        self._committed = _decode_comment(body)
+
+    def _publish(self) -> None:
+        assert self._txn is not None
+        body = _encode_comment(self._txn)
+        if self._comment_id is None:
+            self._comment_id, echoed = self._port.create(body)
+        else:
+            echoed = self._port.update(self._comment_id, body)
+        if _comment_payload(echoed) != _comment_payload(body):
+            raise ValueError("operation comment readback failed")
+        super()._publish()
+
+
+def run_review_trigger(
+    host: OperationHost,
+    *,
+    trigger: str,
+    proof: AdmissionProof,
+    request: OperationRequest,
+    plan: TransitionPlan,
+    provider_call: Callable[[], ProviderOutput],
+    validator: Callable[[ProviderOutput, int], bool],
+    consume_grant: Callable[[], bool],
+    server_started_ms: int,
+    bootstrap_dispatches: int = 1,
+) -> ExecutionResult | OperationRefusal:
+    """Admit, restore, or finish one review trigger through the shared host.
+
+    An accepted packet is read back and returned without another provider call.
+    """
+
+    if trigger not in REVIEW_TRIGGERS:
+        return OperationRefusal("trigger")
+    restored = host.restore_operation(proof, request)
+    if isinstance(restored, RestoredOperation) and restored.accepted_packet is not None:
+        return host.execute_and_accept(restored.handle, provider_call, validator)
+    if isinstance(restored, RestoredOperation):
+        handle = restored.handle
+    else:
+        if restored.reason != "not_admitted":
+            return restored
+        begun = host.begin_operation(
+            proof, request, server_started_ms, bootstrap_dispatches
+        )
+        if not isinstance(begun, OperationHandle):
+            return begun
+        handle = begun
+    if not _note_trigger(host, handle, trigger):
+        return OperationRefusal("trigger")
+    permit = host.consume_transition(handle, plan, consume_grant=consume_grant)
+    if not isinstance(permit, TransitionPermit):
+        return permit
+    return host.execute_and_accept(handle, provider_call, validator)
+
+
+def _note_trigger(host: OperationHost, handle: OperationHandle, trigger: str) -> bool:
+    with host.store.transaction() as txn:
+        event = host.store._live()["events"].get((handle.scope_digest, handle.event_id))
+        if not isinstance(event, dict):
+            txn.rollback()
+            return False
+        current = event.get("trigger")
+        if current not in (None, trigger):
+            txn.rollback()
+            return False
+        if current == trigger:
+            txn.rollback()
+            return True
+        event["trigger"] = trigger
+        txn.commit()
+        return True
+
+
+def _encode_comment(store: dict[str, dict[object, object]]) -> str:
+    payload = json.dumps(_export_store(store), sort_keys=True, separators=(",", ":"))
+    body = f"{OPERATION_COMMENT_MARKER}\n```json\n{payload}\n```\n"
+    if len(body.encode("utf-8")) > _COMMENT_BOUND:
+        raise ValueError("operation comment exceeds the GitHub bound")
+    return body
+
+
+def _decode_comment(body: str) -> dict[str, dict[object, object]]:
+    return _import_store(json.loads(_comment_payload(body)))
+
+
+def _comment_payload(body: str) -> str:
+    start = body.find("```json\n")
+    end = body.rfind("\n```")
+    if start < 0 or end < 0 or end <= start:
+        raise ValueError("operation comment is not a review record")
+    return body[start + len("```json\n") : end]
+
+
+def _export_store(
+    store: dict[str, dict[object, object]],
+) -> dict[str, dict[str, object]]:
+    widths = {"events": 2, "transitions": 3, "grants": 1, "scopes": 1}
+    exported: dict[str, dict[str, object]] = {}
+    for name, width in widths.items():
+        bucket: dict[str, object] = {}
+        for key, value in store[name].items():
+            if width == 1:
+                encoded = str(key)
+            else:
+                if not isinstance(key, tuple) or len(key) != width:
+                    raise ValueError("operation record key is invalid")
+                encoded = "\t".join(str(part) for part in key)
+            bucket[encoded] = _export_value(value)
+        exported[name] = bucket
+    return exported
+
+
+def _export_value(value: object) -> object:
+    if isinstance(value, AcceptedPacket):
+        return {
+            "kind": "accepted-packet",
+            "decisions_digest": value.decisions_digest,
+            "known_output_bytes": value.known_output_bytes,
+            "payload_digest": value.payload_digest,
+            "request_digest": value.request_digest,
+            "obligation_ids": list(value.obligation_ids),
+        }
+    if isinstance(value, tuple):
+        return {"kind": "tuple", "items": [_export_value(item) for item in value]}
+    if isinstance(value, dict):
+        return {str(key): _export_value(item) for key, item in value.items()}
+    return value
+
+
+def _import_store(payload: object) -> dict[str, dict[object, object]]:
+    if not isinstance(payload, dict):
+        raise ValueError("operation record is invalid")
+    widths = {"events": 2, "transitions": 3, "grants": 1, "scopes": 1}
+    imported: dict[str, dict[object, object]] = {}
+    for name, width in widths.items():
+        raw = payload.get(name)
+        if not isinstance(raw, dict):
+            raise ValueError("operation record is invalid")
+        bucket: dict[object, object] = {}
+        for key, value in raw.items():
+            if not isinstance(key, str):
+                raise ValueError("operation record key is invalid")
+            if width == 1:
+                decoded: object = key
+            else:
+                parts = key.split("\t")
+                if len(parts) != width:
+                    raise ValueError("operation record key is invalid")
+                decoded = tuple(parts)
+            bucket[decoded] = _import_value(value)
+        imported[name] = bucket
+    return imported
+
+
+def _import_value(value: object) -> object:
+    if isinstance(value, dict) and value.get("kind") == "accepted-packet":
+        obligations = value.get("obligation_ids")
+        return AcceptedPacket(
+            decisions_digest=str(value.get("decisions_digest")),
+            known_output_bytes=_as_int(value.get("known_output_bytes")),
+            payload_digest=str(value.get("payload_digest")),
+            request_digest=str(value.get("request_digest")),
+            obligation_ids=tuple(obligations) if isinstance(obligations, list) else (),
+        )
+    if isinstance(value, dict) and value.get("kind") == "tuple":
+        items = value.get("items")
+        if not isinstance(items, list):
+            raise ValueError("operation record is invalid")
+        return tuple(_import_value(item) for item in items)
+    if isinstance(value, dict):
+        return {str(key): _import_value(item) for key, item in value.items()}
+    return value

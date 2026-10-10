@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Sequence, cast
 
@@ -33,6 +33,7 @@ MAINTAINER_ACTIONS = frozenset(
         "dismiss",
         "defer",
         "accept-risk",
+        "approve-media",
     }
 )
 FINDING_ACTIONS = frozenset({"dismiss", "defer", "accept-risk"})
@@ -69,6 +70,19 @@ _FINDING = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _FINGERPRINT = re.compile(r"^[a-f0-9]{16,64}$")
+_FINDING_REFERENCE = re.compile(r"^(?:RS-)?[A-Fa-f0-9]{6,64}$")
+_OVERRIDE = re.compile(
+    rf"^override{_COMMAND_WS}+((?:RS-)?[A-Fa-f0-9]{{6,64}})({_COMMAND_WS}+acceptable{_COMMAND_WS}+risk)?{_COMMAND_WS}*$",
+    re.IGNORECASE,
+)
+_ACCEPTABLE_RISK = re.compile(
+    rf"^((?:RS-)?[A-Fa-f0-9]{{6,64}}){_COMMAND_WS}+is{_COMMAND_WS}+acceptable{_COMMAND_WS}+risk{_COMMAND_WS}*$",
+    re.IGNORECASE,
+)
+_MEDIA_APPROVAL = re.compile(
+    rf"^i{_COMMAND_WS}+reviewed{_COMMAND_WS}+the{_COMMAND_WS}+media{_COMMAND_WS}+files{_COMMAND_WS}+and{_COMMAND_WS}+i{_COMMAND_WS}+approve{_COMMAND_WS}*$",
+    re.IGNORECASE,
+)
 _HEAD_SHA = re.compile(r"^[a-f0-9]{40,64}$")
 
 
@@ -116,6 +130,19 @@ def authorized_maintainer(
     return association.upper() in AUTHORIZED_ASSOCIATIONS
 
 
+def authorized_override(*, association: object, permission: object = None) -> bool:
+    """Maintainer or admin override. Write access alone is not enough.
+
+    An explicit GitHub permission wins. ``maintain`` and ``admin`` qualify.
+    When the permission was not loaded, a repository owner or organization
+    member still qualifies; an outside collaborator does not.
+    """
+
+    if isinstance(permission, str):
+        return permission in {"maintain", "admin"}
+    return isinstance(association, str) and association.upper() in {"OWNER", "MEMBER"}
+
+
 @dataclass(frozen=True)
 class MaintainerCommand:
     """One authenticated, head-bound maintainer action."""
@@ -124,6 +151,7 @@ class MaintainerCommand:
     actor: str
     reason: str | None = None
     finding_fingerprint: str | None = None
+    finding_reference: str | None = None
     head_sha: str | None = None
     command_id: str | None = None
 
@@ -143,7 +171,14 @@ class MaintainerCommand:
         if self.command_id is not None and self.action != "continue":
             raise ReviewInputError("maintainer command_id only applies to continuation")
         if self.action in FINDING_ACTIONS:
-            if self.finding_fingerprint is None or not _FINGERPRINT.fullmatch(
+            if self.finding_reference is not None:
+                if (
+                    not isinstance(self.finding_reference, str)
+                    or _FINDING_REFERENCE.fullmatch(self.finding_reference) is None
+                    or self.finding_fingerprint is not None
+                ):
+                    raise ReviewInputError("finding reference is invalid")
+            elif self.finding_fingerprint is None or not _FINGERPRINT.fullmatch(
                 self.finding_fingerprint
             ):
                 raise ReviewInputError("finding disposition requires a fingerprint")
@@ -193,7 +228,82 @@ def parse_maintainer_command(
             reason=finding.group(3).strip(_COMMAND_WHITESPACE).strip('"').strip("'"),
             head_sha=head_sha,
         )
+    if _MEDIA_APPROVAL.fullmatch(remainder):
+        return MaintainerCommand(action="approve-media", actor=actor, head_sha=head_sha)
+    override = _OVERRIDE.fullmatch(remainder)
+    if override is not None:
+        reason = "acceptable risk" if override.group(2) else "override"
+        return _override_command(
+            actor, override.group(1), reason=reason, head_sha=head_sha
+        )
+    acceptable = _ACCEPTABLE_RISK.fullmatch(remainder)
+    if acceptable is not None:
+        return _override_command(
+            actor,
+            acceptable.group(1),
+            reason="acceptable risk",
+            head_sha=head_sha,
+        )
     return None
+
+
+def _override_command(
+    actor: str, token: str, *, reason: str, head_sha: str | None
+) -> MaintainerCommand:
+    """Map an easy override onto accept-risk.
+
+    A full fingerprint can be stored immediately. A displayed ``RS-`` id stays
+    unresolved until the current review's fingerprints are available.
+    """
+
+    body = token[3:] if token.lower().startswith("rs-") else token
+    if token.lower().startswith("rs-") or not _FINGERPRINT.fullmatch(body.lower()):
+        reference = f"RS-{body.upper()}"
+        return MaintainerCommand(
+            action="accept-risk",
+            actor=actor,
+            finding_reference=reference,
+            reason=reason,
+            head_sha=head_sha,
+        )
+    return MaintainerCommand(
+        action="accept-risk",
+        actor=actor,
+        finding_fingerprint=body.lower(),
+        reason=reason,
+        head_sha=head_sha,
+    )
+
+
+def resolve_finding_reference(reference: str, fingerprints: Sequence[str]) -> str:
+    """Resolve one displayed finding id to exactly one current fingerprint."""
+
+    if (
+        not isinstance(reference, str)
+        or _FINDING_REFERENCE.fullmatch(reference) is None
+    ):
+        raise ReviewInputError("finding id is invalid")
+    body = reference[3:] if reference.lower().startswith("rs-") else reference
+    from .presentation import assign_finding_identifiers
+
+    assigned = assign_finding_identifiers(fingerprints)
+    wanted = f"RS-{body.upper()}"
+    matches = [
+        fingerprint
+        for fingerprint, identifier in assigned.items()
+        if identifier.upper() == wanted
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    exact = [
+        fingerprint
+        for fingerprint in fingerprints
+        if fingerprint.lower() == body.lower()
+        and _FINGERPRINT.fullmatch(fingerprint.lower())
+    ]
+    if len(exact) == 1:
+        return exact[0]
+    raise ReviewInputError("finding id does not match one current finding")
 
 
 @dataclass(frozen=True)
@@ -283,9 +393,29 @@ def apply_session_command(
     command: MaintainerCommand,
     *,
     now: datetime | None = None,
+    finding_fingerprints: Sequence[str] | None = None,
 ) -> tuple[SessionRecord, MaintainerCommandResult]:
     """Mutate pause/continuation and persist finding decisions on the ledger."""
 
+    if command.action == "approve-media":
+        return SessionRecord.create(identity, now=now), MaintainerCommandResult(
+            action="approve-media",
+            applied=False,
+            operator_paused=False,
+            summary=(
+                "media approval is applied by the file reviewer for the current head"
+            ),
+        )
+    if command.finding_reference is not None:
+        if not finding_fingerprints:
+            raise ReviewInputError("finding id needs the current review")
+        command = replace(
+            command,
+            finding_fingerprint=resolve_finding_reference(
+                command.finding_reference, finding_fingerprints
+            ),
+            finding_reference=None,
+        )
     if (
         command.action not in {"status", "verify"}
         and getattr(ledger, "_broker", None) is not None

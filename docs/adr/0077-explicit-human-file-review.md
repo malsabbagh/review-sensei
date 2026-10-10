@@ -23,7 +23,9 @@ Recording is not approval. A receipt is audit metadata for selected binary files
 Add bounded closed request/receipt reference documents and an opt-in GitHub
 library adapter. Trusted host policy defaults to report-only. Confirmation uses
 a whole explicit `media-reviewed` command containing the full request digest
-and full selected file IDs. Live numeric human identity, source location,
+and full selected file IDs. A maintainer or admin may instead reply
+`@reviewsensei I reviewed the media files and I approve`, which selects every
+file on that request. Live numeric human identity, source location,
 association and collaborator permission are mandatory. Owned request/receipt
 readback and the latest owned review bind the exact validated result and complete
 changed-file inventory. Immutable Git trees bind old/new regular blobs, modes

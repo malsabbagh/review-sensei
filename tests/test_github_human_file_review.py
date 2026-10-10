@@ -279,6 +279,55 @@ class GitHubHumanFileReviewTests(unittest.TestCase):
         self.assertIn("AI result status remains partial", approvals[0]["body"])
         self.assertIn("mixed coverage sufficient", approvals[0]["body"])
 
+    def test_blanket_sentence_approves_every_file_for_a_maintainer(self):
+        identifier, request = self.request_review()
+        self.state.permission = "maintain"
+        self.state.comments[20] = {
+            "id": 20,
+            "user": ALICE,
+            "author_association": "MEMBER",
+            "issue_url": f"{API}{REPO}/issues/2",
+            "updated_at": "2026-10-10T01:00:00Z",
+            "body": "@reviewsensei I reviewed the media files and I approve",
+        }
+        self.publisher().confirm(
+            request_comment_id=identifier,
+            source_comment_id=20,
+            result=self.state.result,
+        )
+        assessment = self.publisher().publish_mixed_approval(
+            request_comment_id=identifier,
+            result=self.state.result,
+            has_open_review_threads=False,
+        )
+        self.assertTrue(assessment.approval.approved)
+        self.assertEqual(
+            set(assessment.human_reviewed_ids), {item.file_id for item in request.files}
+        )
+        self.assertEqual(self.state.result.review_status, "partial")
+        self.assertEqual(
+            [item["state"] for item in self.state.reviews if item["id"] != 10],
+            ["APPROVED"],
+        )
+
+    def test_blanket_sentence_refuses_write_permission(self):
+        identifier, _request = self.request_review()
+        self.state.permission = "write"
+        self.state.comments[20] = {
+            "id": 20,
+            "user": ALICE,
+            "author_association": "COLLABORATOR",
+            "issue_url": f"{API}{REPO}/issues/2",
+            "updated_at": "2026-10-10T01:00:00Z",
+            "body": "@reviewsensei I reviewed the media files and I approve",
+        }
+        with self.assertRaisesRegex(ReviewInputError, "maintainer or admin"):
+            self.publisher().approve_reviewed_media(
+                request_comment_id=identifier,
+                source_comment_id=20,
+                result=self.state.result,
+            )
+
     def test_default_policy_rejects_confirmation_before_any_io(self):
         with self.assertRaisesRegex(ReviewInputError, "disabled"):
             self.publisher(enabled=False).confirm(

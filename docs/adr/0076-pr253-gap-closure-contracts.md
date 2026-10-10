@@ -103,8 +103,14 @@ grant.
 
 ### Acceptance stores
 
-Broker SQL owns original origin, stable event, admission identity, prepaid
-calls, one-use consumption, unknown transitions and the root cursor.
+The public operation record is one App-owned pull-request issue comment.
+`run_review_trigger` is the entry for full review, reply, reassessment, and
+verify. The comment stores digests, counters, the trigger name, and the
+accepted packet. It does not store prompts, model text, or file contents.
+The Cloudflare worker exchanges credentials so the App can write that comment
+and the review. It does not persist review or operation state. Durable Object
+SQL is not this store.
+
 The exact App-owned activated acceptance packet owns normalized decisions and
 measured known output bytes. Eligibility is derived. Acknowledgement is a
 projection, never the acceptance record or the resource origin.
@@ -147,8 +153,10 @@ disabled. Do not raise caps to make it fit.
 
 One operation host owns admission, restore, transport accounting, checkpoint
 activation and publication reconciliation for full review, reply,
-reassessment and verify. Domain modules do not gain broker authority. The host
-is opt-in. The default public path keeps its current behavior until P1 passes.
+reassessment and verify. Those triggers enter through `run_review_trigger`.
+The record is the GitHub issue comment above. Domain modules do not gain
+broker authority. The host is opt-in. The default public path keeps its
+current behavior until P1 passes.
 
 ## Scope
 
@@ -180,7 +188,9 @@ already exceeds the ordinary dispatch budget before broker overhead. Raising
 the 49,152 byte or 64/60 ceilings was rejected. Treating a missing check as a
 blocker was rejected because that would change acceptance policy without an
 explicit product decision. Promising exactly-once GitHub writes was rejected
-because SQL and GitHub do not commit atomically.
+because a comment write and a later review write are still separate GitHub
+requests. The public record does not add a private database beside the
+repository.
 
 ## Validation
 
@@ -204,7 +214,7 @@ unknown in-flight state or reset an event budget.
 These items stay open until their own evidence exists:
 
 - Maintainer acceptance of this ADR.
-- Interrupted-admission cost recovery, and one SQL transaction for proof use plus admission ([#268](https://github.com/malsabbagh/review-sensei/issues/268)). This profile refuses interrupted admission.
+- Interrupted-admission cost recovery ([#268](https://github.com/malsabbagh/review-sensei/issues/268)). The public path does not store that state in worker SQL. This profile refuses interrupted admission.
 - A passing public P1 trace inside the original 64 dispatches and 60 seconds, including real elapsed time ([#267](https://github.com/malsabbagh/review-sensei/issues/267)). The in-memory host is not that trace.
 - Installed, published and deployed artifact identity, plus joint 100/250 history ([#269](https://github.com/malsabbagh/review-sensei/issues/269)).
 - A normative re-audit of the required rules file. Keyword extraction and a one-file fixture do not prove every configured review fits ([#270](https://github.com/malsabbagh/review-sensei/issues/270)).

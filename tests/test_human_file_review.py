@@ -30,6 +30,19 @@ class HumanFileReviewTests(unittest.TestCase):
             (item.file_id,),
         )
         self.assertIsNone(parse_confirmation("@sensei media-reviewed all", request))
+        self.assertEqual(
+            parse_confirmation(
+                "@reviewsensei I reviewed the media files and I approve", request
+            ),
+            (item.file_id,),
+        )
+        self.assertIsNone(
+            parse_confirmation(
+                "@reviewsensei I reviewed the media files and I approve extra",
+                request,
+            )
+        )
+        self.assertIn("I reviewed the media files and I approve", request.render())
         self.assertIn("not AI-reviewed", request.render())
 
     def request(self):

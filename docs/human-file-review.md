@@ -6,10 +6,9 @@ binary changes that ReviewSensei cannot assess. AI coverage continues to say
 A file extension, model answer, pasted marker, URL, or general reassurance does
 not select or clear a file.
 
-This is a local library feature awaiting review and hosted integration. The
-released CLI, mention workflows and ordinary approval finalizer do not route
-`media-reviewed` yet. There is no new YAML option, automatic approval, broker
-capability, release, or workflow activation in this change.
+The live caller treats the blanket approval sentence and a finding override as
+commands. The ordinary approval finalizer still withholds a partial AI result.
+There is no new YAML option or release in this change.
 
 ## Host configuration and invocation
 
@@ -75,19 +74,34 @@ policy-excluded files, incomplete file enumeration and unreviewed hunks do not
 gain a human exemption. Deleted files bind the old blob; new files bind the new
 blob; renames bind both paths and blobs.
 
-An authorized person replies with a whole literal command and selected full IDs:
+A maintainer or admin replies with this exact sentence to approve every file
+in the current request:
+
+```text
+@reviewsensei I reviewed the media files and I approve
+```
+
+`@sensei` is also accepted. Extra prose is refused. The same person can still
+name a subset with a whole literal command:
 
 ```text
 @sensei media-reviewed <64-character-request-digest> <64-character-file-id> [<64-character-file-id> ...]
 ```
 
-`@reviewsensei` is also accepted. The digest and IDs must come from that exact
-request. No `all`, short IDs, wildcards, URLs, code fences, inferred filenames or
-additional prose are accepted. To confirm another subset, use a new comment.
+The digest and IDs must come from that exact request. No `all`, short IDs,
+wildcards, URLs, code fences, inferred filenames or additional prose are
+accepted. To confirm another subset, use a new comment. The blanket sentence
+requires GitHub permission `maintain` or `admin`. Write access can still
+confirm a named subset. A maintainer or admin can also record one finding as
+acceptable risk, for example `@reviewsensei override RS-ABCDEF acceptable risk`
+or `@reviewsensei RS-ABCDEF is acceptable risk`. That records the existing
+accept-risk disposition on the GitHub session comment. It is not a verified fix.
 One source comment cannot be edited into a new confirmation or rebound to a new
 snapshot. The source must be a live issue comment on the same PR, with exact
 numeric human `User` identity, `OWNER`/`MEMBER`/`COLLABORATOR` association and live
-`write`/`maintain`/`admin` permission matching its login and numeric ID. Inline
+permission matching its login and numeric ID. A named subset accepts `write`,
+`maintain`, or `admin`. The blanket sentence accepts only `maintain` or `admin`.
+Inline
 comments are not accepted by this initial command.
 
 The App records a metadata-only receipt containing the request and source IDs,
@@ -168,6 +182,8 @@ metadata, and an old schema withhold or refuse. Policy off leaves the binary
 blocker in place. Replay of the same confirmation event returns the same receipt
 identity.
 
-`publish_mixed_approval` can post that decision when a host calls it. The
-shared finalizer is unchanged and still withholds a partial AI result. Public
-mention routing is still unwired.
+`approve_reviewed_media` confirms the source comment and then calls
+`publish_mixed_approval`, which can post that decision. The shared finalizer
+is unchanged and still withholds a partial AI result. The live caller treats
+the blanket sentence and the finding override as commands. Posting the APPROVE
+still needs the current review result.

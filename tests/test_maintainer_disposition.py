@@ -15,8 +15,10 @@ from review_sensei.disposition import (
     FindingDisposition,
     apply_session_command,
     authorized_maintainer,
+    authorized_override,
     parse_maintainer_command,
     render_convergence_summary,
+    resolve_finding_reference,
     session_dispositions,
 )
 from review_sensei.errors import ReviewInputError
@@ -445,6 +447,14 @@ class TriggerCommandTests(unittest.TestCase):
         self.assertEqual(finding.operation, "command")
         plain = resolve_issue_comment("please take a look", _pull())
         self.assertEqual(plain.operation, "reply")
+        media = resolve_issue_comment(
+            "@reviewsensei I reviewed the media files and I approve", _pull()
+        )
+        self.assertEqual(media.operation, "command")
+        override = resolve_issue_comment(
+            "@reviewsensei override RS-ABCDEF acceptable risk", _pull()
+        )
+        self.assertEqual(override.operation, "command")
 
 
 class DisabledWriteTests(unittest.TestCase):
@@ -1015,6 +1025,80 @@ class CliCommandTests(unittest.TestCase):
                 ]
             )
             self.assertEqual(status, 0)
+
+
+class FindingOverrideTests(unittest.TestCase):
+    def test_displayed_id_becomes_one_accept_risk_disposition(self):
+        fingerprint = "abc123" + "0" * 58
+        command = parse_maintainer_command(
+            "@reviewsensei override RS-ABC123 acceptable risk",
+            actor="alice",
+            head_sha="a" * 40,
+        )
+        assert command is not None
+        self.assertEqual(command.action, "accept-risk")
+        self.assertEqual(command.finding_reference, "RS-ABC123")
+        ledger = InMemorySessionLedger()
+        record, result = apply_session_command(
+            ledger,
+            IDENTITY,
+            command,
+            now=FIXED_NOW,
+            finding_fingerprints=(fingerprint,),
+        )
+        self.assertTrue(result.applied)
+        self.assertEqual(record.dispositions[0]["fingerprint"], fingerprint)
+        self.assertEqual(record.dispositions[0]["action"], "accept-risk")
+        self.assertEqual(record.dispositions[0]["reason"], "acceptable risk")
+        self.assertEqual(
+            resolve_finding_reference("RS-ABC123", (fingerprint,)), fingerprint
+        )
+
+    def test_ambiguous_prefix_and_write_collaborator_do_not_override(self):
+        left = "abc123" + "0" * 58
+        right = "abc123" + "1" * 58
+        with self.assertRaisesRegex(ReviewInputError, "one current finding"):
+            resolve_finding_reference("RS-ABC123", (left, right))
+        self.assertFalse(authorized_override(association="COLLABORATOR"))
+        self.assertFalse(authorized_override(association="MEMBER", permission="write"))
+        self.assertTrue(
+            authorized_override(association="MEMBER", permission="maintain")
+        )
+        self.assertTrue(authorized_override(association="OWNER"))
+        sentence = parse_maintainer_command(
+            "@reviewsensei RS-ABCDEF is acceptable risk", actor="alice"
+        )
+        assert sentence is not None
+        self.assertEqual(sentence.reason, "acceptable risk")
+        bare = parse_maintainer_command(
+            "@reviewsensei override RS-ABCDEF", actor="alice"
+        )
+        assert bare is not None
+        self.assertEqual(bare.reason, "override")
+
+    def test_collaborator_cannot_apply_the_easy_override(self):
+        application = GitHubApplication(
+            broker=object(),
+            http=None,
+            reviewer=object(),
+            learner=object(),
+            replier=object(),
+            session_ledger=InMemorySessionLedger(),
+        )
+        result = application.apply_maintainer_command(
+            options=GitHubWriteOptions(github_writes=False),
+            oidc_token=None,
+            repository="owner/repo",
+            repository_id=99,
+            pull_request=136,
+            head_sha="b" * 40,
+            body="@reviewsensei override RS-ABC123 acceptable risk",
+            actor_login="alice",
+            association="COLLABORATOR",
+            app_slug="reviewsensei[bot]",
+        )
+        self.assertEqual(result.summary, "unauthorized")
+        self.assertFalse(result.applied)
 
 
 if __name__ == "__main__":

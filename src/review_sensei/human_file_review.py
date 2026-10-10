@@ -253,7 +253,7 @@ class FileReviewRequest:
         lines = [
             "Human review requested for unsupported binary files (not AI-reviewed).",
             f"Snapshot: base `{self.base_sha}`, head `{self.head_sha}`.",
-            "A maintainer with write access may confirm only files they personally reviewed.",
+            "A maintainer or admin who reviewed these files may approve them in one reply.",
         ]
         for item in self.files:
             # JSON quoting keeps file names from introducing mentions/Markdown instructions.
@@ -270,13 +270,30 @@ class FileReviewRequest:
         lines.extend(
             [
                 "",
-                "Reply with the request digest and selected full file IDs:",
-                f"`@sensei media-reviewed {self.digest} <file-id> [<file-id> ...]`",
+                "Reply with this exact sentence to approve every file in this request:",
+                "`@reviewsensei I reviewed the media files and I approve`",
+                "A maintainer or admin may also name one finding, for example "
+                "`@reviewsensei override RS-ABCDEF acceptable risk`.",
                 "This confirms human file review only. Text findings and other approval checks remain open.",
                 "Any snapshot or review-result change requires a fresh confirmation.",
             ]
         )
         return "\n".join(lines)
+
+
+def is_blanket_media_approval(body: object) -> bool:
+    """The whole comment approves every file on the current request."""
+
+    if not isinstance(body, str):
+        return False
+    match = re.fullmatch(
+        r"(?:@sensei|(?ai:@reviewsensei))[ \t\r\n]+(.*)",
+        body.strip(" \t\r\n"),
+    )
+    if match is None:
+        return False
+    phrase = re.sub(r"[ \t\r\n]+", " ", match.group(1)).strip(" ")
+    return phrase.casefold() == "i reviewed the media files and i approve"
 
 
 def parse_confirmation(
@@ -290,6 +307,10 @@ def parse_confirmation(
             return None
     except UnicodeError:
         return None
+    if is_blanket_media_approval(body):
+        if not request.files:
+            return None
+        return tuple(item.file_id for item in request.files)
     words = re.split(r"[ \t\r\n]+", body.strip(" \t\r\n"))
     if (
         len(words) < 4

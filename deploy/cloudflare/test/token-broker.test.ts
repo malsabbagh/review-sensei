@@ -446,6 +446,10 @@ describe("token broker authorization", () => {
 
   it.each([
     ["review reenroll", true],
+    ["I reviewed the media files and I approve", true],
+    ["override RS-ABCDEF acceptable risk", true],
+    ["RS-ABCDEF is acceptable risk", true],
+    ["I reviewed the media files", false],
     [`dismiss ${"a".repeat(15)} --reason accepted`, false],
     ["dismiss abcd1234abcd1234 --reason accepted", true],
     [`dismiss ${"a".repeat(64)} --reason accepted`, true],

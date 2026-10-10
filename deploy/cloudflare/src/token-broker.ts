@@ -68,6 +68,18 @@ const RECOGNIZED_CONTINUE = new RegExp(
   `^review${COMMAND_WHITESPACE_RUN}continue${COMMAND_WHITESPACE}*$`,
   "i",
 );
+const RECOGNIZED_MEDIA_APPROVAL = new RegExp(
+  `^i${COMMAND_WHITESPACE_RUN}reviewed${COMMAND_WHITESPACE_RUN}the${COMMAND_WHITESPACE_RUN}media${COMMAND_WHITESPACE_RUN}files${COMMAND_WHITESPACE_RUN}and${COMMAND_WHITESPACE_RUN}i${COMMAND_WHITESPACE_RUN}approve${COMMAND_WHITESPACE}*$`,
+  "i",
+);
+const RECOGNIZED_OVERRIDE = new RegExp(
+  `^override${COMMAND_WHITESPACE_RUN}(?:rs-)?[a-f0-9]{6,64}(?:${COMMAND_WHITESPACE_RUN}acceptable${COMMAND_WHITESPACE_RUN}risk)?${COMMAND_WHITESPACE}*$`,
+  "i",
+);
+const RECOGNIZED_ACCEPTABLE_RISK = new RegExp(
+  `^(?:rs-)?[a-f0-9]{6,64}${COMMAND_WHITESPACE_RUN}is${COMMAND_WHITESPACE_RUN}acceptable${COMMAND_WHITESPACE_RUN}risk${COMMAND_WHITESPACE}*$`,
+  "i",
+);
 
 type Capability = keyof typeof CAPABILITIES;
 
@@ -553,6 +565,9 @@ function recognizedCommand(value: string): boolean {
     RECOGNIZED_REENROLL.test(command) ||
     RECOGNIZED_VERIFY.test(command) ||
     RECOGNIZED_CONTINUE.test(command) ||
+    RECOGNIZED_MEDIA_APPROVAL.test(command) ||
+    RECOGNIZED_OVERRIDE.test(command) ||
+    RECOGNIZED_ACCEPTABLE_RISK.test(command) ||
     (finding !== null && validCommandReason(finding[1]))
   );
 }

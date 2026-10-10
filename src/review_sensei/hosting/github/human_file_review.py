@@ -27,6 +27,7 @@ from ...human_file_review import (
     UnsupportedFile,
     canonical,
     display_path,
+    is_blanket_media_approval,
     parse_confirmation,
     positive,
     sha,
@@ -559,6 +560,7 @@ class HumanFileReviewPublisher:
             raise ReviewInputError(
                 "human file confirmation requires an authorized human"
             )
+        blanket = is_blanket_media_approval(x["body"])
         selection = parse_confirmation(x["body"], request)
         if selection is None or len(x["body"].encode("utf-8")) > MAX_SOURCE_BYTES:
             raise ReviewInputError(
@@ -578,9 +580,13 @@ class HumanFileReviewPublisher:
             f"/collaborators/{quote(receipt.actor, safe='')}/permission"
         )
         permission_user = permission.get("user")
+        permission_name = permission.get("permission")
+        allowed = {"maintain", "admin"} if blanket else {"write", "maintain", "admin"}
+        if blanket and permission_name not in {"maintain", "admin"}:
+            raise ReviewInputError("media approval requires a maintainer or admin")
         if (
-            not isinstance(permission.get("permission"), str)
-            or permission.get("permission") not in {"write", "maintain", "admin"}
+            not isinstance(permission_name, str)
+            or permission_name not in allowed
             or not isinstance(permission_user, Mapping)
             or permission_user.get("id") != receipt.actor_id
             or type(permission_user.get("id")) is not int
@@ -840,3 +846,33 @@ class HumanFileReviewPublisher:
         if result.review_status != "partial":
             raise ReviewInputError("mixed approval changed the AI result")
         return assessment
+
+    def approve_reviewed_media(
+        self,
+        *,
+        request_comment_id: int,
+        source_comment_id: int,
+        result: ReviewResult,
+        has_open_review_threads: bool | None = None,
+        qualification: str = "not-required",
+    ) -> HumanFileReviewAssessment:
+        """Confirm every file named by the source comment, then post one APPROVE.
+
+        The blanket sentence selects the whole current request. The AI result
+        stays partial. Unrelated blockers still withhold the review. Both
+        calls share this publisher's original guard and refuse when that guard
+        cannot hold them. A host can confirm, then call ``publish_mixed_approval``
+        on a later invocation of the same comment.
+        """
+
+        self.confirm(
+            request_comment_id=request_comment_id,
+            source_comment_id=source_comment_id,
+            result=result,
+        )
+        return self.publish_mixed_approval(
+            request_comment_id=request_comment_id,
+            result=result,
+            has_open_review_threads=has_open_review_threads,
+            qualification=qualification,
+        )
