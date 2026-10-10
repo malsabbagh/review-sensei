@@ -933,6 +933,10 @@ class GitHubIssueCommentSessionLedger:
             raise ReviewInputError(
                 "only an expired or witness-only session can be re-enrolled"
             )
+        if record.assessment_queue is not None:
+            raise ReviewInputError(
+                "assessment queue requires retained tombstone authority before re-enrollment"
+            )
         repository_id = self._require_identity(identity)
         replacement = SessionRecord.create(identity, now=now)
         self._verify_live_head(identity)

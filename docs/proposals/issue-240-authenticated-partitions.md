@@ -170,3 +170,35 @@ compose authenticated fresh grants per permitted mutation or a reviewed transact
 protocol, and qualify the actual consuming broker before host acceptance. Current
 conditional reload/PATCH remains non-atomic; single-writer deployment serialization
 and ambiguity reconciliation remain required. No broker validation is weakened.
+
+
+## Local accounting amendment v1
+
+Local authority I/O uses the original shared EvidenceReadBudget for bounded root,
+part and enrollment reads; bounded containment inspections; retention enumeration
+and each enumerated entry stat; durable enrollment/immutable/temp-file writes;
+explicit expired-witness/root retirement; and final root activation/readback.
+One durable write dispatch includes directory creation, mandatory fsync and
+unconditional temporary cleanup. This is an adapter dispatch unit rather than an
+OS syscall counter, matching the HTTP adapter's complete request unit. Root temp
+write and authority activation are separate charged dispatches. Writes/fault
+cleanup charges are conservative and never refunded. Scan entries share the same
+finite global allowance instead of gaining an additional 256-entry free scan.
+
+The root is read back immediately before activation. Immediately after temp-file
+fsync, another count/deadline fence precedes link/replace; an elapsed deadline
+refuses activation and removes the uninstalled temp file. Expiry or conflict after
+activation is ambiguous failure, never acknowledgement. Owned root digest readback
+is required before replace returns. Three final fence dispatches (root reload,
+activation, readback) may use the four reserved calls; the host retains the fourth
+for its source/final fence. No cross-process atomic compare-and-swap is claimed.
+Root/enrollment reads now request only their bounded maximum plus one byte.
+
+A complete varied 250-finding local checkpoint fits the finite allowance; its
+original acquisition allowance can refuse a subsequent queue admission. Fresh
+initial queue admissions have separate authorization and no active operation to
+resume. Every resumed C execution must pass restored original durable accounting,
+without reset. Expired session re-enrollment also refuses an assessment queue:
+unresolved work and receipts need explicit retained tombstone authority, and an
+expired ledger is insufficient proof that queue obligations were satisfied. No
+retirement implementation is supplied by this amendment.
