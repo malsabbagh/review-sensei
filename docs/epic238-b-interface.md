@@ -94,11 +94,64 @@ no unavailable provider metadata or underlying SiteVault defect is inferred.
 Provider narrative appears separately after host counts and next action. Partial
 coverage continues to withhold independently of optional findings.
 
+## Dependent nonactivating prototype
+
+The separate `codex/epic238-b-partition-prototype` branch incorporates frozen A
+`ba89418d21898d14e6d1e535a5409c47c7cff3b2` and D
+`3749b14d5df9b017785e5ea9a18e38db5020ca51`. The initial independent identity/prose
+commit remains `647a2db3a17e0e01e7c3017e5cecde9cc7a1ec10` in draft #251.
+
+`HumanAssessmentService.reply/_request/_parse` and `validate_assessment_evidence`
+accept optional `feedback: FeedbackSelection`. Complete selected bodies enter
+JSON reference data through D's full prompt preflight, including instructions,
+pending findings, current diff and framing. A resolved citation must occur wholly
+within one original selected source. Generated metadata and adjacent source
+concatenation cannot provide that evidence. Base/head and available context PR
+identity are checked; explicit selected targets must contain the current batch.
+The authenticated caller/C still binds repository and the entire ordered target
+tuple and feedback digest. Legacy single-source admission remains 4 KiB.
+
+`human_inventory.stage_human_inventory/read_human_inventory` wrap A's strict
+codec with purpose `human-inventory`, exact trusted binding, actual manifest
+allocation, complete finding count and full inventory digest validation.
+Callbacks are **uncharged physical transports** taking remaining seconds; these
+wrappers charge each write/read on the caller's shared budget. Do not pass an
+already charged ledger adapter into these callbacks. Ledger stage/read adapters
+instead use A's existing conditional mutation and accounting directly.
+
+`CommentReviewProseStore.stage(parts, head_sha)` uses the caller's existing review
+publication capability to POST only COMMENT reviews, then GET each numeric review
+ID. Exact configured Bot login and numeric account, PR URL, head, COMMENTED state,
+full UTF-8 body and ordered instances/placements are verified. The finite complete
+scan uses one review per response to bound escaping under the REST ceiling. It
+shares the same 64-dispatch/60s budget; a busy historical PR can therefore refuse
+before mutation. Retention is at most 256 prose reviews/8 MiB, with no deletion.
+Identical staged reviews are reused. Ambiguous writes and partial readback raise
+`ProseStagingError` with known IDs; retry reconciliation still proves all bodies.
+
+`VisibleProseReceipt` is `visible-prose-v1`; its strict document includes placement
+`review-body`, index, numeric review and producer IDs, head, body hash/bytes and
+complete instance/path lists. `revalidate` performs fresh complete owner/body
+reads. A receipt alone grants no eligibility, and this store is not called by
+the current ReviewPublisher or finalizer. Every part rejects authority markers.
+
+Synthetic detail-3 profiles stage/reconstruct inventory and COMMENT prose, then
+freshly revalidate both under one budget: 100 findings use three inventory parts,
+1,150 manifest bytes, 11,010 visible receipt document bytes and 19 dispatches;
+250 use six inventory parts, 1,667 manifest bytes, 27,824 receipt document bytes
+and 43 dispatches. Four final fences remain reserved. Whole visible receipts
+require bounded partitioning or actual root allocation; these measurements do
+not imply that embedding receipts directly in a root fits. Fault tests cover
+each POST/readback, lost response reconciliation, metadata ambiguity, edited or
+foreign bodies/owners/PR/head/placement, changed inventory parts, restored budgets,
+and actual manifest allocation refusal. No activation root is written.
+
 ## Remaining qualification
 
-A's concrete immutable partition API and the reviewed compact root reader are
-required for host activation, publication failure/retry tests and complete
-100/250 hosted lifecycle qualification. C/D supply operation and source receipts;
+A's concrete immutable partition API is incorporated in the dependent prototype.
+The reviewed compact latest-root reader and coordinator call sites are still
+required for activation and complete 100/250 hosted lifecycle qualification.
+C/D supply operation and authenticated source receipts;
 F supplies process/concurrency qualification. The coordinator owns installed
 native/npm/action parity and reader-first drain/rollback evidence. Retain all
 active/staged authority and obligations; no cleanup or deployment is authorized.
