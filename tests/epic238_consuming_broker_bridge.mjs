@@ -34,7 +34,7 @@ registerHooks({
 });
 
 const { consumingBroker } = await import("../deploy/cloudflare/test/epic238-consuming-broker-fixture.ts");
-const fixture = await consumingBroker(process.argv[2]);
+const fixture = await consumingBroker(process.argv[2], process.argv[3]);
 globalThis.fetch = async (input, init) => {
   if (process.argv[3]) {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
@@ -51,6 +51,11 @@ for await (const line of lines) {
   const request = JSON.parse(line);
   let result;
   let status = 200;
+  if (request.action === "verify" && request.pause_before_verify === true) {
+    // Before production verification dispatch, not an invented SQL boundary.
+    process.stdout.write(JSON.stringify({ id: request.id, checkpoint: "before-grant-verification" }) + "\n");
+    await new Promise(() => {});
+  }
   try {
     switch (request.action) {
       case "oidc": result = await fixture.oidcToken(request.overrides ?? {}); break;
@@ -59,6 +64,14 @@ for await (const line of lines) {
       case "grant_count": result = fixture.grantCount(); break;
       case "request_log": result = { transport: fixture.transportRequests, ledger: fixture.ledgerRequests }; break;
       case "set_source": Object.assign(fixture.githubInputs.source, request.source); result = null; break;
+      case "set_inline_source": Object.assign(fixture.githubInputs.inlineSource, request.source); result = null; break;
+      case "set_snapshot": {
+        for (const name of ["number", "state", "draft", "base", "head"]) {
+          if (Object.hasOwn(request.snapshot, name)) fixture.githubInputs[name] = request.snapshot[name];
+        }
+        result = null; break;
+      }
+      case "configure_feedback": result = fixture.configureFeedback(); break;
       case "shutdown": fixture.close(); lines.close(); result = null; break;
       default: throw new Error("unknown fixture action");
     }

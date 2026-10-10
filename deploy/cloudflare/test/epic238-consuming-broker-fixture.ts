@@ -3,6 +3,7 @@
  * This supplies no Python host persistence or writer activation policy.
  */
 import { DatabaseSync } from "node:sqlite";
+import { readFileSync, openSync, writeSync, fsyncSync, closeSync } from "node:fs";
 import { BrokerLedger } from "../src/broker-ledger";
 import { TokenBroker } from "../src/token-broker";
 import { GitHubApi } from "../src/github-api";
@@ -10,6 +11,18 @@ import type { WorkerEnv } from "../src/env";
 
 export const SHA = "a".repeat(40);
 export const WORKFLOW = "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5";
+
+const feedbackVector = JSON.parse(readFileSync(new URL(
+  "../../../tests/fixtures/feedback-session-attestation.json", import.meta.url,
+), "utf8"));
+
+export function feedbackAttestation() {
+  const request = structuredClone(feedbackVector.request);
+  request.issued_at = Math.floor(Date.now() / 1000);
+  // A test reference, never a durable attempt or root authorization witness.
+  request.mutation.read_accounting.deadline_unix_ms = Date.now() + 60_000;
+  return request;
+}
 
 export function claims(jti = "assertion-1") {
   return {
@@ -42,7 +55,7 @@ const keyPair = crypto.subtle.generateKey(
   true, ["sign", "verify"],
 );
 
-export async function consumingBroker(filename = ":memory:") {
+export async function consumingBroker(filename = ":memory:", traceFile?: string) {
   const keys = await keyPair;
   const pem = Buffer.from(await crypto.subtle.exportKey("pkcs8", keys.privateKey)).toString("base64");
   const jwk = { ...await crypto.subtle.exportKey("jwk", keys.publicKey), kid: "synthetic-fixture", alg: "RS256", use: "sig" };
@@ -86,19 +99,49 @@ export async function consumingBroker(filename = ":memory:") {
     BROKER_LEDGER: {
       idFromName: () => ({ name: "broker" }),
       get: () => ({ fetch: async (url: string, init: RequestInit) => {
-        ledgerRequests.push(JSON.parse(String(init.body)).action);
+        const action = JSON.parse(String(init.body)).action;
+        ledgerRequests.push(action);
+        // Observe the real binding dispatch before calling production SQLite
+        // policy. No authority, liability, grant or budget is supplied here.
+        if (traceFile) {
+          const descriptor = openSync(traceFile, "a");
+          try {
+            writeSync(descriptor, JSON.stringify({ phase: "attempt", origin: "broker-ledger", method: init.method ?? "GET", path: new URL(url).pathname, action }) + "\n");
+            fsyncSync(descriptor);
+          } finally { closeSync(descriptor); }
+        }
         return ledger.fetch(new Request(url, init));
       } }),
     },
   } as unknown as WorkerEnv;
   const githubInputs = {
+    number: 7, state: "open", draft: false,
     base: "b".repeat(40),
     head: SHA,
     source: {
       id: 13579, body: "@sensei review continue", login: "octocat",
       authorId: 12345678, updatedAt: "2026-10-09T00:00:00Z",
       userType: "User", association: "OWNER",
+      url: "https://api.github.test/repos/acme/widgets/issues/7", status: 200,
     },
+    inlineSource: {
+      id: 24680, body: "The linked caller rejects remote input.", login: "collaborator",
+      authorId: 42, updatedAt: "2026-10-10T00:00:01Z",
+      userType: "User", association: "COLLABORATOR", rootCommentId: 24680,
+      url: "https://api.github.test/repos/acme/widgets/pulls/7", status: 200,
+    },
+  };
+  const configureFeedback = () => {
+    githubInputs.base = feedbackVector.request.feedback.base_sha;
+    for (const source of feedbackVector.selection.sources) {
+      const target = source.kind === "issue" ? githubInputs.source : githubInputs.inlineSource;
+      Object.assign(target, {
+        id: source.comment_id, body: source.body, login: source.author,
+        authorId: source.author_id, updatedAt: source.updated_at,
+        association: source.association, rootCommentId: source.root_comment_id,
+      });
+    }
+    return feedbackAttestation();
   };
   const transportRequests: { method: string; path: string; kind: string }[] = [];
   const transport = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -106,6 +149,7 @@ export async function consumingBroker(filename = ":memory:") {
     const method = init?.method ?? (input instanceof Request ? input.method : "GET");
     transportRequests.push({ method, path: url.pathname, kind: url.hostname === "token.actions.githubusercontent.com" ? "oidc" : "broker-github" });
     let body: unknown;
+    let status = 200;
     if (url.href === "https://token.actions.githubusercontent.com/.well-known/jwks") body = { keys: [jwk] };
     else if (url.hostname !== "api.github.test") throw new Error("unexpected fixture transport host");
     else if (url.pathname === "/repos/malsabbagh/review-sensei/git/ref/tags/v5") body = { object: { type: "commit", sha: SHA } };
@@ -114,12 +158,17 @@ export async function consumingBroker(filename = ":memory:") {
       const request = JSON.parse(String(init?.body));
       body = { token: "synthetic-scoped", expires_at: new Date(Date.now() + 60_000).toISOString(), permissions: { metadata: "read", ...request.permissions } };
     } else if (url.pathname === "/repos/acme/widgets") body = { id: 987654321, fork: false };
-    else if (url.pathname === "/repos/acme/widgets/pulls/7") body = { state: "open", draft: false, base: { sha: githubInputs.base }, head: { sha: githubInputs.head } };
+    else if (url.pathname === "/repos/acme/widgets/pulls/7") body = { number: githubInputs.number, state: githubInputs.state, draft: githubInputs.draft, base: { sha: githubInputs.base }, head: { sha: githubInputs.head } };
     else if (url.pathname === "/repos/acme/widgets/issues/comments/13579") {
       const source = githubInputs.source;
-      body = { id: source.id, body: source.body, updated_at: source.updatedAt, user: { id: source.authorId, login: source.login, type: source.userType }, author_association: source.association, issue_url: "https://api.github.test/repos/acme/widgets/issues/7" };
-    } else throw new Error(`unexpected fixture GitHub transport: ${method} ${url.pathname}`);
-    return new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+      body = { id: source.id, body: source.body, updated_at: source.updatedAt, user: { id: source.authorId, login: source.login, type: source.userType }, author_association: source.association, issue_url: source.url };
+      status = source.status;
+    } else if (url.pathname === "/repos/acme/widgets/pulls/comments/24680") {
+      const source = githubInputs.inlineSource;
+      body = { id: source.id, body: source.body, updated_at: source.updatedAt, user: { id: source.authorId, login: source.login, type: source.userType }, author_association: source.association, pull_request_url: source.url, in_reply_to_id: source.rootCommentId };
+      status = source.status;
+    } else { body = { message: "Not Found" }; status = 404; }
+    return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   };
   let assertion = 0;
   const assertionPrefix = crypto.randomUUID();
@@ -132,7 +181,7 @@ export async function consumingBroker(filename = ":memory:") {
     return `${content}.${signature}`;
   };
   return {
-    broker: new TokenBroker(env, new GitHubApi(env)), ledger, ledgerRequests, githubInputs,
+    broker: new TokenBroker(env, new GitHubApi(env)), ledger, ledgerRequests, githubInputs, configureFeedback,
     transport, transportRequests, oidcToken,
     grantCount: () => Number(database.prepare("SELECT COUNT(*) AS count FROM broker_session_grants").get()?.count),
     close: () => database.close(),

@@ -11,6 +11,7 @@ import os
 import queue
 import subprocess
 import threading
+from io import BytesIO
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlparse
@@ -88,6 +89,7 @@ class ProductionBrokerBridge:
     def __init__(self, directory: Path, trace: PhysicalDispatchTrace):
         self.directory, self.trace = directory, trace
         self.sequence = 0
+        self.oidc_overrides = {}
         self.results = queue.Queue()
         self.process = subprocess.Popen(
             [
@@ -101,6 +103,25 @@ class ProductionBrokerBridge:
             stderr=subprocess.PIPE,
             text=True,
             cwd=ROOT,
+            env={
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith(
+                    (
+                        "REVIEWSENSEI_",
+                        "OLLAMA_",
+                        "OPENAI_",
+                        "ANTHROPIC_",
+                        "GITHUB_",
+                        "GH_",
+                        "ACTIONS_",
+                        "AWS_",
+                        "AZURE_",
+                        "OPENROUTER_",
+                    )
+                )
+                and not key.endswith(("_TOKEN", "_API_KEY", "_SECRET"))
+            },
         )
 
         def read():
@@ -130,7 +151,7 @@ class ProductionBrokerBridge:
         assert timeout > 0
         path = urlparse(request.full_url).path
         if path == "/fixture-oidc":
-            reply = self.call("oidc")
+            reply = self.call("oidc", overrides=self.oidc_overrides)
             return json_response({"value": reply["result"]})
         if request.method != "POST":
             raise AssertionError("broker fixture accepts only the actual POST protocol")
@@ -150,14 +171,15 @@ class ProductionBrokerBridge:
                 reply["status"],
                 "synthetic broker refusal",
                 {},
-                json_response(reply["result"], reply["status"]),
+                BytesIO(json.dumps(reply["result"]).encode("utf-8")),
             )
         return json_response(reply["result"])
 
-    def client(self):
+    def client(self, *, before_request=None):
         return BrokerClient(
             broker_url="https://broker.github.test/api/github/token",
             opener=self.trace.opener(self.open, origin="caller-broker"),
+            before_request=before_request,
         )
 
     def internal_dispatches(self):
