@@ -118,6 +118,8 @@ maintainer operations documented in the release runbook.
 
 ### Proposed JSON-syntax recovery amendment (2026-10-10)
 
+Related PR: [#266](https://github.com/malsabbagh/review-sensei/pull/266).
+
 The legacy `HumanAssessmentService.reply` permits exactly one fresh strict-JSON
 correction after `json.loads` syntax rejection. The original application resource
 tracker is required through preparation and both attempts; direct callers may
