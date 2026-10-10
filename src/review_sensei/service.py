@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from .budgets import ProviderCapabilities, ReviewWorkBudgets
 from .concurrency import ReviewConcurrencyPlan
 from .context import (
+    PROMPT_CONTEXT_POLICY,
     FindingLifecycle,
     IncrementalReviewPlan,
     ReviewContextCache,
@@ -250,6 +251,7 @@ class ReviewService:
             {
                 "mechanism": "unified:v1",
                 "shared_document_prompt_format": SHARED_DOCUMENT_PROMPT_FORMAT,
+                "prompt_context_policy": PROMPT_CONTEXT_POLICY,
                 "budgets": asdict(self.work_budgets),
                 "resource_budget": asdict(self.budget),
                 "capabilities": asdict(self.capabilities)

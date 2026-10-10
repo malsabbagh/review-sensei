@@ -78,7 +78,9 @@ class FileCoverage:
     reason: str | None = None
 
     def __post_init__(self) -> None:
-        validate_repository_path(self.path, label="coverage path")
+        validate_repository_path(
+            self.path, label="coverage path", allow_glob_chars=True
+        )
         if self.outcome not in COVERAGE_OUTCOMES:
             raise ReviewInputError("coverage outcome is unsupported")
         _validate_reason(self.reason)
@@ -119,7 +121,9 @@ class HunkCoverage:
             or self.index < 1
         ):
             raise ReviewInputError("coverage hunk index must be a positive integer")
-        validate_repository_path(self.path, label="coverage hunk path")
+        validate_repository_path(
+            self.path, label="coverage hunk path", allow_glob_chars=True
+        )
         if self.outcome not in COVERAGE_OUTCOMES:
             raise ReviewInputError("coverage outcome is unsupported")
         _validate_reason(self.reason)

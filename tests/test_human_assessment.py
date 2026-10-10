@@ -176,6 +176,11 @@ class State:
 
     def pr(self):
         return {
+            "changed_files": (
+                len(self.files)
+                if self.files is not None
+                else len({item.path for item in self.eligibility.human_review.findings})
+            ),
             "state": "open",
             "draft": False,
             "user": {"login": "alice", "type": "User"},

@@ -754,7 +754,9 @@ class ConversationPublisher:
             raise GitHubConversationError("human assessment paths are invalid")
         try:
             for path in pending_paths:
-                validate_repository_path(path, label="human assessment path")
+                validate_repository_path(
+                    path, label="human assessment path", allow_glob_chars=True
+                )
         except ReviewInputError as exc:
             raise GitHubConversationError("human assessment paths are invalid") from exc
         required = sorted(set(pending_paths))
@@ -777,7 +779,9 @@ class ConversationPublisher:
             if not isinstance(item, dict) or not isinstance(item.get("filename"), str):
                 continue
             filename = item["filename"]
-            validate_repository_path(filename, label="conversation diff path")
+            validate_repository_path(
+                filename, label="conversation diff path", allow_glob_chars=True
+            )
             raw_patch = item.get("patch")
             patch = (
                 raw_patch if isinstance(raw_patch, str) and raw_patch.strip() else None
@@ -829,107 +833,34 @@ class ConversationPublisher:
         required_paths: Sequence[str],
         timeout_seconds: float = 120,
         include_all_changed: bool = False,
+        before_read=None,
     ):
-        """Load exact complete file patches outside the bounded chat context.
+        """Load exact evidence with shared acquisition accounting and fences.
 
-        Pagination and individual HTTP responses retain their existing bounds.
-        No patch is truncated or replaced with a historical inline fragment.
-        With include_all_changed, base/head and changed-file count are fenced
-        around pagination. Required-path-only callers must fence publication
-        against the supplied snapshot themselves.
+        The integrated host must pass its original before_read guard; partition,
+        feedback and evidence phases must not replenish one another's allowance.
+        Transport failures retain pending obligations without partial authority.
         """
-        import time
-
-        from ...evidence import EvidenceBundle, EvidenceRecord, EvidenceSnapshot
+        from ...evidence import EvidenceBundle, EvidenceSnapshot
 
         if isinstance(required_paths, str) or len(required_paths) > 64:
             raise GitHubConversationError("human assessment paths are invalid")
         for path in required_paths:
-            validate_repository_path(path, label="human assessment path")
+            validate_repository_path(
+                path, label="human assessment path", allow_glob_chars=True
+            )
         snapshot = EvidenceSnapshot(repository, pull_request, base_sha, head_sha)
-        if not required_paths:
-            return EvidenceBundle(snapshot, ())
-        expected_count = None
-        acquisition_deadline = time.monotonic() + min(60, timeout_seconds)
-
-        def remaining_acquisition():
-            return max(0.0, acquisition_deadline - time.monotonic())
-
-        def snapshot_current():
-            status, pr = self.http.request(
-                "GET",
-                self.http.repository_path(repository, f"/pulls/{pull_request}"),
-                token=token,
-                timeout_seconds=remaining_acquisition(),
-            )
-            if (
-                status != 200
-                or not isinstance(pr, dict)
-                or not isinstance(pr.get("base"), dict)
-                or not isinstance(pr.get("head"), dict)
-                or pr["base"].get("sha") != base_sha
-                or pr["head"].get("sha") != head_sha
-            ):
-                raise GitHubConversationError("review evidence snapshot changed")
-            return pr.get("changed_files")
-
         try:
-            if include_all_changed:
-                expected_count = snapshot_current()
-            files = self.http.paginate(
-                path=self.http.repository_path(
-                    repository, f"/pulls/{pull_request}/files"
-                ),
+            return self.http.load_review_evidence(
                 token=token,
-                page_sizes=(100, 50, 25, 5, 1),
-                max_requests=62 if include_all_changed else 64,
-                timeout_seconds=remaining_acquisition(),
+                snapshot=snapshot,
+                required_paths=tuple(required_paths),
+                include_all_changed=include_all_changed,
+                timeout_seconds=min(60, timeout_seconds),
+                before_read=before_read,
             )
-            if include_all_changed:
-                snapshot_current()
         except GitHubHTTPError:
             return EvidenceBundle(snapshot, (), enumeration_complete=False)
-        records = []
-        for item in files:
-            if not isinstance(item, dict) or not isinstance(item.get("filename"), str):
-                raise GitHubConversationError(
-                    "review evidence file inventory is invalid"
-                )
-            path = item["filename"]
-            validate_repository_path(path, label="review evidence path")
-            if not include_all_changed and path not in required_paths:
-                continue
-            patch = item.get("patch")
-            records.append(
-                EvidenceRecord(
-                    path,
-                    patch if isinstance(patch, str) else "",
-                    snapshot,
-                    supplied_complete=isinstance(patch, str)
-                    and bool(patch.strip())
-                    and isinstance(item.get("additions"), int)
-                    and not isinstance(item.get("additions"), bool)
-                    and isinstance(item.get("deletions"), int)
-                    and not isinstance(item.get("deletions"), bool),
-                    old_path=item.get("previous_filename"),
-                    expected_additions=item.get("additions"),
-                    expected_deletions=item.get("deletions"),
-                )
-            )
-        try:
-            if expected_count is not None and (
-                isinstance(expected_count, bool)
-                or not isinstance(expected_count, int)
-                or len({record.path for record in records}) != expected_count
-            ):
-                return EvidenceBundle(
-                    snapshot, tuple(records), enumeration_complete=False
-                )
-            return EvidenceBundle(snapshot, tuple(records))
-        except ReviewInputError as exc:
-            raise GitHubConversationError(
-                "review evidence file patches conflict or exceed bounds"
-            ) from exc
 
     def _load_diff_context(
         self,
@@ -944,7 +875,9 @@ class ConversationPublisher:
         source_path = source.get("path")
         source_hunk = source.get("diff_hunk")
         if source_kind == "inline" and isinstance(source_path, str):
-            validate_repository_path(source_path, label="conversation diff path")
+            validate_repository_path(
+                source_path, label="conversation diff path", allow_glob_chars=True
+            )
             if isinstance(source_hunk, str) and source_hunk.strip():
                 bounded = _bounded_text(
                     f"path={source_path}\n{source_hunk}", MAX_CONTEXT_DIFF_BYTES
@@ -992,7 +925,9 @@ class ConversationPublisher:
             patch = item.get("patch")
             if not isinstance(filename, str):
                 continue
-            validate_repository_path(filename, label="conversation diff path")
+            validate_repository_path(
+                filename, label="conversation diff path", allow_glob_chars=True
+            )
             paths.append(filename)
             if not isinstance(patch, str) or not patch.strip():
                 continue
@@ -1002,7 +937,9 @@ class ConversationPublisher:
         seen_priority: set[tuple[str, str]] = set()
         for filename, diff_hunk in priority_hunks:
             try:
-                validate_repository_path(filename, label="conversation diff path")
+                validate_repository_path(
+                    filename, label="conversation diff path", allow_glob_chars=True
+                )
             except ReviewInputError:
                 continue
             if not isinstance(diff_hunk, str) or not diff_hunk.strip():
@@ -1064,7 +1001,9 @@ class ConversationPublisher:
             if not isinstance(path, str) or not path:
                 continue
             try:
-                validate_repository_path(path, label="conversation finding path")
+                validate_repository_path(
+                    path, label="conversation finding path", allow_glob_chars=True
+                )
             except ReviewInputError:
                 continue
             if not isinstance(diff_hunk, str) or not diff_hunk.strip():

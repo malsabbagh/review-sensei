@@ -1090,7 +1090,7 @@ diff --git a/src/helper.py b/src/helper.py
             malformed_argv[malformed_argv.index("--head-sha") + 1] = "c" * 40
             with (
                 patch(
-                    "review_sensei.cli.baseline_from_history_document",
+                    "review_sensei.cli.read_session_baseline",
                     side_effect=ReviewInputError("corrupt persisted baseline"),
                 ),
                 patch(

@@ -947,7 +947,7 @@ class ReviewComment:
         }
 
     def __post_init__(self) -> None:
-        validate_repository_path(self.path, label="comment path")
+        validate_repository_path(self.path, label="comment path", allow_glob_chars=True)
         if self.side not in COMMENT_SIDES:
             raise ReviewInputError("comment side must be LEFT, RIGHT, or FILE")
         if self.side == "FILE":
@@ -1879,7 +1879,9 @@ class ConversationFinding:
             allow_empty=False,
         )
         if self.path is not None:
-            validate_repository_path(self.path, label="conversation finding path")
+            validate_repository_path(
+                self.path, label="conversation finding path", allow_glob_chars=True
+            )
         if self.line is not None and (
             isinstance(self.line, bool)
             or not isinstance(self.line, int)
