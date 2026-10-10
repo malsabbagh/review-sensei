@@ -204,9 +204,7 @@ def discover(
                 if getattr(stage_provider, "allow_model_override", True)
                 else None
             ) or stage_provider.model
-            service.capabilities.require_identity(
-                provider_name=stage_provider.name, model=selected_model
-            )
+            service.capabilities.require_provider(stage_provider, model=selected_model)
         budgets = service.work_budgets.effective(
             limits=request.limits,
             resource=tracker.budget,

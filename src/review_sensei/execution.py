@@ -81,18 +81,21 @@ def provider_work_identity(provider: ReviewProvider) -> str:
         if policy is not None and callable(getattr(policy, "identity_fields", None))
         else None
     )
-    return evidence_digest(
-        {
-            "adapter": type(provider).__module__ + "." + type(provider).__qualname__,
-            "name": provider.name,
-            "model": provider.model,
-            "base_url": getattr(provider, "base_url", None),
-            "timeout_seconds": getattr(provider, "timeout_seconds", None),
-            "max_output_tokens": getattr(provider, "max_output_tokens", None),
-            "allow_model_override": getattr(provider, "allow_model_override", True),
-            "routing_policy": fields,
-        }
-    )
+    identity = {
+        "adapter": type(provider).__module__ + "." + type(provider).__qualname__,
+        "name": provider.name,
+        "model": provider.model,
+        "base_url": getattr(provider, "base_url", None),
+        "timeout_seconds": getattr(provider, "timeout_seconds", None),
+        "max_output_tokens": getattr(provider, "max_output_tokens", None),
+        "allow_model_override": getattr(provider, "allow_model_override", True),
+        "routing_policy": fields,
+    }
+    contract = getattr(provider, "completion_contract", None)
+    if contract is not None:
+        identity["completion_contract"] = contract
+        identity["endpoint"] = getattr(provider, "endpoint", None)
+    return evidence_digest(identity)
 
 
 @dataclass(frozen=True)
@@ -236,6 +239,13 @@ def execute_call(
     output_accounting = output_accounting or OutputAccounting()
     corrected = False
     while True:
+        if budgets.capabilities is not None:
+            selected_model = (
+                request.model
+                if getattr(provider, "allow_model_override", True)
+                else None
+            ) or provider.model
+            budgets.capabilities.require_provider(provider, model=selected_model)
         diagnostic = tracker.admit_call(request.prompt)
         if diagnostic:
             return CallResult(diagnostic=diagnostic)

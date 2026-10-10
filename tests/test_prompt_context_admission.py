@@ -108,6 +108,8 @@ def lens(category="documents", *, size=7000, count=64, omitted=9, pinned=False):
 class Provider:
     name = "fixture"
     model = "fixture-model"
+    endpoint = "https://fixture.example/api"
+    completion_contract = "bounded-complete-text-v1"
 
     def __init__(self, summary="Reviewed current diff.", finding=False):
         self.calls = []
@@ -442,6 +444,8 @@ class PromptContextAdmissionTests(unittest.TestCase):
             qualified=True,
             provider_name=provider.name,
             model=provider.model,
+            endpoint=provider.endpoint,
+            completion_contract=provider.completion_contract,
         )
         run = reviewer.run(request(lens(size=10000, count=1, omitted=0, pinned=True)))
         self.assertEqual(len(provider.calls), 1)

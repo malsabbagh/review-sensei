@@ -5,6 +5,19 @@ approval bounds, see [Review pipelines and customization](review-pipelines.md).
 That guide is a fixed snapshot of `a598d4a` (0.6.18), not a live mirror of this
 architecture page. Refresh ownership and validation steps live in the guide itself.
 
+## Provider response completeness and capability identity
+
+Qualified library capabilities bind the exact credential-free endpoint, model,
+provider and `bounded-complete-text-v1` adapter contract. Shared discovery and
+reassessment check that identity before planning and dispatch. Ollama advertises
+the contract only with explicit fixed-model `require_completion_metadata=True`:
+it requires normal completion, exact model and bounded integer token usage before
+returning text. Present incomplete, length-terminated or over-cap metadata also
+refuses in legacy mode; absent legacy metadata retains its prior disposition.
+This change activates no qualified profile or workflow. Remote tokenizer mapping,
+producer authority and full lifecycle qualification remain separate gates. See
+[ADR 0075](adr/0075-complete-provider-response-contract.md).
+
 ## npm launcher and standalone boundary (issue #103)
 
 The npm surface is an adapter around the existing Python engine, not a second

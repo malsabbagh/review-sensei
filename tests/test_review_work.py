@@ -46,6 +46,8 @@ class ReviewWorkBudgetTests(unittest.TestCase):
             qualified=True,
             provider_name="fixture",
             model="fixture",
+            endpoint="https://fixture.example/api",
+            completion_contract="bounded-complete-text-v1",
         )
         effective = budgets.effective(
             limits=ReviewLimits(max_diff_bytes=64 * 1024),

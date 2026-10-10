@@ -202,6 +202,18 @@ class _BudgetedProvider:
         self._budget = budget
 
     @property
+    def endpoint(self) -> object:
+        return getattr(self._provider, "endpoint", None)
+
+    @property
+    def completion_contract(self) -> object:
+        return getattr(self._provider, "completion_contract", None)
+
+    @property
+    def allow_model_override(self) -> bool:
+        return getattr(self._provider, "allow_model_override", True)
+
+    @property
     def exhausted(self) -> bool:
         return self._budget.exhausted
 
