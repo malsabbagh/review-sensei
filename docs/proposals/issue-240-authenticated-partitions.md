@@ -414,6 +414,96 @@ a fresh grant, and after consumed verification/current-root discovery before
 checkpoint preparation. Caller accounting is never restored or adopted as
 original-attempt proof.
 
+### Direct owned history association amendment (prototype, default off)
+
+`enable_history_graph=False` remains the default on both adapters. The opt-in
+reader uses C's immutable `assessment-history-index-v1` parser at
+`c425739851989bda81649eefe2d917dd70b522fc`. Only `assessment_queue.py`,
+`assessment_history_index.py` and its exact synthetic fixtures are selected as
+dependencies. The Python feedback parser separately selects coordinator
+`5e799c0b13902be22d66c720213e9e76d6d1cd57`: primitive JSON string
+`admission-dispatch` requires both exact request and dispatch digests. Neither
+dependency enables a route, coalescing, source acknowledgement or writers.
+
+The concrete owned API is:
+
+```python
+associate_assessment_history(
+    identity, *, expected_binding, expected_root_sha256,
+    expected_generation, max_scan_pages, now=None,
+) -> HistoryAssociation
+read_associated_history(
+    proof, *, source_digest, operation_id, now=None,
+) -> object  # exact decoded old journal, never a recursive resolver
+```
+
+`max_scan_pages` is mandatory only for the hosted adapter (1..60); the local
+adapter takes no remote scan scope. The caller supplies the full trusted
+immutable queue binding and exact current owned root digest/generation. The
+adapter loads the complete current envelope under the original shared budget,
+uses the strict C parser, checks the actual complete inventory count (1..250),
+snapshot and inventory digest, and verifies a current PR head on GitHub even
+when no mutation broker is configured. Local snapshot trust remains the
+caller's immutable Git context. Each root read, metadata page, head request,
+physical part inspection and part read is charged. No helper creates or restores
+a new operation allowance. Reader fences retain the existing four reserved
+activation calls; they do not gain additional free calls.
+
+The opaque proof is registered on the same ledger and budget object. It binds
+the owned root digest/generation, the canonical full binding and complete ordered
+direct source/reference/original-accounting inventory digest. Its sealed bytes
+cannot be replaced, transferred to another ledger or reused with another budget.
+The cache and proof registries each have a 2 MiB aggregate byte ceiling and 64
+entry ceiling. `host_state()` exposes a snapshot with no attempt witness; like
+C's `QueueHostState`, the snapshot does not authenticate itself or prove restart.
+
+Lookup selects only an exact source/operation member of that current inventory.
+Before and after the one child fetch it reloads the complete current root and
+checks the current head. The child must have the canonical adapter ID, exact
+configured Bot integer author and repository/PR association on GitHub, exact
+framed size/hash, immutable binding hash, a single part, and bounded inflation
+(32 KiB framed / 2 MiB decoded). It must contain that source's exact inline
+original receipt and identical immutable inventory; C still owns receipt
+validation. An older packet's index is reference data only. No API associates a
+raw supplied journal, follows its references, grants arbitrary ID access, or
+claims that unfetched objects were authenticated.
+
+All direct child IDs enter the activation plan scope and prepaid dispatch
+inventory. The complete manifest plus baseline and direct-child cardinality and
+declared framed bytes must fit the shared 256-part / 8 MiB retention allowance;
+actual staging scans also include every orphan and visible retained object.
+Root allocation and future summary/lifecycle growth retain their existing
+actual-record preflight. A prepaid activation validates every direct child,
+including children unrelated to the selected replay source. No dispatch is
+refunded or charged again. A missing, foreign, unidentified, substituted or
+omitted reference refuses activation. Existing archived source/operation,
+reference, tombstone and original accounting remain exact; archival of a prior
+current receipt requires that exact prior owned single-part manifest. Ordinary
+`replace` refuses graph mutation. Legacy-to-index migration and a first indexed
+root containing invented archived accounting explicitly refuse without a future
+reviewed complete original-source proof. This amendment supplies no GC.
+
+Measured small read-only fixture: complete root with two direct children,
+lookup of the second child, including both root/head fences, costs **10 hosted
+physical requests** (`3 * (scan + current part + head) + child`) or **15 local
+I/O units** (`3 * (root + 3 current-part units) + 3 child-part units`). The
+unselected first child may be missing without causing that sparse lookup to
+follow it; full activation refuses its absence. The activation-reader fixture
+precharges and consumes all **9 local part units** for current + two children,
+with no refund on a missing child. These are storage-reader measurements, not
+provider/source/broker/acknowledgement lifecycle measurements.
+
+The retained 194-piece C profile is not qualified for whole hosted execution.
+At five objects per metadata page, repeated complete scans and full child
+validation can exceed the genuine shared 64-call/60-second ceiling before root
+activation. The boundary fixture supplies 198 visible retained objects, allows
+exactly 39 pages, then refuses without a 40th request or an omitted inventory.
+Local retained-entry scans are likewise charged; no larger profile is admitted
+by silently skipping scans, source fences, head checks or original proof.
+The earlier actual production-broker cost and whole-operation refusal remain
+release gates. Live-only mutation proof, explicit restart refusal, residual
+non-atomic GitHub races and all writer-off qualifications remain unchanged.
+
 The new dependency can charge every physical BrokerClient dispatch through
 `before_request`. The adapter accepts that hook only when it is the bound
 `consume` method of this exact original EvidenceReadBudget; then the client

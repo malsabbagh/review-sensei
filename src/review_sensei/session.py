@@ -57,6 +57,14 @@ from .convergence import (
 )
 from .coverage import FileCoverage, HunkCoverage
 from .errors import ReviewInputError
+from .history_association import (
+    HistoryAssociation,
+    _read_history_child,
+    associate_history,
+    history_payload,
+    indexed_document,
+    read_associated_history,
+)
 from .models import ReviewResult, ReviewTransaction
 from .schemas import validate_public_document
 
@@ -2827,7 +2835,147 @@ def read_session_assessment_queue(
         or document.get("schema_version") != binding["schema_version"]
     ):
         raise ReviewInputError("assessment journal schema is unsupported")
+    cache = getattr(ledger, "_history_documents", None)
+    if indexed_document(document):
+        if not getattr(ledger, "enable_history_graph", False) or cache is None:
+            raise ReviewInputError(
+                "indexed history requires explicit reader enablement"
+            )
+        payload = history_payload(record, document)
+        encoded = canonical_bytes(payload)
+        key = _history_cache_key(record)
+        prospective = {**cache, key: encoded}
+        if (
+            len(prospective) > 64
+            or sum(len(value) for value in prospective.values()) > 2_097_152
+        ):
+            raise ReviewInputError("history reader cache exceeds finite bound")
+        cache[key] = encoded
+        if getattr(ledger, "_activation_ticket", None) is not None:
+            for row in payload["sources"]:
+                _read_history_child(ledger, identity, payload, row)
+    elif cache is not None and getattr(ledger, "enable_history_graph", False):
+        if len(cache) >= 64 and _history_cache_key(record) not in cache:
+            raise ReviewInputError("history reader cache exceeds finite bound")
+        cache[_history_cache_key(record)] = b""
     return document
+
+
+def _history_cache_key(record: SessionRecord) -> str:
+    if record.assessment_queue is None:
+        return ""
+    return hashlib.sha256(
+        canonical_bytes(record.assessment_queue["state_manifest"])
+    ).hexdigest()
+
+
+def _history_cached(ledger: Any, record: SessionRecord) -> dict[str, Any] | None:
+    key = _history_cache_key(record)
+    if not key:
+        return None
+    if key not in ledger._history_documents:
+        raise ReviewInputError("complete queue reference inventory was not read")
+    value = ledger._history_documents[key]
+    return json.loads(value) if value else None
+
+
+def _history_extra_ids(ledger: Any, record: SessionRecord) -> tuple[str, ...]:
+    if not ledger.enable_history_graph:
+        return ()
+    payload = _history_cached(ledger, record)
+    return (
+        tuple(row["reference"]["storage_id"] for row in payload["sources"])
+        if payload is not None
+        else ()
+    )
+
+
+def _history_legacy_write_guard(ledger: Any, record: SessionRecord) -> None:
+    if ledger.enable_history_graph and _history_cached(ledger, record) is not None:
+        raise ReviewInputError(
+            "indexed history mutation requires a sealed activation tail"
+        )
+
+
+def _history_preserve_sources(
+    ledger: Any, before: SessionRecord, after: SessionRecord
+) -> None:
+    if not ledger.enable_history_graph:
+        return
+    old, new = _history_cached(ledger, before), _history_cached(ledger, after)
+    if old is None:
+        if before.assessment_queue is not None and new is not None:
+            raise ReviewInputError(
+                "indexed legacy migration requires complete original source proof"
+            )
+        if new is not None and new["sources"]:
+            raise ReviewInputError(
+                "initial indexed root cannot invent archived original accounting"
+            )
+        return
+    if new is None:
+        raise ReviewInputError(
+            "indexed history cannot discard its complete source inventory"
+        )
+
+    def identities(
+        payload: dict[str, Any], record: SessionRecord
+    ) -> dict[str, tuple[str, object]]:
+        from .assessment_history_index import IndexedAssessmentJournal
+
+        journal = IndexedAssessmentJournal.from_document(payload["envelope"]["journal"])
+        rows = {
+            row["source_digest"]: (row["operation_id"], row["read_accounting"])
+            for row in payload["sources"]
+        }
+        current = journal._current()
+        if current is not None:
+            active = cast(Mapping[str, Any], record.assessment_queue)[
+                "active_operation"
+            ]
+            if (
+                not isinstance(active, Mapping)
+                or active["source_digest"] != current["source_digest"]
+                or active["operation_id"] != current["operation_id"]
+            ):
+                raise ReviewInputError(
+                    "indexed current original accounting carrier differs"
+                )
+            rows[current["source_digest"]] = (
+                current["operation_id"],
+                active["read_accounting"],
+            )
+        return rows
+
+    previous, following = identities(old, before), identities(new, after)
+    active = cast(Mapping[str, Any], after.assessment_queue)["active_operation"]
+    changing = active["source_digest"] if isinstance(active, Mapping) else None
+    for source, (operation, accounting) in previous.items():
+        candidate = following.get(source)
+        if candidate is None or candidate[0] != operation:
+            raise ReviewInputError(
+                "indexed history omitted or substituted an original source"
+            )
+        if source != changing and candidate[1] != accounting:
+            raise ReviewInputError("indexed history changed original sealed accounting")
+    old_archived = {row["source_digest"]: row for row in old["sources"]}
+    new_archived = {row["source_digest"]: row for row in new["sources"]}
+    for source, row in old_archived.items():
+        if source != changing and new_archived.get(source) != row:
+            raise ReviewInputError(
+                "indexed history substituted a retained child reference"
+            )
+    for source, row in new_archived.items():
+        if source in old_archived or source not in previous:
+            continue
+        manifest = cast(Mapping[str, Any], before.assessment_queue)["state_manifest"]
+        if len(manifest["parts"]) != 1 or row["reference"] != {
+            **manifest["parts"][0],
+            "decoded_bytes": manifest["decoded_bytes"],
+        }:
+            raise ReviewInputError(
+                "indexed archival requires exact prior owned current part"
+            )
 
 
 def _validate_queue_retention(before: SessionRecord, after: SessionRecord) -> None:
@@ -2892,7 +3040,9 @@ def _tail_attempt_scope(
     ).hexdigest()
 
 
-def _tail_part_ids(record: SessionRecord) -> tuple[str, ...]:
+def _tail_part_ids(
+    record: SessionRecord, *, history_ids: tuple[str, ...] = ()
+) -> tuple[str, ...]:
     manifests = []
     history = record.convergence_history
     baseline = history.get("baseline") if isinstance(history, Mapping) else None
@@ -2900,10 +3050,13 @@ def _tail_part_ids(record: SessionRecord) -> tuple[str, ...]:
         manifests.append(validate_manifest(baseline))
     if record.assessment_queue is not None:
         manifests.append(validate_manifest(record.assessment_queue["state_manifest"]))
-    return tuple(
-        ref["storage_id"]
-        for manifest in manifests
-        for ref in cast(list[dict[str, Any]], manifest["parts"])
+    return (
+        tuple(
+            ref["storage_id"]
+            for manifest in manifests
+            for ref in cast(list[dict[str, Any]], manifest["parts"])
+        )
+        + history_ids
     )
 
 
@@ -2973,6 +3126,8 @@ def _tail_plan_scope(
     head_sha: str | None = None,
     root_id: int | None = None,
     grant_sha256: str | None = None,
+    old_history_ids: tuple[str, ...] = (),
+    new_history_ids: tuple[str, ...] = (),
 ) -> str:
     return hashlib.sha256(
         canonical_bytes(
@@ -2980,8 +3135,8 @@ def _tail_plan_scope(
                 "adapter": adapter,
                 "current_root": before.record_sha256,
                 "draft_shape": hashlib.sha256(_tail_record_shape(draft)).hexdigest(),
-                "old_parts": _tail_part_ids(before),
-                "new_parts": _tail_part_ids(draft),
+                "old_parts": _tail_part_ids(before, history_ids=old_history_ids),
+                "new_parts": _tail_part_ids(draft, history_ids=new_history_ids),
                 "operation": dict(operation),
                 "original_deadline_ms": budget.wall_deadline_ms,
                 "scan_pages": scan_pages,
@@ -3080,6 +3235,7 @@ class LocalSessionLedger:
         *,
         evidence_budget: EvidenceReadBudget | None = None,
         enable_partition_writes: bool = False,
+        enable_history_graph: bool = False,
     ) -> None:
         if not isinstance(root, Path):
             raise ReviewInputError("session ledger root is invalid")
@@ -3087,6 +3243,9 @@ class LocalSessionLedger:
         self.evidence_budget = evidence_budget or EvidenceReadBudget()
         self._explicit_evidence_budget = evidence_budget is not None
         self.enable_partition_writes = enable_partition_writes
+        self.enable_history_graph = enable_history_graph
+        self._history_documents: dict[str, bytes] = {}
+        self._history_associations: dict[object, Any] = {}
         self._shared_control_budget = evidence_budget is not None
         self._activation_ticket: EvidenceTailTicket | None = None
         self._activation_identity: SessionIdentity | None = None
@@ -3134,6 +3293,70 @@ class LocalSessionLedger:
     @staticmethod
     def evidence_producer() -> str:
         return "local-ledger"
+
+    def _history_load(
+        self,
+        identity: SessionIdentity,
+        *,
+        max_scan_pages: int | None,
+        now: datetime | None,
+    ) -> tuple[SessionRecord | None, object]:
+        if max_scan_pages is not None:
+            raise ReviewInputError(
+                "local history reader does not accept remote scan scope"
+            )
+        # Read-only authority may outlive execution deadlines; it never admits a mutation.
+        document = self._read_document(self._path(identity), fence=True)
+        if document is None:
+            raise ReviewInputError("history current root is missing")
+        record = SessionRecord.from_dict(document)
+        if (record.repository, record.repository_id, record.pull_request) != (
+            identity.repository,
+            identity.repository_id,
+            identity.pull_request,
+        ):
+            raise ReviewInputError("history root identity differs")
+        read_session_baseline(self, record)
+        return record, read_session_assessment_queue(self, record)
+
+    @staticmethod
+    def _history_head(identity: SessionIdentity, binding: Mapping[str, object]) -> None:
+        # Local caller supplies the trusted immutable Git snapshot context.
+        if (
+            binding.get("repository") != identity.repository
+            or binding.get("pull_request") != identity.pull_request
+        ):
+            raise ReviewInputError("history trusted local snapshot differs")
+
+    def associate_assessment_history(
+        self,
+        identity: SessionIdentity,
+        *,
+        expected_binding: Mapping[str, object],
+        expected_root_sha256: str,
+        expected_generation: int,
+        now: datetime | None = None,
+    ) -> HistoryAssociation:
+        return associate_history(
+            self,
+            identity,
+            expected_binding=expected_binding,
+            expected_root_sha256=expected_root_sha256,
+            expected_generation=expected_generation,
+            now=now,
+        )
+
+    def read_associated_history(
+        self,
+        proof: HistoryAssociation,
+        *,
+        source_digest: str,
+        operation_id: str,
+        now: datetime | None = None,
+    ) -> object:
+        return read_associated_history(
+            self, proof, source_digest=source_digest, operation_id=operation_id, now=now
+        )
 
     def _part_directory(
         self, identity: SessionIdentity, *, storage_id: str | None = None
@@ -3759,9 +3982,11 @@ class LocalSessionLedger:
         if loaded.status != "ok" or loaded.record is None:
             raise ReviewInputError("session record is missing")
         updated = mutate(loaded.record)
+        _history_legacy_write_guard(self, loaded.record)
         _validate_queue_retention(loaded.record, updated)
         read_session_baseline(self, updated)
         read_session_assessment_queue(self, updated)
+        _history_legacy_write_guard(self, updated)
         current_document = self._read_document(self._path(identity), fence=True)
         if current_document is None:
             raise ReviewInputError("session generation conflict before activation")
@@ -3907,12 +4132,23 @@ class LocalSessionLedger:
                 reservation_id=attempt_reservation_id,
                 budget=budget,
             )
+            if self.enable_history_graph:
+                read_session_assessment_queue(self, draft)
+                _history_preserve_sources(self, before, draft)
+            old_ids = _history_extra_ids(self, before)
+            new_ids = _history_extra_ids(self, draft)
             plan_scope = _tail_plan_scope(
-                "local", before, draft, operation=operation, budget=budget
+                "local",
+                before,
+                draft,
+                operation=operation,
+                budget=budget,
+                old_history_ids=old_ids,
+                new_history_ids=new_ids,
             )
             steps = tuple(
                 TailDispatch(f"part:{part_id}:{unit}")
-                for part_id in _tail_part_ids(draft)
+                for part_id in _tail_part_ids(draft, history_ids=new_ids)
                 for unit in ("resolve", "directory", "read")
             ) + (
                 TailDispatch("root:reload", fence=True),
@@ -3927,7 +4163,13 @@ class LocalSessionLedger:
             ticket.seal(sealed.record_sha256)
             ticket.start(
                 scope_sha256=_tail_plan_scope(
-                    "local", before, sealed, operation=operation, budget=budget
+                    "local",
+                    before,
+                    sealed,
+                    operation=operation,
+                    budget=budget,
+                    old_history_ids=old_ids,
+                    new_history_ids=new_ids,
                 ),
                 root_sha256=sealed.record_sha256,
             )
