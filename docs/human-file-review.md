@@ -124,13 +124,14 @@ old transaction reader cannot silently verify and drop the new approval input.
 With every binary change freshly confirmed and this host-derived provenance,
 `evaluate` can compute a combined coverage decision while preserving every
 other frozen/current approval fact. It leaves the original AI result, baseline,
-cache, eligibility marker and partial coverage unchanged and never posts
-APPROVE or a passing check. A returned assessment is a fresh observation, not a
-durable authorization. The ordinary finalizer still withholds the partial
-review. Before automatic publication is enabled, a reviewed host must compose
-this decision with fresh finalizer guards, broker authorization, durable
-receipts and the complete resource/concurrency profile. Remote reads and writes
-are not an atomic GitHub CAS; concurrent duplicate receipts refuse evaluation.
+cache, eligibility marker and partial coverage unchanged and does not post
+APPROVE or a passing check. `publish_mixed_approval` is the separate host call
+that posts one exact-head APPROVE after that decision passes. A returned
+assessment is a fresh observation. The ordinary finalizer still withholds the
+partial review. The public mention router does not call either method yet, so
+a GitHub comment is not connected until a reviewed host wires it. Remote reads
+and writes are not an atomic GitHub CAS; concurrent duplicate receipts refuse
+evaluation.
 
 ## Finite limits and validation
 
@@ -167,5 +168,6 @@ metadata, and an old schema withhold or refuse. Policy off leaves the binary
 blocker in place. Replay of the same confirmation event returns the same receipt
 identity.
 
-Public APPROVE integration is still pending. The shared finalizer is unchanged
-until a later change is authorized to call this function.
+`publish_mixed_approval` can post that decision when a host calls it. The
+shared finalizer is unchanged and still withholds a partial AI result. Public
+mention routing is still unwired.

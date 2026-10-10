@@ -107,6 +107,9 @@ Rollback keeps the unused module unconnected. A future activated deployment
 must retain original guards and unknown transitions; rollback cannot erase them
 to obtain another allowance.
 
+The bootstrap profile and producer contract are recorded in ADR 0076. This
+record remains the storage primitive. The human-file recorder is ADR 0077.
+
 ## Sources
 
 The implementation uses synchronous transactions and consumes SQL cursors before
