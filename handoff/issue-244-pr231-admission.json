@@ -1,0 +1,35 @@
+{
+  "base_sha": "70305207647c22595660e5ebb9e4a33991489ffe",
+  "head_sha": "bf408b0c070e7404fefcf50eebc104346228662b",
+  "provider": "credential-free fixture; no actual review inference",
+  "original_prompt_bytes": 640794,
+  "original_reports": [
+    {
+      "discovered": 73,
+      "selected": 64,
+      "omitted": 9,
+      "inventory_sha256": "bd9745c91e42f4edc5e19b3d8101bc6bfa33b4146e3843211b1b5c7fd2fc548f"
+    }
+  ],
+  "mandatory_documents": [
+    {
+      "path": "docs/architecture.md",
+      "bytes": 61136,
+      "sha256": "c97cc4c95234b3e4a024714528b306e560c0a8c176060f3f4ddfc62746f4c038"
+    }
+  ],
+  "calls": 0,
+  "executed_prompt_bytes": [],
+  "result_status": "partial",
+  "changed_file_coverage_complete": false,
+  "outcome": "partial",
+  "qualified_fixture": {
+    "calls": 1,
+    "prompt_bytes": [
+      179949
+    ],
+    "status": "partial",
+    "coverage_complete": true,
+    "qualification": "synthetic fixture only; no Ollama/GLM qualification claim"
+  }
+}

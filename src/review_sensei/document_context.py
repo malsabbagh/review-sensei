@@ -77,6 +77,7 @@ class DocumentDecision:
             "configured-source",
             "file-budget",
             "byte-budget",
+            "prompt-budget",
             "inspection-file-limit",
             "unreadable",
             "invalid-utf8",
