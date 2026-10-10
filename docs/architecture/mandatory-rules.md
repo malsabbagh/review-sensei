@@ -1,4 +1,23 @@
-# Architecture
+<!--
+supplemental-ledger
+These docs/architecture.md parts stay supplemental. They are historical narrative
+or non-normative reference. Every normative line copied below is verbatim.
+- preamble: pipelines guide snapshot pointer
+- Boundary map diagram, except the test-only production-map exclusion
+- Selected design: historical combined-workflow versus provider-protocol choice
+- Future extension points: prospective adapter notes, except the learning-publisher rule
+- OIDC exchange figure, except the metadata-only audit constraint
+- explanatory sentences with no MUST, MUST NOT, never, only, refuse, or retain constraint
+-->
+
+```supplemental-ledger
+omitted:
+  - preamble
+  - boundary-map-diagram
+  - selected-design
+  - future-extension-prospective-notes
+  - oidc-exchange-figure
+```
 
 ## Explicit human file review (local, opt-in)
 
@@ -18,105 +37,28 @@ composition and deployed resource qualification remain pending.
 Recording a confirmation is not approval.
 See [Proposed ADR 0077](adr/0077-explicit-human-file-review.md).
 
-For the operational flows and separate analysis, persistence, reassessment and
-approval bounds, see [Review pipelines and customization](review-pipelines.md).
-That guide is a fixed snapshot of `a598d4a` (0.6.18), not a live mirror of this
-architecture page. Refresh ownership and validation steps live in the guide itself.
-
 ## Provider response completeness and capability identity
 
-Qualified library capabilities bind the exact credential-free endpoint, model,
-provider and `bounded-complete-text-v1` adapter contract. Shared discovery and
 reassessment check that identity before planning and dispatch. Ollama advertises
 the contract only with explicit fixed-model `require_completion_metadata=True`:
 it requires normal completion, exact model and bounded integer token usage before
 returning text. Present incomplete, length-terminated or over-cap metadata also
 refuses in legacy mode; absent legacy metadata retains its prior disposition.
-This change activates no qualified profile or workflow. Remote tokenizer mapping,
-producer authority and full lifecycle qualification remain separate gates. See
-[ADR 0075](adr/0075-complete-provider-response-contract.md).
 
 ## npm launcher and standalone boundary (issue #103)
 
-The npm surface is an adapter around the existing Python engine, not a second
 implementation. `packages/npm/cli/bin/review-sensei.js` is the only package
 that exposes the `review-sensei` command; it selects one exact platform package,
 validates its fixed in-package payload, and forwards argv/process behavior.
 `review_sensei.cli:main` remains the only review engine. Native one-folder
-bundles are produced by the pinned PyInstaller spec in
-`packaging/standalone/`, with JSON defaults and `review-sensei` distribution
-metadata collected for `--version` outside a Python checkout.
 
-The supported target table is deliberately closed: macOS arm64/x64, glibc
-Linux arm64/x64, and Windows x64. Package assembly and independent tarball
-validation are confined to ignored build/dist staging. Release publication is
-version-serialized and platform-first through npm Trusted Publishing, with
-launcher-last after exact registry version/integrity readback; PyPI remains an
 independent lane. A
 partial or compromised release is handled version-forward, never by moving a
 tag or replacing a tarball. See [ADR 0031](adr/0031-npm-launcher-and-standalone-platform-packages.md).
 
 ## Boundary map
 
-```text
-trusted target/base checkout
-     |                    |                        |
-     v                    v                        v
-LearningStore    RepositoryContextStore    SymbolAwareContextSelector
-     |                    |                        |
-     +------> ReviewLensContext          SourceContextSelection
-                    |                        |
-                    +----------- ReviewRequest <--+
-                    |
-trusted category files --> ReviewCategoryCatalog
-                    |          |
-trusted stage files --> Stage category ids
-                               |
-diff changed paths --> active lens selection
-                               |
-                               v
-                         ReviewRequest
-                               |
-                               v
-                                ReviewService
-                                        |
-                                        v
-                           single-pass prompt renderer
-                                        |
-                                        v
-                              ReviewProvider protocol
-                                  |           |
-                                  v           v
-                    OllamaProvider    OpenAICompatibleProvider
-                                  |           |
-                                  +-----------+
-                                              |
-                                              v
-                         validated ReviewResult
-
 (fixture adapter: test-only seam, omitted from production map)
-                           |                   |
-                           v                   v
-          prepare_publishable_review   learning proposals ----> GitHub learning PR
-                           |
-                           v
-              confirmed findings, or identified legacy comments
-                           |
-                           v
-                    GitHub or other publisher adapters
-                           |
-                           v
-                      structured RunOutcome
-
-ReviewRequest ----> ReviewConcurrencyPlan ----> host scheduler
-ReviewService.run ----> ResourceBudget admission ----> RunOutcome
-ReviewConvergencePolicy ----> evaluate_blocker_admission / admit_review_result
-                               (legacy: ADR 0032 events; operator modes: publication)
-SessionLedger --------------> local JSON / GitHub issue-comment adapters
-                               (C3 counters; C5 will enforce)
-ReviewBaseline -------------> IncrementalReviewPlan + late classification
-                               (C4 verification scope; C2 admits)
-```
 
 `ReviewService.run` always emits a versioned `RunOutcome`. Hard resource budgets
 cap provider calls, transport retries, prompt/output bytes, and elapsed time.
@@ -125,20 +67,13 @@ One structural-correction retry remains distinct from transport retry. Opt-in
 model or rewriting trusted learnings or configuration. See
 [ADR 0043](adr/0043-structured-run-outcomes-budgets-and-publication-recovery.md).
 
-An operator-ledger analysis checkpoint commits the logical review round before
-GitHub publication. An identical retry whose publication is pending or failed
-reports `publication_recovery_required` without another provider call or ledger
-charge. It requires the original validated result and trusted admission contexts;
 the ledger's baseline and digests cannot reconstruct them. Reusable runners
 publish only a newly produced result and retain an explicitly enabled diagnostics
 bundle after publication failure. That bundle includes the reviewed diff and
 trusted configuration/admission contexts, retains the existing seven-day limit,
 and remains disabled for `artifacts: none`. Local analysis-only sessions retain
 their existing duplicate behavior. See the PR223 amendment to
-[ADR 0052](adr/0052-logical-review-transaction-across-analysis-and-publication.md).
 
-The review service owns the business invariants. Provider adapters own protocol,
-authentication, timeout, and response-envelope details. Publishers own GitHub
 API authentication and comment/review delivery. `prepare_publishable_review`
 sits between a validated `ReviewResult` and any publisher: `legacy` keeps
 single-pass comments and identifies them; `confirmed` publishes only candidates
@@ -146,10 +81,8 @@ whose evidence exists in the exact reviewed snapshot. Unverified candidates
 never become findings, and incomplete verification cannot be treated as a
 clean review. Candidate text and snapshot contents remain untrusted data.
 
-The versioned synthetic corpus flows through a bounded, provider-neutral
 evaluation loader and `FixtureProvider` into the unchanged `ReviewService`.
 Reports retain only aggregate, non-monetary metrics. Live endpoints are
-authority-gated by the CLI; CI uses fixture mode.
 
 ## Quality and supply-chain boundary
 
@@ -163,29 +96,11 @@ outside the checkout; CodeQL analyzes Python and JavaScript/TypeScript and its
 deterministic SARIF findings gate is the enforcement surface. Checkout-only
 tests that need `scripts/`, `.github/`, `packages/`, or `deploy/` remain in the
 compatibility and quality jobs. All workflow permissions default to
-`contents: read`, and the `required-checks` aggregate publishes the stable
-`Required checks` status used by branch protection. The optional downstream
-canary workflow is operator-gated and is excluded from that aggregate.
 
 The public JSON schemas are structural contracts only. They reject malformed
-shapes and unknown fields, but runtime loaders (`ReviewCategory`, `Stage`, and
-`LearningEntry`) remain the semantic authority for path safety, placeholder
-allowlists, cross-file references, and bounded values. Schema documents,
-workflow text, diffs, comments, and model output remain untrusted input. CI tool
-versions are direct, exact pins in `requirements/ci.txt`; the packaged runtime
-depends on the pinned-compatible `jsonschema` library for public contract
-validation and `cryptography` for GitHub App JWT signing.
 
-The shared `validation.py` module owns the provider-neutral untrusted-input
-boundary. Its frozen `ReviewLimits` profile defaults to 1,048,576 bytes/50,000
-lines/500 files/5,000 hunks per diff, 4,194,304-byte prompts, 1,048,576-byte
-provider responses, and 2,097,152-byte publisher results, with independent
-metadata, learning, category, context, summary, comment, proposal, and line
 number ceilings documented in the README and ADR 0007. Profiles can only move
 downward. Canonical NFC UTF-8 repository paths and strict Git C-quoted paths are
-validated once and reused by models, stages, and diff analysis; no path is
-silently normalized. The CLI reads at most the diff ceiling plus one byte, and
-each provider adapter owns an equivalent bounded transport read.
 
 ## Portable workflow boundary
 
@@ -209,62 +124,19 @@ package, then runs the backend on the runner kind that plan requires: cloud
 backends on GitHub-hosted compute, local backends on the operator's
 self-hosted runner (labelled `ollama` in the example), which must have Ollama
 and the selected model provisioned before dispatch. Provider egress is explicit
-opt-in through the canonical `inference.backend` field (or the optional
-`REVIEWSENSEI_PROVIDER` Actions variable); the local backend uses
-`http://127.0.0.1:11434/api` with no API key, cloud backends use their fixed
-allowlisted endpoints and require the matching repository secret. The workflow
-does not accept an arbitrary provider URL input, so a dispatch-supplied URL
-cannot redirect the provider credential. The workflow installs the exact
-requested `review-sensei==X.Y.Z` package from PyPI into a separate
-`RUNNER_TEMP` virtual environment. When that exact distribution is
-unavailable, it installs the same version from the executing workflow commit
-SHA in the public GitHub repository; other PyPI failures remain fatal. The
-install step verifies the package metadata and dependency set before review.
 
 ## GitHub App setup migration boundary
 
-The installation bootstrap is a narrow deployment adapter, not a repository
-configuration owner. Generated setup files carry a `ReviewSensei setup version`
 marker. Before creating a setup pull request, the Cloudflare Worker or Python
 adapter reads only the three known generated paths from the trusted default
 branch, with a 128 KiB per-file limit and strict UTF-8 decoding. Older
-generated files, partial current setups, byte-exact managed v3 workflows, and
-managed v4 workflows following another valid public tag produce a reviewable
-migration PR; all current files are a no-op. A custom, malformed,
-or future-version file produces a no-write result so repository-owned workflow
+
 content is not overwritten. The migration branch is created once per base and
 tag (`review-sensei/setup-v5-<base12>-<tag>`), is reusable only when its parent
 is the named base SHA, its author is the ReviewSensei App, its content is
 exactly current, and its comparison changes generated paths only, and is never
 force-moved; it changes no path outside the generated set, preserving
 learnings, secrets, existing variables, and unrelated repository files. See ADR
-0021.
-
-Public JSON documents are versioned under `src/review_sensei/schemas/` with v1
-`$id` values. The `review_sensei.schemas` module and
-`scripts/validate_public_schemas.py` validate packaged defaults, examples, and
-golden fixtures against those schemas before publication. Public schemas,
-stable error categories, provider transient metadata, CLI flags, and
-compatibility guarantees are documented in `docs/public-contracts.md` and ADR
-0009.
-
-Proposal aggregate sizing uses the compact UTF-8 serialization of the complete
-proposal array, including its brackets and separators, so the publisher-facing
-bound is deterministic across stages.
-
-## Selected design
-
-The project considered two approaches:
-
-1. Put Ollama calls, GitHub event handling, prompt construction, and comment
-   posting in one workflow or server module.
-2. Keep a provider-neutral review service behind a small provider protocol, then
-   add Ollama and GitHub as replaceable adapters.
-
-ReviewSensei uses the second approach. It keeps model changes local, makes the
-review rules testable without network access, prevents GitHub credentials from
-becoming part of the core, and lets a future provider or publisher reuse the
-same validated result.
 
 ## Domain contracts
 
@@ -391,10 +263,6 @@ same validated result.
 
 ## Review stage configuration
 
-Category files contain one `ReviewCategory` each and are indexed by stable id in
-a `ReviewCategoryCatalog`. Stage files are sorted by filename and executed in
-that order. Each stage contains a `name`, an `outputs` array, a
-`prompt_template`, and either `category_ids` resolved from a supplied catalog or
 an inline `categories` array. A stage cannot combine both forms. Reusing an id
 in multiple stages is allowed only when its title and focus items are identical,
 keeping the aggregated result vocabulary unambiguous.
@@ -403,9 +271,6 @@ The category block is configuration, not provider output. A stage with
 categories must include `{review_categories}` in its template so focus data
 cannot be configured but silently omitted from the model prompt. A stage whose
 categories request supplemental context must also include `{review_context}`.
-Template placeholder names are allowlisted, and replacement occurs in one regex
-pass so tokens embedded in untrusted diffs, learnings, documents, or
-instructions remain literal.
 
 `applies_to` defaults to the whole diff and controls whether a lens is active.
 The CLI derives applicability paths independently from inline-comment locations,
@@ -439,15 +304,13 @@ bounded path/provenance inventory without document text. These counts describe
 supplemental context, independently of source-review coverage and approval.
 See proposed [ADR 0058](adr/0058-budgeted-document-context.md).
 
-Symbol-aware source selection is a separate opt-in policy
 (`SymbolAwareContextPolicy`, `--enable-symbol-context`). Disabled by default,
 it never expands trusted context. When enabled, `SymbolAwareContextSelector`
 reads only the trusted-base snapshot identified by `--base-sha`. Head source
-remains the untrusted diff. The documented language set is Python with
-deterministic AST parsing; JavaScript/TypeScript receive a bounded fallback
+
 and an explicit `unsupported-language` outcome. Selection is static: files are
 never executed. Exhausted budgets fail closed; other incomplete coverage is
-recorded on the review result as `source_context` without changing GitHub
+
 write, egress, or approval defaults. Bounded relationship expansion reports
 `directory-truncated` or `relations-truncated` so a capped graph cannot be
 read as a complete one, and only Python sources count toward the
@@ -456,9 +319,6 @@ caller-directory cap. Default enablement requires evaluation under issue #33.
 Custom stage and category directories are operator-selected configuration. They
 must come from a trusted checkout or deployment bundle, not the pull-request
 head. The loaders reject empty directories, symlinked or non-regular JSON files,
-duplicate stage names or category ids, unknown category references, oversized
-files, excessive file counts, malformed categories, unknown configuration
-fields, and unknown template placeholders before any provider request is made.
 
 The context loader rejects traversal, symlinks, secret-like names, unsupported
 text formats, unreadable or empty files, excessive file counts, and per-file or
@@ -511,10 +371,6 @@ history, bounded for storage only, and never decide admission.
 
 ## Future extension points
 
-- Additional model adapters register with `ProviderRegistry`.
-- A GitHub publisher can consume `ReviewResult`, reuse the GitHub App auth
-  adapter in `src/review_sensei/hosting/github/`, and implement review creation,
-  thread replies, and idempotency.
 - The GitHub learning publisher converts validated `learning_proposals` into a
   single ReviewSensei-owned draft PR per source PR. It uses content-addressed
   learning files, a stable source-PR branch/marker, hash-bound commit
@@ -522,8 +378,6 @@ history, bounded for storage only, and never decide admission.
   generations start fresh and omit files already byte-identical on the latest
   base; closed, deleted, manually edited, fork-owned, or ambiguous artifacts
   fail closed. Only merged learning files are eligible for later reviews.
-- A workflow or queue adapter can enforce `ReviewService.concurrency_plan()`
-  without adding GitHub or provider-specific dependencies to the review engine.
 
 ## Open-source integration
 
@@ -535,23 +389,7 @@ unavailable, from the public repository at the executing workflow SHA, run the
 provider, and upload the validated result plus the installed version. A source
 fallback is used only for the package-not-found condition; other PyPI failures
 remain fatal. This path does not require a hosted backend,
-GitHub App installation tokens, a durable job queue, a database, or deployment
-infrastructure. The default provider configuration is local Ollama, so private
-source data is not exported by default.
 
-Optional GitHub App identity: a GitHub App registration can provide ReviewSensei
-branding, name, and icon. If App-identity comments or reviews are needed, the
-App can use JWT and installation-token authentication as a narrow transport
-concern. That authentication work belongs outside the provider-neutral review
-core and is implemented under `src/review_sensei/hosting/github/` with
-registration, key-rotation, and revocation guidance in
-[`docs/github-app-auth.md`](github-app-auth.md). It is not a hosted review
-service. The default manual workflow does not post comments and does not
-require an App.
-
-Installation-time setup bootstrap is also outside the review core. When an App
-installation is created or repositories are added, the webhook/setup boundary
-verifies webhook signatures, deduplicates deliveries, and opens a reviewable
 setup pull request per newly selected repository. The setup service never
 includes secrets, private keys, installation tokens, raw webhook bodies,
 authorization headers, or GitHub API bodies in generated files or PR bodies. It
@@ -559,70 +397,22 @@ creates the generated files and no repository variables at all; the only two
 product overrides are the optional `REVIEWSENSEI_PROVIDER` and
 `REVIEWSENSEI_MODEL` Actions variables, and `OLLAMA_API_KEY` remains a
 user-managed secret.
-The generated manual cleanup workflow can open a PR deleting the setup files,
-but the App cannot do that automatically after uninstall because its token is
-revoked.
-See [`docs/github-app-registration.md`](github-app-registration.md) and ADR
-0014.
 
-An optional Cloudflare deployment package under `deploy/cloudflare/` supplies a
-live ingress for that narrow setup boundary without turning ReviewSensei into a
 hosted review engine. The Worker applies a bounded Web Crypto HMAC gate and
 payload validation, then a single named SQLite-backed Durable Object stores
 only delivery identity, digest, state, and a short lease. The same Worker uses
-Web Crypto RS256 signing, installation-scoped GitHub tokens, and bounded REST
-calls to create idempotent setup pull requests and defaults. No raw body, token,
-key, diff, or provider output is persisted. The package does not use Cloudflare
-Containers, so this deployment path is compatible with the Workers Free plan.
-See [`deploy/cloudflare/README.md`](../deploy/cloudflare/README.md) and ADR
-0020.
 
 ## Release engineering boundary
 
-The distributable package is a separate, operator-owned boundary around the
 provider-neutral review engine. `pyproject.toml` is the single package metadata
 source; `setup.py` is retained only as a metadata-free compatibility shim for
 legacy tooling. `MANIFEST.in` controls source-distribution documentation and
-example inclusion, while setuptools package-data rules carry the packaged
-default stage/category JSON into wheels.
-
-`.github/workflows/release.yml` is a tag-driven Python/package release workflow,
-not runtime application code. It validates a `vX.Y.Z` tag against package
-metadata and the changelog, builds and inspects the sdist/wheel before any
-external write, and uses a dedicated PyPI environment with GitHub OIDC Trusted
-Publishing rather than a long-lived upload token. The build also emits
-checksums, an SBOM, and GitHub artifact attestations before the publish and
-GitHub-release jobs attach the immutable assets. Workflow permissions are
-scoped per job and third-party actions are pinned to full commit SHAs. Active
-workflow jobs use GitHub-hosted runners, including the full cross-platform
-compatibility matrix.
-
-The public repository publishes the standalone launcher and native platform
-packages from a version tag in `.github/workflows/release.yml` or from the
-manual `.github/workflows/publish-npm.yml` path. The manual path is pinned to
-the public default-branch SHA. Both paths build the five platform executables
-on native runners, validate and attest the exact tarballs, and publish platform
-packages before the launcher through the protected `npm` environment. Their
-publish jobs share a version-specific concurrency group.
-Package manifests name the same public repository so npm provenance remains
-auditable. A temporary environment-scoped token can bootstrap an entirely new
-package set; after the first release, npm Trusted Publishing binds each package
-to each authorized workflow, repository, and environment, eliminating the token.
 
 Release operations, PyPI registration, signed-tag ownership, verification,
 rollback/yank, and compromised-release response are documented in
 `docs/releasing.md`. The workflow cannot reserve the PyPI project or decide
 whether a maintainer should publish; those are explicit external operations.
 
-Release Marshal keeps authored changelog notes when supplied and otherwise
-generates escaped commit-title notes from the exact first-parent range since the
-previous version's signed annotated tag. Notes, version metadata and generated
-docs share the existing allowlisted direct App commit and receipt digest. Exact
-prepared-source CI still precedes signing and owner publisher approval. See
-[ADR 0071](adr/0071-generated-release-notes.md).
-
-Supported release combinations are bound by a versioned compatibility
-manifest: workflow commit, Python distribution digest, npm artifact digests,
 public schema version, and Worker identity. Build output is valid only when
 every named artifact is present with an exact SHA-256 digest and an explicit
 trusted provenance mechanism. Missing or extra artifacts fail closed. The
@@ -632,71 +422,33 @@ tag movement remain operator-only. See [ADR 0038](adr/0038-release-compatibility
 
 ## Public landing-page analytics boundary
 
-`docs/site/index.html` is a static GitHub Pages artifact. The Google Tag
-Manager bootstrap for container `GTM-5W7TJV38` is an intentional exception to
-the otherwise self-contained page: normal visits request
-`https://www.googletagmanager.com/gtm.js?id=GTM-5W7TJV38`, while browsers
-without JavaScript receive the corresponding `ns.html` iframe. The remote
-container can execute tags and is therefore code outside the repository's
-reviewed commit.
-
-Ownership is split explicitly:
-
-- ReviewSensei maintainers own the bootstrap, container ID, data-layer
-  contract, privacy requirements, and repository changes.
-- Google Tag Manager workspace administrators own container versions, tag
-  configuration, publish permissions, and emergency pause/revert actions.
-- The GitHub Pages workflow owns delivery of the reviewed bootstrap after a
-  merge to `main`.
-
-The browser-to-Google request may expose normal request metadata such as the
-source IP address, user agent, referrer, and cookies, plus any additional data
 collected by the published tags. The page must not put source code, diffs,
 prompts, review comments, credentials, or other sensitive ReviewSensei data in
 `dataLayer`. Container tags must follow the site's privacy notice and
 applicable consent requirements; adding a new data field or tag requires
 maintainer review in the GTM workspace and repository policy review.
 
-Controls:
-
-- `GTM-5W7TJV38` and both Google endpoints are literal, reviewed source
-  values; no visitor or workflow input can select a container or script URL.
 - The standard loader and its noscript fallback are the only integration in
   `docs/site/index.html`; additional collection is visible in the container's
   published tag configuration.
 - Workspace access and publish permissions are limited to designated
   maintainers, and published container versions are retained for audit and
   rollback.
-- Changes to the integration or its privacy/data-layer contract go through a
-  normal PR and the existing Pages deployment workflow.
 
 Rollback is code-only for the repository integration: revert the snippets in
 a reviewed PR, merge to `main`, and verify that the deployed page no longer
 requests the GTM endpoints. For an active incident, the GTM workspace owner
-can pause the container or restore the last approved container version before
-the Pages revert completes. No review-engine data migration is required.
 
 ## Publication boundary
 
-The private development repository produces the public
 `malsabbagh/review-sensei` through a reproducible publication pipeline. An
 exclusion manifest (`.publication/exclusions.json`) lists every internal-only
 file pattern with a documented reason. A commit-oriented publication audit
-(`scripts/audit_publication.py`) resolves an explicit source commit and exact
-Git tree, applies the exclusion manifest before reading blobs, rejects unsafe
-publishable non-blob entries, scans publishable blobs for credentials, private
-repository references, private-network endpoints, and unallowlisted identity
-metadata, and writes a deterministic redacted report. The audit fails closed
-without echoing matched values. `scripts/publish_public.py` exports the
-approved commit's file set to the public repository and appends a provenance
+
 ledger entry recording both SHAs and a mode-aware publishable tree hash. The
 hash covers sorted path, tracked Git mode, and blob-digest records, so a
 mode-only executable-bit change is a distinct publication identity. The
-internal `publish` GitHub Actions
-workflow gates the audit, dry-run, and sync behind maintainer approval; the
-workflow and operator runbook are intentionally excluded from the public tree.
 
-Deferred hosted review service: the hosted GitHub App architecture in ADR 0006
 is superseded for now. The Cloudflare package is only an optional installation
 bootstrap ingress; customer Actions still own review execution and provider
 compute. A hosted review service would require a new ADR and a fresh issue set.
@@ -710,113 +462,52 @@ private key remains in managed storage, the broker receives no diff or provider 
 and forks, missing or suspended installations, rate limits, and verification
 or GitHub failures are rejected fail-closed.
 
-```text
-GitHub Actions OIDC id_token (audience=sts.reviewsensei.dev, id-token: write)
-    -> OIDCBroker.exchange
-        -> verify_oidc_token (issuer/audience/JWKS/RS256/exp/iat/nbf/claims)
-        -> approved workflow identity + fork rejection
-        -> installation mapping
-        -> rate limit
-        -> GitHubAppAuth.installation_token (repo-scoped, permission-checked)
-        -> short-lived InstallationToken (no key/JWT in response)
         -> audit (non-secret metadata only)
-```
 
 ## Issue-64 setup-v4 tagged publication architecture
 
-The proposed [feedback mutation protocol](adr/0073-authenticated-feedback-mutation-grants.md)
 adds a distinct version-2 session grant. The Worker transiently reloads complete
 human sources to verify numeric actors, exact snapshot and selection digests;
 credentials and ledger records retain metadata and hashes. It does not receive
-review diffs or provider responses. This grant alone cannot authenticate original
-attempt accounting or authorize the disabled richer hosted queue route.
 
 Setup-v4 separates the customer caller, public execution workflow, and
 issuance-only Worker:
 
-```text
-customer setup-v4 caller (operator-managed @v5 tag; all five opt-ins false)
-    -> public reusable workflow
-       -> trusted-base checkout and bounded diff
-       -> PyPI package or executing-SHA public GitHub source fallback
-       -> provider-selected cloud or local review/reply runtime
-       -> typed result/reply validation
-       -> Actions OIDC assertion
-          -> Cloudflare POST /github/token
-             -> exact @v5 ref + tag-resolved runtime SHA + installation resolution + metadata-scoped repository/fork checks
-             -> hashed replay/rate Durable Object claim
-             -> one least-privileged capability token
-       -> App-authored exact-head review (COMMENT or eligible APPROVE), learning PR, or authorized reply
-          -> temporary eyes reaction around each authorized provider turn
-```
-
-The generated setup PR is limited to the workflow caller, uninstall workflow,
-and config file. The operator-managed v5 tag is validated during
-installation/reconciliation and remains in the generated caller; the broker
 resolves the tag at capability exchange time and checks the runtime SHA. The workflow may
 receive the existing customer-owned `OLLAMA_API_KEY` only through a literal
 name-only secret mapping. The setup App does not access that value. The Worker
 does not receive source, diffs, prompts, review output, reply content, provider
 credentials, or installation-token values for persistence; its ledger retains
 only hashed identities and bounded counters. Current, custom, malformed, and
-future clients are no-write cases. A byte-exact managed v3 workflow or managed
-v4 workflow following another valid public tag is stale and is migrated; absent
-and legacy/v2 clients are also reconciled through at most one reviewable
-setup-v5 PR per selected repository.
 
 The generated caller is invocation-only: backend, model, endpoint, credential,
 and every `github.*` policy resolve from `.reviewsensei.yml` on the trusted
 policy commit, with `REVIEWSENSEI_PROVIDER` and `REVIEWSENSEI_MODEL` as the
 only product overrides. Local, cloud, and OpenRouter runtime jobs expose the
-same operation matrix—automatic/manual review, review and learning publication,
-optional artifacts, and bounded `@reviewsensei` replies—while retaining different
-compute and egress boundaries. `local-ollama` uses the labelled self-hosted
-Ollama runner; `cloud-ollama` uses the hosted Ollama Cloud lane; `openrouter`
-uses the hosted OpenRouter lane for allowlisted models. Hosted reusable jobs
-default to GitHub; an operator may select one validated trusted Linux label
+
 through `hosted_runner` (ADR 0062). Read-only bootstrap and the local Ollama
 label array retain their existing routing. Backend, model and policy still
-resolve from trusted configuration, not this infrastructure input.
-Older setup-v4 callers remain recognized as managed content and migrate through
-the existing reviewable setup PR path.
 
 Before an enabled review reaches either provider, the reusable workflow runs a
 read-only authoritative pull-request preflight. It validates the repository
-numeric id, open/non-draft state, same-repository non-fork head, exact head
-SHA, base ref, and (when supplied) base SHA, then exports the API's canonical
-base SHA and a bounded standard-base64 title. The provider checks out that
-canonical base commit. Reply operations use a no-op preflight and cannot
-select a review step; unavailable GitHub metadata fails closed with an
-explicit error rather than allowing a stale or ambiguous review.
 
-The automatic-review and GitHub-writes caller path defaults to automatic
-approval. Review publication is one exact-head review, and
-enforcement is one stable `ReviewSensei` check run bound to that head and to
-its producing App (ADR 0057). A completed `auto-approve` review publishes
-`success` whether or not required fixes remain, and submits `REQUEST_CHANGES`
-when they remain and `COMMENT` otherwise. `blocking` publishes `failure` when
 required fixes remain and stays `COMMENT`. `advisory` publishes `neutral`,
 stays `COMMENT`, and never fails the check. `action_required` covers a
-partial, incomplete, or unpublished review in `auto-approve` and `blocking`,
-and `cancelled` is a run that ended without a conclusion. A pending review
-first writes `in_progress`, so an earlier conclusion on the same head cannot
+
 stand for a review that has not finished. A repository administrator must mark the check
 required for it to gate merges in `blocking` mode; `doctor` reports the check identity and
 producing App. Checks: write is a scoped broker capability
-(`check_publish`), so a missing permission leaves the check unpublished and
-reports `check_permission`; it does not prevent approval for an otherwise
+
 eligible review. Repositories that require this check must grant the
 permission and broker capability for the merge gate to be enforced.
 
 A shared deterministic finalizer then emits `APPROVE` only when an eligible
 exact-head PR has a complete, qualified review with no unresolved ReviewSensei
 root classified blocking. Non-blocking ReviewSensei roots and human threads may
-remain open. Blocking or unclassified ReviewSensei roots, draft/closed/stale/
-fork targets, App-authored PRs, and malformed or unavailable thread state
-withhold approval or fail closed, and the withheld decision carries a bounded
+
 diagnostic. The classification sweep asks only for bounded root data, is capped
 at ten pages, and runs before a final PR preflight. The finalizer runs after
-review publication and after the AI resolves a blocking root, and it re-reads
+
 the persisted eligibility document instead of trusting a caller boolean. The
 existing `pull_requests: write` capability and per-head approval
 marker/idempotency boundary are shared, so approval adds no credential or
@@ -826,16 +517,7 @@ auto-merge.
 [ADR 0059](adr/0059-dependency-review-and-partial-publication.md) permits
 validated partial analysis to cross the identity-bound checkpoint/publication
 boundary only with complete enumeration and evidence of reviewed work. The
-same repository/PR/base/head/policy/configuration/result-digest checks apply to
-first publication and crash recovery. Partial checkpoints charge one failed
-attempt, preserve the last complete baseline, and do not increment completed
-review counters or create convergence/no-progress markers. Successful transport
-preserves the `partial` run outcome and approval/check limitations; incomplete
-or wholly failed analysis remains fail-closed.
 
-[ADR 0060](adr/0060-stale-baseline-full-review-recovery.md) permits bounded
-fresh full analysis when a valid durable baseline loses incremental reuse
-compatibility. The analysis attempt is deterministic for the exact current
 base/head, configuration and context, so a same-head base change runs once.
 The prior baseline stays in trusted publication admission inputs; fallback
 findings retain human adjudication. Only a validated complete checkpoint
@@ -844,128 +526,58 @@ blocked, and partial or failed work preserves the last complete baseline.
 Closed operational diagnostic tokens reach stderr and Actions summaries
 without requiring retained artifacts.
 
-Issue #136 adds a versioned review-convergence policy (ADR 0046) that doctor
 and plan can display. Issue #146 F7 (ADR 0055) makes `merge-focused` the
 runtime default and retires live `legacy` selection, so the policy is now bound
 into publication: operator modes run the blocker-admission evaluator before
 GitHub review events and comment rendering, and only historical `legacy`
 records keep the explicit finding `blocking` bit described above.
-The approval choice is `github.reviews` in `.reviewsensei.yml`: `blocking`
-publishes and enforces without ever approving, and `advisory` imposes no
-ReviewSensei merge gate.
 
-F1 of issue #146 adds an identity-bound `ReviewTransaction` handoff for
-operator-ledger runs. Analysis reserves once, checkpoints the validated result
-and increments the logical round once, then GitHub publication advances the
-same durable transaction through pending, failed, or succeeded phases without
 another provider call or counter increment. The result and ledger carry only
 bounded repository/PR/base/head, policy/configuration/evidence digests,
 reservation, generation, phase, and result-digest metadata; publication
 recomputes the trusted context before any broker or publisher write. Legacy and
-no-ledger callers remain on their existing compatibility path until the later
-issue #146 workflow/default slices.
 
-Conversation turns are authorized before capability exchange or provider
-execution. The reply capability adds an App-authored `eyes` reaction to the
-source comment, the provider receives the already-bounded thread/diff/findings/
-learnings context, and a `finally` cleanup removes the reaction after reply
-publication or another terminal outcome. The validated reply may also carry an
 explicit `resolve` decision. Only a ReviewSensei-authored inline root can be
 resolved; the publisher rechecks the exact head, performs a bounded GraphQL
 root-to-thread lookup, and confirms an idempotent `resolveReviewThread` result.
-Issue comments, human roots, stale heads, and malformed or unavailable thread
-responses remain unresolved. Reply markers still provide idempotency, so a
-retry can reconcile an already-published response and finish a pending
-resolution without creating a duplicate. After a successful AI resolution of a
-blocking root, the adapter invokes the shared finalizer on the same exact head;
-this avoids a second provider pass, synthetic commit, or Actions-dispatch
-capability while preserving the normal approval gates.
 
-Pending `needs_human` findings follow the separate evidence-backed reassessment
-path in [ADR 0061](adr/0061-human-reply-reassessment.md). A new review records a
 complete bounded inventory in its App eligibility document. An authorized
 explicit `@reviewsensei` explanation and validated provider assessment can refresh
 only the human flag for that exact base/head and result. Literal human/diff
-citations establish provenance; the model supplies semantic judgment. Fresh
-source authorization, latest persisted eligibility and all existing approval
-gates are checked before approval. Legacy, incomplete, stale or unsupported
-inventories keep withholding; no session baseline or cross-head disposition
-changes. Supported resolution uses the existing review publication capability,
-with the issue-reply token kept on conversation operations.
 
-[ADR 0065](adr/0065-complete-human-inventory-and-approval-retry.md) distinguishes
 assessment identities from lifecycle concern fingerprints. Colliding concerns
 retain separate identities derived from their validated v1 comments;
 identical comments coalesce. Invalid or oversized inventories fail before
-publication instead of silently disappearing. A missing legacy inventory or a
-malformed latest authority record returns an actionable full-review error,
-without generating ordinary chat. Published prose and short finding IDs do not
-prove a complete inventory bound to the original result digest. Once a complete
-inventory is durably reassessed, retries re-enter the existing exact-head
-finalizer without another inference or reassessment review. All other eligibility
-facts, current authorization, live thread checks and approval markers remain
-authoritative.
 
-The default reassessment path prioritizes the complete supplied current patches for validated
-pending paths within the existing 12 KiB budget. Missing, conflicting or
-oversized required evidence produces a deterministic acknowledgment and a
-separate insufficient-evidence outcome, with no inference, review capability or
-eligibility/approval mutation. Ordinary conversation selection remains unchanged.
-Provider output rejection exposes a closed reason code without source or model
-payload, and accepted decisions still require verbatim human and relevant current
-diff evidence. The legacy service permits at most one fresh JSON-syntax correction
-within the original resource tracker, provider token limit, 48 KiB per-request
 prompt and 16 KiB per-response bounds. The application passes its existing
 tracker through preparation and both calls; counters and deadlines are never
 reset. Schema/citation rejection and provider transport/completion failures do
 not trigger this syntax correction. Safe parser diagnostics contain only fixed
 reason labels, numeric line/column/offset, response byte count, correction status
 and a closed budget reason. Raw output is neither echoed in the correction nor
-logged. This does not add durable replay authority to the legacy path.
 
-[ADR 0067](adr/0067-shared-review-work-mechanics.md) introduces the opt-in
-`advanced.review_work.mode: unified` mechanism. Both full discovery and human
-reassessment use immutable snapshot-bound evidence, one deterministic rendered
-request planner, and one executor for provider calls, retries and aggregate
 budgets. Mode adapters retain distinct prompts and validators. Complete file
 groups are atomic for reassessment; exhaustive parsed hunks are permitted only
 for discovery. Publisher validation uses the original per-batch evidence map,
 without concatenating it into the bounded conversation diff field. Failed or
 unprocessed work retains pending findings and conservative coverage.
 
-Unified reassessment permits one bounded structural correction per batch within
-the shared retry/call allowance. Citation, rationale and reserved-marker failures
-do not trigger semantic correction retries. Explicit cross-file requirements use
-eligibility payload version `2.0` inside the recognized `eligibility:v1` envelope;
-the facts remain v1. Upgraded readers accept v1 and v2, and a latest unsupported
 record blocks older authority. Normal review publication continues writing v1.
 The work-policy digest extends transaction configuration only for opt-in runs.
 
-Closed context requests permit one host-validated joint or discovery wave using
 the same planner and tracker. Broader discovery uses configured full-review
 policy and its normal publisher; the merged eligibility retains exact prior
 findings, blockers, coverage and qualification. Source reply, latest authority
-and base/head fence mutations, and result replay preserves persisted concerns.
-Explicit opt-ins expose a private HMAC-authenticated v2 receipt store; admission
+
 is saved before dispatch and restored without resetting calls or deadlines.
 Artifacts retain normalized receipts and exact evidence only under diagnostics
 policy, with bounded size/count/expiry and current semantic validation. See
-[shared work operations](shared-review-work.md) for CLI and retention controls.
-The reusable workflow serializes provider work per PR across full/reply/command
-modes and backends without cancelling active siblings; GitHub's single pending
-slot can replace queued work, which cannot clear a pending finding.
 
-The offline pinned-reader gate, `scripts/check_review_reader_compatibility.py`,
 uses the immutable published v0.6.16 source. That reader refuses richer eligibility
 and opt-in transaction contexts, but skips session comments exceeding its 16 KiB
 ceiling. Upgraded readers treat oversized trusted terminal markers as unreadable
 authority and prohibit initialization. Expanded writers require quiescing older
 readers/writers; rollback retains upgraded readers rather than resetting state.
-
-This architecture preserves the provider-neutral core: GitHub transport,
-Actions OIDC, broker capabilities, setup lifecycle, publication markers, and
-conversation authorization remain under `src/review_sensei/hosting/github/`
-or `deploy/cloudflare/`.
 
 ### Learning publication lifecycle (Issue #97)
 
@@ -1000,35 +612,12 @@ candidate precedence and recovery rules.
 
 ## Ownership, licensing, and commercial boundary
 
-Copyright licensing, trademark usage, and the Community / official-ops /
-prospective commercial boundary are documented in
-[`docs/ownership-and-licensing.md`](ownership-and-licensing.md),
-[`TRADEMARKS.md`](../TRADEMARKS.md), and
-[ADR 0040](adr/0040-community-managed-enterprise-boundary.md). Public
-App/broker source remains MIT; official channel control does not reclassify
-that source as proprietary. Package identities and runtime contracts are
-unchanged by that documentation.
-
-Authenticated abandoned analysis recovery is described in
-[ADR 0063](adr/0063-authenticated-reservation-recovery.md). The broker can bind a
-held reservation to its OIDC run. `@reviewsensei review continue` requires live Actions
-completion evidence before reclaiming analysis, including a constrained origin
-proof for older PR-triggered runs. Recovery preserves session budgets and saved
-publication work; cooperating command/review jobs serialize the comment write.
-
-Complete review evidence now uses the lossless inline contract proposed in
 [ADR 0072](adr/0072-lossless-inline-review-evidence.md). Small baseline and human
 inventories retain their legacy JSON shape; larger inventories share a bounded
 canonical JSON/zlib/base64 reader. The existing authenticated ledger atomically
-binds the full baseline and preserves its lifecycle reserve. Human eligibility
-version 3 stores immutable full prose separately from the mutable resolution
-list and reserves room for every possible resolution. Whole inventories are
-independent of provider batches. Capacity failure carries an exact-result-bound
-`persistence_status` and `baseline_capacity_exceeded` outcome; it withholds
+
 approval while reporting analysis coverage accurately. All shared readers must
 be upgraded before richer writes; rollback readers fail closed on those records.
 Representative capacity and retained-state measurements are recorded in the
 ADR: fifty varied findings fit the baseline and resolution-growth contracts;
 larger or more verbose inventories can still exceed inline bounds. Full finding
-text is budgeted separately from the input overview, while the framed review
-body remains bounded to 65,536 bytes.

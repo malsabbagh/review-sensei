@@ -1,0 +1,14 @@
+{
+  "schema_version": "human-file-receipt-v1",
+  "request_digest": "e87dab8db71d542d961e6e387fb46dab4c5952f12ad3e53ec3d397d720640f2b",
+  "request_comment_id": 4,
+  "source_comment_id": 5,
+  "source_updated_at": "2026-10-10T01:00:00Z",
+  "source_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "actor_id": 6,
+  "actor": "alice",
+  "selected_ids": [
+    "d74fa6dc43095e33c28ecacc99a21cb91c89f34014818e6499f3efecf1b53991"
+  ],
+  "unknown_authority": true
+}

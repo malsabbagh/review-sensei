@@ -42,6 +42,18 @@ The pinned `docs/architecture.md` alone is 61,136 UTF-8 bytes, digest
 `c97cc4c95234b3e4a024714528b306e560c0a8c176060f3f4ddfc62746f4c038`.
 It remains a genuine zero-call mandatory refusal under the unqualified cap.
 Optional selection and lossless deduplication cannot remove that obligation.
+The packaged architecture category now keeps that long guide supplemental.
+`docs/architecture/mandatory-rules.md` is the required contract: its governing
+rules are copied verbatim from `docs/architecture.md`, and the guide, the rest
+of `docs/architecture/`, and `docs/adr/` stay available as non-required sources.
+`tests/test_pr253_context_policy.py` proves that this required file, unchanged,
+plus a one-file complete diff, admits through the unqualified complete-frame
+ceiling of 49,152 UTF-8 bytes, including the reserved structural correction. A
+frame of exactly 49,152 bytes admits. One byte over that ceiling raises
+`PromptContextOverflow` and the unified review path makes zero provider calls.
+The test uses that reduced fixture. It does not show that a frame which still
+carries the full supplemental guide (about 65,740 bytes when the guide itself
+was mandatory) now fits.
 A separately labeled synthetic qualified adapter admits the exact diff in one
 179,949-byte request with complete changed-file coverage and partial context
 status. This fixture does not qualify any Ollama or GLM model. The generated

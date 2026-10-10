@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/human-file-review.schema.json",
+  "title": "human-file-review",
+  "description": "Bounded reference data. Runtime semantic validation and independent live host authentication are required; this document alone is not approval authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "repository",
+    "repository_id",
+    "pull_request",
+    "review_id",
+    "base_sha",
+    "head_sha",
+    "result_digest",
+    "files"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "human-file-review-v1"
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "repository_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "pull_request": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "review_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "base_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "head_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "result_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "change",
+          "old_blob",
+          "new_blob",
+          "old_path",
+          "old_mode",
+          "new_mode"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "change": {
+            "enum": [
+              "added",
+              "modified",
+              "removed",
+              "renamed"
+            ]
+          },
+          "old_blob": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-f0-9]{40}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "new_blob": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-f0-9]{40}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "old_path": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "old_mode": {
+            "enum": [
+              null,
+              "100644",
+              "100755"
+            ]
+          },
+          "new_mode": {
+            "enum": [
+              null,
+              "100644",
+              "100755"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

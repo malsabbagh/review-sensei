@@ -751,6 +751,12 @@ Both handles use the same authorization, publication policy, and bounded context
 For concrete factual replies, verified operator commands, human-inventory
 boundaries and the complete-feedback API's current integration status, see
 [human assessment workflows](docs/human-assessment.md).
+
+The local, opt-in [human file review library](docs/human-file-review.md) records
+explicit selected binary-file confirmations with exact snapshot/content and
+live reviewer checks. AI coverage stays unsupported; text findings remain open.
+Confirmation defaults off, and released CLI/mention routing and automatic
+approval are not enabled by this library change.
 Existing installations need a caller update as well as the matching runtime and
 broker update; see [the caller rollout guide](docs/mention-handle-rollout.md).
 
