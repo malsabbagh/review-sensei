@@ -12,6 +12,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from ...errors import ReviewInputError
+from ...evidence import EvidenceBundle, EvidenceRecord, EvidenceSnapshot
+from ...validation import validate_repository_path
 from .errors import (
     GitHubHTTPError,
     GitHubHTTPPaginationLimitError,
@@ -52,6 +55,21 @@ def _validated_repo(repo: str) -> str:
     if not isinstance(repo, str) or _SAFE_SEGMENT.fullmatch(repo) is None:
         raise GitHubHTTPError("GitHub repository is invalid")
     return repo
+
+
+def _read_allowance(before_read: Callable[[], float]) -> float:
+    """Charge the host-owned shared envelope before each physical GET attempt."""
+    remaining = before_read()
+    if (
+        isinstance(remaining, bool)
+        or not isinstance(remaining, (int, float))
+        or not math.isfinite(remaining)
+        or not 0 < remaining <= 60
+    ):
+        raise GitHubHTTPPaginationLimitError(
+            "GitHub shared read allowance is invalid or exhausted"
+        )
+    return remaining
 
 
 class GitHubHttp:
@@ -178,6 +196,8 @@ class GitHubHttp:
         max_requests: int | None = None,
         timeout_seconds: float | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        expected_items: int | None = None,
+        before_read: Callable[[], float] | None = None,
     ) -> list[Any]:
         """Return at most ``MAX_PAGINATION_ITEMS`` list entries.
 
@@ -211,6 +231,14 @@ class GitHubHttp:
             or not 1 <= max_requests <= MAX_PAGINATION_ITEMS + len(page_sizes)
         ):
             raise GitHubHTTPError("GitHub pagination request budget is invalid")
+        if expected_items is not None and (
+            isinstance(expected_items, bool)
+            or not isinstance(expected_items, int)
+            or not 0 <= expected_items <= MAX_PAGINATION_ITEMS
+        ):
+            raise GitHubHTTPPaginationLimitError(
+                "GitHub expected inventory exceeds the item budget"
+            )
         if timeout_seconds is not None and (
             isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, (int, float))
@@ -218,22 +246,23 @@ class GitHubHttp:
             or timeout_seconds <= 0
         ):
             raise GitHubHTTPError("GitHub pagination timeout is invalid")
-        started = monotonic()
+        deadline = (
+            monotonic() + timeout_seconds if timeout_seconds is not None else math.inf
+        )
         requests = 0
         collected: list[Any] = []
         separator = "&" if "?" in path else "?"
         page_size_index = 0
-        while len(collected) < MAX_PAGINATION_ITEMS:
+        while len(collected) < MAX_PAGINATION_ITEMS or (
+            expected_items == MAX_PAGINATION_ITEMS
+            and len(collected) == MAX_PAGINATION_ITEMS
+        ):
             page_size = page_sizes[page_size_index]
             if len(collected) % page_size:
                 raise GitHubHTTPError("GitHub pagination offset was invalid")
             page = len(collected) // page_size + 1
             current = f"{path}{separator}per_page={page_size}&page={page}"
-            remaining = (
-                timeout_seconds - (monotonic() - started)
-                if timeout_seconds is not None
-                else None
-            )
+            remaining = deadline - monotonic() if math.isfinite(deadline) else None
             if (max_requests is not None and requests >= max_requests) or (
                 remaining is not None and remaining <= 0
             ):
@@ -241,6 +270,14 @@ class GitHubHttp:
                     "GitHub pagination exhausted its request or time budget"
                 )
             requests += 1
+            if before_read is not None:
+                shared_remaining = _read_allowance(before_read)
+                deadline = min(deadline, monotonic() + shared_remaining)
+                remaining = (
+                    min(remaining, shared_remaining)
+                    if remaining is not None
+                    else shared_remaining
+                )
             try:
                 if remaining is None:
                     status, body = self.request("GET", current, token=token)
@@ -256,6 +293,10 @@ class GitHubHttp:
                     raise GitHubHTTPError("GitHub pagination offset was invalid")
                 page_size_index += 1
                 continue
+            if monotonic() >= deadline:
+                raise GitHubHTTPPaginationLimitError(
+                    "GitHub pagination exhausted its time budget"
+                )
             if status == 404:
                 raise GitHubHTTPError("GitHub pagination target was not found")
             if status < 200 or status >= 300:
@@ -266,9 +307,177 @@ class GitHubHttp:
                 raise GitHubHTTPError(
                     "GitHub pagination page exceeded its requested size"
                 )
+            if len(collected) + len(body) > MAX_PAGINATION_ITEMS or (
+                expected_items is not None
+                and len(collected) + len(body) > expected_items
+            ):
+                raise GitHubHTTPPaginationLimitError(
+                    "GitHub pagination exceeded its expected inventory"
+                )
             collected.extend(body)
             if len(body) < page_size:
+                if expected_items is not None and len(collected) != expected_items:
+                    raise GitHubHTTPError("GitHub pagination inventory count changed")
                 return collected
         raise GitHubHTTPPaginationLimitError(
             "GitHub pagination exceeded configured page limit"
         )
+
+    def load_review_evidence(
+        self,
+        *,
+        token: str,
+        snapshot: EvidenceSnapshot,
+        required_paths: tuple[str, ...],
+        include_all_changed: bool = False,
+        timeout_seconds: float = 60,
+        max_requests: int = 64,
+        monotonic: Callable[[], float] = time.monotonic,
+        before_read: Callable[[], float] | None = None,
+    ) -> EvidenceBundle:
+        """Read one exhaustive file inventory between exact snapshot/count fences.
+
+        Both fences, oversized-page retries and the optional item-limit EOF probe
+        share the original 64-read/60-second envelope. Failure raises a sanitized
+        error; callers must retain pending obligations. No partial bundle escapes.
+        The returned bundle may contain explicitly incomplete/binary patches.
+        """
+        if (
+            not isinstance(snapshot, EvidenceSnapshot)
+            or snapshot.repository is None
+            or snapshot.pull_request is None
+            or snapshot.base_sha is None
+            or snapshot.head_sha is None
+            or not isinstance(required_paths, tuple)
+            or len(required_paths) > 64
+            or any(not isinstance(path, str) for path in required_paths)
+            or not isinstance(include_all_changed, bool)
+        ):
+            raise GitHubHTTPError("GitHub evidence acquisition scope is invalid")
+        if len(set(required_paths)) != len(required_paths):
+            raise GitHubHTTPError("GitHub evidence acquisition scope is duplicated")
+        for path in required_paths:
+            validate_repository_path(
+                path, label="review evidence path", allow_glob_chars=True
+            )
+        if (
+            isinstance(max_requests, bool)
+            or not isinstance(max_requests, int)
+            or not 3 <= max_requests <= 64
+            or isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(timeout_seconds)
+            or not 0 < timeout_seconds <= 60
+        ):
+            raise GitHubHTTPError("GitHub evidence acquisition budget is invalid")
+        deadline = monotonic() + timeout_seconds
+        reads = 0
+
+        def remaining() -> float:
+            value = deadline - monotonic()
+            if value <= 0:
+                raise GitHubHTTPPaginationLimitError(
+                    "GitHub evidence acquisition exhausted its time budget"
+                )
+            return value
+
+        def charge() -> float:
+            nonlocal reads, deadline
+            remaining()
+            if reads >= max_requests:
+                raise GitHubHTTPPaginationLimitError(
+                    "GitHub evidence acquisition exhausted its read budget"
+                )
+            reads += 1
+            if before_read is not None:
+                deadline = min(deadline, monotonic() + _read_allowance(before_read))
+            return remaining()
+
+        pr_path = self.repository_path(
+            snapshot.repository, f"/pulls/{snapshot.pull_request}"
+        )
+
+        def fence() -> int:
+            allowance = charge()
+            status, pr = self.request(
+                "GET", pr_path, token=token, timeout_seconds=min(remaining(), allowance)
+            )
+            remaining()
+            if (
+                status != 200
+                or not isinstance(pr, dict)
+                or not isinstance(pr.get("base"), dict)
+                or not isinstance(pr.get("head"), dict)
+                or pr["base"].get("sha") != snapshot.base_sha
+                or pr["head"].get("sha") != snapshot.head_sha
+            ):
+                raise GitHubHTTPError(
+                    "GitHub evidence snapshot changed or is unavailable"
+                )
+            count = pr.get("changed_files")
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise GitHubHTTPError("GitHub evidence inventory count is invalid")
+            if count > MAX_PAGINATION_ITEMS:
+                raise GitHubHTTPPaginationLimitError(
+                    "GitHub evidence inventory exceeds the item budget"
+                )
+            return count
+
+        expected_count = fence()
+        files = self.paginate(
+            path=pr_path + "/files",
+            token=token,
+            page_sizes=(100, 50, 25, 5, 1),
+            max_requests=max_requests - 2,
+            timeout_seconds=remaining(),
+            monotonic=monotonic,
+            expected_items=expected_count,
+            before_read=charge,
+        )
+        if fence() != expected_count:
+            raise GitHubHTTPError("GitHub evidence inventory count changed")
+        records = []
+        seen: set[str] = set()
+        try:
+            for item in files:
+                if not isinstance(item, dict) or not isinstance(
+                    item.get("filename"), str
+                ):
+                    raise GitHubHTTPError("GitHub evidence file inventory is invalid")
+                path = item["filename"]
+                validate_repository_path(
+                    path, label="review evidence path", allow_glob_chars=True
+                )
+                if path in seen:
+                    raise GitHubHTTPError(
+                        "GitHub evidence file inventory is duplicated"
+                    )
+                seen.add(path)
+                # Validate all entries before selecting required paths. Enumeration
+                # cannot be certified by ignoring malformed unrelated entries.
+                patch = item.get("patch")
+                additions = item.get("additions")
+                deletions = item.get("deletions")
+                record = EvidenceRecord(
+                    path,
+                    patch if isinstance(patch, str) else "",
+                    snapshot,
+                    supplied_complete=isinstance(patch, str)
+                    and bool(patch.strip())
+                    and isinstance(additions, int)
+                    and not isinstance(additions, bool)
+                    and isinstance(deletions, int)
+                    and not isinstance(deletions, bool),
+                    old_path=item.get("previous_filename"),
+                    expected_additions=additions,
+                    expected_deletions=deletions,
+                )
+                if include_all_changed or path in required_paths:
+                    records.append(record)
+            bundle = EvidenceBundle(snapshot, tuple(records))
+        except ReviewInputError as exc:
+            raise GitHubHTTPError(
+                "GitHub evidence file patches conflict or exceed bounds"
+            ) from exc
+        remaining()
+        return bundle
