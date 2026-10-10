@@ -44,6 +44,48 @@ larger than the unqualified 49,152-byte prompt limit before framing. It remains 
 precise zero-call refusal. A separately labeled larger-envelope fixture proves
 admission, not qualification of a deployed provider.
 
+### Oversized mandatory guidance: supported paths and remaining decision
+
+The motivating PR231 request is not fixed by supplemental selection or shared
+serialization. Its complete mandatory guidance cannot fit the current
+unqualified unified envelope. Changing `batch_prompt_bytes`, choosing a model
+with a larger advertised window, or passing `--allow-unqualified-profile` does
+not qualify capacity or remove the 49,152-byte unqualified admission ceiling.
+
+A maintainer may explicitly correct the trusted review configuration when its
+mandatory document selection is broader than the intended policy. Categories
+declare `context.documents`; an explicitly selected file is pinned, while a
+directory selection can produce supplemental documents. Such a correction must
+be reviewed in trusted-base category/stage files, retain every governing rule
+needed for the review, and explain any scope change. It must not automatically
+demote, omit, clip, or summarize the current mandatory architecture document.
+Use the existing `--categories-dir`, `--stages-dir`, and `--context-root` inputs
+to exercise the reviewed configuration against an immutable trusted checkout.
+`review-sensei config validate` checks canonical configuration and provider
+selection; exact rendered-prompt tests are additionally required to prove
+admission, followed by meaningful provider and publication qualification. The
+current PR231 reproduction uses the original trusted configuration throughout.
+
+The existing library seam also accepts an operator-owned
+`ProviderCapabilities` contract through `ReviewService(..., capabilities=...)`.
+It binds the exact provider/model and a qualified conservative tokenizer bound,
+including framing, output reservation and margin. This is a supported finite
+admission mechanism, not a self-attested CLI switch. No larger DeepSeek or GLM
+envelope has been qualified by this investigation. The 179,949-byte PR231
+fixture demonstrates only how an already qualified contract would admit the
+complete frame.
+
+If the full mandatory guidance remains necessary under the present provider
+envelope, useful review requires a separately reviewed semantics-preserving
+multi-call design. That design must preserve exact source digests and all rules,
+prove complete guidance coverage for every affected decision, and define how
+joint decisions and citations become authority. Splitting the document into
+unrelated calls or accepting a model-generated summary does not establish this
+proof. The maintainer decision is therefore a validated policy/configuration
+correction, qualification of an existing larger finite capability, or approval
+of that new design. Until one is demonstrated end to end, PR231 remains an open
+practical capacity blocker with honest pending output.
+
 ## Blockers before writer activation or complete-evidence qualification
 
 1. Persisted control accounting currently omits activation-tail work. Independent
