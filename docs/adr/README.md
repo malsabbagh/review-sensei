@@ -82,6 +82,7 @@ Process: `docs/process/adr-process.md`
 | [0057](0057-one-check-run-as-the-single-merge-authority.md) | Proposed | One head-bound `ReviewSensei` check run as the only merge authority, with evidence-bound default approval | #181 F | Review events stay `COMMENT`; required-check setup and stale change-request reconciliation remain administrator/transition work |
 
 | [0073](0073-authenticated-feedback-mutation-grants.md) | Proposed | Authenticate complete human feedback as a distinct session mutation source | #238, #242, #243, #245 | Live numeric actor/source authorization; version-1 compatibility; original-attempt and whole-budget composition remain activation gates |
+| [0074](0074-durable-original-attempt-accounting.md) | Proposed | Retain original accounting and unknown transitions without renewing an allowance | #238, #240, #242, #245 | Dormant SQLite storage primitive; independent authorizer, bootstrap, restore and whole-budget qualification required |
 
 ## Policy
 
