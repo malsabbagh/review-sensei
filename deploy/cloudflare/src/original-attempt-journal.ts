@@ -73,7 +73,17 @@ function integer(value: unknown, max = Number.MAX_SAFE_INTEGER): asserts value i
 function hash(value: unknown, width = 64): void {
   if (typeof value !== "string" || value.length !== width || !/^[a-f0-9]+$/.test(value)) fail("invalid");
 }
+function closedCopy<T>(value: T, keys: string[]): T {
+  exact(value, keys);
+  const entries = keys.map(key => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !Object.hasOwn(descriptor, "value")) fail("invalid");
+    return [key, descriptor.value];
+  });
+  return Object.freeze(Object.fromEntries(entries)) as T;
+}
 function binding(value: AttemptBinding): string {
+  value = closedCopy(value, BINDING_KEYS);
   exact(value, BINDING_KEYS);
   for (const key of BINDING_KEYS.filter(key => !key.endsWith("_generation"))) {
     hash(value[key], key === "execution_identity" ? 32 : 64);
@@ -83,6 +93,7 @@ function binding(value: AttemptBinding): string {
   return JSON.stringify(Object.fromEntries(BINDING_KEYS.map(key => [key, value[key]])));
 }
 function transition(value: AttemptTransition): string {
+  value = closedCopy(value, TRANSITION_KEYS);
   exact(value, TRANSITION_KEYS);
   for (const key of ["attempt_id", "prior_root_digest", "target_root_digest", "request_digest", "dispatch_digest", "sealed_plan_digest"]) hash(value[key]);
   integer(value.sequence, ORIGINAL_ATTEMPT_LIMITS.attemptsPerSource - 1);
@@ -110,6 +121,9 @@ export class OriginalAttemptJournal {
       "CREATE TABLE IF NOT EXISTS original_attempt_transitions (" +
       "scope_digest TEXT NOT NULL, event_digest TEXT NOT NULL, attempt_id TEXT NOT NULL, " +
       "transition TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY(scope_digest,event_digest,attempt_id));" +
+      "CREATE TABLE IF NOT EXISTS original_attempt_clocks (" +
+      "scope_digest TEXT NOT NULL, event_digest TEXT NOT NULL, observed_at_ms INTEGER NOT NULL, " +
+      "PRIMARY KEY(scope_digest,event_digest));" +
       "CREATE INDEX IF NOT EXISTS original_attempt_inflight ON original_attempt_transitions(scope_digest,state);"
     );
   }
@@ -146,6 +160,7 @@ export class OriginalAttemptJournal {
    */
   admit(value: AttemptBinding, serverStartedAtMs: number, bootstrapDispatches: number): AttemptSnapshot {
     const encoded = binding(value), now = this.clock();
+    value = Object.freeze(JSON.parse(encoded)) as AttemptBinding;
     integer(serverStartedAtMs, now);
     integer(bootstrapDispatches, ORIGINAL_ATTEMPT_LIMITS.ordinaryDispatches);
     if (bootstrapDispatches === 0) fail("invalid");
@@ -163,13 +178,14 @@ export class OriginalAttemptJournal {
       }
       if (this.count("SELECT COUNT(*) AS count FROM original_attempt_events WHERE scope_digest=?", value.scope_digest) >= ORIGINAL_ATTEMPT_LIMITS.sourcesPerScope) fail("capacity");
       this.sql.exec("INSERT INTO original_attempt_events VALUES (?,?,?,?,?,?,?)", value.scope_digest, value.event_digest, encoded, serverStartedAtMs, serverStartedAtMs + ORIGINAL_ATTEMPT_LIMITS.controlMilliseconds, bootstrapDispatches, 0);
+      this.sql.exec("INSERT INTO original_attempt_clocks VALUES (?,?,?)", value.scope_digest, value.event_digest, now);
       return this.snapshot(value);
     });
   }
 
   /** Read-only metadata; this cannot acquire mutation or restore authority. */
   inspect(value: AttemptBinding): AttemptSnapshot {
-    binding(value);
+    value = Object.freeze(JSON.parse(binding(value))) as AttemptBinding;
     return this.storage.transactionSync(() => this.snapshot(value));
   }
 
@@ -179,16 +195,24 @@ export class OriginalAttemptJournal {
    * A repeated transition is inspectable but never consumes/returns it again.
    */
   reserve(value: AttemptBinding, step: AttemptTransition, consumeGrant: () => boolean): AttemptSnapshot & { first_consumption: boolean; state: string } {
-    binding(value);
+    value = Object.freeze(JSON.parse(binding(value))) as AttemptBinding;
     const encoded = transition(step), now = this.clock();
-    return this.storage.transactionSync(() => {
+    step = Object.freeze(JSON.parse(encoded)) as AttemptTransition;
+    const result = this.storage.transactionSync(() => {
       const event = this.event(value), scope = this.scope(value);
       const previous = this.first<TransitionRow & Record<string, SqlStorageValue>>("SELECT transition,state FROM original_attempt_transitions WHERE scope_digest=? AND event_digest=? AND attempt_id=?", value.scope_digest, value.event_digest, step.attempt_id);
       if (previous) {
         if (previous.transition !== encoded) fail("transition_conflict");
         return { ...this.snapshot(value), first_consumption: false, state: previous.state };
       }
-      if (now >= event.control_deadline_ms) fail("expired");
+      const observed = this.first<{ observed_at_ms: number }>("SELECT observed_at_ms FROM original_attempt_clocks WHERE scope_digest=? AND event_digest=?", value.scope_digest, value.event_digest);
+      if (!observed) fail("clock_origin_required");
+      if (now < event.created_at_ms || now < observed.observed_at_ms) fail("clock_rollback");
+      // Retain an observed expiry even if the server clock later regresses.
+      if (now >= event.control_deadline_ms) {
+        this.sql.exec("UPDATE original_attempt_clocks SET observed_at_ms=? WHERE scope_digest=? AND event_digest=?", now, value.scope_digest, value.event_digest);
+        return { refusal: "expired" } as const;
+      }
       if (event.sequence !== step.sequence) fail("sequence_conflict");
       if (scope.root_digest !== step.prior_root_digest || scope.root_generation !== step.prior_root_generation) fail("root_conflict");
       if (this.count("SELECT COUNT(*) AS count FROM original_attempt_transitions WHERE scope_digest=? AND state='inflight'", value.scope_digest) > 0) fail("inflight");
@@ -196,10 +220,13 @@ export class OriginalAttemptJournal {
       const ordinary = event.calls + step.ordinary_dispatches, calls = ordinary + step.fence_dispatches;
       if (ordinary > ORIGINAL_ATTEMPT_LIMITS.ordinaryDispatches || calls > ORIGINAL_ATTEMPT_LIMITS.dispatches) fail("budget");
       if (consumeGrant() !== true) fail("grant_invalid");
+      this.sql.exec("UPDATE original_attempt_clocks SET observed_at_ms=? WHERE scope_digest=? AND event_digest=?", now, value.scope_digest, value.event_digest);
       this.sql.exec("INSERT INTO original_attempt_transitions VALUES (?,?,?,?,?)", value.scope_digest, value.event_digest, step.attempt_id, encoded, "inflight");
       this.sql.exec("UPDATE original_attempt_events SET calls=?,sequence=? WHERE scope_digest=? AND event_digest=?", calls, event.sequence + 1, value.scope_digest, value.event_digest);
       return { ...this.snapshot(value), first_consumption: true, state: "inflight" };
     });
+    if (result.refusal !== undefined) fail(result.refusal);
+    return result;
   }
 
   /**
@@ -208,7 +235,7 @@ export class OriginalAttemptJournal {
    * observation. Remote writes and SQL cannot be one atomic transaction.
    */
   confirm(value: AttemptBinding, attemptId: string, rootDigest: string, rootGeneration: number): AttemptSnapshot {
-    binding(value); hash(attemptId); hash(rootDigest); integer(rootGeneration, 2147483647);
+    value = Object.freeze(JSON.parse(binding(value))) as AttemptBinding; hash(attemptId); hash(rootDigest); integer(rootGeneration, 2147483647);
     return this.storage.transactionSync(() => {
       this.event(value);
       const row = this.first<TransitionRow & Record<string, SqlStorageValue>>("SELECT transition,state FROM original_attempt_transitions WHERE scope_digest=? AND event_digest=? AND attempt_id=?", value.scope_digest, value.event_digest, attemptId);

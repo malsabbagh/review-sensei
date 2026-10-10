@@ -172,6 +172,73 @@ describe("dormant original-attempt SQLite primitive", () => {
     } finally { fixture.close(); }
   });
 
+  it("refuses clock rollback below admission or committed time without consuming", () => {
+    const fixture = open();
+    try {
+      fixture.journal.admit(binding(), 1000, 3);
+      const consume = fixture.grant();
+      fixture.tick(0);
+      expect(() => fixture.journal.reserve(binding(), step(), consume)).toThrow("original_attempt_clock_rollback");
+      expect(fixture.journal.inspect(binding()).calls).toBe(3);
+      expect(fixture.database.prepare("SELECT COUNT(*) AS n FROM fixture_grants").get()?.n).toBe(1);
+      fixture.tick(5000);
+      fixture.journal.reserve(binding(), step(), consume);
+      fixture.journal.confirm(binding(), step().attempt_id, step().target_root_digest, 1);
+      const next = { ...step("9"), sequence: 1, prior_root_digest: "5".repeat(64), prior_root_generation: 1, target_root_generation: 2 };
+      fixture.tick(4999);
+      expect(() => fixture.journal.reserve(binding(), next, fixture.grant("grant-2"))).toThrow("original_attempt_clock_rollback");
+      expect(fixture.journal.inspect(binding())).toMatchObject({ calls: 10, control_deadline_ms: 61000 });
+    } finally { fixture.close(); }
+  });
+
+  it("retains observed expiry across clock rollback and refuses missing clock origin", () => {
+    const fixture = open();
+    try {
+      fixture.journal.admit(binding(), 1000, 3);
+      const consume = fixture.grant();
+      fixture.tick(61000);
+      expect(() => fixture.journal.reserve(binding(), step(), consume)).toThrow("original_attempt_expired");
+      fixture.tick(60000);
+      expect(() => fixture.journal.reserve(binding(), step(), consume)).toThrow("original_attempt_clock_rollback");
+      expect(fixture.journal.inspect(binding())).toMatchObject({ calls: 3, control_deadline_ms: 61000 });
+      expect(fixture.database.prepare("SELECT COUNT(*) AS n FROM fixture_grants").get()?.n).toBe(1);
+      fixture.database.exec("DELETE FROM original_attempt_clocks");
+      expect(() => fixture.journal.reserve(binding(), step(), consume)).toThrow("original_attempt_clock_origin_required");
+    } finally { fixture.close(); }
+  });
+
+  it("captures immutable validated keys before the grant callback", () => {
+    const fixture = open();
+    try {
+      const input = binding(), proposed = step();
+      fixture.journal.admit(input, 1000, 3);
+      const consume = fixture.grant();
+      expect(fixture.journal.reserve(input, proposed, () => {
+        const consumed = consume();
+        proposed.attempt_id = "9".repeat(64);
+        proposed.ordinary_dispatches = 60;
+        input.event_digest = "9".repeat(64);
+        return consumed;
+      })).toMatchObject({ first_consumption: true, calls: 10 });
+      const row = fixture.database.prepare("SELECT attempt_id,transition FROM original_attempt_transitions").get();
+      expect(row?.attempt_id).toBe(step().attempt_id);
+      expect(JSON.parse(row?.transition as string)).toEqual(step());
+      expect(fixture.journal.reserve(binding(), step(), () => { throw new Error("must not consume again"); })).toMatchObject({ first_consumption: false, calls: 10 });
+      fixture.journal.confirm(binding(), step().attempt_id, step().target_root_digest, 1);
+    } finally { fixture.close(); }
+  });
+
+  it("rejects accessor metadata before the callback can cross validation", () => {
+    const fixture = open();
+    try {
+      fixture.journal.admit(binding(), 1000, 3);
+      const proposed = step();
+      Object.defineProperty(proposed, "attempt_id", { enumerable: true, get: () => step().attempt_id });
+      expect(() => fixture.journal.reserve(binding(), proposed, () => { throw new Error("must not consume"); })).toThrow("original_attempt_invalid");
+      expect(fixture.journal.inspect(binding()).calls).toBe(3);
+    } finally { fixture.close(); }
+  });
+
   it("has closed scalar metadata and refuses raw prose, coercion or zero liability", () => {
     const fixture = open();
     try {

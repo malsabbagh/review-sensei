@@ -42,7 +42,14 @@ Its full declared liability is debited before external work. A synchronous
 same-storage grant-consumption callback and the debit/in-flight record commit
 in one SQLite transaction. Repeating the same transition reports its retained
 state and never consumes or returns one-use authority again. A conflicting
-transition refuses. The callback's independent authentication and use of the
+transition refuses. Validated metadata is copied to closed immutable scalar
+records before callbacks; callback mutation cannot change SQL keys or replay
+identity. Accessors are refused. A retained server-clock high-water mark refuses
+new transitions below admission or a committed observation. Observed expiry is
+retained even when the clock later regresses; the original absolute deadline
+never moves. Missing clock provenance refuses mutation rather than creating a
+new origin. Previously committed transitions remain readable without issuing
+another consumption permit. The callback's independent authentication and use of the
 same storage are obligations of the future broker integration.
 
 An in-flight transition blocks another protocol writer for that scope until
