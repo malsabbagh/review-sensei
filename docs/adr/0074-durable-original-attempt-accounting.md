@@ -1,6 +1,6 @@
 # ADR 0074 - Durable original-attempt accounting
 
-Status: Proposed
+Status: Superseded by ADR 0076 (GitHub operation record)
 Date: 2026-10-10
 Owners/Reviewers: Maintainers
 Approved by: not applicable

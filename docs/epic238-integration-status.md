@@ -95,13 +95,14 @@ dispatch, and receipt-first private diagnostic recovery. All new writers and
 public restore authority remain disabled. Neither the indexed reader nor a
 broker reference creates an original-attempt witness.
 
-The first coordinated source run including the dormant attempt journal passed
-3,007 Python tests with 83.54% branch coverage. Its complete Worker suite passed
-509 tests. The explicit production-broker IPC module passed all 15 cases with
-resource warnings treated as errors. These counts identify that source
-milestone; the subsequent graph and journal corrections require their own
-exact-head gates. CI now runs the IPC module explicitly under pinned Node 22;
-local Node 26 execution does not establish that CI result.
+The first coordinated source run passed 3,007 Python tests with 83.54% branch
+coverage. Its complete Worker suite passed 509 tests. The explicit
+production-broker IPC module passed all 15 cases with resource warnings treated
+as errors. These counts identify that source milestone; the subsequent graph
+corrections require their own exact-head gates. CI now runs the IPC module
+explicitly under pinned Node 22; local Node 26 execution does not establish
+that CI result. The removed SQLite original-attempt journal is not part of the
+live store.
 
 The live-only tail reader preserves exact immutable journal and manifest bytes
 while sealing prepaid final root liability into the original accounting carrier.
@@ -134,13 +135,10 @@ account the internal categories too. Post-issuance source edits do not change
 an already issued grant's consumption semantics, so publication still requires
 fresh complete host source fences.
 
-The dormant SQLite attempt-journal prototype has no route, constructor call in
-the broker or restore endpoint. It retains sticky event bindings, original
-origin/debit, consumed transitions and unknown in-flight state. Independent
-review exposed clock rollback and callback-mutated SQL keys. The corrections
-retain a server-clock high-water mark and copy validated scalar metadata before
-callbacks; focused SQLite tests cover those boundaries. This remains storage
-mechanism evidence, not approval of its missing public authorizer or bootstrap.
+The SQLite original-attempt journal and its authorizer are removed. They were
+never a Worker route or a Durable Object class, and they are not the live
+store. The live record is the GitHub operation record in ADR 0076. An old root
+snapshot or a fresh consuming grant is still not an original-attempt witness.
 
 ## Blockers before writer activation or complete-evidence qualification
 
@@ -152,9 +150,8 @@ mechanism evidence, not approval of its missing public authorizer or bootstrap.
 2. Trusted first-admission derivation and complete ordered dispatch liability
    must precede external inference or root mutation. A root GET plus opaque
    admission hashes cannot prove a proposed first admission absent from that
-   root. The dormant SQL module must not be connected until its independent
-   authorizer, same-storage grant binding, bootstrap and restoration protocol
-   are reviewed and qualified.
+   root. The removed SQLite journal is not the live store and is not connected.
+   The live record is the GitHub operation record in ADR 0076.
 3. The original 64-dispatch/60-second useful hosted path remains unqualified.
    Coalescing from five to three and optionally two checkpoint saves improves
    structural cost but does not establish fit after all source, provider,

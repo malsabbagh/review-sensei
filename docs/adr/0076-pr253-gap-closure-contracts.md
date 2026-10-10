@@ -17,13 +17,30 @@ construction still uses the legacy assessor path. A separate human-media
 recording implementation exists outside this tree and does not yet approve.
 
 The implementation request for this change selects the recommended defaults
-from the PR253 gap plan. Selecting them here does not accept this ADR.
-Maintainers accept it by review. Richer writers stay off until the gates below
-pass. This record freezes the contracts implementers must follow. It does not
-claim a measured 64/60 public profile, process attestation, or deployed
-qualification.
+from the PR253 gap plan. Decisions D-A, D-B, D-C and D-D are accepted.
+Maintainer acceptance of the remaining contracts is still by review. This
+record freezes the contracts implementers must follow. It does not claim a
+measured 64/60 public profile, process attestation, or deployed qualification.
 
 ## Decision
+
+### Accepted operation-entry decisions
+
+**D-A.** Accepted. The validated review result, not prompts or transcripts, is
+stored as App-authored part comments on the same pull request.
+
+**D-B.** Accepted. `github.operation_entry` defaults to enabled. The 64/60
+budget is not yet measured
+([#267](https://github.com/malsabbagh/review-sensei/issues/267)). Caps are
+never raised.
+
+**D-C.** Accepted. Verify reassesses the existing inventory on the current
+head with at most one provider request, then runs the approval finalizer,
+including mixed APPROVE when media coverage is the only blocker.
+
+**D-D.** Accepted. The worker has no rate-limit counter. Abuse protection is
+GitHub's own limits plus a Cloudflare WAF rule configured outside the
+repository.
 
 ### D1 mandatory context
 
@@ -90,8 +107,8 @@ The first supported profile is **uninterrupted bootstrap only**.
 
 | Record | Rule |
 | --- | --- |
-| Unauthenticated ingress | No victim event or root ownership. Bounded abuse accounting is separate. Invalid traffic is not charged to another event. |
-| Interrupted pre-admission | If the authoritative SQL transaction did not commit, refuse that attempt. Do not reserve the victim event. Do not reconstruct the cost from a fresh grant or an old GitHub snapshot. |
+| Unauthenticated ingress | No victim event or root ownership. Abuse protection is outside the worker (D-D). Invalid traffic is not charged to another event. |
+| Interrupted pre-admission | If the authoritative operation comment write did not commit, refuse that attempt. Do not reserve the victim event. Do not reconstruct the cost from a fresh grant or an old GitHub snapshot. |
 | Committed original admission | Sticky for the stable event. A lost response, fresh OIDC token, or inventory edit returns the same origin or a binding conflict. It does not create another allowance. |
 | Bootstrap carrier | The server creates it inside the authenticated admission transaction. A caller nonce or unsigned event claim is not proof. Absent proof refuses original mutation. |
 | Unknown attempt | Retain the debit and possible external effect. Expiry, an older root, or a new token does not clear it. |
@@ -103,24 +120,24 @@ grant.
 
 ### Acceptance stores
 
-The public operation record is one App-owned pull-request issue comment.
+The public record is App-authored GitHub issue comments: one index comment
+plus one comment per event, and separate result-part comments.
 `run_review_trigger` is the entry for full review, reply, reassessment, and
-verify. The comment stores digests, counters, the trigger name, and the
-accepted packet. It does not store prompts, model text, or file contents.
-The Cloudflare worker exchanges credentials so the App can write that comment
-and the review. It does not persist review or operation state. Durable Object
-SQL is not this store.
+verify. The index and event comments store digests, counters, the trigger
+name, and the accepted packet. Result-part comments store the validated
+review result. These comments do not store prompts, transcripts, or file
+contents. The worker verifies GitHub identity and issues credentials. It is
+not the operation store.
 
 The exact App-owned activated acceptance packet owns normalized decisions and
 measured known output bytes. Eligibility is derived. Acknowledgement is a
 projection, never the acceptance record or the resource origin.
 
-Order: SQL prepays and marks in-flight, then provider and validation, then
-stage and read back the immutable packet, then activate and read back the
-root, then the broker confirms the exact packet, then remaining publication,
-then acknowledgement. While the stores disagree, liability stays conservative
-and inference cannot redispatch. Staged orphan parts are not acceptance.
-A broker rollback after an observed external effect must not reopen dispatch.
+Order: operation comment charge, then provider and validation, then accepted
+packet comment, then result parts, then publication, then acknowledgement.
+While the stores disagree, liability stays conservative and inference cannot
+redispatch. Staged orphan parts are not acceptance. A broker rollback after
+an observed external effect must not reopen dispatch.
 
 ### Unknown remote effects
 
@@ -146,23 +163,24 @@ distinct pending instances with complete evidence, one provider request and
 two durable checkpoints, then accepted readback before acknowledgement.
 Ordinary dispatches stay 60 and total dispatches stay 64. The control deadline
 stays 60 seconds. Provider calls after a kill that follows accepted authority
-must stay 1 then 1 on replay. If that profile does not fit, the route stays
-disabled. Do not raise caps to make it fit.
+must stay 1 then 1 on replay. The 64/60 budget is not yet measured
+([#267](https://github.com/malsabbagh/review-sensei/issues/267)). If that
+profile does not fit, set `github.operation_entry` to disabled. Caps are
+never raised.
 
 ### Shared host
 
 One operation host owns admission, restore, transport accounting, checkpoint
 activation and publication reconciliation for full review, reply,
 reassessment and verify. Those triggers enter through `run_review_trigger`.
-The record is the GitHub issue comment above. Domain modules do not gain
-broker authority. The host is opt-in. The default public path keeps its
-current behavior until P1 passes.
+The record is the App-authored GitHub comments above. Domain modules do not
+gain broker authority. `github.operation_entry` defaults to enabled.
 
 ## Scope
 
-In scope: these contracts, gated authorizer and restore behavior, the opt-in
-host, unchanged-source citations, mixed-coverage evaluation, and tests that
-show the negative cases above.
+In scope: these contracts, gated authorizer and restore behavior, the
+operation host, unchanged-source citations, mixed-coverage evaluation, and
+tests that show the negative cases above.
 
 Out of scope for this change: publishing packages, deploying the Worker,
 canary activation, live provider calls, qualifying a larger model envelope,
@@ -204,18 +222,18 @@ A fixed structural clock is not elapsed-time proof.
 
 ## Rollout and rollback
 
-Ship readers and the opt-in host first. Default configuration leaves the new
-writers off. Rollback disables the new writers and keeps compatible readers,
-original guards, unknown transitions, receipts and tombstones. Do not delete
-unknown in-flight state or reset an event budget.
+`github.operation_entry` defaults to enabled. Rollback sets that switch to
+disabled and keeps compatible readers, original guards, unknown transitions,
+receipts and tombstones. Do not delete unknown in-flight state or reset an
+event budget.
 
 ## Follow-up
 
 These items stay open until their own evidence exists:
 
 - Maintainer acceptance of this ADR.
-- Interrupted-admission cost recovery ([#268](https://github.com/malsabbagh/review-sensei/issues/268)). The public path does not store that state in worker SQL. This profile refuses interrupted admission.
+- Interrupted-admission cost recovery ([#268](https://github.com/malsabbagh/review-sensei/issues/268)). This profile refuses interrupted admission. The worker is not the operation store.
 - A passing public P1 trace inside the original 64 dispatches and 60 seconds, including real elapsed time ([#267](https://github.com/malsabbagh/review-sensei/issues/267)). The in-memory host is not that trace.
 - Installed, published and deployed artifact identity, plus joint 100/250 history ([#269](https://github.com/malsabbagh/review-sensei/issues/269)).
 - A normative re-audit of the required rules file. Keyword extraction and a one-file fixture do not prove every configured review fits ([#270](https://github.com/malsabbagh/review-sensei/issues/270)).
-- Human-file recording is ADR 0077. Explicit verification can post one exact-head APPROVE. The legacy finalizer still withholds a partial AI result.
+- Human-file recording is ADR 0077. Verify can post mixed APPROVE when media coverage is the only blocker. AI coverage stays partial.
