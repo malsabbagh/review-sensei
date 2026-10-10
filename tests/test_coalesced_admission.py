@@ -377,7 +377,14 @@ class CoalescedAdmissionTests(QueueFixture, unittest.TestCase):
                 root = Path(directory)
                 environment = {
                     key: os.environ[key]
-                    for key in ("PATH", "HOME", "TMPDIR", "PYTHONPATH")
+                    for key in (
+                        "PATH",
+                        "HOME",
+                        "TMPDIR",
+                        "PYTHONPATH",
+                        "SYSTEMROOT",
+                        "WINDIR",
+                    )
                     if key in os.environ
                 }
                 command = [
