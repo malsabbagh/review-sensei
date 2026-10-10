@@ -208,6 +208,11 @@ class CoalescedAdmissionTests(QueueFixture, unittest.TestCase):
                 adapter.checkpoint(coalesce_admission_dispatch=invalid)
 
     def test_combined_closed_metadata_requires_both_exact_digests(self):
+        for reason in (["admission-dispatch"], None, 42, {}):
+            with self.assertRaises(ReviewInputError):
+                CheckpointMutation(
+                    reason, request_digest="a" * 64, dispatch_digest="b" * 64
+                )
         for values in (
             {},
             {"request_digest": "a" * 64},
