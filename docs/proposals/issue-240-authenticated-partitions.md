@@ -202,3 +202,16 @@ without reset. Expired session re-enrollment also refuses an assessment queue:
 unresolved work and receipts need explicit retained tombstone authority, and an
 expired ledger is insufficient proof that queue obligations were satisfied. No
 retirement implementation is supplied by this amendment.
+
+
+Local accounting compatibility correction: explicitly supplied/restored budgets,
+opt-in partition writers and observed queue/partition roots always retain the same
+shared counter/deadline object. Default inline-only callers retain their previous
+ledger lifetime behavior rather than inventing an evidence operation across every
+legacy command. The first richer-root read is bounded and charged before authority
+is returned, then all subsequent control I/O uses that budget without refill.
+An expired v0.1 record with its historical implicit TTL and no assessment_queue
+field may follow the existing explicit migration/re-enrollment path; invalid
+explicit legacy expiry still refuses under the original migration rules; any queue-bearing expired record,
+including an unsupported legacy-shaped object, refuses retirement. Fixtures cover
+both cases. This exemption grants no receipt, dispatch or queue accounting reset.
