@@ -215,3 +215,85 @@ field may follow the existing explicit migration/re-enrollment path; invalid
 explicit legacy expiry still refuses under the original migration rules; any queue-bearing expired record,
 including an unsupported legacy-shaped object, refuses retirement. Fixtures cover
 both cases. This exemption grants no receipt, dispatch or queue accounting reset.
+
+## Activation-tail proposal v0 (review required, writers OFF)
+
+The current `stage_partitioned_evidence` planning estimate `4 * parts + 16`
+and local estimate `8 * parts + 16` are conservative protocol planning guards.
+They are not public analysis limits, storage-byte limits or the true resource
+ceiling. The genuine shared ceiling remains 64 dispatches / 60 seconds, including
+metadata, writes, root validation and fences. The estimates currently refuse some
+plans that actual finite dispatch accounting could fit. They are not increased
+or removed in this patch.
+
+Measured A `0ca0f8e` / C `09b7c86` one-finding successful C trace emits five
+checkpoints: admission, dispatch charge, response accounting, accepted result,
+final checkpoint. Replaying its complete journals through A with one original
+budget refuses before accepted persistence on GitHub (44 calls, stage planning
+requires 24 while only 16 ordinary calls remain), and before response-accounting
+persistence locally (52 calls, requires 24 with 8 ordinary calls remaining).
+A proposed three-checkpoint replay combines response accounting and acceptance.
+With a pre-enrolled root it persists all three GitHub mutations in 36 calls;
+local settlement refuses at 43 because planning requires 24 with 17 ordinary
+calls remaining. These are storage lower bounds using synthetic object transport;
+source/evidence/provider calls, consuming broker grants, final delivery/ack,
+active accounting summaries and integrated C callback semantics remain unqualified.
+They do not demonstrate a successful production one-call lifecycle.
+
+An actual callback snapshot undercounts its activation tail: seven dispatches
+locally; five on first GitHub queue activation and six on subsequent ones in the
+minimal replay without broker head checks. Persisting those preactivation actual
+counters as complete original accounting permits restart to refill spent calls.
+Current host composition must refuse that inference; default writers stay OFF.
+
+Proposed finite seam, not an implemented or accepted interface:
+
+1. `plan_activation_tail(before, draft, *, max_scan_pages)` computes bounded
+   ordinary/fence dispatch counts from exact old/new referenced part inventories
+   and configured head checks. It binds immutable operation/source/authority/
+   execution identity, original deadline, expected current root digest/generation,
+   and the final root/ref inventory. Full scans exceeding the declared page bound
+   refuse before another dispatch; a partial scan never proves current authority.
+2. `reserve_tail(plan)` conservatively debits the original budget before creating
+   the durable root summary. The caller serializes the charged count, including
+   the nonrefundable reservation, then seals the ticket to the resulting root
+   digest. An adapter-only prepaid ticket consumes the reserved tail without
+   charging twice, never refunds unused capacity, and refuses dispatch/deadline,
+   root/ref/page/head changes beyond its sealed bounds. No ordinary resolver can
+   use an outstanding activation ticket or replenish its counter.
+3. For the current local I/O units, tail bound is `3 * new_part_count + 4`:
+   all complete part reads/inspections, root reload, temporary write, activation
+   and root readback. For GitHub it is
+   `2 * new_part_count + old_part_count + 2 * max_scan_pages + head_reads + 1`
+   under the current validation/reload/PATCH/readback sequence. The counts include
+   every baseline and queue reference, and hosted head_reads is one when required.
+   Metadata/other root growth exceeding the sealed bound is refusal, not free work.
+
+A committed tail summary alone cannot prove that no later failed activation
+attempt spent more calls than that older summary records. Crash-before-commit and
+ambiguous-write restart therefore require an independently reviewed original
+attempt witness or precise same-operation restart refusal. A conservative option
+within existing fields is to reserve the entire remaining operation allowance in
+the first successfully admitted root: durable calls becomes 64, the original
+process executes only through a bounded prepaid ticket, and restart has no new
+inference or acknowledgement allowance. This sacrifices automatic continuation
+rather than refunding interrupted control work. Failed initial admission also
+needs source/one-attempt grant replay refusal; a new automatic grant cannot erase
+it. Fresh operator authorization must be separately scoped and preserve old
+receipts/obligations. That permission/witness composition belongs to the host
+review (R11); no new infrastructure or credential is proposed. The first admitted
+root and every later transition still need exact accounted ticket tests, original
+source replay tests, ambiguity/kill tests and final-source-fence accounting before
+host acceptance. No tail protocol or release acceptance is conveyed here.
+
+## Literal path and unsupported resolver amendment
+
+Actual baseline finding/reviewed/related inventory paths permit canonical literal
+Git glob characters and quoted Unicode filenames. They retain exact identity;
+configured directory/pattern validators keep their existing rules. Traversal,
+absolute/drive paths, repeated separators, backslashes, controls and non-NFC text
+remain rejected. Plain, inline and partition readers round trip the complete
+inventory including those filenames. Public session reader helpers now refuse a
+missing/noncallable trusted producer/resolver or missing shared budget with
+sanitized ReviewInputError, allowing consumers to hand off unreadable authority.
+No manifest is interpreted as empty state or resolved through an arbitrary path.

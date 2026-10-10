@@ -12,7 +12,7 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from review_sensei.bounded_evidence import canonical_bytes
+from review_sensei.bounded_evidence import EvidenceReadBudget, canonical_bytes
 from review_sensei.errors import ReviewInputError
 from review_sensei.schemas import validate_public_document
 from review_sensei.session import (
@@ -22,6 +22,7 @@ from review_sensei.session import (
     assessment_queue_manifest_capacity,
     checkpoint_baseline_capacity,
     read_session_assessment_queue,
+    read_session_baseline,
 )
 from tests import test_review_transaction as fixture
 from tests.test_authenticated_partitions import GitHubState, binding, checkpoint, packed
@@ -406,6 +407,38 @@ class QueueAdapterTests(unittest.TestCase):
         self.assertEqual(
             state.ledger().load(fixture.IDENTITY, now=fixture.NOW).record, original
         )
+
+    def test_unsupported_custom_resolver_or_missing_budget_is_sanitized_refusal(self):
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = LocalSessionLedger(Path(directory), enable_partition_writes=True)
+            checkpoint(ledger, 250)
+            ledger = LocalSessionLedger(Path(directory), enable_partition_writes=True)
+            record, _ = activate(ledger)
+            invalid = (
+                object(),
+                SimpleNamespace(evidence_producer=lambda: "local-ledger"),
+                SimpleNamespace(
+                    evidence_producer=lambda: "local-ledger",
+                    read_evidence=lambda *args, **kwargs: {},
+                ),
+                SimpleNamespace(
+                    evidence_producer=None,
+                    read_evidence=None,
+                    evidence_budget=EvidenceReadBudget(),
+                ),
+            )
+            for resolver in invalid:
+                for read in (read_session_baseline, read_session_assessment_queue):
+                    with self.subTest(resolver=resolver, reader=read):
+                        with self.assertRaisesRegex(
+                            ReviewInputError, "trusted resolver"
+                        ):
+                            read(resolver, record)
+            plain = SessionRecord.create(fixture.IDENTITY, now=fixture.NOW)
+            self.assertIsNone(read_session_baseline(object(), plain))
+            self.assertIsNone(read_session_assessment_queue(object(), plain))
 
     def test_expired_queue_reenrollment_refuses_without_dropping_receipts(self):
         later = fixture.NOW + timedelta(days=31)
