@@ -1,6 +1,6 @@
 # Plan: GitHub-only operation entry for PR 271
 
-Status: Accepted (D-A, D-B, D-C recorded; D-D open)
+Status: Accepted (decisions D-A, D-B, D-C, D-D recorded)
 Date: 2026-10-10
 Branch: `feat/pr253-gap-closure` ([PR 271](https://github.com/malsabbagh/review-sensei/pull/271))
 Related: [#267](https://github.com/malsabbagh/review-sensei/issues/267), [#268](https://github.com/malsabbagh/review-sensei/issues/268), ADR 0074, ADR 0076, ADR 0077
@@ -291,7 +291,7 @@ replaced as follows.
 | One-use session grants (`broker_session_grants`) | A signed grant: HMAC-SHA256 over the scope, attestation digest, audience, run id hash and expiry, 10-minute TTL. `/github/session-grant` checks the signature and expiry. One-use is recorded on GitHub (Phase 1, `consume_grant`). | None for callers. The grant string format changes, so the broker and Python client ship together. |
 | Session enrollment witness (`broker_session_enrollments`) | GitHub. `known` means an App-authored submitted pull request review with `commit_id` equal to the head, or an App-authored operation record for that pull request, already exists. Users cannot delete submitted reviews. Otherwise `enrolled`. | A crash after enrollment and before the first review or record leaves no witness. A deleted ledger comment in that window starts fresh instead of `recovery-required`. Only write-access users can delete App comments. |
 | OIDC replay ids (`broker_replays`) | No stored replay set. Keep exact claim checks (repository, workflow ref and sha, event, run id, audience). Add a short maximum token age: refuse an `iat` older than 5 minutes. The minted token stays scoped to one repository and one capability. | A copied OIDC token can be exchanged again within 5 minutes for the same repository and capability. The OIDC token is a job credential, and that job can already request that token. |
-| Rate counters (`broker_rates`) | See decision D-D. | |
+| Rate counters (`broker_rates`) | None in the worker (D-D). A Cloudflare WAF rule set up outside the repository. | Worker requests are no longer counted per scope. |
 | Webhook delivery ids (`deliveries`) | No dedup store. Setup is idempotent on GitHub: branch creation and pull request creation return 422 when they already exist, and `github-app.ts` already treats that as done. GitHub does not redeliver automatically. A manual redelivery reruns the same idempotent setup. | Two concurrent deliveries for the same repository both run. One gets 422 and stops. Add a test for that race. |
 | Setup continuation cursors and alarm (`setup_continuations`) | A signed cursor. After each repository, the worker calls its own `/github/setup-continue` route through a self service binding (`services` in `wrangler.jsonc`), not the public URL, inside `ctx.waitUntil`. The request carries an HMAC-signed cursor: installation id, delivery id, page, offset and expiry. The repository list and permissions are re-read from GitHub with the installation token on each step. The cursor never holds repository names or the permission map. | No durable alarm. If a continuation request is lost, setup stops part way. Recovery is redelivering the webhook from the App settings, or the next `installation_repositories` event. Setup is idempotent, so a rerun is safe. |
 | Setup failure records (`setup_outcomes`) | Workers logs only, with `delivery_id`, `error_code` and failure count. No repository name or slug in any log line. | No queryable failure table. |
@@ -326,19 +326,14 @@ Work:
 - Update `deploy/cloudflare/README.md`, `docs/data-handling.md` and the ADRs
   that name `BrokerLedger` or `DeliveryLedger`. The worker stores nothing.
 
-**D-D. Rate limiting without SQLite.** The broker counts 10 requests per
-minute per scope today. Options:
-
-- Recommended: the Workers Rate Limiting binding (`ratelimits` in
-  `wrangler.jsonc`), keyed on sha256 of the client address for the pre-auth
-  check and sha256 of `repository_id:actor_id:capability` after OIDC checks.
-  It is not SQL and not a Durable Object. Cloudflare keeps short-lived
-  counters per location, so limits are approximate. Confirm it is available
-  on the Workers Free plan before choosing it, because
-  `deploy/cloudflare/README.md` promises Free-plan compatibility.
-- Alternative: no worker rate limit. Rely on GitHub's own limits on the App
-  installation, plus a Cloudflare WAF rule on `/github/token` configured
-  outside this repository.
+**D-D. Rate limiting without SQLite.** Decided: no rate limit in the worker.
+Delete `admitScope`, the `preauth` admit call and the `broker_rate_limited`
+error. Python `broker_client.py` drops its `rate_limited` branch. Abuse
+protection is GitHub's own limits on the App installation, plus a Cloudflare
+WAF rate-limiting rule on `/github/token` and `/github/session-grant`. That
+rule is configured in the Cloudflare dashboard, outside this repository.
+`deploy/cloudflare/README.md` documents the rule as a deploy step. The worker
+does not depend on it to be correct. Do not add the `ratelimits` binding.
 
 ## Phase 5: ADR 0076 corrections
 
