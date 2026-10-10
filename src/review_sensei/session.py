@@ -2780,6 +2780,24 @@ def _safe_ledger_name(repository: str) -> str:
     return repository.replace("/", "%2F")
 
 
+def _trusted_evidence_resolver(
+    ledger: object,
+) -> tuple[Callable[[], str], Callable[..., object]]:
+    producer = getattr(ledger, "evidence_producer", None)
+    reader = getattr(ledger, "read_evidence", None)
+    budget = getattr(ledger, "evidence_budget", None)
+    if (
+        not callable(producer)
+        or not callable(reader)
+        or not isinstance(budget, EvidenceReadBudget)
+    ):
+        raise ReviewInputError(
+            "partition authority requires a trusted resolver and shared budget"
+        )
+    budget.check()
+    return producer, reader
+
+
 def read_session_assessment_queue(
     ledger: object, record: SessionRecord
 ) -> object | None:
@@ -2791,16 +2809,15 @@ def read_session_assessment_queue(
     assert isinstance(manifest, dict)
     binding = manifest["binding"]
     assert isinstance(binding, dict)
-    if binding["producer"] != getattr(ledger, "evidence_producer")():
+    producer, reader = _trusted_evidence_resolver(ledger)
+    if binding["producer"] != producer():
         raise ReviewInputError(
             "assessment queue producer does not match authenticated session"
         )
     identity = SessionIdentity(
         record.repository, record.pull_request, repository_id=record.repository_id
     )
-    document = getattr(ledger, "read_evidence")(
-        identity, manifest, expected_binding=binding
-    )
+    document = reader(identity, manifest, expected_binding=binding)
     if (
         not isinstance(document, dict)
         or document.get("schema_version") != binding["schema_version"]
@@ -2842,6 +2859,7 @@ def read_session_baseline(
     if not isinstance(value, dict) or value.get("encoding") != PARTITION_ENCODING:
         return baseline_from_history_document(value)
     manifest = validate_manifest(value)
+    producer, reader = _trusted_evidence_resolver(ledger)
     binding = manifest["binding"]
     assert isinstance(binding, dict)
     if (
@@ -2850,7 +2868,7 @@ def read_session_baseline(
         or binding["pull_request"] != record.pull_request
         or binding["generation"] > record.generation
         or binding["purpose"] != "baseline"
-        or binding["producer"] != getattr(ledger, "evidence_producer")()
+        or binding["producer"] != producer()
     ):
         raise ReviewInputError("partition root does not match authenticated session")
     identity = SessionIdentity(
@@ -2858,9 +2876,7 @@ def read_session_baseline(
     )
     return baseline_from_history_document(
         value,
-        reader=lambda root: getattr(ledger, "read_evidence")(
-            identity, root, expected_binding=binding
-        ),
+        reader=lambda root: reader(identity, root, expected_binding=binding),
     )
 
 

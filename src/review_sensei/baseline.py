@@ -187,7 +187,7 @@ def _bounded_paths(values: Sequence[str], *, label: str) -> tuple[str, ...]:
     paths: list[str] = []
     seen: set[str] = set()
     for path in values:
-        validate_repository_path(path, label=label)
+        validate_repository_path(path, allow_glob_chars=True, label=label)
         if path not in seen:
             if len(paths) >= MAX_CACHE_METADATA_ITEMS:
                 raise ReviewInputError(f"{label} paths exceed MAX_CACHE_METADATA_ITEMS")
@@ -263,7 +263,9 @@ class BaselineFinding:
         if self.concern is not None:
             _require_sha256(self.concern, label="baseline finding concern")
         if self.path is not None:
-            validate_repository_path(self.path, label="baseline finding path")
+            validate_repository_path(
+                self.path, allow_glob_chars=True, label="baseline finding path"
+            )
         if self.symbol is not None and (
             not isinstance(self.symbol, str) or not self.symbol.strip()
         ):
