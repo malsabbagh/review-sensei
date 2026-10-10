@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,6 +36,7 @@ class LiteralContextPathTests(unittest.TestCase):
             "e" * 64,
         )
 
+    @unittest.skipIf(os.name == "nt", "Windows cannot create literal * or ? filenames")
     def test_source_selection_reads_only_the_literal_file_and_preserves_provenance(
         self,
     ):
