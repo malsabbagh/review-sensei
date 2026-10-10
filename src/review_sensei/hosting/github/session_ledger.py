@@ -17,6 +17,7 @@ retried with a newly issued grant rather than replaying the old one.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime
@@ -27,8 +28,12 @@ from ...bounded_evidence import (
     MAX_STORED_PART_BYTES,
     MAX_STORED_PARTS,
     PARTITION_ENCODING,
+    ActivationTailPlan,
     AuthenticatedPart,
     EvidenceReadBudget,
+    EvidenceTailTicket,
+    NonResumableActivationError,
+    TailDispatch,
     canonical_bytes,
     partition_evidence,
     read_partitioned_evidence,
@@ -42,7 +47,13 @@ from ...session import (
     SessionLoadReason,
     SessionLoadResult,
     SessionRecord,
+    _seal_tail_accounting,
+    _tail_attempt_scope,
+    _tail_operation_binding,
+    _tail_part_ids,
+    _tail_plan_scope,
     _validate_queue_retention,
+    _validate_tail_draft,
     load_session_status,
     mutate_abort,
     mutate_commit,
@@ -50,6 +61,7 @@ from ...session import (
     read_session_assessment_queue,
     read_session_baseline,
 )
+from .broker_client import BrokerClient, BrokerSessionGrant
 from .errors import (
     GitHubBrokerClientError,
     GitHubHTTPError,
@@ -271,6 +283,18 @@ class GitHubIssueCommentSessionLedger:
         self.enable_partition_writes = enable_partition_writes
         self._evidence_author_id: int | None = None
         self._mutation_active = False
+        self._tail_authorizing = False
+        self._tail_preparing = False
+        self._tail_scan_pages: int | None = None
+        self._activation_ticket: EvidenceTailTicket | None = None
+        self._activation_identity: SessionIdentity | None = None
+        self._activation_patch_bytes: bytes | None = None
+        self._tail_phase = ""
+        self._bound_tail_grants: set[str] = set()
+        if session_grant is not None:
+            self._bound_tail_grants.add(
+                hashlib.sha256(session_grant.encode()).hexdigest()
+            )
 
     def evidence_producer(self) -> str:
         if self.app_slug is None or self._evidence_author_id is None:
@@ -302,6 +326,11 @@ class GitHubIssueCommentSessionLedger:
     def _read_part(
         self, identity: SessionIdentity, storage_id: str
     ) -> AuthenticatedPart:
+        if (
+            self._activation_ticket is not None
+            and identity != self._activation_identity
+        ):
+            raise ReviewInputError("activation part identity changed")
         if not re.fullmatch(r"[1-9][0-9]{0,18}", storage_id):
             raise ReviewInputError("GitHub partition identity is invalid")
         path = self.http.repository_path(
@@ -415,6 +444,13 @@ class GitHubIssueCommentSessionLedger:
         ]
         missing_bodies = [body for body in prospective_bodies if body not in existing]
         if (
+            self._tail_scan_pages is not None
+            and len(items) + len(missing_bodies) >= 5 * self._tail_scan_pages
+        ):
+            raise ReviewInputError(
+                "activation future metadata exceeds sealed page bound"
+            )
+        if (
             stored_count + len(missing_bodies) > MAX_STORED_PARTS
             or stored_bytes + sum(len(body.encode()) for body in missing_bodies)
             > MAX_STORED_PART_BYTES
@@ -465,13 +501,20 @@ class GitHubIssueCommentSessionLedger:
             writer=write,
             reader=lambda storage_id: self._read_part(identity, storage_id),
             budget=self.evidence_budget,
+            preflight_calls=(
+                len(missing_bodies) * (2 if self._broker is not None else 1)
+                + len(prospective_parts)
+            )
+            if self._tail_preparing
+            else None,
         )
 
     def _bounded_comments(self, identity: SessionIdentity) -> list[Any]:
         assert self.evidence_budget is not None
         items: list[Any] = []
         # Five maximum-size comments fit the retained 512 KiB transport bound.
-        for page in range(1, 201):
+        page_limit = self._tail_scan_pages if self._tail_scan_pages is not None else 200
+        for page in range(1, page_limit + 1):
             status, payload = self._request(
                 "GET", f"{self._comments_path(identity)}?per_page=5&page={page}"
             )
@@ -501,6 +544,20 @@ class GitHubIssueCommentSessionLedger:
         replayed against a different pull request before the broker is asked.
         """
 
+        if self._tail_authorizing:
+            if (
+                not isinstance(self._broker, BrokerClient)
+                or self.evidence_budget is None
+            ):
+                raise NonResumableActivationError(
+                    "prepaid hosted activation requires the consuming broker client"
+                )
+            remaining = self.evidence_budget._remaining_seconds()
+            if self._broker.timeout > remaining:
+                raise ReviewInputError(
+                    "broker grant transport exceeds original remaining deadline"
+                )
+            self.evidence_budget.consume()
         if self._broker is None:
             return
         assert self._session_grant is not None
@@ -522,6 +579,8 @@ class GitHubIssueCommentSessionLedger:
             raise ReviewInputError("session grant verification failed") from exc
         if not isinstance(verified, Mapping) or dict(verified) != attestation:
             raise ReviewInputError("session grant verification failed")
+        if self._tail_authorizing and self.evidence_budget is not None:
+            self.evidence_budget.check()
 
     def _verify_live_head(self, identity: SessionIdentity) -> None:
         """Re-read the PR head immediately before a grant-authorized write.
@@ -560,7 +619,28 @@ class GitHubIssueCommentSessionLedger:
     ) -> tuple[int, dict[str, Any] | list[Any] | None]:
         try:
             if self.evidence_budget is not None:
-                remaining = self.evidence_budget.consume()
+                if self._activation_ticket is not None:
+                    if self._activation_identity is None:
+                        raise ReviewInputError(
+                            "activation root identity is unavailable"
+                        )
+                    if body is not None and (
+                        method != "PATCH"
+                        or canonical_bytes(body) != self._activation_patch_bytes
+                    ):
+                        raise ReviewInputError(
+                            "activation PATCH differs from sealed root"
+                        )
+                    fence = method == "PATCH" or (
+                        self._tail_phase in {"reload", "readback"}
+                        and path
+                        == f"{self._comments_path(self._activation_identity)}?per_page=5&page=1"
+                    )
+                    remaining = self._activation_ticket.consume(
+                        f"{method} {path}", fence=fence
+                    )
+                else:
+                    remaining = self.evidence_budget.consume()
                 response = self.http.request(
                     method, path, token=self.token, body=body, timeout_seconds=remaining
                 )
@@ -661,6 +741,17 @@ class GitHubIssueCommentSessionLedger:
                 )
             found.append((comment_id, record))
             author_id = author.get("id") if isinstance(author, dict) else None
+            if self._tail_authorizing or self._activation_ticket is not None:
+                if (
+                    isinstance(author_id, bool)
+                    or not isinstance(author_id, int)
+                    or author_id <= 0
+                    or self._evidence_author_id is not None
+                    and author_id != self._evidence_author_id
+                ):
+                    raise ReviewInputError("activation root Bot numeric owner changed")
+                self._evidence_author_id = author_id
+                self._part_owner(item, identity)
             if (
                 not isinstance(author_id, bool)
                 and isinstance(author_id, int)
@@ -898,6 +989,362 @@ class GitHubIssueCommentSessionLedger:
         ):
             raise ReviewInputError("session comment update lost")
         return readback
+
+    def reserve_for_tail(
+        self,
+        identity: SessionIdentity,
+        *,
+        operation_binding: Mapping[str, object],
+        slot: str,
+        reservation_id: str,
+        expected_generation: int,
+        max_scan_pages: int,
+        head_sha: str | None = None,
+        now: datetime | None = None,
+    ) -> SessionRecord:
+        if not self.enable_partition_writes or self.evidence_budget is None:
+            raise ReviewInputError(
+                "prepaid activation writers or original budget are unavailable"
+            )
+        self._validate_tail_scan_pages(max_scan_pages)
+        budget = self.evidence_budget
+        scope = _tail_attempt_scope(identity, reservation_id, operation_binding)
+        if (
+            budget.restored
+            or scope in budget._live_attempts
+            or scope in budget._failed_attempts
+        ):
+            raise NonResumableActivationError(
+                "original activation attempt cannot be restarted"
+            )
+
+        def admit(record: SessionRecord) -> SessionRecord:
+            if (
+                record.reservation_id is not None
+                or record.last_committed_reservation_id == reservation_id
+            ):
+                raise NonResumableActivationError(
+                    "loaded reservation is not a live original attempt proof"
+                )
+            return self._own_reservation(
+                record,
+                mutate_reserved(
+                    record,
+                    slot=slot,
+                    reservation_id=reservation_id,
+                    expected_generation=expected_generation,
+                    head_sha=head_sha,
+                    now=now,
+                ),
+            )
+
+        self._tail_authorizing, self._tail_scan_pages = True, max_scan_pages
+        try:
+            reserved = self.replace(identity, admit, now=now)
+            budget._remember_live_attempt(scope, reserved.record_sha256, owner=self)
+            return reserved
+        except BaseException:
+            budget._burn_live_attempt(scope)
+            raise
+        finally:
+            self._tail_authorizing, self._tail_scan_pages = False, None
+
+    @staticmethod
+    def _validate_tail_scan_pages(value: int) -> None:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 1 <= value <= 60
+        ):
+            raise ReviewInputError("activation scan page bound is invalid")
+
+    def bind_tail_grant(
+        self,
+        identity: SessionIdentity,
+        grant: BrokerSessionGrant,
+        *,
+        operation_binding: Mapping[str, object],
+        attempt_reservation_id: str,
+        max_scan_pages: int,
+        now: datetime | None = None,
+    ) -> None:
+        """Install a fresh one-attempt grant on the original live ledger only.
+
+        This does not issue authority or verify/consume the grant. The next
+        mutation verifies it through the actual consuming BrokerClient. Current
+        v1 grant claims bind hosted command scope; they do not prove durable
+        original operation accounting or permit crash/restart continuation.
+        """
+        budget = self.evidence_budget
+        if not self.enable_partition_writes or budget is None:
+            raise ReviewInputError(
+                "prepaid activation writers or budget are unavailable"
+            )
+        self._validate_tail_scan_pages(max_scan_pages)
+        operation = _tail_operation_binding(operation_binding)
+        scope = _tail_attempt_scope(identity, attempt_reservation_id, operation)
+        if (
+            budget.restored
+            or budget._live_attempt_owners.get(scope) is not self
+            or scope in budget._failed_attempts
+        ):
+            raise NonResumableActivationError(
+                "original live ledger proof is unavailable"
+            )
+        if self._activation_ticket is not None or budget._tail_ticket is not None:
+            raise ReviewInputError("cannot rebind a pending activation tail")
+        try:
+            if not isinstance(self._broker, BrokerClient) or not isinstance(
+                grant, BrokerSessionGrant
+            ):
+                raise ReviewInputError(
+                    "activation requires a broker-parsed session grant"
+                )
+            attestation = self._broker._validated_attestation_grant(grant.attestation)
+            original = self._broker._validated_attestation_grant(
+                self._session_attestation
+            )
+            # Only issuance time may change between the same command's grants.
+            if (
+                {key: value for key, value in attestation.items() if key != "issued_at"}
+                != {key: value for key, value in original.items() if key != "issued_at"}
+                or attestation["repository"] != identity.repository
+                or attestation["repository_id"] != identity.repository_id
+                or attestation["pull_request"] != identity.pull_request
+                or attestation["head_sha"] != self._head_sha
+                or grant.state not in {"enrolled", "known"}
+                or not isinstance(grant.token, str)
+                or not grant.token.strip()
+                or not isinstance(grant.grant, str)
+                or re.fullmatch(r"[A-Za-z0-9_-]{43}", grant.grant) is None
+            ):
+                raise ReviewInputError("fresh activation grant scope differs")
+            digest = hashlib.sha256(grant.grant.encode()).hexdigest()
+            if digest in self._bound_tail_grants or len(self._bound_tail_grants) >= 64:
+                raise ReviewInputError(
+                    "activation grant was reused or registry exhausted"
+                )
+            self._tail_authorizing, self._tail_scan_pages = True, max_scan_pages
+            comment_id, current = self._discover(identity, now=now)
+            if (
+                comment_id is None
+                or current is None
+                or current.expired(now=now)
+                or current.reservation_id != attempt_reservation_id
+            ):
+                raise ReviewInputError("current activation reservation is unavailable")
+            budget._require_live_attempt(scope, current.record_sha256, owner=self)
+            if current.assessment_queue is not None:
+                _validate_tail_draft(
+                    current,
+                    current.evolve(generation=current.generation + 1, now=now),
+                    operation=operation,
+                    reservation_id=attempt_reservation_id,
+                    budget=budget,
+                )
+            self._verify_live_head(identity)
+            budget.check()
+            self.token = grant.token
+            self._session_grant = grant.grant
+            self._session_attestation = attestation
+            self._bound_tail_grants.add(digest)
+        except GitHubBrokerClientError as exc:
+            budget._burn_live_attempt(scope)
+            raise ReviewInputError(
+                "fresh activation grant attestation is invalid"
+            ) from exc
+        except BaseException:
+            budget._burn_live_attempt(scope)
+            raise
+        finally:
+            self._tail_authorizing, self._tail_scan_pages = False, None
+
+    def replace_with_tail(
+        self,
+        identity: SessionIdentity,
+        prepare: Callable[[SessionRecord], SessionRecord],
+        *,
+        operation_binding: Mapping[str, object],
+        attempt_reservation_id: str,
+        seal_accounting: Callable[[SessionRecord, Mapping[str, int]], SessionRecord],
+        max_scan_pages: int,
+        now: datetime | None = None,
+    ) -> SessionRecord:
+        """Each checkpoint consumes a fresh grant; prepay all sealed root work."""
+        if not self.enable_partition_writes or self.evidence_budget is None:
+            raise ReviewInputError(
+                "prepaid activation writers or original budget are unavailable"
+            )
+        self._validate_tail_scan_pages(max_scan_pages)
+        budget = self.evidence_budget
+        operation = _tail_operation_binding(operation_binding)
+        scope = _tail_attempt_scope(identity, attempt_reservation_id, operation)
+        if (
+            budget.restored
+            or scope not in budget._live_attempts
+            or budget._live_attempt_owners.get(scope) is not self
+            or scope in budget._failed_attempts
+        ):
+            raise NonResumableActivationError(
+                "original activation attempt witness is unavailable"
+            )
+        ticket: EvidenceTailTicket | None = None
+        self._tail_authorizing, self._tail_scan_pages = True, max_scan_pages
+        try:
+            self._verify_mutation_grant(identity)
+            comment_id, before = self._discover(identity, now=now)
+            if comment_id is None or before is None or before.expired(now=now):
+                raise ReviewInputError(
+                    "prepaid activation current authority is unavailable"
+                )
+            budget._require_live_attempt(scope, before.record_sha256, owner=self)
+            latest_id, latest = self._discover(identity, now=now)
+            if (
+                latest_id != comment_id
+                or latest is None
+                or latest.record_sha256 != before.record_sha256
+            ):
+                raise ReviewInputError("session generation conflict before preparation")
+            self._mutation_active = self._tail_preparing = True
+            draft = prepare(before)
+            self._mutation_active = self._tail_preparing = False
+            _validate_tail_draft(
+                before,
+                draft,
+                operation=operation,
+                reservation_id=attempt_reservation_id,
+                budget=budget,
+            )
+            if self._session_grant is None:
+                raise ReviewInputError("activation grant is unavailable")
+            grant_digest = hashlib.sha256(self._session_grant.encode()).hexdigest()
+            attested_head = self._head_sha
+
+            def plan_scope(record: SessionRecord) -> str:
+                if (
+                    self._session_grant is None
+                    or self._head_sha != attested_head
+                    or hashlib.sha256(self._session_grant.encode()).hexdigest()
+                    != grant_digest
+                ):
+                    raise ReviewInputError("activation grant or head scope changed")
+                return _tail_plan_scope(
+                    "github",
+                    before,
+                    record,
+                    operation=operation,
+                    budget=budget,
+                    scan_pages=max_scan_pages,
+                    head_sha=self._head_sha,
+                    root_id=comment_id,
+                    grant_sha256=grant_digest,
+                )
+
+            def part_steps(record: SessionRecord) -> tuple[TailDispatch, ...]:
+                return tuple(
+                    TailDispatch(
+                        f"GET {self.http.repository_path(identity.repository, f'/issues/comments/{part_id}')}"
+                    )
+                    for part_id in _tail_part_ids(record)
+                )
+
+            def scan_steps() -> tuple[TailDispatch, ...]:
+                return tuple(
+                    TailDispatch(
+                        f"GET {self._comments_path(identity)}?per_page=5&page={page}",
+                        fence=page == 1,
+                        optional=page > 1,
+                    )
+                    for page in range(1, max_scan_pages + 1)
+                )
+
+            path = self.http.repository_path(
+                identity.repository, f"/issues/comments/{comment_id}"
+            )
+            head_steps = (
+                TailDispatch(
+                    f"GET {self.http.repository_path(identity.repository, f'/pulls/{identity.pull_request}')}"
+                ),
+            )
+            steps = (
+                part_steps(draft)
+                + scan_steps()
+                + part_steps(before)
+                + head_steps
+                + (TailDispatch(f"PATCH {path}", fence=True),)
+                + scan_steps()
+                + part_steps(draft)
+            )
+            plan = ActivationTailPlan("github", plan_scope(draft), steps)
+            ticket = budget.reserve_tail(plan)
+            sealed = _seal_tail_accounting(draft, seal_accounting, budget)
+            _validate_queue_retention(before, sealed)
+            patch_body: dict[str, object] = {
+                "body": render_session_comment(
+                    repository_id=self._require_identity(identity),
+                    pull_request=identity.pull_request,
+                    record=sealed,
+                )
+            }
+            self._activation_patch_bytes = canonical_bytes(patch_body)
+            ticket.seal(sealed.record_sha256)
+            ticket.start(
+                scope_sha256=plan_scope(sealed), root_sha256=sealed.record_sha256
+            )
+            self._activation_ticket, self._activation_identity = ticket, identity
+            self._tail_phase = "validate"
+            read_session_baseline(self, sealed)
+            read_session_assessment_queue(self, sealed)
+            self._tail_phase = "reload"
+            current_id, current = self._discover(identity, now=now)
+            if (
+                current_id != comment_id
+                or current is None
+                or current.record_sha256 != before.record_sha256
+            ):
+                raise ReviewInputError(
+                    "session generation conflict before prepaid activation"
+                )
+            self._tail_phase = "activate"
+            self._verify_live_head(identity)
+            status, payload = self._request("PATCH", path, body=patch_body)
+            if status != 200 or not isinstance(payload, dict):
+                raise GitHubPublicationTransientError(
+                    "prepaid root update is ambiguous"
+                )
+            self._part_owner(payload, identity)
+            verified = parse_session_comment(payload.get("body"), identity=identity)
+            if (
+                payload.get("id") != comment_id
+                or verified is None
+                or verified.record_sha256 != sealed.record_sha256
+            ):
+                raise ReviewInputError("prepaid root update lost")
+            self._tail_phase = "readback"
+            readback_id, readback = self._discover(identity, now=now)
+            if (
+                readback_id != comment_id
+                or readback is None
+                or readback.record_sha256 != sealed.record_sha256
+            ):
+                raise ReviewInputError(
+                    "prepaid activation readback is ambiguous or conflicting"
+                )
+            ticket.finish()
+            budget._advance_live_attempt(scope, sealed.record_sha256)
+            return readback
+        except BaseException:
+            budget._burn_live_attempt(scope)
+            raise
+        finally:
+            if ticket is not None:
+                ticket.abort()
+            self._activation_ticket = self._activation_identity = None
+            self._activation_patch_bytes = None
+            self._tail_authorizing = self._tail_preparing = self._mutation_active = (
+                False
+            )
+            self._tail_scan_pages, self._tail_phase = None, ""
 
     def reenroll(
         self,

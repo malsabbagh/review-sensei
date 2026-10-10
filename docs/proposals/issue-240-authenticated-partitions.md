@@ -297,3 +297,95 @@ inventory including those filenames. Public session reader helpers now refuse a
 missing/noncallable trusted producer/resolver or missing shared budget with
 sanitized ReviewInputError, allowing consumers to hand off unreadable authority.
 No manifest is interpreted as empty state or resolved through an arbitrary path.
+
+### Live-only prepaid activation amendment (prototype, writers off)
+
+The adapter-owned opt-in primitive requires an explicitly supplied original
+EvidenceReadBudget and implements the prepaid tail; the public
+64-dispatch/60-second ceiling is unchanged. `EvidenceReadBudget.reserve_tail`
+debits the complete ordered `ActivationTailPlan` before the root accounting is
+sealed. `EvidenceTailTicket` is one-use, cannot be restored, and admits only its
+sealed root/context and exact labeled dispatches. Actual dispatches do not debit
+the prepaid liability again. Unused optional pages, refused activation,
+ambiguous writes, expired deadlines and failed readbacks are never refunded.
+Retries are not admitted by these plans: a failed transport burns the attempt.
+The ordinary four-call fence reserve remains in force; tail admission simulates
+ordinary/fence admission in the exact planned order, rather than adding four
+free calls to the cap.
+
+Both adapters expose `reserve_for_tail(identity, *, operation_binding, slot,
+reservation_id, expected_generation, head_sha=None, now=None)` (GitHub also
+requires `max_scan_pages`). It uses the existing reservation mechanism, requires
+new owned durable reservation readback, and retains proof in the original
+ledger object and original budget. `operation_binding` is closed over
+`operation_id`, `source_digest`, `authority_digest`, `execution_identity`,
+`inventory_digest`, and immutable `inventory_generation`. Loaded, duplicate,
+restored-budget, new-ledger (even sharing the budget), and previously failed
+attempts cannot authorize `replace_with_tail`. The typed failure is
+`NonResumableActivationError`, reason `original-attempt-witness-required`.
+This live proof is not durable authenticated original-attempt accounting.
+Classifying an invocation as a new operation, including failures before the
+reservation root exists, requires the host's existing authenticated attempt
+witness. The primitive does not qualify crash/restart completion or enable any
+consumer writer. Completed roots remain readable using an independent bounded
+read-only invocation after the original execution deadline.
+
+`replace_with_tail(identity, prepare, *, operation_binding,
+attempt_reservation_id, seal_accounting, now=None)` also requires
+`max_scan_pages` on GitHub. Preparation stages and reads back complete pieces
+under the original budget. It uses an adapter-specific exact staging preflight,
+not the codec's legacy conservative `4 * parts + 16` planning guard. Retained
+piece scans, metadata pages, write/head checks and staging readbacks remain
+charged. After preparation, the adapter fixes current-root digest, ordered
+complete new/old manifest references, draft shape, original absolute UTC
+deadline, operation binding, and (GitHub) root ID, head and current grant digest.
+`seal_accounting(draft, {calls, deadline_at_ms}) -> SessionRecord` may change only
+`active_operation.read_accounting` and the record digest. Complete journal
+bytes, inventory generation, reservation, manifest, record generation and all
+other lifecycle fields must remain identical. The accounting carrier and
+reservation remain nonnull through acknowledgment; the host owns lifecycle
+projection and journal semantics.
+
+The local tail is `3 * Nnew + 4`: complete new-piece containment/directory/read
+operations, current-root reload fence, durable temporary-root write (including
+sync/cleanup), deadline-checked activation fence, and owned root readback fence.
+The GitHub tail is `2 * Nnew + Nold + 2 * S + 2`, where `S` is the declared finite
+metadata page maximum: complete new-piece validation; current-root discovery
+and old-piece validation; one live-head GET; one PATCH fence; owned discovery
+and complete new-piece readback. Both scans reserve all `S` pages; page one is a
+fence and later pages are ordinary optional liabilities that remain charged
+when unused. A full last page cannot establish termination and refuses without
+an extra request. Staging refuses before POST when future root/piece retention
+cannot fit the declared scan bound. Every referenced baseline and queue piece
+is counted, including duplicate references; there is no per-layer allowance.
+No cleanup, active-reference deletion, cross-process lock or atomic GitHub CAS
+is introduced.
+
+GitHub exposes `bind_tail_grant(identity, BrokerSessionGrant, *,
+operation_binding, attempt_reservation_id, max_scan_pages, now=None)` on the same
+live ledger. It requires the actual `BrokerClient`, its exact closed v1 parsed
+attestation, unchanged original command/run/head/workflow claims (only issuance
+time may differ), current owned reservation/root and live head. These reads are
+charged to the original budget before installation. Grant reuse is refused;
+the next checkpoint consumes fresh broker verification before writes. Issuance
+and broker-internal dispatches are host composition work and must also be
+charged; the adapter does not provide a free grant allowance. V1 grant claims
+do not authenticate operation/read-accounting restart proof. The coordinator's
+v2 metadata-only feedback binding and separate original-attempt witness remain
+pending composition, with v1 compatibility retained here.
+
+The executable hosted fixture uses the actual BrokerClient parser and a service
+that consumes each grant once. In a pre-enrolled PR with no baseline, one queue
+piece and a minimal synthetic complete journal, original issuance/reservation
+costs 8 dispatches; fresh issuance/binding plus checkpoint 1 reaches 24;
+checkpoint 2 reaches 44; checkpoint 3 preparation reaches 57 and refuses the
+seven-dispatch tail because its ordinary work would consume the fence reserve.
+All 57 dispatches equal 49 GitHub attempts plus 8 fixture broker attempts. No
+source/evidence/provider/finalization/publication/acknowledgment work is present
+in that lower-bound fixture. This is a precise useful-route refusal, not a
+successful C operation. F independently measured production cold acquisition
+plus consume at 12 physical attempts and warm at 11 including internal work;
+those costs cannot be substituted with the fixture's two outer broker requests.
+The existing host three-checkpoint measurement of 41 storage attempts plus
+production grants already exceeds 64 before source/ack work. Combined admission
+remains a release gate; no ceiling increase or hidden exclusions are accepted.

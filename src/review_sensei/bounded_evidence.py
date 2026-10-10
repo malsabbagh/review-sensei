@@ -46,6 +46,121 @@ class AuthenticatedPart:
     producer: str
 
 
+class NonResumableActivationError(ReviewInputError):
+    """Original attempted control work lacks authenticated restart accounting."""
+
+    reason = "original-attempt-witness-required"
+
+
+@dataclass(frozen=True)
+class TailDispatch:
+    label: str
+    fence: bool = False
+    optional: bool = False
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.label, str)
+            or not self.label
+            or len(self.label.encode()) > 1024
+            or not isinstance(self.fence, bool)
+            or not isinstance(self.optional, bool)
+        ):
+            raise ReviewInputError("activation tail dispatch is invalid")
+
+
+@dataclass(frozen=True)
+class ActivationTailPlan:
+    """Adapter-sealed context digest and complete ordered dispatch liability."""
+
+    adapter: str
+    scope_sha256: str
+    steps: tuple[TailDispatch, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            self.adapter not in {"local", "github"}
+            or not isinstance(self.steps, tuple)
+            or not 1 <= len(self.steps) <= MAX_PART_READS
+            or any(not isinstance(step, TailDispatch) for step in self.steps)
+        ):
+            raise ReviewInputError("activation tail plan is invalid")
+        _sha(self.scope_sha256)
+
+
+class EvidenceTailTicket:
+    """One-use prepaid work; unused, failed and ambiguous work is never refunded.
+
+    This is not an authority proof. Only owning adapters construct the sealed
+    plan, validate its root and route the enumerated physical dispatches here.
+    Tickets cannot be reconstructed from a durable budget snapshot.
+    """
+
+    def __init__(self, budget: "EvidenceReadBudget", plan: ActivationTailPlan):
+        self._budget = budget
+        self.plan = plan
+        self._root_sha256: str | None = None
+        self._started = False
+        self._closed = False
+        self._index = 0
+        self.dispatched = 0
+
+    def seal(self, root_sha256: str) -> None:
+        if (
+            self._root_sha256 is not None
+            or self._closed
+            or self._budget._tail_ticket is not self
+        ):
+            self.abort()
+            raise ReviewInputError("activation tail ticket was already sealed or spent")
+        self._budget.check()
+        self._root_sha256 = _sha(root_sha256)
+
+    def start(self, *, scope_sha256: str, root_sha256: str) -> None:
+        if (
+            self._closed
+            or self._started
+            or self._root_sha256 is None
+            or self._budget._tail_ticket is not self
+            or scope_sha256 != self.plan.scope_sha256
+            or root_sha256 != self._root_sha256
+        ):
+            self.abort()
+            raise ReviewInputError("activation tail scope or root does not match")
+        self._budget.check()
+        self._started = True
+
+    def consume(self, label: str, *, fence: bool = False) -> float:
+        if self._closed or not self._started or self._budget._tail_ticket is not self:
+            raise ReviewInputError("activation tail ticket is not active")
+        remaining = self._budget._remaining_seconds()
+        while self._index < len(self.plan.steps):
+            step = self.plan.steps[self._index]
+            if step.label == label and step.fence == fence:
+                self._index += 1
+                self.dispatched += 1
+                return remaining
+            if not step.optional:
+                break
+            self._index += 1
+        self.abort()
+        raise ReviewInputError("activation tail dispatch exceeds sealed bounds")
+
+    def finish(self) -> None:
+        if self._closed or not self._started:
+            raise ReviewInputError("activation tail ticket was already spent")
+        self._budget.check()
+        if any(not step.optional for step in self.plan.steps[self._index :]):
+            self.abort()
+            raise ReviewInputError("activation tail mandatory readback is incomplete")
+        self.abort()
+
+    def abort(self) -> None:
+        self._closed = True
+        if self._budget._tail_ticket is self:
+            self._budget._tail_ticket = None
+
+
 def _integer(value: object, maximum: int, *, minimum: int = 0) -> int:
     if (
         isinstance(value, bool)
@@ -131,6 +246,11 @@ class EvidenceReadBudget:
         snapshot: object | None = None,
     ) -> None:
         self.clock = clock
+        self.restored = snapshot is not None
+        self._tail_ticket: EvidenceTailTicket | None = None
+        self._live_attempts: dict[str, str] = {}
+        self._live_attempt_owners: dict[str, object] = {}
+        self._failed_attempts: set[str] = set()
         if snapshot is None:
             self.calls = 0
             remaining = PART_READ_SECONDS
@@ -166,15 +286,79 @@ class EvidenceReadBudget:
             raise ReviewInputError("partition read deadline exhausted")
 
     def consume(self, *, fence: bool = False) -> float:
-        remaining = self.deadline - self.clock()
-        if remaining <= 0:
-            raise ReviewInputError("partition read deadline exhausted")
+        if self._tail_ticket is not None:
+            raise ReviewInputError(
+                "ordinary dispatch cannot use prepaid activation work"
+            )
+        remaining = self._remaining_seconds()
         if self.calls >= MAX_PART_READS - (0 if fence else 4):
             raise ReviewInputError("partition shared request budget exhausted")
         self.calls += 1
         # Addition/subtraction near a float exponent boundary can round above
         # the transport ceiling. Clamp the timeout, never the original deadline.
         return min(remaining, PART_READ_SECONDS)
+
+    def _remaining_seconds(self) -> float:
+        remaining = self.deadline - self.clock()
+        if remaining <= 0:
+            raise ReviewInputError("partition read deadline exhausted")
+        return min(remaining, PART_READ_SECONDS)
+
+    def reserve_tail(self, plan: ActivationTailPlan) -> EvidenceTailTicket:
+        """Debit the complete worst-case liability before serializing authority."""
+        self.check()
+        if self.restored:
+            raise NonResumableActivationError(
+                "activation restart requires authenticated original attempt accounting"
+            )
+        if self._tail_ticket is not None or not isinstance(plan, ActivationTailPlan):
+            raise ReviewInputError("activation tail reservation is already outstanding")
+        projected = self.calls
+        for step in plan.steps:
+            if projected >= MAX_PART_READS - (0 if step.fence else 4):
+                raise ReviewInputError(
+                    "activation tail liability exceeds original budget"
+                )
+            projected += 1
+        self.calls = projected
+        ticket = EvidenceTailTicket(self, plan)
+        self._tail_ticket = ticket
+        return ticket
+
+    def _remember_live_attempt(
+        self, scope: str, root_sha256: str, *, owner: object
+    ) -> None:
+        if (
+            self.restored
+            or scope in self._live_attempts
+            or scope in self._failed_attempts
+        ):
+            raise NonResumableActivationError(
+                "activation requires a newly owned original attempt witness"
+            )
+        self._live_attempts[scope] = _sha(root_sha256)
+        self._live_attempt_owners[scope] = owner
+
+    def _require_live_attempt(
+        self, scope: str, root_sha256: str, *, owner: object
+    ) -> None:
+        if (
+            self.restored
+            or scope in self._failed_attempts
+            or self._live_attempts.get(scope) != root_sha256
+            or self._live_attempt_owners.get(scope) is not owner
+        ):
+            raise NonResumableActivationError(
+                "activation restart requires authenticated original attempt accounting"
+            )
+
+    def _advance_live_attempt(self, scope: str, root_sha256: str) -> None:
+        self._live_attempts[scope] = _sha(root_sha256)
+
+    def _burn_live_attempt(self, scope: str) -> None:
+        self._failed_attempts.add(scope)
+        self._live_attempts.pop(scope, None)
+        self._live_attempt_owners.pop(scope, None)
 
     def preflight(self, calls: int) -> None:
         self.check()
@@ -313,6 +497,7 @@ def stage_partitioned_evidence(
     writer: Callable[[dict[str, object]], str],
     reader: Callable[[str], AuthenticatedPart],
     budget: EvidenceReadBudget,
+    preflight_calls: int | None = None,
 ) -> dict[str, object]:
     """Preflight every bound, stage immutable objects, then verify all readbacks.
 
@@ -333,7 +518,11 @@ def stage_partitioned_evidence(
     # Creation, readback and preactivation validation plus bounded metadata and
     # root revalidation. Large plans can be legal codec objects but not legal
     # single-operation writes under the shared allowance.
-    budget.preflight(4 * len(parts) + 16)
+    budget.preflight(
+        4 * len(parts) + 16
+        if preflight_calls is None
+        else _integer(preflight_calls, MAX_PART_READS)
+    )
     storage_ids = tuple(writer(part) for part in parts)
     manifest = evidence_manifest(
         value,
