@@ -1,8 +1,9 @@
 # Compact eligibility-v4 reader proposal
 
-Status: Proposed prototype; coordinator review required before committing these
-activation interfaces. No new writer, root, schema registration or rollout is
-enabled. Depends on A v1.1 and B instance-v1 / visible-prose-v1 / D feedback-v1.
+Status: Conditionally reviewed reader-first prototype. No new writer, root,
+shared schema registration or rollout is enabled. Depends on A v1.1 and B
+instance-v1 / visible-prose-v1 / D feedback-v1. Consumer integration and complete
+consuming-grant/resource/fence qualification remain prerequisites for activation.
 
 ## Closed root shape
 
@@ -108,10 +109,14 @@ ReviewApprovalEligibility.from_dict(
 Legacy calls remain byte-compatible and preserve stored IDs. Version 4 requires
 all three supplied seams. `expected_context` is authenticated host context with
 the complete A snapshot/binding, exact result digest, immutable/activation
-generation and complete expected visible instance set. `partition_reader` is
-A's already charged authenticated adapter resolver receiving the manifest and
-the exact expected binding. `visible_reader` performs complete fresh receipt
-readback under that same budget. Neither can be selected by untrusted content.
+generation, actual independently owned numeric root ID, complete expected
+visible instance set, actual framing/future allocation and original shared
+EvidenceReadBudget. `partition_reader` is A's already charged authenticated
+resolver receiving manifest, expected_binding and budget as keyword-only values.
+`visible_reader` receives the complete receipts and that same budget. Neither
+can be selected by untrusted content. The finalizer checks context budget object
+identity before scanning and exact numeric root/App identity on the selected
+latest candidate. Parser callback success must return None, not a false status.
 
 The parser validates closed root shape/finite bytes first, validates both closed
 manifests and exact bindings/counts, reconstructs both complete envelopes,
@@ -130,8 +135,8 @@ immutable readers must reject a newer v4 root in mixed history.
 
 ## Root growth and finite admission
 
-Canonical v4 document ceiling proposed: 32 KiB; A retains its 8 KiB ceiling for
-each manifest. This is an additional domain bound, not host support. Preflight
+Total framed v4 root ceiling: 32 KiB; A retains its 8 KiB ceiling for each
+manifest. This is an additional domain bound, not host support. Preflight
 uses maximum-width part IDs, all 250 possible full resolutions, complete
 navigation/summary/marker base64 framing and the actual host/root allocation,
 including retained transaction/attestation/progress/queue growth where applicable.
@@ -140,9 +145,14 @@ before mutation. Whole visible receipt documents (measured 27,824 bytes for 250)
 are partitioned rather than directly embedded. Existing complete prose stays
 visible and old authority stays retained after partial failures.
 
-The initial a754527 stage/read seam currently handles a raw schema-3 inventory;
-adding these result-bound envelopes would be a discrete reviewed amendment,
-not a silent reinterpretation of that committed interface. The coordinator owns
+The initial a754527 stage/read seam retains its raw schema-3 inventory format.
+The discrete amendment adds inventory_result_document,
+inventory_from_result_document and stage_result_human_inventory, leaving raw
+prototype reads unchanged. Eligibility v4 accepts only the closed result-bound
+envelope. PartitionedEligibilityRoot stores immutable read-backed references;
+its serializer reserves all resolutions and maximum activation-counter width.
+V4 finalization explicitly withholds in this prototype, even when all static
+facts and inventory resolutions are clean. The coordinator owns
 shared public schema registration and reader/call-site rollout. No writer
 activation until current and immutable-reader checks, fresh source/visible/root
 fences, grant composition, retention/resource R12 and fault/concurrency gates pass.

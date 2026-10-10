@@ -9,7 +9,7 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from ...baseline import ReviewBaseline
 from ...bounded_evidence import EvidenceReadBudget
@@ -74,6 +74,13 @@ from .errors import (
     GitHubPublicationTransientError,
 )
 from .http import GitHubHttp
+
+if TYPE_CHECKING:
+    from .eligibility_parts import (
+        PartitionedEligibilityContext,
+        PartitionReader,
+        VisibleReader,
+    )
 
 REVIEW_MARKER_PREFIX = "<!-- reviewsensei:review:v1"
 FINDING_MARKER_PREFIX = "<!-- reviewsensei:finding:v1"
@@ -507,7 +514,13 @@ def approval_eligibility_marker(eligibility: ReviewApprovalEligibility) -> str:
     return marker
 
 
-def approval_eligibility_from_body(body: object) -> ReviewApprovalEligibility | None:
+def approval_eligibility_from_body(
+    body: object,
+    *,
+    partition_reader: PartitionReader | None = None,
+    expected_context: PartitionedEligibilityContext | None = None,
+    visible_reader: VisibleReader | None = None,
+) -> ReviewApprovalEligibility | None:
     """Read back one persisted eligibility document, failing closed to ``None``.
 
     A missing, unreadable, or malformed document returns ``None``: every caller
@@ -530,7 +543,12 @@ def approval_eligibility_from_body(body: object) -> ReviewApprovalEligibility | 
     except (ValueError, UnicodeDecodeError, binascii.Error):
         return None
     try:
-        return ReviewApprovalEligibility.from_dict(document)
+        return ReviewApprovalEligibility.from_dict(
+            document,
+            partition_reader=partition_reader,
+            expected_context=expected_context,
+            visible_reader=visible_reader,
+        )
     except ReviewInputError:
         return None
 
@@ -778,6 +796,12 @@ class ReviewApprovalFinalizer:
 
         if not isinstance(eligibility, ReviewApprovalEligibility):
             raise GitHubPublicationError("approval eligibility is invalid")
+        if eligibility.partitioned_root is not None:
+            # Reader-first prototype only. Full finalizer part/source/root
+            # fences and consuming-grant/resource qualification remain gates.
+            return PublicationResult(
+                status="approval_withheld", diagnostic="approval_withheld"
+            )
         if not GIT_SHA_HEX.fullmatch(head_sha):
             raise GitHubPublicationError("review head sha is invalid")
         if eligibility.head_sha != head_sha:
@@ -1155,6 +1179,9 @@ class ReviewApprovalFinalizer:
         head_sha: str,
         app_slug: str,
         require_valid: bool = False,
+        partition_reader: PartitionReader | None = None,
+        expected_context: PartitionedEligibilityContext | None = None,
+        visible_reader: VisibleReader | None = None,
     ) -> ReviewApprovalEligibility | None:
         """Read the persisted eligibility document for one reviewed head.
 
@@ -1170,16 +1197,36 @@ class ReviewApprovalFinalizer:
             raise GitHubPublicationError("review head sha is invalid")
         if not isinstance(app_slug, str) or not app_slug.strip():
             raise GitHubPublicationError("review app slug is invalid")
+        if (
+            expected_context is not None
+            and expected_context.budget is not self.evidence_budget
+        ):
+            raise GitHubPublicationError(
+                "partition eligibility scan requires the original shared budget"
+            )
         reviews = self._load_head_reviews(
             token=token, repository=repository, pull_request=pull_request
         )
         return self._eligibility_from_reviews(
-            reviews, head_sha=head_sha, app_slug=app_slug, require_valid=require_valid
+            reviews,
+            head_sha=head_sha,
+            app_slug=app_slug,
+            require_valid=require_valid,
+            partition_reader=partition_reader,
+            expected_context=expected_context,
+            visible_reader=visible_reader,
         )
 
     @staticmethod
     def _eligibility_from_reviews(
-        reviews: list[Any], *, head_sha: str, app_slug: str, require_valid: bool = False
+        reviews: list[Any],
+        *,
+        head_sha: str,
+        app_slug: str,
+        require_valid: bool = False,
+        partition_reader: PartitionReader | None = None,
+        expected_context: PartitionedEligibilityContext | None = None,
+        visible_reader: VisibleReader | None = None,
     ) -> ReviewApprovalEligibility | None:
         expected = app_slug.casefold()
         for review in reversed(reviews):
@@ -1196,7 +1243,27 @@ class ReviewApprovalFinalizer:
             ):
                 continue
             # A malformed newer App record cannot reveal an older clean one.
-            eligibility = approval_eligibility_from_body(body)
+            if expected_context is not None and (
+                type(review.get("id")) is not int
+                or review.get("id") != expected_context.owned_root_id
+                or not isinstance(user, dict)
+                or type(user.get("id")) is not int
+                or user.get("type") != "Bot"
+                or f"github-bot:{user.get('id')}"
+                != expected_context.binding["producer"]
+                or review.get("state") not in PUBLISHED_REVIEW_STATES
+            ):
+                if require_valid:
+                    raise GitHubPublicationError(
+                        "latest partition eligibility root ownership conflicts"
+                    )
+                return None
+            eligibility = approval_eligibility_from_body(
+                body,
+                partition_reader=partition_reader,
+                expected_context=expected_context,
+                visible_reader=visible_reader,
+            )
             if eligibility is not None and eligibility.head_sha == head_sha:
                 return eligibility
             if require_valid:
