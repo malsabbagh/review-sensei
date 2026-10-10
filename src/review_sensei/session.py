@@ -27,7 +27,7 @@ from dataclasses import InitVar, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol, Sequence, cast
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol, Sequence, cast
 
 from .bounded_evidence import (
     MAX_PART_BYTES,
@@ -56,6 +56,9 @@ from .errors import ReviewInputError
 from .models import ReviewResult, ReviewTransaction
 from .schemas import validate_public_document
 
+if TYPE_CHECKING:
+    from .baseline import ReviewBaseline
+
 PUBLIC_SCHEMA_VERSION = "1.0"
 SESSION_LEDGER_ENV = "REVIEWSENSEI_SESSION_LEDGER"
 DEFAULT_SESSION_TTL = timedelta(days=30)
@@ -69,6 +72,8 @@ MAX_SESSION_TTL = timedelta(days=90)
 # surrounding state; allocate less history for larger retained/escaped fields.
 MAX_CONVERGENCE_HISTORY_BYTES = 12_288
 MAX_SESSION_RECORD_BYTES = MAX_CONVERGENCE_HISTORY_BYTES + 8192
+MAX_ASSESSMENT_QUEUE_ROOT_BYTES = 8192
+MAX_ASSESSMENT_QUEUE_SUMMARY_BYTES = 1024
 MAX_CONVERGENCE_PROGRESS_ENTRIES = 3
 SESSION_SHA256_PATTERN = r"^[a-f0-9]{64}$"
 # This is a deliberately coarse structural ceiling, independent of the byte
@@ -166,6 +171,50 @@ def _stored_continuation_grants(value: object) -> tuple[dict[str, object], ...]:
             raise ReviewInputError("continuation grant is invalid")
         grants.append(dict(item))
     return tuple(grants)
+
+
+def _stored_assessment_queue(value: object) -> dict[str, object] | None:
+    """Validate only C's dedicated root/summary, never queue payload semantics."""
+    if value is None:
+        return None
+    normalized = json.loads(canonical_bytes(value))
+    validate_public_document(normalized, "assessment-queue-root")
+    if len(canonical_bytes(normalized)) > MAX_ASSESSMENT_QUEUE_ROOT_BYTES:
+        raise ReviewInputError(
+            "assessment queue root exceeds actual bounded allocation"
+        )
+    manifest = validate_manifest(normalized["state_manifest"])
+    binding = cast(dict[str, object], manifest["binding"])
+    if (
+        binding["purpose"] != "queue"
+        or binding["generation"] != normalized["inventory_generation"]
+    ):
+        raise ReviewInputError(
+            "assessment queue inventory/domain binding does not match"
+        )
+    active = normalized["active_operation"]
+    if active is not None:
+        deadline = _parse_aware_datetime(
+            active["deadline_at"], label="assessment deadline"
+        )
+        expires = _parse_aware_datetime(active["expires_at"], label="assessment expiry")
+        if (
+            deadline.utcoffset() != timedelta(0)
+            or expires.utcoffset() != timedelta(0)
+            or expires < deadline
+        ):
+            raise ReviewInputError(
+                "assessment queue deadline/expiry must be ordered UTC instants"
+            )
+        if active["response_bytes"] + active["response_bytes_reserved"] > 1_048_576:
+            raise ReviewInputError(
+                "assessment actual and reserved response bytes exceed original ceiling"
+            )
+    summary = dict(normalized)
+    summary["state_manifest"] = {}
+    if len(canonical_bytes(summary)) > MAX_ASSESSMENT_QUEUE_SUMMARY_BYTES:
+        raise ReviewInputError("assessment queue summary exceeds growth reserve")
+    return normalized
 
 
 def _stored_convergence_history(
@@ -629,6 +678,7 @@ class SessionRecord:
     transaction: ReviewTransaction | None = None
     convergence_history: Mapping[str, object] | None = None
     reservation_owner: Mapping[str, object] | None = None
+    assessment_queue: Mapping[str, object] | None = None
     # The shape is selected only while loading an existing untrusted document;
     # it is not part of the public record or its equality contract.
     _digest_shape_input: InitVar[str] = "current"
@@ -784,6 +834,27 @@ class SessionRecord:
             raise ReviewInputError(
                 "session convergence history requires the current digest shape"
             )
+        object.__setattr__(
+            self, "assessment_queue", _stored_assessment_queue(self.assessment_queue)
+        )
+        if self.assessment_queue is not None:
+            if self._digest_shape != "current":
+                raise ReviewInputError(
+                    "assessment queue requires current authenticated digest shape"
+                )
+            manifest = self.assessment_queue["state_manifest"]
+            assert isinstance(manifest, dict)
+            binding = manifest["binding"]
+            assert isinstance(binding, dict)
+            if (
+                binding["repository"] != self.repository
+                or binding["pull_request"] != self.pull_request
+                or binding["repository_id"] != self.repository_id
+                or binding["generation"] > self.generation
+            ):
+                raise ReviewInputError(
+                    "assessment queue does not match session identity/generation"
+                )
         expected_payload = {
             "current": self._payload,
             "operator-paused": self._payload_without_dispositions,
@@ -820,6 +891,8 @@ class SessionRecord:
             payload["transaction"] = self.transaction.to_dict()
         if self.convergence_history is not None:
             payload["convergence_history"] = dict(self.convergence_history)
+        if self.assessment_queue is not None:
+            payload["assessment_queue"] = dict(self.assessment_queue)
         return payload
 
     def _payload_without_dispositions(self) -> dict[str, object]:
@@ -871,6 +944,7 @@ class SessionRecord:
         transaction: ReviewTransaction | None = None,
         convergence_history: Mapping[str, object] | None = None,
         reservation_owner: Mapping[str, object] | None = None,
+        assessment_queue: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         normalized_dispositions = _stored_dispositions(dispositions)
         normalized_grants = _stored_continuation_grants(continuation_grants)
@@ -904,6 +978,9 @@ class SessionRecord:
         normalized_history = _stored_convergence_history(convergence_history)
         if normalized_history is not None:
             payload["convergence_history"] = normalized_history
+        normalized_queue = _stored_assessment_queue(assessment_queue)
+        if normalized_queue is not None:
+            payload["assessment_queue"] = normalized_queue
         if (
             len(
                 json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
@@ -935,6 +1012,7 @@ class SessionRecord:
             transaction=transaction,
             convergence_history=normalized_history,
             reservation_owner=normalized_owner,
+            assessment_queue=normalized_queue,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -989,6 +1067,9 @@ class SessionRecord:
         has_transaction = "transaction" in value
         has_history = "convergence_history" in value
         has_owner = "reservation_owner" in value
+        has_queue = "assessment_queue" in value
+        if has_queue and value["assessment_queue"] is None:
+            raise ReviewInputError("assessment queue cannot be a null absence marker")
         has_attempt_head = value.get("failed_attempts_head_sha") is not None
         if has_dispositions and not has_operator_paused:
             raise ReviewInputError(
@@ -1002,6 +1083,7 @@ class SessionRecord:
             or has_history
             or has_attempt_head
             or has_owner
+            or has_queue
             else "operator-paused"
             if has_operator_paused
             else "legacy"
@@ -1078,6 +1160,7 @@ class SessionRecord:
                 value.get("convergence_history")
             ),
             reservation_owner=_stored_reservation_owner(value.get("reservation_owner")),
+            assessment_queue=_stored_assessment_queue(value.get("assessment_queue")),
             _digest_shape_input=digest_shape,
         )
         validate_public_document(record.to_dict(), "session-record")
@@ -1104,6 +1187,7 @@ class SessionRecord:
         transaction: ReviewTransaction | None = None,
         convergence_history: Mapping[str, object] | None = None,
         reservation_owner: Mapping[str, object] | None = None,
+        assessment_queue: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         created = _aware_now(now)
         if isinstance(expires_at, str):
@@ -1140,6 +1224,7 @@ class SessionRecord:
             transaction=transaction,
             convergence_history=convergence_history,
             reservation_owner=reservation_owner,
+            assessment_queue=assessment_queue,
         )
 
     def evolve(
@@ -1160,6 +1245,7 @@ class SessionRecord:
         transaction: ReviewTransaction | None | object = ...,
         convergence_history: Mapping[str, object] | None | object = ...,
         reservation_owner: Mapping[str, object] | None | object = ...,
+        assessment_queue: Mapping[str, object] | None | object = ...,
     ) -> "SessionRecord":
         updated = _format_datetime(_aware_now(now))
         return type(self)._construct(
@@ -1224,6 +1310,11 @@ class SessionRecord:
                 if transaction is ...
                 else cast(ReviewTransaction | None, transaction)
             ),
+            assessment_queue=(
+                self.assessment_queue
+                if assessment_queue is ...
+                else cast(Mapping[str, object] | None, assessment_queue)
+            ),
             convergence_history=(
                 self.convergence_history
                 if convergence_history is ...
@@ -1281,6 +1372,10 @@ def checkpoint_baseline_capacity(record: SessionRecord) -> int:
     ).to_dict()
     transaction.update(phase="publication_suppressed", result_sha256="a" * 64)
     shell["transaction"] = transaction
+    if record.assessment_queue is not None:
+        # Reserve the entire legal queue root across later summary/counter and
+        # reference growth, rather than charging only today's short root.
+        shell["assessment_queue"] = "q" * MAX_ASSESSMENT_QUEUE_ROOT_BYTES
     # Subtract the empty object's two bytes; key/colon/comma and the record
     # digest remain included. Nested JSON is an object, not an escaped string.
     outside = len(json.dumps(shell, sort_keys=True, separators=(",", ":")).encode()) - 2
@@ -1293,6 +1388,61 @@ def checkpoint_baseline_capacity(record: SessionRecord) -> int:
             MAX_HISTORY_BASELINE_BYTES,
             history_bytes - MAX_HISTORY_ENVELOPE_RESERVE_BYTES,
         ),
+    )
+
+
+def assessment_queue_manifest_capacity(record: SessionRecord) -> int:
+    """Allocate the queue manifest beside retained baseline and future lifecycle.
+
+    The 8 KiB queue cap includes its 1 KiB summary reserve. Preserve existing
+    baseline bytes plus its 1 KiB history lifecycle reserve. The conservative
+    shell includes mutually exclusive future transaction/ownership fields.
+    """
+    from .baseline import MAX_HISTORY_ENVELOPE_RESERVE_BYTES
+
+    shell = record.to_dict()
+    shell.pop("assessment_queue", None)
+    history = shell.pop("convergence_history", None)
+    shell.update(
+        generation=MAX_GENERATION,
+        completed_initial_reviews=DIAGNOSTIC_ROUND_CEILING,
+        completed_verification_rounds=DIAGNOSTIC_ROUND_CEILING,
+        failed_attempts=MAX_FAILED_ATTEMPTS,
+        failed_attempts_head_sha="a" * 64,
+        reservation_id="a" * 64,
+        reserved_slot="failed-attempt",
+        last_committed_reservation_id="b" * 64,
+        reservation_owner={"run_id": "9" * 19, "head_sha": "a" * 40},
+    )
+    updated = "9999-12-31T23:59:59.999999Z"
+    if len(updated) > len(str(shell["updated_at"])):
+        shell["updated_at"] = updated
+    transaction = ReviewTransaction.create(
+        repository=record.repository,
+        pull_request=record.pull_request,
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        policy_digest="c" * 64,
+        configuration_digest="d" * 64,
+        evidence_digest="e" * 64,
+        reservation_id="f" * 64,
+        generation=MAX_GENERATION,
+    ).to_dict()
+    transaction.update(phase="publication_suppressed", result_sha256="a" * 64)
+    shell["transaction"] = transaction
+    history_bytes = (
+        len(canonical_bytes(history)) if history is not None else 0
+    ) + MAX_HISTORY_ENVELOPE_RESERVE_BYTES
+    outside = (
+        len(canonical_bytes(shell))
+        + len(',"assessment_queue":')
+        + len(',"convergence_history":')
+        + history_bytes
+    )
+    return max(
+        0,
+        min(MAX_ASSESSMENT_QUEUE_ROOT_BYTES, MAX_SESSION_RECORD_BYTES - outside)
+        - MAX_ASSESSMENT_QUEUE_SUMMARY_BYTES,
     )
 
 
@@ -2630,7 +2780,51 @@ def _safe_ledger_name(repository: str) -> str:
     return repository.replace("/", "%2F")
 
 
-def read_session_baseline(ledger: object, record: SessionRecord) -> object:
+def read_session_assessment_queue(
+    ledger: object, record: SessionRecord
+) -> object | None:
+    """Reconstruct C's whole journal; C owns payload/count/receipt validation."""
+    root = record.assessment_queue
+    if root is None:
+        return None
+    manifest = root["state_manifest"]
+    assert isinstance(manifest, dict)
+    binding = manifest["binding"]
+    assert isinstance(binding, dict)
+    if binding["producer"] != getattr(ledger, "evidence_producer")():
+        raise ReviewInputError(
+            "assessment queue producer does not match authenticated session"
+        )
+    identity = SessionIdentity(
+        record.repository, record.pull_request, repository_id=record.repository_id
+    )
+    document = getattr(ledger, "read_evidence")(
+        identity, manifest, expected_binding=binding
+    )
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version") != binding["schema_version"]
+    ):
+        raise ReviewInputError("assessment journal schema is unsupported")
+    return document
+
+
+def _validate_queue_retention(before: SessionRecord, after: SessionRecord) -> None:
+    if before.assessment_queue is not None and after.assessment_queue is None:
+        raise ReviewInputError(
+            "assessment queue must retain an explicit tombstone, never absence"
+        )
+    if after.assessment_queue is not None:
+        manifest = after.assessment_queue["state_manifest"]
+        if len(canonical_bytes(manifest)) > assessment_queue_manifest_capacity(after):
+            raise ReviewInputError(
+                "assessment queue exceeds future session growth allocation"
+            )
+
+
+def read_session_baseline(
+    ledger: object, record: SessionRecord
+) -> ReviewBaseline | None:
     """Read the complete inventory from this integrity-checked authority root.
 
     Immutable review generation may precede mutable receipt generation. Snapshot
@@ -3205,6 +3399,7 @@ class LocalSessionLedger:
                 return SessionLoadResult(status="migrated", record=migrated_record)
             record = SessionRecord.from_dict(document)
             read_session_baseline(self, record)
+            read_session_assessment_queue(self, record)
         except ReviewInputError:
             return SessionLoadResult(status="integrity-failed")
         if (
@@ -3259,7 +3454,9 @@ class LocalSessionLedger:
         if loaded.status != "ok" or loaded.record is None:
             raise ReviewInputError("session record is missing")
         updated = mutate(loaded.record)
+        _validate_queue_retention(loaded.record, updated)
         read_session_baseline(self, updated)
+        read_session_assessment_queue(self, updated)
         current_document = self._read_document(self._path(identity))
         if current_document is None:
             raise ReviewInputError("session generation conflict before activation")

@@ -17,7 +17,12 @@ assert_distribution_import()
 from review_sensei.bounded_evidence import EvidenceReadBudget  # noqa: E402
 from review_sensei.errors import ReviewInputError  # noqa: E402
 from review_sensei.schemas import validate_public_document  # noqa: E402
-from review_sensei.session import LocalSessionLedger, SessionIdentity  # noqa: E402
+from review_sensei.session import (  # noqa: E402
+    LocalSessionLedger,
+    SessionIdentity,
+    assessment_queue_manifest_capacity,
+    read_session_assessment_queue,
+)
 
 
 class InstalledPartitionTests(unittest.TestCase):
@@ -63,3 +68,51 @@ class InstalledPartitionTests(unittest.TestCase):
             next(Path(directory).glob(".evidence/*/*/*")).unlink()
             with self.assertRaises(ReviewInputError):
                 reader.read_evidence(identity, manifest, expected_binding=binding)
+
+    def test_installed_queue_slot_schema_digest_and_complete_restart(self):
+        identity = SessionIdentity("synthetic/repo", 240, 99)
+        document = {"schema_version": "1.0", "synthetic_journal": ["retained"]}
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = LocalSessionLedger(Path(directory), enable_partition_writes=True)
+            ledger.initialize(identity)
+
+            def mutation(record):
+                binding = {
+                    "repository": identity.repository,
+                    "repository_id": 99,
+                    "pull_request": 240,
+                    "base_sha": "a" * 40,
+                    "head_sha": "b" * 40,
+                    "policy_digest": "c" * 64,
+                    "configuration_digest": "d" * 64,
+                    "generation": record.generation,
+                    "producer": "local-ledger",
+                    "purpose": "queue",
+                    "schema_version": "1.0",
+                }
+                manifest = ledger.stage_evidence(
+                    identity,
+                    binding=binding,
+                    document=document,
+                    item_count=1,
+                    max_manifest_bytes=assessment_queue_manifest_capacity(record),
+                )
+                root = {
+                    "schema_version": "1.0",
+                    "inventory_digest": "e" * 64,
+                    "inventory_generation": record.generation,
+                    "state_manifest": manifest,
+                    "active_operation": None,
+                }
+                validate_public_document(root, "assessment-queue-root")
+                return record.evolve(
+                    assessment_queue=root, generation=record.generation + 1
+                )
+
+            saved = ledger.replace(identity, mutation)
+            reader = LocalSessionLedger(Path(directory))
+            loaded = reader.load(identity)
+            self.assertEqual(loaded.record, saved)
+            self.assertEqual(
+                read_session_assessment_queue(reader, loaded.record), document
+            )

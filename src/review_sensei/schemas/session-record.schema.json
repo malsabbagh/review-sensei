@@ -78,6 +78,7 @@
     },
     "record_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "operator_paused": {"type": "boolean"},
+    "assessment_queue": {"$ref": "https://reviewsensei.dev/schemas/v1/assessment-queue-root.schema.json"},
     "dispositions": {
       "type": "array",
       "maxItems": 4,
