@@ -16,9 +16,15 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, replace
-from typing import Sequence
+from typing import Callable, Sequence
 
-from .bounded_evidence import decode_evidence, encode_evidence
+from .bounded_evidence import (
+    PARTITION_ENCODING,
+    canonical_bytes,
+    decode_evidence,
+    encode_evidence,
+    validate_manifest,
+)
 from .context import (
     MAX_CACHE_METADATA_ITEMS,
     FindingLifecycle,
@@ -368,6 +374,8 @@ def baseline_history_document(
     *,
     max_bytes: int = MAX_HISTORY_BASELINE_BYTES,
     require_complete: bool = False,
+    partition_writer: Callable[[dict[str, object], int, int], dict[str, object]]
+    | None = None,
 ) -> dict[str, object]:
     """Persist every finding and path within the reserved lifecycle allocation.
 
@@ -418,30 +426,7 @@ def baseline_history_document(
     )
     if fields_exceed_bound and not require_complete:
         raise ReviewInputError("baseline evidence exceeds persisted field bounds")
-    document: dict[str, object] = {
-        "cache_key": baseline_cache_key_document(baseline.cache_key),
-        "policy_digest": baseline.policy_digest,
-        "complete": baseline.complete,
-        "coverage_complete": baseline.coverage_complete,
-        "generation": baseline.generation,
-        "findings": [
-            {
-                "fingerprint": finding.fingerprint,
-                "resolution_criterion": finding.resolution_criterion,
-                "concern": finding.concern,
-                "path": finding.path,
-                "symbol": finding.symbol,
-                "defect_kind": finding.defect_kind,
-                "generation": finding.generation,
-                "blocking": finding.blocking,
-            }
-            for finding in findings
-        ],
-        "reviewed_paths": [],
-        "related_paths": [],
-    }
-    document["reviewed_paths"] = sorted(baseline.reviewed_paths)
-    document["related_paths"] = sorted(baseline.related_paths)
+    document = _baseline_document(baseline)
     if require_complete and (not baseline.complete or not baseline.coverage_complete):
         raise ReviewInputError("only complete evidence can be persisted")
     # Pick a stable format independently of a caller's current allocation.
@@ -465,7 +450,7 @@ def baseline_history_document(
     reasons = []
     if decoded_size > MAX_BASELINE_DECODED_BYTES:
         reasons.append("decoded-bytes")
-    if size > max_bytes:
+    if size > max_bytes and partition_writer is None:
         reasons.append("encoded-bytes")
     if fields_exceed_bound:
         reasons.append("field-width")
@@ -492,6 +477,14 @@ def baseline_history_document(
             }
         )
     validate_public_document(document, "baseline-evidence")
+    if size > max_bytes:
+        assert partition_writer is not None
+        persisted = partition_writer(document, len(findings), max_bytes)
+        validate_manifest(persisted)
+        if len(canonical_bytes(persisted)) > max_bytes:
+            raise ReviewInputError(
+                "partition manifest exceeds actual lifecycle allocation"
+            )
     return persisted
 
 
@@ -553,12 +546,28 @@ def cache_key_from_document(value: object) -> ReviewContextCacheKey:
         raise ReviewInputError("review cache key is invalid") from exc
 
 
-def baseline_from_history_document(value: object) -> ReviewBaseline:
+def baseline_from_history_document(
+    value: object,
+    *,
+    reader: Callable[[dict[str, object]], object] | None = None,
+) -> ReviewBaseline:
     """Rebuild one bounded baseline after a fresh durable-ledger load."""
 
     if not isinstance(value, dict):
         raise ReviewInputError("persisted baseline is invalid")
-    if isinstance(value, dict) and "encoding" in value:
+    manifest = None
+    if value.get("encoding") == PARTITION_ENCODING:
+        manifest = validate_manifest(value)
+        if reader is None:
+            raise ReviewInputError(
+                "partition baseline requires an authenticated reader"
+            )
+        binding = manifest["binding"]
+        assert isinstance(binding, dict)
+        if binding["purpose"] != "baseline" or binding["schema_version"] != "1.0":
+            raise ReviewInputError("partition baseline document kind does not match")
+        value = reader(manifest)
+    elif "encoding" in value:
         value = decode_evidence(
             value,
             max_encoded_bytes=MAX_HISTORY_BASELINE_BYTES,
@@ -582,6 +591,23 @@ def baseline_from_history_document(value: object) -> ReviewBaseline:
     }
     if set(value) != required or not isinstance(value["cache_key"], dict):
         raise ReviewInputError("persisted baseline has an invalid shape")
+    if manifest is not None:
+        binding = manifest["binding"]
+        assert isinstance(binding, dict)
+        persisted_key = value["cache_key"]
+        if (
+            any(
+                persisted_key[field] != binding[field]
+                for field in ("repository", "pull_request", "base_sha", "head_sha")
+            )
+            or value["generation"] != binding["generation"]
+            or value["policy_digest"] != binding["policy_digest"]
+            or len(canonical_bytes(value)) != manifest["decoded_bytes"]
+            or hashlib.sha256(canonical_bytes(value)).hexdigest() != manifest["sha256"]
+            or not isinstance(value["findings"], list)
+            or len(value["findings"]) != manifest["item_count"]
+        ):
+            raise ReviewInputError("partition baseline authority does not match")
     # F3 trusts this reconstruction, so the persisted shape must be provably
     # closed: an extra key is never silently dropped and a missing key is
     # never silently coerced to a BaselineFinding default.
@@ -634,7 +660,9 @@ def admission_context_document(
     if baseline is not None and not isinstance(baseline, ReviewBaseline):
         raise ReviewInputError("review baseline is invalid")
     return {
-        "baseline": (None if baseline is None else baseline_history_document(baseline)),
+        "baseline": (
+            None if baseline is None else baseline_complete_document(baseline)
+        ),
         "current_key": baseline_cache_key_document(current_key),
     }
 
@@ -653,6 +681,43 @@ def admission_context_from_document(
         else baseline_from_history_document(baseline_value)
     )
     return baseline, cache_key_from_document(value["current_key"])
+
+
+def _baseline_document(baseline: ReviewBaseline) -> dict[str, object]:
+    document: dict[str, object] = {
+        "cache_key": baseline_cache_key_document(baseline.cache_key),
+        "policy_digest": baseline.policy_digest,
+        "complete": baseline.complete,
+        "coverage_complete": baseline.coverage_complete,
+        "generation": baseline.generation,
+        "findings": [
+            {
+                "fingerprint": finding.fingerprint,
+                "resolution_criterion": finding.resolution_criterion,
+                "concern": finding.concern,
+                "path": finding.path,
+                "symbol": finding.symbol,
+                "defect_kind": finding.defect_kind,
+                "generation": finding.generation,
+                "blocking": finding.blocking,
+            }
+            for finding in sorted(baseline.findings, key=lambda item: item.fingerprint)
+        ],
+        "reviewed_paths": [],
+        "related_paths": [],
+    }
+    document["reviewed_paths"] = sorted(baseline.reviewed_paths)
+    document["related_paths"] = sorted(baseline.related_paths)
+    return document
+
+
+def baseline_complete_document(baseline: ReviewBaseline) -> dict[str, object]:
+    """Complete bounded admission artifact, independent of inline root space."""
+    document = _baseline_document(baseline)
+    if len(canonical_bytes(document)) > MAX_BASELINE_DECODED_BYTES:
+        raise ReviewInputError("complete admission baseline exceeds decoded bound")
+    validate_public_document(document, "baseline-evidence")
+    return document
 
 
 def baseline_from_review(
