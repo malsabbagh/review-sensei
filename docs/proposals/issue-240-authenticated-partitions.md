@@ -389,3 +389,36 @@ those costs cannot be substituted with the fixture's two outer broker requests.
 The existing host three-checkpoint measurement of 41 storage attempts plus
 production grants already exceeds 64 before source/ack work. Combined admission
 remains a release gate; no ceiling increase or hidden exclusions are accepted.
+
+### Parsed v2 feedback-grant compatibility amendment
+
+This separate adapter amendment uses only the coordinator's frozen
+`broker_client.py` and `feedback_attestation.py` dependency at
+`0d8bfabf0ce68cd812cd4ed007e32edc3b63b354`. No Worker, ADR index, consumer,
+release or queue-journal implementation is imported. V1 grant checks remain
+unchanged. A live attempt cannot change grant versions during rebinding.
+
+For parsed version2/operation `feedback`, rebinding preserves the complete
+original feedback/source selection, numeric actor identity, role, repository,
+PR, head, run and workflow claims. Only issuance time and the closed mutation
+object may change. The mutation must match all six immutable operation binding
+fields and the original reservation ID; its root digest/generation must equal
+the current authenticated owned root. Its original absolute UTC accounting
+deadline must equal the retained live budget, and calls must not decrease below
+either the previous grant or the completed root's prepaid liability, nor exceed
+the actual retained live budget. Legitimately changing reason/request/dispatch
+references are left to the host checkpoint composition, whose exact grant
+request and complete journal projection remain its responsibility. These
+reference checks run during original reservation admission, before installing
+a fresh grant, and after consumed verification/current-root discovery before
+checkpoint preparation. Caller accounting is never restored or adopted as
+original-attempt proof.
+
+The new dependency can charge every physical BrokerClient dispatch through
+`before_request`. The adapter accepts that hook only when it is the bound
+`consume` method of this exact original EvidenceReadBudget; then the client
+charges once and clamps its timeout without an additional adapter debit.
+Absent a hook, the legacy adapter debit remains. A hook with a fresh budget or
+unreviewed wrapper refuses before verification. This does not account for
+Worker-internal requests by assumption: production acquisition/internal-call
+composition and its previously measured12/11 cost remain a release gate.

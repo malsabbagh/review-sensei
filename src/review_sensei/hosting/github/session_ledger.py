@@ -21,7 +21,7 @@ import hashlib
 import json
 import re
 from datetime import datetime
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, cast
 
 from ...bounded_evidence import (
     MAX_PART_BYTES,
@@ -552,12 +552,27 @@ class GitHubIssueCommentSessionLedger:
                 raise NonResumableActivationError(
                     "prepaid hosted activation requires the consuming broker client"
                 )
-            remaining = self.evidence_budget._remaining_seconds()
-            if self._broker.timeout > remaining:
-                raise ReviewInputError(
-                    "broker grant transport exceeds original remaining deadline"
-                )
-            self.evidence_budget.consume()
+            callback = self._broker.before_request
+            if callback is not None:
+                if (
+                    getattr(callback, "__self__", None) is not self.evidence_budget
+                    or getattr(callback, "__func__", None)
+                    is not EvidenceReadBudget.consume
+                ):
+                    raise ReviewInputError(
+                        "broker accounting is not the original budget"
+                    )
+                # The actual client's callback charges its physical dispatch
+                # and clamps timeout. Do not charge that request twice here.
+                assert self.evidence_budget is not None
+                self.evidence_budget.check()
+            else:
+                remaining = self.evidence_budget._remaining_seconds()
+                if self._broker.timeout > remaining:
+                    raise ReviewInputError(
+                        "broker grant transport exceeds original remaining deadline"
+                    )
+                self.evidence_budget.consume()
         if self._broker is None:
             return
         assert self._session_grant is not None
@@ -1026,6 +1041,13 @@ class GitHubIssueCommentSessionLedger:
                 raise NonResumableActivationError(
                     "loaded reservation is not a live original attempt proof"
                 )
+            if self._session_attestation is not None:
+                self._validate_feedback_tail_attestation(
+                    self._session_attestation,
+                    record,
+                    operation=_tail_operation_binding(operation_binding),
+                    reservation_id=reservation_id,
+                )
             return self._own_reservation(
                 record,
                 mutate_reserved(
@@ -1057,6 +1079,57 @@ class GitHubIssueCommentSessionLedger:
             or not 1 <= value <= 60
         ):
             raise ReviewInputError("activation scan page bound is invalid")
+
+    def _validate_feedback_tail_attestation(
+        self,
+        attestation: Mapping[str, object],
+        record: SessionRecord,
+        *,
+        operation: Mapping[str, object],
+        reservation_id: str,
+    ) -> None:
+        """Bind parsed v2 references to retained live authority, never mint it."""
+        if attestation.get("version") != 2:
+            return
+        assert self.evidence_budget is not None
+        assert isinstance(self._broker, BrokerClient)
+        try:
+            parsed = self._broker._validated_attestation_grant(attestation)
+            original = self._broker._validated_attestation_grant(
+                self._session_attestation
+            )
+        except GitHubBrokerClientError as exc:
+            raise ReviewInputError(
+                "feedback activation attestation is invalid"
+            ) from exc
+        if original.get("version") != 2:
+            raise ReviewInputError("activation attestation version changed")
+        mutation = cast(Mapping[str, Any], parsed["mutation"])
+        previous = cast(Mapping[str, Any], original["mutation"])
+        accounting = mutation["read_accounting"]
+        active = (
+            record.assessment_queue["active_operation"]
+            if record.assessment_queue is not None
+            else None
+        )
+        retained_calls = (
+            cast(Mapping[str, Any], active)["read_accounting"]["calls"]
+            if active is not None
+            else 0
+        )
+        if (
+            {key: mutation[key] for key in operation} != operation
+            or mutation["reservation_id"] != reservation_id
+            or mutation["root_digest"] != record.record_sha256
+            or mutation["root_generation"] != record.generation
+            or accounting["deadline_unix_ms"] != self.evidence_budget.wall_deadline_ms
+            or not max(previous["read_accounting"]["calls"], retained_calls)
+            <= accounting["calls"]
+            <= self.evidence_budget.calls
+        ):
+            raise ReviewInputError(
+                "feedback grant original operation, root or accounting differs"
+            )
 
     def bind_tail_grant(
         self,
@@ -1104,10 +1177,21 @@ class GitHubIssueCommentSessionLedger:
             original = self._broker._validated_attestation_grant(
                 self._session_attestation
             )
-            # Only issuance time may change between the same command's grants.
+            # Feedback mutation fields change between checkpoints; complete
+            # source/actor/workflow identity remains immutable. V1 preserves
+            # its original same-command claim equality.
+            excluded = {"issued_at"}
+            if attestation.get("version") == original.get("version") == 2:
+                excluded.add("mutation")
             if (
-                {key: value for key, value in attestation.items() if key != "issued_at"}
-                != {key: value for key, value in original.items() if key != "issued_at"}
+                {
+                    key: value
+                    for key, value in attestation.items()
+                    if key not in excluded
+                }
+                != {
+                    key: value for key, value in original.items() if key not in excluded
+                }
                 or attestation["repository"] != identity.repository
                 or attestation["repository_id"] != identity.repository_id
                 or attestation["pull_request"] != identity.pull_request
@@ -1134,6 +1218,12 @@ class GitHubIssueCommentSessionLedger:
             ):
                 raise ReviewInputError("current activation reservation is unavailable")
             budget._require_live_attempt(scope, current.record_sha256, owner=self)
+            self._validate_feedback_tail_attestation(
+                attestation,
+                current,
+                operation=operation,
+                reservation_id=attempt_reservation_id,
+            )
             if current.assessment_queue is not None:
                 _validate_tail_draft(
                     current,
@@ -1198,6 +1288,13 @@ class GitHubIssueCommentSessionLedger:
                     "prepaid activation current authority is unavailable"
                 )
             budget._require_live_attempt(scope, before.record_sha256, owner=self)
+            if self._session_attestation is not None:
+                self._validate_feedback_tail_attestation(
+                    self._session_attestation,
+                    before,
+                    operation=operation,
+                    reservation_id=attempt_reservation_id,
+                )
             latest_id, latest = self._discover(identity, now=now)
             if (
                 latest_id != comment_id
