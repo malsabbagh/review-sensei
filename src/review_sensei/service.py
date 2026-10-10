@@ -38,6 +38,7 @@ from .models import (
     ProviderRequest,
     ProviderResponse,
     ReviewComment,
+    ReviewLensContext,
     ReviewRequest,
     ReviewResult,
 )
@@ -61,6 +62,35 @@ from .stages import (
     load_stages_from_dir,
 )
 from .validation import utf8_size, validate_bounded_text
+
+SHARED_DOCUMENT_PROMPT_FORMAT = "shared-review-documents-v1"
+
+
+def _lens_prompt_payload(contexts: Sequence[ReviewLensContext]) -> list[object]:
+    """Render shared documents once without changing lens selection or provenance."""
+    documents = {}
+    repeated = False
+    for context in contexts:
+        for document in context.documents:
+            repeated |= document.path in documents
+            documents[document.path] = document
+    if not repeated:
+        return [context.to_prompt_dict() for context in contexts]
+    payload: list[object] = [
+        {
+            "kind": SHARED_DOCUMENT_PROMPT_FORMAT,
+            "documents": [document.to_prompt_dict() for document in documents.values()],
+        }
+    ]
+    for context in contexts:
+        lens = context.to_prompt_dict()
+        lens["documents"] = [
+            {"document_ref": document.path, "sha256": document.sha256}
+            for document in context.documents
+        ]
+        payload.append(lens)
+    return payload
+
 
 if TYPE_CHECKING:
     from .work_recovery import WorkRecoveryStore
@@ -219,6 +249,7 @@ class ReviewService:
         return evidence_digest(
             {
                 "mechanism": "unified:v1",
+                "shared_document_prompt_format": SHARED_DOCUMENT_PROMPT_FORMAT,
                 "budgets": asdict(self.work_budgets),
                 "resource_budget": asdict(self.budget),
                 "capabilities": asdict(self.capabilities)
@@ -1564,11 +1595,13 @@ class ReviewService:
             ensure_ascii=False,
             indent=2,
         )
-        review_context_payload: list[object] = [
-            context.to_prompt_dict()
-            for context in request.lens_contexts
-            if context.category_id in active_ids
-        ]
+        review_context_payload = _lens_prompt_payload(
+            tuple(
+                context
+                for context in request.lens_contexts
+                if context.category_id in active_ids
+            )
+        )
         if request.source_context is not None:
             from .context import SourceContextSelection
 
