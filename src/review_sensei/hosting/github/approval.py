@@ -329,9 +329,11 @@ def approval_eligibility_from_result(
             previous = findings[item.fingerprint]
             if previous.path != item.path or previous.body != item.body:
                 raise ReviewInputError("broader review finding authority conflicts")
-            # The ordinary discovery result has a v1 inventory; rediscovering
-            # the same finding must not discard its stricter v2 requirement.
-            item = replace(item, required_paths=previous.required_paths)
+            # Stable display identity alone cannot transfer a resolution into
+            # different metadata/requirements. Retain the original immutable
+            # obligation, including unknown legacy metadata. New result facts
+            # still contribute their independently stricter approval blockers.
+            item = previous
         findings[item.fingerprint] = item
     inventory = PendingHumanReview(
         retained.human_review.base_sha,

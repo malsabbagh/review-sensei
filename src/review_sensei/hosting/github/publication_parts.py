@@ -19,6 +19,7 @@ from ...presentation import (
     build_finding_view,
     render_finding,
 )
+from ...validation import validate_bounded_text, validate_repository_path
 
 PROSE_PART_VERSION = "1"
 MAX_PROSE_PART_BYTES = 65_536
@@ -34,6 +35,38 @@ class FindingProsePart:
     body: str
     instances: tuple[str, ...]
     paths: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.index) is not int
+            or type(self.count) is not int
+            or not 0 <= self.index < self.count <= MAX_PROSE_PARTS
+            or not isinstance(self.instances, tuple)
+            or not 1 <= len(self.instances) <= 250
+            or len(set(self.instances)) != len(self.instances)
+            or any(
+                not isinstance(item, str)
+                or len(item) != 64
+                or any(character not in "0123456789abcdef" for character in item)
+                for item in self.instances
+            )
+            or not isinstance(self.paths, tuple)
+            or not 1 <= len(self.paths) <= MAX_PROSE_PART_PATHS
+            or len(set(self.paths)) != len(self.paths)
+        ):
+            raise ReviewInputError("finding prose part metadata is invalid")
+        validate_bounded_text(
+            self.body,
+            MAX_PROSE_PART_BYTES,
+            label="finding prose part",
+            allow_empty=False,
+        )
+        if "<!-- reviewsensei:" in self.body:
+            raise ReviewInputError("staged prose cannot carry authority markers")
+        for path in self.paths:
+            validate_repository_path(
+                path, label="finding prose path", allow_glob_chars=True
+            )
 
     @property
     def sha256(self) -> str:
@@ -167,6 +200,14 @@ def verify_finding_prose_readbacks(
         or producer_id <= 0
         or len(parts) != len(observed)
         or len(parts) > MAX_PROSE_PARTS
+        or any(not isinstance(part, FindingProsePart) for part in parts)
+        or sum(part.byte_length for part in parts) > MAX_PROSE_TOTAL_BYTES
+        or len({instance for part in parts for instance in part.instances})
+        != sum(len(part.instances) for part in parts)
+        or sum(len(part.instances) for part in parts) > 250
+        or not isinstance(head_sha, str)
+        or len(head_sha) != 40
+        or any(character not in "0123456789abcdef" for character in head_sha)
     ):
         raise ReviewInputError("finding prose readback is incomplete")
     receipts = []
