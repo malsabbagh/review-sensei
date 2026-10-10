@@ -318,12 +318,12 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "spdx-json",
             "subject-checksums",
             "attestations: true",
-            "gh release create",
+            "github_release.py draft",
+            "github_release.py publish",
+            "attestations: read",
             "set -euo pipefail",
             'find "$GITHUB_WORKSPACE/dist"',
-            "missing release asset",
-            "--verify-tag",
-            "--generate-notes",
+            "sha256sum -- review-sensei-sbom.spdx.json",
         ):
             self.assertIn(marker, self.workflow)
 

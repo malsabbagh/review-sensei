@@ -21,6 +21,11 @@
   failure, with approval withheld independently of human adjudication. No
   inventory truncation, release, runtime promotion or deployment is included.
 
+- Prepare a GitHub Release draft from verified signed-tag builds, reviewed
+  changelog notes and attested wheel, source archive and SBOM assets. Publish
+  it only after both approved npm/PyPI jobs succeed. Reconcile retries against
+  exact notes, source and asset digests without replacing existing content.
+
 ## 0.6.18 - 2026-10-09
 
 Changes since [v0.6.17](https://github.com/malsabbagh/review-sensei/releases/tag/v0.6.17), from [d1f445caf3f416ba01c21cd4f76962bfceba54b5](https://github.com/malsabbagh/review-sensei/commit/d1f445caf3f416ba01c21cd4f76962bfceba54b5) through [c569ce22ec0beaca0377d708e122f4f0a540c350](https://github.com/malsabbagh/review-sensei/commit/c569ce22ec0beaca0377d708e122f4f0a540c350).

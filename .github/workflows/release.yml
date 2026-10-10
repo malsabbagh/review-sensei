@@ -123,10 +123,8 @@ jobs:
           "$WHEEL_ENV/bin/python" -m pip check
           "$WHEEL_ENV/bin/review-sensei" --help
 
-      - name: Create release checksums
-        run: |
-          mkdir -p release
-          (cd dist && sha256sum -- *.tar.gz *.whl) > release/SHA256SUMS
+      - name: Prepare release metadata directory
+        run: mkdir -p release
 
       - name: Generate SPDX SBOM
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
@@ -137,6 +135,11 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
           dependency-snapshot: false
+
+      - name: Create release checksums
+        run: |
+          (cd dist && sha256sum -- *.tar.gz *.whl) > release/SHA256SUMS
+          (cd release && sha256sum -- review-sensei-sbom.spdx.json) >> release/SHA256SUMS
 
       - name: Attest package checksums
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -354,7 +357,7 @@ jobs:
 
   publish-npm:
     name: Publish npm packages with Trusted Publishing
-    needs: assemble-npm
+    needs: [assemble-npm, draft-release]
     runs-on: ubuntu-latest
     concurrency:
       group: publish-npm-${{ github.ref_name }}
@@ -428,7 +431,7 @@ jobs:
 
   publish:
     name: Publish to PyPI with Trusted Publishing
-    needs: build
+    needs: [build, draft-release]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -451,43 +454,80 @@ jobs:
           skip-existing: false
           attestations: true
 
-  github-release:
-    name: Create GitHub release assets
-    needs: [build, publish, publish-npm]
+  draft-release:
+    name: Prepare draft GitHub release
+    needs: [build, docs-build, assemble-npm]
     runs-on: ubuntu-latest
+    # Serialize draft/finalizer work across all attempts of this exact tag.
+    concurrency:
+      group: github-release-${{ github.ref_name }}
+      cancel-in-progress: false
     permissions:
       contents: write
+      actions: read
+      attestations: read
     steps:
-      - name: Check out tagged source
+      - name: Check out exact tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-
-      - name: Download validated release bundle
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install pinned manifest validator
+        run: python -m pip install --disable-pip-version-check jsonschema==4.26.0
+      - name: Download same-run validated release bundle
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: review-sensei-release-bundle
-          path: .
-
-      - name: Create tagged GitHub release
+          path: ${{ runner.temp }}/github-release-bundle
+      - name: Verify signed source, attestations and GitHub release state
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          sdists=(dist/*.tar.gz)
-          wheels=(dist/*.whl)
-          if (( ${#sdists[@]} != 1 || ${#wheels[@]} != 1 )); then
-            echo "expected exactly one sdist and one wheel" >&2
-            exit 1
-          fi
-          assets=("${sdists[0]}" "${wheels[0]}" release/SHA256SUMS release/review-sensei-sbom.spdx.json)
-          for asset in "${assets[@]}"; do
-            if [[ ! -f "$asset" ]]; then
-              echo "missing release asset: $asset" >&2
-              exit 1
-            fi
-          done
-          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
-            --verify-tag --generate-notes --title "ReviewSensei $GITHUB_REF_NAME"
+        run: >-
+          python source/scripts/github_release.py draft
+          --root "$GITHUB_WORKSPACE/source"
+          --bundle "$RUNNER_TEMP/github-release-bundle"
+          --tag "$GITHUB_REF_NAME"
+
+  github-release:
+    name: Create GitHub release assets
+    needs: [build, draft-release, publish, publish-npm]
+    runs-on: ubuntu-latest
+    # Share the draft job's per-tag group; retries cancel no running attempt.
+    concurrency:
+      group: github-release-${{ github.ref_name }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: read
+      attestations: read
+    steps:
+      - name: Check out exact tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install pinned manifest validator
+        run: python -m pip install --disable-pip-version-check jsonschema==4.26.0
+      - name: Download same-run validated release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: review-sensei-release-bundle
+          path: ${{ runner.temp }}/github-release-bundle
+      - name: Verify signed source, attestations and GitHub release state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python source/scripts/github_release.py publish
+          --root "$GITHUB_WORKSPACE/source"
+          --bundle "$RUNNER_TEMP/github-release-bundle"
+          --tag "$GITHUB_REF_NAME"

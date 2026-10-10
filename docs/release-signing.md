@@ -98,8 +98,10 @@ the run fails rather than reporting success. Inspect the emitted public tag
 object/source SHA before recovery; cleanup never deletes a remote tag.
 
 Inspect exact source/tag SHA, GPG fingerprint and Release builds before
-approving the two publish jobs. GitHub assets wait for both publications;
-successful Release is still required for released docs/Pages. If a tag exists,
+approving the two publish jobs. Inspect the prepared GitHub Release draft and
+its reviewed changelog notes/assets before approving. The release becomes public
+only after both publications; successful Release is still required for released
+docs/Pages. If a tag exists,
 never rerun signing or move/delete it: recover its original Release jobs and
 artifacts. Signing failures or a missing approval gate hold publication. If
 rules reject the App's tag write, inspect them separately; no broad tag bypass
