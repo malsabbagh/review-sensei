@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.19 - 2026-10-10
+
 - Cache immutable human-inventory encodings without exposing mutable authority,
   and accept closed historical checkpoint-diagnostic profiles in current readers.
 
