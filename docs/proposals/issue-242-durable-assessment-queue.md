@@ -422,3 +422,41 @@ the coordinator composes actual serialized artifacts through A's reviewed
 graph reader and measures the complete original 64-call/60-second lifecycle.
 D60's full-history source56/258-part refusal remains the existing supported
 profile blocker; this opt-in primitive is not a claim that hosted250 is enabled.
+
+## Opt-in initial admission and dispatch activation
+
+A separate amendment adds the trusted boolean
+`AssessmentCheckpoint(..., coalesce_admission_dispatch=True)` and the same
+explicit option on the opt-in host adapter's `checkpoint()` constructor.
+Default behavior remains the prior three activations for a successful one-batch
+operation. There is no public configuration syntax or ambient input flag.
+
+With this capability, the first useful activation has closed mutation reason
+`admission-dispatch` and durably retains the exact complete admitted queue,
+plan/request digests, original resource envelope/execution identity/deadline,
+charged call/prompt, enforced output reservation and unknown dispatch outcome.
+It includes exact batch/request/dispatch/root-generation mutation context.
+Only the provider call following this completed activation may dispatch.
+A kill after activation but before the request conservatively retains the
+unknown output reservation/charged call and never redispatches or refunds it.
+No-dispatch terminal work still saves zero-call admission with pending states
+and no attempted IDs. Every accepted partial result remains durable before
+another request; rejected or ambiguous responses retain original accounting.
+
+One successful batch uses two C activations: combined admission/charge and
+accepted decision/accounting. This does not reduce the work done within A's
+activation, remove source/head/root fencing, replace an original-attempt
+witness, reuse a consumed broker grant, or replenish a deadline/allowance.
+Python/Worker broker enums and the public adapter composition remain
+coordinator-owned and require matching review before this opt-in reason is used.
+
+Tests exercise exact receipt fields before inference, source-context mutation
+refusal with zero provider requests, no-work admission, accepted partial state,
+conservative unknown response accounting, and real parent kills both before and
+after the fsynced combined save. Before-save restart has an original charged
+local-attempt witness but no accepted receipt; absence cannot be treated as
+zero accounting or hosted restart authority. After-save restart reads the
+complete original receipt and emits no provider request. These tests use
+synthetic durable storage, not a consuming broker or hosted grant.
+Whole hosted 64-call/60-second feasibility and joint authority storage remain
+unqualified; the two-activation count alone supplies no hosted support claim.

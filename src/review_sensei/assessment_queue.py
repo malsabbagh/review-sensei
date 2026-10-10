@@ -262,12 +262,14 @@ class AssessmentCheckpoint:
         root_generation: Callable[[], int] | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         retention_seconds: int = 6 * 60 * 60,
+        coalesce_admission_dispatch: bool = False,
     ) -> None:
         if (
             not _hash(operation_id)
             or isinstance(retention_seconds, bool)
             or not isinstance(retention_seconds, int)
             or not 1 <= retention_seconds <= MAX_OPERATION_RETENTION_SECONDS
+            or type(coalesce_admission_dispatch) is not bool
         ):
             raise ReviewInputError(
                 "assessment operation identity or retention is invalid"
@@ -283,6 +285,7 @@ class AssessmentCheckpoint:
         self.root_generation = root_generation
         self.now = now
         self.retention_seconds = retention_seconds
+        self.coalesce_admission_dispatch = coalesce_admission_dispatch
         self._origin: datetime | None = None
         self._expires: datetime | None = None
         self._deadline: datetime | None = None
@@ -1327,6 +1330,7 @@ class AssessmentQueueHostAdapter:
         *,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         retention_seconds: int = 6 * 60 * 60,
+        coalesce_admission_dispatch: bool = False,
     ) -> AssessmentCheckpoint:
         def unfenced_write(_document: dict[str, object]) -> None:
             raise ReviewInputError("assessment host mutation cannot use unfenced write")
@@ -1339,6 +1343,7 @@ class AssessmentQueueHostAdapter:
             root_generation=self._generation,
             now=now,
             retention_seconds=retention_seconds,
+            coalesce_admission_dispatch=coalesce_admission_dispatch,
         )
 
 

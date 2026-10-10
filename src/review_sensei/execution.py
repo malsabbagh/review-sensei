@@ -43,6 +43,7 @@ class CheckpointMutation:
     def __post_init__(self) -> None:
         if self.reason not in {
             "admission",
+            "admission-dispatch",
             "dispatch",
             "accounting",
             "accepted",
@@ -164,6 +165,10 @@ class WorkCheckpointStore(Protocol):
     load restores the original charged tracker and absolute deadline. Missing
     latest authority, authentication failure and incompatible receipts raise;
     only proven absence returns None. save must finish before dispatch/exit.
+    A trusted host may explicitly enable coalesce_admission_dispatch=True only
+    when its activation durably retains complete original admission and the
+    charged unknown outcome together. This optional capability defaults off;
+    it changes neither witnesses, grants, deadlines nor original allowances.
     """
 
     def load(
@@ -495,6 +500,10 @@ def execute_plan(
         else 0,
     )
     last_saved: tuple[WorkExecution[T], tuple[int, ...]] | None = None
+    admission_pending = checkpoint is not None and not checkpoint_loaded
+    coalesce_admission = getattr(checkpoint, "coalesce_admission_dispatch", False)
+    if type(coalesce_admission) is not bool:
+        raise ReviewInputError("checkpoint admission coalescing capability is invalid")
 
     def save_state(
         next_index: int,
@@ -504,7 +513,7 @@ def execute_plan(
         batch: WorkBatch | None = None,
         dispatch_digest: str | None = None,
     ) -> None:
-        nonlocal last_saved
+        nonlocal last_saved, admission_pending
         if encode_recovery is not None and (
             recovery is not None or checkpoint is not None
         ):
@@ -572,6 +581,11 @@ def execute_plan(
             ):
                 return
             if checkpoint is not None:
+                if admission_pending:
+                    # First charge contains the exact complete original
+                    # admission as well as the conservative dispatch liability.
+                    # Non-dispatch terminal states still admit with zero calls.
+                    reason = "admission-dispatch" if dispatched else "admission"
                 checkpoint.save(
                     execution,
                     tracker,
@@ -586,13 +600,16 @@ def execute_plan(
                         dispatch_digest,
                     ),
                 )
+                admission_pending = False
             else:
                 store.save(execution, tracker, encode_recovery, request_digests)
             last_saved = signature
 
-    # Persist zero-call admission before any remote side effect. A subsequent
-    # restart sees the same origin/deadline even if the runner dies immediately.
-    if checkpoint is not None and not checkpoint_loaded:
+    # Default zero-call admission persists before side effects. The explicit
+    # coalescing capability instead persists complete admission with the first
+    # charge/reservation before inference. A terminal no-dispatch path still
+    # persists admission, and no provider side effect precedes either save.
+    if admission_pending and not coalesce_admission:
         save_state(0, reason="admission")
 
     for index, batch in enumerate(plan.batches):
