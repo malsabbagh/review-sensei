@@ -32,6 +32,14 @@ MAX_OPERATION_RECEIPT_BYTES = 2 * 1024 * 1024
 MAX_OPERATION_RETENTION_SECONDS = 24 * 60 * 60
 MAX_RETAINED_ASSESSMENT_OPERATIONS = 32
 QUEUE_INTERFACE_VERSION = "assessment-queue-v1"
+FACTORED_JOURNAL_INTERFACE_VERSION = "assessment-history-v2"
+# History does not increase concurrent in-flight attempts. The measured profile
+# needs 64 sources for 250 four-decision batches plus a semantic rejection.
+# 256 is a finite history ceiling, not provider/storage/control admission.
+MAX_RETAINED_FACTORED_OPERATIONS = 256
+MAX_FACTORED_STRINGS = 16384
+MAX_FACTORED_DEPTH = 32
+MAX_RECONSTRUCTED_HISTORY_BYTES = 8 * 1024 * 1024
 
 
 def _hash(value: object) -> bool:
@@ -650,13 +658,15 @@ class AssessmentJournal:
     This codec cannot turn a non-atomic remote PATCH into a concurrent CAS.
     """
 
+    max_retained_operations = MAX_RETAINED_ASSESSMENT_OPERATIONS
+
     def __init__(
         self, queue: AssessmentQueue, operations: tuple[dict[str, object], ...] = ()
     ) -> None:
         if (
             not isinstance(queue, AssessmentQueue)
             or not isinstance(operations, tuple)
-            or len(operations) > MAX_RETAINED_ASSESSMENT_OPERATIONS
+            or len(operations) > self.max_retained_operations
         ):
             raise ReviewInputError(
                 "assessment journal exceeds retained operation bounds"
@@ -676,17 +686,22 @@ class AssessmentJournal:
                     "assessment journal source/operation binding is invalid"
                 )
             sources.add(item["source_digest"])
-        document = {
+        document: dict[str, object] = {
             "schema_version": QUEUE_INTERFACE_VERSION,
             "queue": queue.to_document(),
             "operations": list(operations),
         }
         try:
-            self._bytes = canonical_bytes(document)
+            self._bytes = canonical_bytes(self._encode_document(document))
+        except ReviewInputError:
+            raise
         except (TypeError, ValueError, RecursionError) as exc:
             raise ReviewInputError("assessment journal document is invalid") from exc
         if len(self._bytes) > MAX_OPERATION_RECEIPT_BYTES:
             raise ReviewInputError("assessment journal exceeds aggregate storage")
+
+    def _encode_document(self, document: dict[str, object]) -> dict[str, object]:
+        return document
 
     def to_document(self) -> dict[str, object]:
         return json.loads(self._bytes)
@@ -835,7 +850,496 @@ class AssessmentJournal:
                 "receipt": receipt,
             },
         )
-        return AssessmentJournal(queue, operations)
+        return type(self)(queue, operations)
+
+
+class FactoredAssessmentJournal(AssessmentJournal):
+    """Lossless retained history, with shared strings rather than copied IDs.
+
+    This is an explicit new wire codec. Original receipt fields, accepted
+    results, pending reasons, timestamps and source bindings all survive exact
+    reconstruction. The real decoded factored JSON is still capped at 2MiB;
+    full temporary reconstruction has a separate finite 8MiB memory bound.
+    No receipt expiry, history eviction, or new original allowance is implied.
+    """
+
+    max_retained_operations = MAX_RETAINED_FACTORED_OPERATIONS
+
+    @staticmethod
+    def _settled(receipt: dict[str, object]) -> bool:
+        counts, budget = receipt.get("counters"), receipt.get("resource_budget")
+        completed, digests = receipt.get("completed"), receipt.get("request_digests")
+        if (
+            not isinstance(counts, dict)
+            or not isinstance(budget, dict)
+            or not isinstance(completed, list)
+            or not isinstance(digests, dict)
+            or receipt.get("response_bytes_reserved") != 0
+        ):
+            return False
+        calls, maximum = counts.get("provider_calls"), budget.get("max_provider_calls")
+        if (
+            isinstance(calls, int)
+            and not isinstance(calls, bool)
+            and isinstance(maximum, int)
+            and not isinstance(maximum, bool)
+            and 0 < maximum <= calls
+        ):
+            return True
+        return bool(digests) and {
+            item.get("batch_id") for item in completed if isinstance(item, dict)
+        } == set(digests)
+
+    def _encode_document(self, document: dict[str, object]) -> dict[str, object]:
+        operations = document["operations"]
+        assert isinstance(operations, list)
+        if (
+            sum(not self._settled(item["receipt"]) for item in operations)
+            > MAX_RETAINED_ASSESSMENT_OPERATIONS
+        ):
+            raise ReviewInputError("assessment journal exceeds active operation bounds")
+        strings: list[str] = []
+        indexes: dict[str, int] = {}
+        sizes: dict[str, int] = {}
+        total = 0
+        row_total = 0
+
+        def string_size(value: str) -> int:
+            if value not in sizes:
+                sizes[value] = len(canonical_bytes(value))
+            return sizes[value]
+
+        def charge(size: int) -> None:
+            nonlocal total, row_total
+            total += size
+            row_total += size
+            if (
+                total > MAX_RECONSTRUCTED_HISTORY_BYTES
+                or row_total > MAX_OPERATION_RECEIPT_BYTES
+            ):
+                raise ReviewInputError(
+                    "assessment journal exceeds reconstruction bounds"
+                )
+
+        def encode(value: object, depth: int = 0) -> object:
+            if depth > MAX_FACTORED_DEPTH:
+                raise ReviewInputError("assessment history nesting exceeds bounds")
+            if isinstance(value, str):
+                charge(string_size(value))
+                if value not in indexes:
+                    if len(strings) == MAX_FACTORED_STRINGS:
+                        raise ReviewInputError(
+                            "assessment history string table exceeds bounds"
+                        )
+                    indexes[value] = len(strings)
+                    strings.append(value)
+                return indexes[value]
+            if value is None or isinstance(value, bool):
+                charge(len(canonical_bytes(value)))
+                return value
+            if isinstance(value, int):
+                charge(len(canonical_bytes(value)))
+                return {"integer": value}
+            if isinstance(value, list):
+                charge(2 + max(0, len(value) - 1))
+                return [encode(item, depth + 1) for item in value]
+            if isinstance(value, dict) and all(isinstance(key, str) for key in value):
+                charge(
+                    2
+                    + max(0, len(value) - 1)
+                    + sum(string_size(key) + 1 for key in value)
+                )
+                return {
+                    "fields": {
+                        key: encode(value[key], depth + 1) for key in sorted(value)
+                    }
+                }
+            raise ReviewInputError("assessment history contains unsupported JSON")
+
+        records = []
+        for item in operations:
+            row_total = 0
+            records.append(encode(item))
+        if len(strings) > MAX_FACTORED_STRINGS:
+            raise ReviewInputError("assessment history string table exceeds bounds")
+        return {
+            "schema_version": FACTORED_JOURNAL_INTERFACE_VERSION,
+            "queue": document["queue"],
+            "strings": strings,
+            "operations": records,
+        }
+
+    def _operations(self) -> tuple[dict[str, object], ...]:
+        document = self.to_document()
+        return self._decode_operations(document)
+
+    @staticmethod
+    def _decode_operations(
+        document: dict[str, object],
+    ) -> tuple[dict[str, object], ...]:
+        strings, records = document.get("strings"), document.get("operations")
+        if (
+            not isinstance(strings, list)
+            or len(strings) > MAX_FACTORED_STRINGS
+            or any(not isinstance(item, str) for item in strings)
+            or len(set(strings)) != len(strings)
+            or not isinstance(records, list)
+            or len(records) > MAX_RETAINED_FACTORED_OPERATIONS
+        ):
+            raise ReviewInputError("assessment history table is invalid")
+        sizes = [len(canonical_bytes(item)) for item in strings]
+        key_sizes: dict[str, int] = {}
+        total = 0
+        row_total = 0
+
+        def charge(size: int) -> None:
+            nonlocal total, row_total
+            total += size
+            row_total += size
+            if (
+                total > MAX_RECONSTRUCTED_HISTORY_BYTES
+                or row_total > MAX_OPERATION_RECEIPT_BYTES
+            ):
+                raise ReviewInputError(
+                    "assessment journal exceeds reconstruction bounds"
+                )
+
+        def key_size(key: str) -> int:
+            if key not in key_sizes:
+                key_sizes[key] = len(canonical_bytes(key))
+            return key_sizes[key]
+
+        def decode(value: object, depth: int = 0) -> object:
+            if depth > MAX_FACTORED_DEPTH:
+                raise ReviewInputError("assessment history nesting exceeds bounds")
+            if value is None or isinstance(value, bool):
+                charge(len(canonical_bytes(value)))
+                return value
+            if isinstance(value, int):
+                if not 0 <= value < len(strings):
+                    raise ReviewInputError("assessment history reference is invalid")
+                charge(sizes[value])
+                return strings[value]
+            if isinstance(value, list):
+                charge(2 + max(0, len(value) - 1))
+                return [decode(item, depth + 1) for item in value]
+            if isinstance(value, dict):
+                if (
+                    set(value) == {"integer"}
+                    and isinstance(value["integer"], int)
+                    and not isinstance(value["integer"], bool)
+                ):
+                    charge(len(canonical_bytes(value["integer"])))
+                    return value["integer"]
+                if set(value) == {"fields"} and isinstance(value["fields"], dict):
+                    charge(
+                        2
+                        + max(0, len(value["fields"]) - 1)
+                        + sum(key_size(key) + 1 for key in value["fields"])
+                    )
+                    return {
+                        key: decode(item, depth + 1)
+                        for key, item in value["fields"].items()
+                    }
+            raise ReviewInputError("assessment history encoded value is invalid")
+
+        operations: list[dict[str, object]] = []
+        for item in records:
+            row_total = 0
+            operation = decode(item)
+            if not isinstance(operation, dict):
+                raise ReviewInputError("assessment history operation is invalid")
+            operations.append(operation)
+        return tuple(operations)
+
+    @classmethod
+    def from_document(cls, value: object) -> FactoredAssessmentJournal:
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"schema_version", "queue", "strings", "operations"}
+            or value["schema_version"] != FACTORED_JOURNAL_INTERFACE_VERSION
+        ):
+            raise ReviewInputError("assessment history document is invalid")
+        try:
+            if len(canonical_bytes(value)) > MAX_OPERATION_RECEIPT_BYTES:
+                raise ReviewInputError("assessment journal exceeds aggregate storage")
+            journal = cls(
+                AssessmentQueue.from_document(value["queue"]),
+                cls._decode_operations(value),
+            )
+            # No unused strings, alternate references or unbounded aliases.
+            if journal.to_document() != value:
+                raise ReviewInputError("assessment history encoding is noncanonical")
+            return journal
+        except ReviewInputError:
+            raise
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise ReviewInputError("assessment history document is invalid") from exc
+
+    @classmethod
+    def from_legacy(cls, journal: AssessmentJournal) -> FactoredAssessmentJournal:
+        """Explicit migration preserves every old admission and source binding."""
+        if type(journal) is not AssessmentJournal:
+            raise ReviewInputError(
+                "assessment history migration requires legacy journal"
+            )
+        document = journal.to_document()
+        return cls(
+            AssessmentQueue.from_document(document["queue"]), journal._operations()
+        )
+
+
+@dataclass(frozen=True)
+class QueueHostState:
+    """Result of the host's latest authenticated, source/head-fenced read.
+
+    This type does not authenticate itself. The host supplies proven absence as
+    envelope=None, manifest item_count=0; otherwise it verifies the owned queue
+    manifest and returns its exact immutable binding/count. attempt_witness is
+    the independently authenticated original reservation, never a new grant.
+    """
+
+    envelope: object | None
+    root_generation: int
+    binding: Mapping[str, object]
+    item_count: int
+    attempt_witness: str | None
+
+
+@dataclass(frozen=True)
+class QueueHostMutation:
+    """Exact activation input; every call needs its own consuming broker grant.
+
+    The host prepares A's draft root/parts, reserves the sealed prepaid tail,
+    seals only original read_accounting and digest, then activates/readbacks.
+    Any ambiguous write must reconcile before returning QueueHostState. This
+    descriptor is not a capability and does not assert a remote atomic CAS.
+    """
+
+    envelope: dict[str, object]
+    expected_generation: int
+    binding: Mapping[str, object]
+    item_count: int
+    source_digest: str
+    operation_id: str
+    attempt_reservation_id: str
+    mutation: CheckpointMutation
+    request_identity: str
+
+
+class AssessmentQueueHostAdapter:
+    """Closed opt-in bridge from A's authenticated root to C checkpointing.
+
+    read and activate are required trusted host callbacks. activate must refuse
+    without an authenticated original-attempt witness; issue a fresh exact
+    consuming grant per mutation; source/head/root fence; charge/seal the whole
+    activation tail under the original control allowance; and reconcile/read
+    back ambiguous writes. The adapter validates their returned shape/binding,
+    but cannot supply these external authority proofs or enable hosted writers.
+    """
+
+    def __init__(
+        self,
+        *,
+        queue: AssessmentQueue,
+        binding: Mapping[str, object],
+        source_digest: str,
+        operation_id: str,
+        attempt_reservation_id: str,
+        read: Callable[[], QueueHostState],
+        activate: Callable[[QueueHostMutation], QueueHostState],
+    ) -> None:
+        if (
+            not isinstance(queue, AssessmentQueue)
+            or not _hash(source_digest)
+            or not _hash(operation_id)
+            or not isinstance(attempt_reservation_id, str)
+            or re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", attempt_reservation_id) is None
+        ):
+            raise ReviewInputError("assessment host identity is invalid")
+        try:
+            self._binding = canonical_bytes(dict(binding))
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise ReviewInputError("assessment host binding is invalid") from exc
+        if len(self._binding) > 8192:
+            raise ReviewInputError("assessment host binding exceeds bounds")
+        self.queue = queue
+        self.source_digest = source_digest
+        self.operation_id = operation_id
+        self.attempt_reservation_id = attempt_reservation_id
+        self.read = read
+        self.activate = activate
+        self._state: QueueHostState | None = None
+        self._journal: FactoredAssessmentJournal | None = None
+
+    def _accept(self, state: QueueHostState) -> FactoredAssessmentJournal:
+        if not isinstance(state, QueueHostState):
+            raise ReviewInputError("assessment host read shape is invalid")
+        try:
+            binding_bytes = canonical_bytes(dict(state.binding))
+            envelope_bytes = canonical_bytes(state.envelope)
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise ReviewInputError("assessment host read document is invalid") from exc
+        if (
+            isinstance(state.root_generation, bool)
+            or not isinstance(state.root_generation, int)
+            or not 0 <= state.root_generation < 2147483647
+            or binding_bytes != self._binding
+            or isinstance(state.item_count, bool)
+            or not isinstance(state.item_count, int)
+            or (
+                state.attempt_witness is not None
+                and state.attempt_witness != self.attempt_reservation_id
+            )
+        ):
+            raise ReviewInputError("assessment host read binding is invalid")
+        if state.envelope is None:
+            if state.item_count != 0:
+                raise ReviewInputError("assessment host absence count is invalid")
+            return FactoredAssessmentJournal(self.queue)
+        value = state.envelope
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"schema_version", "kind", "journal"}
+            or value["schema_version"] != "1.0"
+            or value["kind"] != "assessment-queue-state"
+            or len(envelope_bytes) > MAX_OPERATION_RECEIPT_BYTES
+        ):
+            raise ReviewInputError("assessment host envelope is invalid")
+        document = value["journal"]
+        if (
+            isinstance(document, dict)
+            and document.get("schema_version") == QUEUE_INTERFACE_VERSION
+        ):
+            journal = FactoredAssessmentJournal.from_legacy(
+                AssessmentJournal.from_document(document)
+            )
+        else:
+            journal = FactoredAssessmentJournal.from_document(document)
+        current = AssessmentQueue.from_document(journal.to_document()["queue"])
+        if (
+            current.snapshot != self.queue.snapshot
+            or current.inventory_digest != self.queue.inventory_digest
+            or current.inventory_ids != self.queue.inventory_ids
+            or state.item_count != len(current.inventory_ids)
+        ):
+            raise ReviewInputError("assessment host inventory binding is invalid")
+        return journal
+
+    def _receipt(self) -> object | None:
+        state = self.read()
+        journal = self._accept(state)
+        if (
+            self._state is not None
+            and state.root_generation < self._state.root_generation
+        ):
+            raise ReviewInputError("assessment host root generation regressed")
+        if (
+            self._state is not None
+            and state.root_generation == self._state.root_generation
+            and canonical_bytes(state.envelope) != canonical_bytes(self._state.envelope)
+        ):
+            raise ReviewInputError("assessment host root changed without generation")
+        receipt = journal.receipt(
+            source_digest=self.source_digest, operation_id=self.operation_id
+        )
+        self._state, self._journal = (
+            replace(
+                state,
+                envelope=json.loads(canonical_bytes(state.envelope)),
+                binding=json.loads(self._binding),
+            ),
+            journal,
+        )
+        return receipt
+
+    def _generation(self) -> int:
+        if self._state is None:
+            raise ReviewInputError("assessment host mutation requires latest read")
+        return self._state.root_generation
+
+    def _mutation(
+        self, document: dict[str, object], mutation: CheckpointMutation
+    ) -> None:
+        if (
+            self._state is None
+            or self._journal is None
+            or mutation.root_generation != self._state.root_generation
+            or self._state.attempt_witness != self.attempt_reservation_id
+        ):
+            raise ReviewInputError(
+                "assessment host mutation requires original attempt witness"
+            )
+        current = AssessmentQueue.from_document(self._journal.to_document()["queue"])
+        journal = self._journal.record(
+            queue=current, source_digest=self.source_digest, receipt=document
+        )
+        envelope: dict[str, object] = {
+            "schema_version": "1.0",
+            "kind": "assessment-queue-state",
+            "journal": journal.to_document(),
+        }
+        if len(canonical_bytes(envelope)) > MAX_OPERATION_RECEIPT_BYTES:
+            raise ReviewInputError("assessment host envelope exceeds aggregate storage")
+        binding = json.loads(self._binding)
+        identity = evidence_digest(
+            {
+                "domain": "assessment-host-mutation-v1",
+                "envelope": envelope,
+                "expected_generation": mutation.root_generation,
+                "binding": binding,
+                "source_digest": self.source_digest,
+                "operation_id": self.operation_id,
+                "attempt_reservation_id": self.attempt_reservation_id,
+                "mutation": asdict(mutation),
+            }
+        )
+        request = QueueHostMutation(
+            envelope,
+            self._state.root_generation,
+            binding,
+            len(current.inventory_ids),
+            self.source_digest,
+            self.operation_id,
+            self.attempt_reservation_id,
+            mutation,
+            identity,
+        )
+        state = self.activate(request)
+        accepted = self._accept(state)
+        if (
+            state.root_generation <= request.expected_generation
+            or canonical_bytes(state.envelope) != canonical_bytes(envelope)
+            or state.attempt_witness != self.attempt_reservation_id
+        ):
+            raise ReviewInputError("assessment host activation readback is ambiguous")
+        self._state, self._journal = (
+            replace(
+                state,
+                envelope=json.loads(canonical_bytes(state.envelope)),
+                binding=json.loads(self._binding),
+            ),
+            accepted,
+        )
+
+    def checkpoint(
+        self,
+        *,
+        now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        retention_seconds: int = 6 * 60 * 60,
+    ) -> AssessmentCheckpoint:
+        def unfenced_write(_document: dict[str, object]) -> None:
+            raise ReviewInputError("assessment host mutation cannot use unfenced write")
+
+        return AssessmentCheckpoint(
+            operation_id=self.operation_id,
+            read=self._receipt,
+            write=unfenced_write,
+            on_mutation=self._mutation,
+            root_generation=self._generation,
+            now=now,
+            retention_seconds=retention_seconds,
+        )
 
 
 def assessment_operation_id(
