@@ -41,7 +41,7 @@ class CheckpointMutation:
     root_generation: int | None = None
 
     def __post_init__(self) -> None:
-        if self.reason not in {
+        if type(self.reason) is not str or self.reason not in {
             "admission",
             "admission-dispatch",
             "dispatch",
