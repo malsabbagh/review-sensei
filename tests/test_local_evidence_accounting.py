@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,7 +18,9 @@ from tests.test_authenticated_partitions import binding, checkpoint
 class LocalAccountingTests(unittest.TestCase):
     def test_root_reads_and_four_final_fences_share_one_original_allowance(self):
         with tempfile.TemporaryDirectory() as directory:
-            ledger = LocalSessionLedger(Path(directory))
+            ledger = LocalSessionLedger(
+                Path(directory), evidence_budget=EvidenceReadBudget()
+            )
             ledger.initialize(fixture.IDENTITY, now=fixture.NOW)
             ledger.evidence_budget.calls = 59
             self.assertEqual(
@@ -172,6 +175,80 @@ class LocalAccountingTests(unittest.TestCase):
                     now=fixture.NOW,
                 )
             self.assertEqual(restored.calls, 61)
+
+    def test_default_inline_only_reused_ledger_keeps_legacy_lifetime(self):
+        now = [0.0]
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = LocalSessionLedger(Path(directory))
+            ledger.initialize(fixture.IDENTITY, now=fixture.NOW)
+            # Default inline-only API did not declare one original evidence
+            # operation spanning all independent legacy invocations.
+            ledger.evidence_budget = EvidenceReadBudget(clock=lambda: now[0])
+            now[0] = 61.0
+            for _ in range(80):
+                self.assertEqual(
+                    ledger.load(fixture.IDENTITY, now=fixture.NOW).status, "ok"
+                )
+            self.assertEqual(ledger.evidence_budget.calls, 0)
+
+    def test_default_richer_root_read_enables_complete_accounting_without_reset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint(
+                LocalSessionLedger(Path(directory), enable_partition_writes=True), 250
+            )
+            reader = LocalSessionLedger(Path(directory))
+            self.assertEqual(
+                reader.load(fixture.IDENTITY, now=fixture.NOW).status, "ok"
+            )
+            self.assertEqual(
+                reader.evidence_budget.calls, 7
+            )  # root plus 2 bounded part reads/inspections
+            original = reader.evidence_budget
+            original.calls = 60
+            self.assertEqual(
+                reader.load(fixture.IDENTITY, now=fixture.NOW).status,
+                "integrity-failed",
+            )
+            self.assertIs(reader.evidence_budget, original)
+
+    def test_expired_v01_without_queue_preserves_explicit_migration_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = LocalSessionLedger(
+                Path(directory), evidence_budget=EvidenceReadBudget()
+            )
+            created = SessionRecord.create(
+                fixture.IDENTITY, now=fixture.NOW - timedelta(days=60)
+            )
+            legacy = {
+                "schema_version": "0.1",
+                "repository": fixture.IDENTITY.repository,
+                "pull_request_number": fixture.IDENTITY.pull_request,
+                "repository_id": fixture.IDENTITY.repository_id,
+                "completed_initial_reviews": 1,
+                "completed_verification_rounds": 0,
+                "failed_attempts": 0,
+                "generation": 0,
+                "created_at": created.created_at,
+                "updated_at": created.updated_at,
+            }
+            path = ledger._path(fixture.IDENTITY)
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps(legacy))
+            self.assertEqual(
+                ledger.load(fixture.IDENTITY, now=fixture.NOW).status, "expired"
+            )
+            self.assertEqual(
+                ledger.reenroll(
+                    fixture.IDENTITY, now=fixture.NOW
+                ).completed_initial_reviews,
+                0,
+            )
+            # The narrow migration exemption never removes a queue-bearing root.
+            legacy["assessment_queue"] = {"untrusted": True}
+            path.write_text(json.dumps(legacy))
+            with self.assertRaises(ReviewInputError):
+                ledger.reenroll(fixture.IDENTITY, now=fixture.NOW)
+            self.assertEqual(json.loads(path.read_text()), legacy)
 
     def test_complete_250_checkpoint_retains_finite_physical_accounting(self):
         with tempfile.TemporaryDirectory() as directory:

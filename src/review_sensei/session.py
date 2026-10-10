@@ -2893,6 +2893,23 @@ class LocalSessionLedger:
         self.root = root
         self.evidence_budget = evidence_budget or EvidenceReadBudget()
         self.enable_partition_writes = enable_partition_writes
+        self._shared_control_budget = evidence_budget is not None
+
+    def _control_accounting_enabled(self) -> bool:
+        return self._shared_control_budget or self.enable_partition_writes
+
+    def _consume_control_io(self, *, fence: bool = False) -> None:
+        if self._control_accounting_enabled():
+            self.evidence_budget.consume(fence=fence)
+
+    def _observe_control_document(self, document: Mapping[str, object]) -> None:
+        history = document.get("convergence_history")
+        baseline = history.get("baseline") if isinstance(history, Mapping) else None
+        if "assessment_queue" in document or (
+            isinstance(baseline, Mapping)
+            and baseline.get("encoding") == PARTITION_ENCODING
+        ):
+            self._shared_control_budget = True
 
     def _reserve_local_io(self, calls: int) -> None:
         """Charge bounded physical work, including mandatory durable cleanup.
@@ -2902,6 +2919,8 @@ class LocalSessionLedger:
         is one bounded dispatch;
         enumeration and each enumerated stat are charged separately.
         """
+        if not self._control_accounting_enabled():
+            return
         self.evidence_budget.preflight(calls)
         for _ in range(calls):
             self.evidence_budget.consume()
@@ -3116,7 +3135,7 @@ class LocalSessionLedger:
         never let that read or write escape the ledger.
         """
 
-        self.evidence_budget.consume()
+        self._consume_control_io()
         root = self.root.resolve()
         directory = self.root / ".enrollments"
         if directory.is_symlink():
@@ -3134,7 +3153,7 @@ class LocalSessionLedger:
         """Return the witness path after rejecting symlinks and non-files."""
 
         path = self._enrollment_directory() / self._enrollment_path(identity).name
-        self.evidence_budget.consume()
+        self._consume_control_io()
         if path.is_symlink():
             raise ReviewInputError("session enrollment witness is invalid")
         if path.exists() and not path.is_file():
@@ -3154,7 +3173,7 @@ class LocalSessionLedger:
 
     def _has_enrollment_witness(self, identity: SessionIdentity) -> bool:
         path = self._validated_enrollment_path(identity)
-        self.evidence_budget.consume()
+        self._consume_control_io()
         try:
             with path.open("rb") as handle:
                 raw = handle.read(66)
@@ -3164,7 +3183,8 @@ class LocalSessionLedger:
             raise ReviewInputError(
                 "session enrollment witness could not be read"
             ) from exc
-        self.evidence_budget.check()
+        if self._control_accounting_enabled():
+            self.evidence_budget.check()
         if raw != self._enrollment_witness(identity):
             raise ReviewInputError("session enrollment witness is invalid")
         return True
@@ -3199,10 +3219,7 @@ class LocalSessionLedger:
                 "only an expired or witness-only session can be re-enrolled"
             )
         expired_document = self._read_document(self._path(identity))
-        if (
-            expired_document is not None
-            and SessionRecord.from_dict(expired_document).assessment_queue is not None
-        ):
+        if expired_document is not None and "assessment_queue" in expired_document:
             raise ReviewInputError(
                 "assessment queue requires retained tombstone authority before re-enrollment"
             )
@@ -3261,7 +3278,8 @@ class LocalSessionLedger:
     def _read_document(
         self, path: Path, *, fence: bool = False
     ) -> Mapping[str, object] | None:
-        self.evidence_budget.consume(fence=fence)
+        accounted = self._control_accounting_enabled()
+        self._consume_control_io(fence=fence)
         try:
             with path.open("rb") as handle:
                 raw = handle.read(MAX_SESSION_RECORD_BYTES + 1)
@@ -3269,15 +3287,21 @@ class LocalSessionLedger:
             return None
         except OSError as exc:
             raise ReviewInputError("session ledger could not be read") from exc
-        self.evidence_budget.check()
+        if accounted:
+            self.evidence_budget.check()
         if len(raw) > MAX_SESSION_RECORD_BYTES:
             raise ReviewInputError("session record exceeds the configured size limit")
         try:
             payload = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
             raise ReviewInputError("session record was not valid JSON") from exc
         if not isinstance(payload, dict):
             raise ReviewInputError("session record is invalid")
+        self._observe_control_document(payload)
+        if not accounted and self._control_accounting_enabled():
+            # First richer-root read is retroactively charged before exposing
+            # authority. Default inline-only callers retain legacy behavior.
+            self._consume_control_io(fence=fence)
         return payload
 
     def _write(
@@ -3287,6 +3311,7 @@ class LocalSessionLedger:
         *,
         exclusive: bool = False,
     ) -> None:
+        self._observe_control_document(record.to_dict())
         path = self._path(identity)
         # One durable temporary-write dispatch includes directory creation,
         # file sync and unconditional cleanup. Activation is a separate fence.
@@ -3315,7 +3340,7 @@ class LocalSessionLedger:
             handle_closed = True
             # Deadline/count is checked again immediately before authority
             # activation, after serialization, temp write and file sync.
-            self.evidence_budget.consume(fence=True)
+            self._consume_control_io(fence=True)
             if exclusive:
                 # Link a fully fsynced temporary file into place without
                 # replacing an existing destination. This is the filesystem
@@ -3333,7 +3358,8 @@ class LocalSessionLedger:
                     os.fsync(directory_fd)
                 finally:
                     os.close(directory_fd)
-            self.evidence_budget.check()
+            if self._control_accounting_enabled():
+                self.evidence_budget.check()
         except (OSError, ReviewInputError) as exc:
             if not handle_closed:
                 try:
