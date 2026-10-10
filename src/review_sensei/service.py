@@ -192,14 +192,37 @@ class _CallBudget:
 class _BudgetedProvider:
     """Count provider calls against a total-work budget without raising per-request limits."""
 
-    name: str
-    model: str | None
-
     def __init__(self, provider: ReviewProvider, *, budget: _CallBudget) -> None:
         self._provider = provider
-        self.name = provider.name
-        self.model = provider.model
         self._budget = budget
+
+    @property
+    def name(self) -> str:
+        return self._provider.name
+
+    @name.setter
+    def name(self, value: str) -> None:
+        self._provider.name = value
+
+    @property
+    def model(self) -> str | None:
+        return self._provider.model
+
+    @model.setter
+    def model(self, value: str | None) -> None:
+        self._provider.model = value
+
+    @property
+    def endpoint(self) -> object:
+        return getattr(self._provider, "endpoint", None)
+
+    @property
+    def completion_contract(self) -> object:
+        return getattr(self._provider, "completion_contract", None)
+
+    @property
+    def allow_model_override(self) -> bool:
+        return getattr(self._provider, "allow_model_override", True)
 
     @property
     def exhausted(self) -> bool:

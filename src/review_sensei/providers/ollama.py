@@ -28,6 +28,32 @@ from .transport import (
 )
 
 MAX_API_KEY_BYTES = 4_096
+COMPLETE_TEXT_CONTRACT = "bounded-complete-text-v1"
+
+
+def _validate_completion(
+    data: object, *, model: str, output_tokens: int | None, required: bool
+) -> None:
+    if not isinstance(data, dict):
+        raise ProviderError("Ollama returned an invalid completion envelope")
+    if required and any(
+        field not in data for field in ("done", "done_reason", "eval_count", "model")
+    ):
+        raise ProviderError("Ollama completion metadata is missing")
+    if "done" in data and (type(data["done"]) is not bool or not data["done"]):
+        raise ProviderError("Ollama completion is incomplete")
+    if "done_reason" in data and (
+        type(data["done_reason"]) is not str or data["done_reason"] != "stop"
+    ):
+        raise ProviderError("Ollama completion did not stop normally")
+    if "eval_count" in data:
+        count = data["eval_count"]
+        if type(count) is not int or not 0 <= count <= 2**31 - 1:
+            raise ProviderError("Ollama output token accounting is invalid")
+        if output_tokens is not None and count > output_tokens:
+            raise ProviderError("Ollama output exceeded the enforced token limit")
+    if required and (type(data["model"]) is not str or data["model"] != model):
+        raise ProviderError("Ollama completion model does not match the request")
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -57,6 +83,7 @@ class OllamaProvider:
         timeout_seconds: float = 900,
         max_output_tokens: int | None = None,
         allow_model_override: bool = True,
+        require_completion_metadata: bool = False,
         opener: Callable[..., Any] = urlopen,
     ) -> None:
         if not base_url.strip():
@@ -65,6 +92,14 @@ class OllamaProvider:
             raise ValueError("Ollama model must be non-empty")
         if timeout_seconds <= 0:
             raise ValueError("Ollama timeout_seconds must be positive")
+        if type(require_completion_metadata) is not bool:
+            raise ValueError("Ollama completion metadata policy must be a boolean")
+        if require_completion_metadata and allow_model_override:
+            raise ValueError("strict Ollama completion requires a fixed model")
+        if max_output_tokens is not None and (
+            type(max_output_tokens) is not int or not 1 <= max_output_tokens <= 16384
+        ):
+            raise ValueError("Ollama output token limit is invalid")
         if api_key is not None:
             if not isinstance(api_key, str):
                 raise ValueError("Ollama api_key must be a string")
@@ -96,6 +131,9 @@ class OllamaProvider:
         self.timeout_seconds = timeout_seconds
         self.max_output_tokens = max_output_tokens
         self.allow_model_override = allow_model_override
+        self._require_completion_metadata = require_completion_metadata
+        self._completion_endpoint = self.endpoint
+        self._completion_model = model
         self._opener = opener
         self._ssl_context: ssl.SSLContext | None = None
         if self.base_url.lower().startswith("https://"):
@@ -135,12 +173,26 @@ class OllamaProvider:
             ) from exc
 
     @property
+    def require_completion_metadata(self) -> bool:
+        return self._require_completion_metadata
+
+    @property
+    def completion_contract(self) -> str | None:
+        return COMPLETE_TEXT_CONTRACT if self.require_completion_metadata else None
+
+    @property
     def endpoint(self) -> str:
         if self.base_url.endswith("/generate"):
             return self.base_url
         return f"{self.base_url}/generate"
 
     def complete(self, request: ProviderRequest) -> ProviderResponse:
+        if self.require_completion_metadata and (
+            self.endpoint != self._completion_endpoint
+            or self.model != self._completion_model
+            or self.allow_model_override
+        ):
+            raise ProviderError("Ollama qualified transport binding changed")
         timeout = (
             min(self.timeout_seconds, request.timeout_seconds)
             if request.timeout_seconds is not None
@@ -158,6 +210,7 @@ class OllamaProvider:
             raise ProviderError(
                 "Ollama model exceeds the configured size limit"
             ) from exc
+        assert isinstance(model, str)
         payload: dict[str, object] = {
             "model": model,
             "prompt": request.prompt,
@@ -166,6 +219,13 @@ class OllamaProvider:
         }
         if request.json_mode:
             payload["format"] = "json"
+        # Configuration is public and mutable: validate the current cap before
+        # taking its minimum, never send a malformed/unbounded num_predict.
+        if self.max_output_tokens is not None and (
+            type(self.max_output_tokens) is not int
+            or not 1 <= self.max_output_tokens <= 16384
+        ):
+            raise ProviderError("Ollama output token limit is invalid")
         output_tokens = request.max_output_tokens
         if self.max_output_tokens is not None:
             output_tokens = (
@@ -173,8 +233,14 @@ class OllamaProvider:
                 if output_tokens is not None
                 else self.max_output_tokens
             )
+        if output_tokens is not None and (
+            type(output_tokens) is not int or not 1 <= output_tokens <= 16384
+        ):
+            raise ProviderError("Ollama effective output token limit is invalid")
         if output_tokens is not None:
             payload["options"] = {"num_predict": output_tokens}
+        elif self.require_completion_metadata:
+            raise ProviderError("strict Ollama completion requires an output limit")
 
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -240,6 +306,13 @@ class OllamaProvider:
             data = json.loads(body_text)
         except (TypeError, json.JSONDecodeError) as exc:
             raise ProviderError("Ollama returned invalid JSON") from exc
+
+        _validate_completion(
+            data,
+            model=model,
+            output_tokens=output_tokens,
+            required=self.require_completion_metadata,
+        )
 
         text = data.get("response") if isinstance(data, dict) else None
         if not isinstance(text, str) or not text.strip():

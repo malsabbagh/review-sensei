@@ -162,7 +162,7 @@ def reassess(
         selected_model = (
             model if getattr(provider, "allow_model_override", True) else None
         ) or provider.model
-        capabilities.require_identity(provider_name=provider.name, model=selected_model)
+        capabilities.require_provider(provider, model=selected_model)
     budgets = work_budgets.effective(
         limits=DEFAULT_REVIEW_LIMITS,
         resource=tracker.budget,

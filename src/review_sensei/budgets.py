@@ -7,6 +7,7 @@ an operator-owned, offline contract, not information supplied by a model or PR.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from urllib.parse import unquote, urlsplit
 
 from .errors import ReviewInputError
 from .outcomes import ResourceBudget
@@ -17,6 +18,42 @@ LEGACY_ASSESSMENT_PROMPT_BYTES = 48 * 1024
 ASSESSMENT_OUTPUT_BYTES = 16 * 1024
 MAX_TOTAL_PROMPT_BYTES = 2 * 1024 * 1024
 MAX_TOTAL_OUTPUT_BYTES = 1024 * 1024
+COMPLETE_TEXT_CONTRACT = "bounded-complete-text-v1"
+
+
+def _validate_capability_endpoint(value: str) -> None:
+    """Validate a finite credential-free identity, without resolving a host."""
+    if (
+        type(value) is not str
+        or not 1 <= len(value) <= 2048
+        or not value.isascii()
+        or any(ord(char) <= 32 or ord(char) == 127 for char in value)
+        or "\\" in value
+    ):
+        raise ReviewInputError("provider capability endpoint is invalid")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+        path = unquote(parsed.path, errors="strict")
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or "@" in parsed.netloc
+            or parsed.query
+            or parsed.fragment
+            or not parsed.path.startswith("/")
+            or "\\" in path
+            or any(part in {".", ".."} for part in path.split("/"))
+            or any(ord(char) < 32 or ord(char) == 127 for char in path)
+            or (port is not None and not 1 <= port <= 65535)
+            or (
+                parsed.scheme == "http"
+                and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+            )
+        ):
+            raise ValueError
+    except (ValueError, UnicodeError):
+        raise ReviewInputError("provider capability endpoint is invalid") from None
 
 
 def _positive(value: int, maximum: int, label: str) -> None:
@@ -52,6 +89,8 @@ class ProviderCapabilities:
     estimator: str = "utf8-byte-upper-bound"
     provider_name: str | None = None
     model: str | None = None
+    endpoint: str | None = None
+    completion_contract: str | None = None
 
     def __post_init__(self) -> None:
         _positive(self.context_tokens, 4_194_304, "provider context tokens")
@@ -69,18 +108,57 @@ class ProviderCapabilities:
             or not self.provider_name.strip()
             or not isinstance(self.model, str)
             or not self.model.strip()
+            or self.endpoint is None
+            or self.completion_contract != COMPLETE_TEXT_CONTRACT
         ):
             raise ReviewInputError(
-                "qualified capability requires exact provider and model"
+                "qualified capability requires exact provider, model, endpoint and completion contract"
+            )
+        if self.endpoint is not None:
+            _validate_capability_endpoint(self.endpoint)
+        if self.completion_contract is not None and (
+            type(self.completion_contract) is not str
+            or self.completion_contract != COMPLETE_TEXT_CONTRACT
+        ):
+            raise ReviewInputError("provider capability completion contract is invalid")
+
+    def require_identity(
+        self,
+        *,
+        provider_name: str,
+        model: str | None,
+        endpoint: object = None,
+        completion_contract: object = None,
+    ) -> None:
+        if self.qualified and (
+            self.provider_name != provider_name
+            or self.model != model
+            or type(endpoint) is not str
+            or self.endpoint != endpoint
+            or type(completion_contract) is not str
+            or self.completion_contract != completion_contract
+        ):
+            raise ReviewInputError(
+                "qualified capability does not match selected provider transport"
             )
 
-    def require_identity(self, *, provider_name: str, model: str | None) -> None:
-        if self.qualified and (
-            self.provider_name != provider_name or self.model != model
-        ):
+    def require_provider(self, provider: object, *, model: str | None) -> None:
+        if not self.qualified:
+            return
+        try:
+            name = getattr(provider, "name")
+            endpoint = getattr(provider, "endpoint", None)
+            contract = getattr(provider, "completion_contract", None)
+        except Exception:
             raise ReviewInputError(
-                "qualified capability does not match selected provider and model"
-            )
+                "qualified provider transport could not be read"
+            ) from None
+        self.require_identity(
+            provider_name=name,
+            model=model,
+            endpoint=endpoint,
+            completion_contract=contract,
+        )
 
     def fits(self, prompt: str, *, output_tokens: int | None = None) -> bool:
         if not self.qualified:
