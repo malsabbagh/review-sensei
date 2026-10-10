@@ -460,7 +460,7 @@ class AssessmentCheckpointTests(QueueFixture, unittest.TestCase):
             pending, bundle, queue, provider=CorrectingProvider(), checkpoint=checkpoint
         )
         self.assertEqual(contexts[0].reason, "admission")
-        self.assertEqual(contexts[-1].reason, "finalize")
+        self.assertEqual(contexts[-1].reason, "accepted")
         dispatches = [item for item in contexts if item.reason == "dispatch"]
         self.assertEqual(len(dispatches), 2)
         self.assertEqual(dispatches[0].request_digest, dispatches[1].request_digest)
@@ -592,6 +592,118 @@ class AssessmentCheckpointTests(QueueFixture, unittest.TestCase):
         )
         self.assertGreater(tracker.response_bytes, 0)
         self.assertEqual(work.execution.response_bytes_reserved, 0)
+        self.assertEqual(len(store.writes), 3)
+        self.assertTrue(store.writes[-1]["completed"])
+        self.assertFalse(store.writes[-1]["pending"])
+        self.assertTrue(
+            all(
+                value["completed"]
+                for value in store.writes
+                if value["counters"]["response_bytes"] > 0
+            )
+        )
+
+    def test_single_target_complete_receipt_has_three_saves_and_retains_scoped_out_work(
+        self,
+    ):
+        pending, bundle, queue = fixture(100)
+        store = DocumentStore()
+        work = self.run_work(
+            pending,
+            bundle,
+            queue,
+            targets=(queue.pending_order[-1],),
+            provider=AssessingProvider(),
+            checkpoint=store.checkpoint(),
+        )
+        self.assertEqual(len(store.writes), 3)
+        receipt = store.writes[-1]
+        self.assertEqual(len(receipt["completed"]), 1)
+        self.assertEqual(len(receipt["pending"]), 99)
+        self.assertEqual(receipt["response_bytes_reserved"], 0)
+        self.assertEqual(
+            set(work.execution.pending_ids),
+            set(queue.pending_order) - {queue.pending_order[-1]},
+        )
+
+    def test_one_call_two_fifty_profile_refuses_registry_before_satisfying_inventory(
+        self,
+    ):
+        try:
+            pending, bundle, queue = fixture(250)
+        except ReviewInputError:
+            self.skipTest("requires frozen B complete inventory admission")
+        state = [AssessmentJournal(queue)]
+
+        class RejectingProvider(AssessingProvider):
+            def complete(self, request):
+                value = json.loads(super().complete(request).text)
+                value["assessments"][0]["diff_evidence"] = "fabricated citation"
+                return ProviderResponse(json.dumps(value), self.name)
+
+        for index in range(1, 34):
+            source = hashlib.sha256(f"source:{index}".encode()).hexdigest()
+            operation = hashlib.sha256(f"operation:{index}".encode()).hexdigest()
+
+            def write(document):
+                current = AssessmentQueue.from_document(state[0].to_document()["queue"])
+                state[0] = state[0].record(
+                    queue=current, source_digest=source, receipt=document
+                )
+
+            checkpoint = AssessmentCheckpoint(
+                operation_id=operation,
+                read=lambda: state[0].receipt(
+                    source_digest=source, operation_id=operation
+                ),
+                write=write,
+            )
+            tracker = ResourceBudgetTracker(ResourceBudget.create(max_provider_calls=1))
+            provider = RejectingProvider() if index == 1 else AssessingProvider()
+            before = state[0].to_document()
+            if index == 33:
+                with self.assertRaisesRegex(
+                    ReviewInputError, "retained operation bounds"
+                ):
+                    self.run_work(
+                        pending,
+                        bundle,
+                        queue,
+                        provider=provider,
+                        checkpoint=checkpoint,
+                        tracker=tracker,
+                    )
+                self.assertEqual(provider.calls, [])
+                self.assertEqual(state[0].to_document(), before)
+                break
+            work = self.run_work(
+                pending,
+                bundle,
+                queue,
+                provider=provider,
+                checkpoint=checkpoint,
+                tracker=tracker,
+            )
+            pending, queue = work.apply_to(pending), work.queue
+            if index == 1:
+                replay_provider = RejectingProvider()
+                replay = self.run_work(
+                    pending,
+                    bundle,
+                    queue,
+                    provider=replay_provider,
+                    checkpoint=checkpoint,
+                    tracker=ResourceBudgetTracker(
+                        ResourceBudget.create(max_provider_calls=1)
+                    ),
+                )
+                self.assertEqual(replay_provider.calls, [])
+                self.assertEqual(replay.reply.decisions, ())
+        self.assertEqual(len(pending.pending), 126)
+        self.assertEqual(len(state[0].to_document()["operations"]), 32)
+        self.assertLess(
+            len(json.dumps(state[0].to_document()).encode()), 2 * 1024 * 1024
+        )
 
     def test_admitted_two_fifty_rejection_replay_and_new_sources_fit_bounded_journal(
         self,

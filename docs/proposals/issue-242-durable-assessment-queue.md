@@ -175,3 +175,65 @@ Keep this proposal Proposed until explicit maintainer approval. Upgrade all
 authority readers before enabling new writers. Rollback must retain compatible
 queue/manifest readers and every obligation/receipt; deleting a latest root or
 falling back to an older clean record cannot authorize inference or approval.
+
+## Owned feedback and checkpoint-count amendment
+
+The initial prototype remains immutable at
+`09b7c86f85f55c9a7a99e411f2a4905b776c4ccb`, draft PR255. This amendment
+preserves the `assessment-queue-v1` wire and adds optional `feedback` to
+`reassess`/`validate_work`. The value must be the complete frozen D
+`FeedbackSelection` matching repository/PR/base/head. Its full digest also
+binds plan authority; its explicit target tuple must match the dispatch target
+tuple. Full selected bodies enter B's reviewed request, parse, scope/cached
+validation and evidence-citation seams. The unused legacy source body is not a
+citation source or a substitute for clipping. Before those dependencies are
+present, the optional path refuses rather than shortening evidence.
+
+For a successful batch, known response accounting and validated decisions now
+activate together. The original pre-dispatch response reservation remains
+durable until that activation; death before it retains unknown output and never
+redispatches the uncertain attempt. A terminal semantic rejection saves measured
+bytes plus pending obligations. Structural/transport retries keep original
+bounded counter/charge checkpoints. An identical final execution/counter state
+does not need a duplicate activation. One successful batch needs exactly three
+C activations: admission, charged reservation, accepted result plus accounting.
+The accepted receipt includes all scoped-out pending IDs before returning.
+
+The coordinator's closed A envelope is exactly `{schema_version: "1.0",
+kind: "assessment-queue-state", journal: <complete C v1 journal>}`. The host
+unwraps after authentication, checks complete inventory count against A
+`item_count`, immutable root digest/binding and closed C parsing. The journal
+lookup key binds immutable trigger kind/numeric ID, repository/PR/initial
+inventory, excluding edited body/timestamp, selection order/targets and mutable
+generations. Full D selection/targets remain in operation binding; changed
+authority on the same trigger refuses replenishment.
+
+Measurements on immutable A `0ca0f8e82e6f94e026cfcb027b43ff684ef00a54` with
+the actual C read/mutation callbacks, one four-finding batch and shared64/60s
+allowance are **storage lower bounds**, not a complete hosted operation:
+
+| Phase | GitHub fixture consumed / persisted | Local consumed / persisted |
+|---|---:|---:|
+| Enrollment | 3 / — | 9 / — |
+| Two original-absence reads | 5 / — | 11 / — |
+| Admission | 15 / 10 | 26 / 19 |
+| Charged dispatch | 28 / 22 | 45 / 38 |
+| Accepted activation | 41 / 35 | 54 / refused |
+
+Local accepted staging refuses its whole-inventory preflight without durability.
+GitHub fixture reaches accepted durability but omits consuming-broker grants,
+source authorization/guards, real provider time, acknowledgement and other
+baseline/human/feedback/evidence/prose roots. The measured activation-tail gap
+of six GitHub/seven local dispatches between stored accounting and actual
+consumption is an independent restart-accounting blocker. No allowance is
+increased/refilled, and hosted writers remain off pending qualification.
+
+A separate hypothetical one-call-per-authorized-source 250-finding domain run
+with an initial semantic rejection/replay retains32 receipts,126 pending IDs
+and about1,724,154 canonical decoded bytes. Source33 refuses before inference,
+preserving the journal. Even without rejection,250/4 requires63 authorized
+sources and exceeds the32-slot registry. The2MiB decoded limit has not been
+raised, and combined256-part/8MiB retention remains unqualified. The frozen B/D
+dependency profile exercises full feedback and the original eight-call 250
+domain fixture; those passes do not qualify hosted throughput or durable
+activation-tail accounting. Diagnostic early admission remains unchanged.
