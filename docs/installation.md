@@ -153,6 +153,7 @@ file uses the packaged defaults:
 | `github.mentions` | `true` | Authorized `@reviewsensei` conversation |
 | `github.learning` | `disabled` | Learning mode: `disabled`, `proposals`, or `pull-requests` |
 | `github.artifacts` | `none` | Artifact mode: `none` or `diagnostics` |
+| `github.operation_entry` | `enabled` | Shared operation entry. `disabled` keeps the previous paths. The 64/60 budget for this route is not yet measured (#267). |
 
 The packaged model for the selected backend applies unless `inference.model`
 names another one. `REVIEWSENSEI_PROVIDER` and `REVIEWSENSEI_MODEL` are the

@@ -1098,7 +1098,9 @@ head, and submits one App-authored review whose formatted summary and inline
 comments append the fixed follow-up instruction `To discuss this finding, reply
 with @reviewsensei followed by your question.` and the maintainer commands
 `@reviewsensei I reviewed the media files and I approve` and
-`@reviewsensei override RS-ABCDEF acceptable risk`, and carry the marker
+`@reviewsensei override RS-ABCDEF acceptable risk`. After an override, comment
+`@reviewsensei verify` to apply it. An override applies to the current commit
+only. A new push needs a new override. Those bodies carry the marker
 `<!-- reviewsensei:review:v1 repo=<id> pr=<n> head=<sha> result=<sha256> -->`.
 The default evidence policy is `legacy` single-pass mode. `confirmed` publishes
 only snapshot-bound confirmed candidates; unverified comments never become
@@ -1213,6 +1215,8 @@ finalizer. It does not call the provider again.
 Setup-v5 resolves every policy from `.reviewsensei.yml`; the packaged defaults
 are `github.reviews: auto-approve`, `github.automatic_reviews: true`, and
 `github.writes: false` (see the defaults table in `docs/installation.md`).
+`github.operation_entry` defaults to `enabled`. The 64/60 budget for this route
+is not yet measured (#267). `disabled` keeps the previous review paths.
 Automatic approval can be disabled with `github.reviews: blocking` (publish and
 enforce, never approve) or `github.reviews: advisory` (no ReviewSensei merge
 gate). When automatic review and GitHub writes are
