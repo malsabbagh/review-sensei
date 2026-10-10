@@ -8,7 +8,7 @@ import hashlib
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Sequence
 
 from ...baseline import ReviewBaseline
@@ -21,6 +21,7 @@ from ...convergence import (
 from ...coverage import CoverageManifest, coverage_approval_state
 from ...diff import DiffAnalysis, analyze_diff
 from ...errors import ReviewInputError
+from ...human_assessment import finding_instance_fingerprint
 from ...models import ReviewComment, ReviewResult
 from ...outcomes import PUBLIC_DIAGNOSTICS, RunOutcome, sanitize_diagnostic
 from ...placement import (
@@ -75,6 +76,11 @@ from .http import GitHubHttp
 REVIEW_MARKER_PREFIX = "<!-- reviewsensei:review:v1"
 FINDING_MARKER_PREFIX = "<!-- reviewsensei:finding:v1"
 FINDING_MARKER_PREFIX_V2 = "<!-- reviewsensei:finding:v2"
+FINDING_INSTANCE_MARKER_PREFIX = "<!-- reviewsensei:instance:v1"
+_FINDING_INSTANCE_RE = re.compile(
+    re.escape(FINDING_INSTANCE_MARKER_PREFIX)
+    + r" instance=(?P<instance>[a-f0-9]{64}) concern=(?P<concern>[a-f0-9]{64}) -->"
+)
 APPROVAL_MARKER_PREFIX = "<!-- reviewsensei:approval:v1"
 APPROVAL_ELIGIBILITY_MARKER_PREFIX = "<!-- reviewsensei:eligibility:v1"
 GIT_SHA_HEX = re.compile(r"^[a-f0-9]{40}$")
@@ -386,6 +392,23 @@ def finding_fingerprint_from_body(body: object) -> str | None:
     return match.group("fingerprint")
 
 
+def finding_instance_marker(comment: ReviewComment) -> str:
+    """Bind display/target identity separately from the unchanged concern marker."""
+    return (
+        f"{FINDING_INSTANCE_MARKER_PREFIX} instance={finding_instance_fingerprint(comment)} "
+        f"concern={finding_lifecycle_for_comment(comment).fingerprint} -->"
+    )
+
+
+def finding_instance_from_body(body: object) -> str | None:
+    if not isinstance(body, str) or body.count(FINDING_INSTANCE_MARKER_PREFIX) != 1:
+        return None
+    match = _FINDING_INSTANCE_RE.search(body)
+    if match is None or match.group("concern") != finding_fingerprint_from_body(body):
+        return None
+    return match.group("instance")
+
+
 def finding_blocking_from_body(body: object) -> bool | None:
     """Return the persisted blocking bit from a v1 or v2 finding marker."""
 
@@ -405,15 +428,23 @@ class PublishedFindingSuppression:
 
     by_fingerprint: Mapping[str, bool]
     by_location: Mapping[tuple[str, int], bool]
+    by_instance: Mapping[str, bool] = field(default_factory=dict)
 
 
 def _should_suppress_published_finding(
     comment: ReviewComment,
     fingerprint: str,
     suppression: PublishedFindingSuppression,
+    *,
+    instance: str | None = None,
 ) -> bool:
     """Return whether an already-published root makes this inline comment redundant."""
 
+    if instance is not None:
+        existing = suppression.by_instance.get(instance)
+        # A legacy concern or location does not prove equality of full prose.
+        # Republishing is safer than dropping a distinct explanation.
+        return existing is not None and existing == comment.blocks_approval
     existing = suppression.by_fingerprint.get(fingerprint)
     if existing is not None:
         return existing == comment.blocks_approval
@@ -1625,6 +1656,11 @@ class ReviewPublisher:
             qualification=qualification,
             retained_eligibility=retained_eligibility,
         )
+        # Until partition writers are enabled through the reviewed reader
+        # contract, refuse inventories outside legacy capacity before any
+        # remote check/review mutation. Domain admission alone is not durable
+        # publication support.
+        prospective_eligibility.to_dict()
         # Automatic approval also requires an eligible review: a partial or
         # failed analysis, a pending human assessment, or incomplete coverage
         # must never converge to APPROVE on the maintainer's behalf. Eligibility
@@ -1940,7 +1976,12 @@ class ReviewPublisher:
                     raise
         comments = []
         for comment, fingerprint, comment_body, anchor in prepared_comments:
-            if _should_suppress_published_finding(comment, fingerprint, suppression):
+            if _should_suppress_published_finding(
+                comment,
+                fingerprint,
+                suppression,
+                instance=finding_instance_fingerprint(comment),
+            ):
                 continue
             comment_payload: dict[str, object] = {
                 "path": comment.path,
@@ -2202,6 +2243,7 @@ class ReviewPublisher:
             raise GitHubPublicationError("review thread repository is invalid")
         by_fingerprint: dict[str, bool] = {}
         by_location: dict[tuple[str, int], bool] = {}
+        by_instance: dict[str, bool] = {}
         after: str | None = None
         for _ in range(MAX_REVIEW_THREAD_PAGES):
             try:
@@ -2287,6 +2329,9 @@ class ReviewPublisher:
                 if blocking is None:
                     continue
                 fingerprint = finding_fingerprint_from_body(body)
+                instance = finding_instance_from_body(body)
+                if instance is not None:
+                    by_instance[instance] = blocking
                 if fingerprint is not None:
                     by_fingerprint[fingerprint] = blocking
                     continue
@@ -2303,7 +2348,9 @@ class ReviewPublisher:
             if not isinstance(has_next, bool):
                 raise GitHubPublicationError("review thread response was invalid")
             if not has_next:
-                return PublishedFindingSuppression(by_fingerprint, by_location)
+                return PublishedFindingSuppression(
+                    by_fingerprint, by_location, by_instance
+                )
             after = page_info.get("endCursor")
             if not isinstance(after, str) or not after:
                 raise GitHubPublicationError("review thread response was invalid")
@@ -2334,7 +2381,7 @@ class ReviewPublisher:
         """Plan placement and render one coherent review body.
 
         Every finding is rendered through the shared typed renderers and gets
-        one stable ID projected from its concern fingerprint. Inline findings
+        one stable ID projected from its instance fingerprint. Inline findings
         are POSTed as threads; body findings keep their full explanation in the
         review body, and an unanchored required finding retains its gate effect
         through its finding marker.
@@ -2348,13 +2395,22 @@ class ReviewPublisher:
             finding_lifecycle_for_comment(comment).fingerprint
             for comment in result.comments
         ]
-        identifiers = assign_finding_identifiers(fingerprints)
+        instances = [
+            finding_instance_fingerprint(comment) for comment in result.comments
+        ]
+        identifiers = assign_finding_identifiers(instances)
         prepared_comments: list[tuple[ReviewComment, str, str, str]] = []
         body_views: list[FindingView] = []
         body_reasons: list[str] = []
         all_views: list[FindingView] = []
         facts: HostPlacementFacts | None = None
-        for comment, fingerprint in zip(result.comments, fingerprints, strict=True):
+        seen_instances: set[str] = set()
+        for comment, fingerprint, instance in zip(
+            result.comments, fingerprints, instances, strict=True
+        ):
+            if instance in seen_instances:
+                continue
+            seen_instances.add(instance)
             state = lifecycle_by_fingerprint.get(fingerprint, "new")
             anchor = _publication_anchor(comment, analysis)
             if facts is None and _placement_needs_host_facts(
@@ -2374,11 +2430,13 @@ class ReviewPublisher:
             view = build_finding_view(
                 comment,
                 fingerprint=fingerprint,
-                identifier=identifiers[fingerprint],
+                identifier=identifiers[instance],
                 lifecycle_state=state,
                 placement=placement,
                 advisory=advisory,
             )
+            # Concern history cannot prove this exact instance was explained.
+            view = replace(view, repeat=True)
             all_views.append(view)
             if placement == BODY_PLACEMENT:
                 body_views.append(view)
@@ -2387,6 +2445,7 @@ class ReviewPublisher:
                 continue
             comment_body = (
                 f"{_with_discussion_instruction(render_finding(view))}\n\n"
+                f"{finding_instance_marker(comment)}\n\n"
                 f"{finding_marker(repository_id=repository_id, pull_request=pull_request, head_sha=head_sha, base_sha=base_sha, result=result, blocking=comment.blocks_approval, fingerprint=fingerprint, state=state)}"
             )
             validate_bounded_text(

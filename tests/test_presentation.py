@@ -284,8 +284,6 @@ class SummaryRenderingTests(unittest.TestCase):
             "Reviewed head: `abc1234`\n"
             "Coverage: complete within the configured review scope\n"
             "\n"
-            "Two concerns were found.\n"
-            "\n"
             "**1 required fix · 1 optional improvement**\n"
             "\n"
             "### Required\n"
@@ -298,7 +296,9 @@ class SummaryRenderingTests(unittest.TestCase):
             "\n"
             "### Next action\n"
             "Address RS-014 and run verification. "
-            "Optional suggestions do not affect the review gate.",
+            "Optional suggestions do not affect the review gate.\n\n"
+            "### Provider narrative (not review instructions)\n\n"
+            "Two concerns were found.",
         )
 
     def test_advisory_summary_states_enforcement_is_disabled(self):
