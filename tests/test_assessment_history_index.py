@@ -96,6 +96,12 @@ class IndexedHistoryTests(QueueFixture, unittest.TestCase):
         budgets = {}
         feedbacks = {}
         clock = [datetime(2026, 10, 9, tzinfo=timezone.utc)]
+        # This measures codec/retention structure, not elapsed host latency.
+        # Coverage CPU must not consume synthetic acquisition time. Keep one
+        # explicit original clock per profile, with no same-source reset.
+        acquisition_clock = [1000.0]
+        self.last_acquisition_clock = acquisition_clock
+        acquisition_wall = clock[0].timestamp()
 
         class RejectingProvider(AssessingProvider):
             def complete(self, request):
@@ -110,7 +116,10 @@ class IndexedHistoryTests(QueueFixture, unittest.TestCase):
             )
             # Same source reuses its original control object, never a refill.
             if source not in budgets:
-                budgets[source] = c.EvidenceReadBudget()
+                budgets[source] = c.EvidenceReadBudget(
+                    clock=lambda: acquisition_clock[0],
+                    wall_clock=lambda: acquisition_wall,
+                )
             control = budgets[source]
 
             def reader(reference):
@@ -354,6 +363,23 @@ class IndexedHistoryTests(QueueFixture, unittest.TestCase):
 
     def test_varied_100_every_checkpoint_is_one_part(self):
         self.profile(100)
+
+    def test_structural_profile_preserves_original_acquisition_deadline(self):
+        self.profile(8)
+        root, _, _, budgets, _ = self.last_profile
+        document = root.to_document()
+        original = {source: budget.snapshot() for source, budget in budgets.items()}
+        self.last_acquisition_clock[0] += 60.0
+        fresh = IndexedAssessmentJournal.from_document(document, reader=root.reader)
+        with self.assertRaisesRegex(ReviewInputError, "deadline"):
+            fresh.receipt(
+                source_digest=hashlib.sha256(b"source:1").hexdigest(),
+                operation_id=hashlib.sha256(b"operation:1").hexdigest(),
+            )
+        self.assertEqual(root.to_document(), document)
+        self.assertEqual(
+            {source: budget.snapshot() for source, budget in budgets.items()}, original
+        )
 
     def test_varied_250_every_checkpoint_is_one_part_and_complete_retention(self):
         self.profile(250)

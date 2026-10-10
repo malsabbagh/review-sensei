@@ -237,3 +237,15 @@ raised, and combined256-part/8MiB retention remains unqualified. The frozen B/D
 dependency profile exercises full feedback and the original eight-call 250
 domain fixture; those passes do not qualify hosted throughput or durable
 activation-tail accounting. Diagnostic early admission remains unchanged.
+
+### Structural profile acquisition clock
+
+The queue-only synthetic codec/retention profile uses an explicit deterministic
+acquisition clock and a fixed initial wall clock for each original control
+budget. Coverage CPU is excluded from this structural measurement; it is not a
+host elapsed-time or throughput qualification. Same-source replay retains the
+same budget object, calls and original deadline. A negative test advances that
+clock to the unchanged 60-second boundary and refuses a fresh archived receipt
+read without changing the journal, counters or deadline. Original provider
+execution accounting, changed-source refusal and seven-hour receipt expiry
+checks remain unchanged. Production time sources and limits are unchanged.
