@@ -1,6 +1,7 @@
 import type { WorkerEnv } from "./env";
 import { GitHubApi, type PublicWorkflowRuntimeShas } from "./github-api";
 import { type OidcClaims, verifyOidcAssertion } from "./oidc";
+import { authorizeFeedback, canonicalFeedback, FEEDBACK_GRANT_KEYS, parseFeedbackAttestation, type FeedbackAttestationRequest, type FeedbackAttestation } from "./feedback-attestation";
 import {
   PUBLIC_REPOSITORY,
   PUBLIC_WORKFLOW_PATH,
@@ -91,7 +92,7 @@ interface SessionScope {
   head_sha: string;
 }
 
-interface SessionAttestationRequest {
+interface LegacySessionAttestationRequest {
   version: 1;
   repository: string;
   repository_id: number;
@@ -106,13 +107,15 @@ interface SessionAttestationRequest {
   job_workflow_sha: string;
 }
 
-interface SessionAttestation extends SessionAttestationRequest {
+interface LegacySessionAttestation extends LegacySessionAttestationRequest {
   actor: string | null;
   actor_type: string | null;
   association: string | null;
   command_id: number | null;
   command_digest: string | null;
 }
+type SessionAttestationRequest = LegacySessionAttestationRequest | FeedbackAttestationRequest;
+type SessionAttestation = LegacySessionAttestation | FeedbackAttestation;
 
 interface SessionGrant {
   grant: string;
@@ -322,6 +325,11 @@ function sessionAttestation(
   claims: OidcClaims,
   scope: SessionScope,
 ): SessionAttestationRequest {
+  if (isObject(value) && value.version === 2) {
+    const parsed = parseFeedbackAttestation(value);
+    validateFeedbackContext(parsed, scope, claims);
+    return parsed;
+  }
   if (!isObject(value) || !hasExactKeys(value, SESSION_ATTESTATION_REQUEST_KEYS)) {
     throw new Error("broker_session_attestation_invalid");
   }
@@ -371,6 +379,32 @@ function sessionAttestation(
   };
 }
 
+/** Runtime and age checks shared by feedback issuance and verification.
+ * Feedback authorization has its own live source checks; it is never a command.
+ */
+function validateFeedbackContext(
+  value: FeedbackAttestationRequest,
+  scope: SessionScope,
+  claims?: OidcClaims,
+  runtime?: PublicWorkflowRuntimeShas,
+): void {
+  const now = Date.now();
+  if (
+    value.repository_id !== scope.repository_id ||
+    value.pull_request !== scope.pull_request ||
+    value.head_sha !== scope.head_sha ||
+    value.issued_at * 1000 > now + SESSION_ATTESTATION_SKEW_MS ||
+    now - value.issued_at * 1000 > SESSION_ATTESTATION_TTL_MS + SESSION_ATTESTATION_SKEW_MS ||
+    (claims !== undefined && (
+      value.repository !== claims.repository ||
+      value.run_id !== claims.run_id ||
+      value.job_workflow_ref !== claims.job_workflow_ref ||
+      value.job_workflow_sha !== claims.job_workflow_sha
+    ))
+  ) throw new Error("broker_session_attestation_invalid");
+  if (runtime !== undefined) authorizeWorkflowRuntimeSha(value.job_workflow_sha, runtime);
+}
+
 async function authorizeLiveSessionActor(
   github: GitHubApi,
   repository: string,
@@ -379,6 +413,7 @@ async function authorizeLiveSessionActor(
   attestation: SessionAttestationRequest,
   token: string,
 ): Promise<SessionAttestation> {
+  if (attestation.operation === "feedback") return authorizeFeedback(github, attestation, claims, token);
   if (attestation.operation === "review") {
     return {
       ...attestation,
@@ -415,7 +450,7 @@ async function authorizeLiveSessionActor(
 }
 
 function canonicalAttestation(value: SessionAttestation): string {
-  return JSON.stringify(value);
+  return value.version === 2 ? canonicalFeedback(value) : JSON.stringify(value);
 }
 
 function sessionAttestationForVerification(
@@ -423,6 +458,11 @@ function sessionAttestationForVerification(
   scope: SessionScope,
   runtime: PublicWorkflowRuntimeShas,
 ): SessionAttestation {
+  if (value.version === 2) {
+    const parsed = parseFeedbackAttestation(value, true);
+    validateFeedbackContext(parsed, scope, undefined, runtime);
+    return parsed as FeedbackAttestation;
+  }
   const operation = value.operation;
   const sourceCommentId = value.source_comment_id;
   const issuedAt = value.issued_at;
@@ -687,7 +727,7 @@ export class TokenBroker {
     if (typeof grant !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(grant)) {
       throw new Error("broker_session_grant_invalid");
     }
-    if (!isObject(attestation) || !hasExactKeys(attestation, SESSION_ATTESTATION_GRANT_KEYS)) {
+    if (!isObject(attestation) || !hasExactKeys(attestation, attestation.version === 2 ? FEEDBACK_GRANT_KEYS : SESSION_ATTESTATION_GRANT_KEYS)) {
       throw new Error("broker_session_attestation_invalid");
     }
     const value = attestation as Record<string, unknown>;

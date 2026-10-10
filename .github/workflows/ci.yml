@@ -335,6 +335,17 @@ jobs:
       - name: Install Worker dependencies
         working-directory: deploy/cloudflare
         run: npm ci
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install Python IPC qualification dependencies
+        run: |
+          python -m pip install -r requirements/ci.txt
+          python -m pip install -e .
+      - name: Qualify production feedback broker IPC
+        env:
+          EPIC238_F_MEASUREMENTS: ${{ runner.temp }}/feedback-broker-ipc-metrics.json
+        run: python -W error::ResourceWarning -m tests.epic238_feedback_broker_qualification -v
       - name: Run Worker tests
         working-directory: deploy/cloudflare
         run: npm test

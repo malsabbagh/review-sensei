@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from .assessment_queue import AssessmentQueue
 from .budgets import ProviderCapabilities, ReviewWorkBudgets, provider_output_tokens
 from .errors import ReviewInputError
 from .evidence import EvidenceBundle, evidence_digest
-from .execution import WorkExecution, execute_plan
+from .execution import WorkCheckpointStore, WorkExecution, execute_plan
 from .human_assessment import (
     MAX_HUMAN_SOURCE_BYTES,
     HumanAssessmentReply,
@@ -20,7 +22,13 @@ from .human_assessment import (
 )
 from .models import ProviderRequest, ProviderResponse
 from .outcomes import ResourceBudget, ResourceBudgetTracker
-from .planning import WorkBatch, WorkRequirement, plan_continuation, plan_work
+from .planning import (
+    ReviewWorkPlan,
+    WorkBatch,
+    WorkRequirement,
+    plan_continuation,
+    plan_work,
+)
 from .providers.base import ReviewProvider
 from .validation import DEFAULT_REVIEW_LIMITS, validate_bounded_text
 
@@ -43,6 +51,47 @@ _REPAIRABLE_VALIDATION = frozenset(
 )
 
 
+def _feedback_handoff(
+    feedback: object | None,
+    bundle: EvidenceBundle,
+) -> tuple[dict[str, Any], str | None]:
+    """Pass the frozen D value whole to B's reviewed assessment codecs.
+
+    Optional import keeps legacy callers usable before the dependency rollout.
+    Digests are bindings only; the host still authenticates every source.
+    """
+    if feedback is None:
+        return {}, None
+    try:
+        model = importlib.import_module(".feedback", __package__).FeedbackSelection
+    except ImportError:
+        raise ReviewInputError("complete feedback assessment is unavailable") from None
+    if not isinstance(feedback, model):
+        raise ReviewInputError("complete feedback selection is invalid")
+    selected: Any = feedback
+    snapshot = bundle.snapshot
+    if (
+        selected.repository != snapshot.repository
+        or selected.pull_request != snapshot.pull_request
+        or selected.base_sha != snapshot.base_sha
+        or selected.head_sha != snapshot.head_sha
+    ):
+        raise ReviewInputError("complete feedback snapshot authority changed")
+    return {"feedback": selected}, selected.digest
+
+
+def _feedback_authority(authority: str, feedback_digest: str | None) -> str:
+    if feedback_digest is None:
+        return authority
+    return evidence_digest(
+        {
+            "domain": "reviewsensei:assessment-feedback:v1",
+            "authority": authority,
+            "feedback": feedback_digest,
+        }
+    )
+
+
 @dataclass(frozen=True)
 class HumanAssessmentWork:
     reply: HumanAssessmentReply
@@ -50,6 +99,28 @@ class HumanAssessmentWork:
     inventory: PendingHumanReview
     scope_execution: WorkExecution[HumanAssessmentReply] | None = None
     discovery: ReviewRun | None = None
+    queue: AssessmentQueue | None = None
+    selected_ids: tuple[str, ...] | None = None
+    admitted_queue: AssessmentQueue | None = None
+    feedback_digest: str | None = None
+
+    def apply_to(self, current: PendingHumanReview) -> PendingHumanReview:
+        """Union a revalidated receipt into latest resolutions without reopening.
+
+        Hosts still validate_work against current authority and fence the write.
+        Receipt replay can include a decision the latest inventory already has.
+        """
+        from .assessment_queue import inventory_digest
+
+        if inventory_digest(current) != inventory_digest(self.inventory):
+            raise ReviewInputError("assessment receipt inventory is stale")
+        return current.apply(
+            tuple(
+                item
+                for item in self.reply.decisions
+                if item.fingerprint not in current.resolved
+            )
+        )
 
 
 def reassess(
@@ -66,10 +137,24 @@ def reassess(
     prior: HumanAssessmentWork | None = None,
     broader_service: ReviewService | None = None,
     recovery: WorkRecoveryStore | None = None,
+    queue: AssessmentQueue | None = None,
+    targets: tuple[str, ...] | None = None,
+    checkpoint: WorkCheckpointStore | None = None,
+    feedback: object | None = None,
 ) -> HumanAssessmentWork:
-    validate_bounded_text(
-        source_body, MAX_HUMAN_SOURCE_BYTES, label="human reply", allow_empty=False
-    )
+    feedback_options, feedback_digest = _feedback_handoff(feedback, bundle)
+    original_authority = authority_digest
+    authority_digest = _feedback_authority(authority_digest, feedback_digest)
+    if feedback is None:
+        validate_bounded_text(
+            source_body, MAX_HUMAN_SOURCE_BYTES, label="human reply", allow_empty=False
+        )
+    else:
+        selected_targets = feedback_options["feedback"].target_ids
+        if selected_targets:
+            if targets is not None and targets != selected_targets:
+                raise ReviewInputError("complete feedback target selection changed")
+            targets = selected_targets
     if bundle.snapshot.base_sha != pending.base_sha or not bundle.snapshot.head_sha:
         raise ReviewInputError("human assessment exact snapshot is missing")
     tracker = tracker or ResourceBudgetTracker(ResourceBudget.create())
@@ -86,6 +171,27 @@ def reassess(
         output_tokens=provider_output_tokens(provider),
     )
     records = bundle.by_path()
+    latest_pending = pending
+    latest_queue = queue
+    if targets is not None and queue is None:
+        raise ReviewInputError("targeted assessment requires a current complete queue")
+    if queue is not None:
+        prepare = getattr(checkpoint, "prepare_queue", None)
+        if not callable(prepare):
+            raise ReviewInputError(
+                "queued assessment requires durable original admission"
+            )
+        queue = prepare(queue, pending, bundle.snapshot)
+        pending = replace(pending, resolved=queue.resolved_ids)
+        queue.require_current(pending, bundle.snapshot)
+    selected_ids = (
+        queue.select(
+            targets=targets,
+            limit=250,
+        )
+        if queue is not None
+        else None
+    )
 
     def requirements_for(current: PendingHumanReview) -> tuple[WorkRequirement, ...]:
         return tuple(
@@ -123,6 +229,7 @@ def reassess(
             max_response_bytes=budgets.batch_output_bytes,
             max_output_tokens=budgets.max_output_tokens,
             allow_context_requests=True,
+            **feedback_options,
         )
 
     def validate(response: ProviderResponse, batch: WorkBatch) -> HumanAssessmentReply:
@@ -133,6 +240,7 @@ def reassess(
             diff_context=batch.diff_context,
             allow_context_requests=True,
             allowed_context_paths=set(records),
+            **feedback_options,
         )
 
     def encode_reply(value: HumanAssessmentReply) -> object:
@@ -142,16 +250,100 @@ def reassess(
             "context_requests": [item.to_dict() for item in value.context_requests],
         }
 
+    admission_failures: dict[str, str] = {}
+    if selected_ids is not None:
+        eligible = []
+        requirements_by_id = {item.identity: item for item in requirements}
+        evidence_by_id = bundle.by_id()
+        for identity in selected_ids:
+            required = requirements_by_id[identity]
+            if not bundle.enumeration_complete or any(
+                key not in evidence_by_id or not evidence_by_id[key].complete
+                for key in required.evidence_ids
+            ):
+                admission_failures[identity] = "required-evidence-missing"
+                continue
+            batch = WorkBatch(
+                "reassessment",
+                (required,),
+                tuple(
+                    sorted(
+                        (evidence_by_id[key] for key in required.evidence_ids),
+                        key=lambda item: item.path,
+                    )
+                ),
+            )
+            try:
+                request = render(batch)
+                fits = len(
+                    batch.diff_context.encode("utf-8")
+                ) <= budgets.batch_diff_bytes and budgets.fits_prompt(
+                    request.prompt + "\n\n" + _CORRECTION,
+                    output_tokens=request.max_output_tokens,
+                )
+            except ReviewInputError:
+                fits = False
+            if not fits:
+                admission_failures[identity] = "required-evidence-oversized"
+                continue
+            eligible.append(identity)
+        # Admission-blocked obligations remain unvisited in the complete queue,
+        # but cannot occupy a dispatch window and starve admissible late work.
+        selected_ids = tuple(
+            eligible[
+                : budgets.max_findings_per_batch * tracker.budget.max_provider_calls
+            ]
+        )
+
     plan = plan_work(
         "reassessment",
         bundle,
-        requirements,
+        tuple(
+            item
+            for item in requirements
+            if selected_ids is None or item.identity in selected_ids
+        ),
         budgets=budgets,
         render=render,
         max_batches=max(1, tracker.budget.max_provider_calls),
         correction=_CORRECTION,
         authority_digest=authority_digest,
     )
+
+    def retain_complete_plan(selected: ReviewWorkPlan) -> ReviewWorkPlan:
+        if selected_ids is None:
+            return selected
+        return replace(
+            selected,
+            requirements=tuple(
+                sorted(
+                    requirements_for(current_inventory), key=lambda item: item.identity
+                )
+            ),
+            unprocessed=tuple(
+                sorted(
+                    (
+                        *selected.unprocessed,
+                        *(
+                            (
+                                item.fingerprint,
+                                admission_failures.get(
+                                    item.fingerprint,
+                                    "target-not-selected"
+                                    if targets is not None
+                                    else "queue-deferred",
+                                ),
+                            )
+                            for item in current_inventory.pending
+                            if selected_ids is not None
+                            and item.fingerprint not in selected_ids
+                        ),
+                    )
+                )
+            ),
+        )
+
+    plan = retain_complete_plan(plan)
     execution = execute_plan(
         plan,
         provider=provider,
@@ -166,6 +358,7 @@ def reassess(
         decode_recovery=lambda value, batch: validate(
             ProviderResponse(json.dumps(value), provider.name), batch
         ),
+        checkpoint=checkpoint,
         repairable_validation=lambda exc: (
             isinstance(exc, HumanAssessmentValidationError)
             and exc.diagnostic in _REPAIRABLE_VALIDATION
@@ -198,7 +391,7 @@ def reassess(
         for item in execution.completed
         for request in item.value.context_requests
     )
-    if requests and scope_execution is None:
+    if requests and scope_execution is None and checkpoint is None:
         scope_execution = execution
         requested = {item.reference: item for item in requests}
         findings = []
@@ -217,7 +410,11 @@ def reassess(
         expanded = plan_continuation(
             execution.plan,
             bundle,
-            requirements_for(current_inventory),
+            tuple(
+                item
+                for item in requirements_for(current_inventory)
+                if selected_ids is None or item.identity in selected_ids
+            ),
             reusable=tuple(
                 item.batch
                 for item in execution.completed
@@ -232,6 +429,7 @@ def reassess(
                 if item.kind == "discovery"
             },
         )
+        expanded = retain_complete_plan(expanded)
 
         def validate_expansion(
             response: ProviderResponse, batch: WorkBatch
@@ -306,11 +504,40 @@ def reassess(
         for decision in completed.value.decisions
     )
     updated = current_inventory.apply(decisions)
-    body = f"Reassessed {len(decisions)} findings for the current head: {len(updated.resolved) - len(pending.resolved)} addressed or safely dismissed; {len(updated.pending)} remain pending. All approval requirements still apply."
+    updated_queue = None
+    if queue is not None:
+        updated_queue = queue.advance(
+            visited=execution.attempted_ids, resolved=updated.resolved
+        )
+        if (
+            updated_queue.inventory_digest != queue.inventory_digest
+            or current_inventory != pending
+        ):
+            updated_queue = updated_queue.reconcile(updated)
+        if latest_queue is not None:
+            # Replays return old accepted results but must never reopen or
+            # duplicate a concurrent resolution already in latest authority.
+            updated_queue = latest_queue.advance(
+                visited=tuple(
+                    item
+                    for item in execution.attempted_ids
+                    if item in latest_queue.pending_order
+                ),
+                resolved=tuple(
+                    sorted(set(latest_pending.resolved) | set(updated.resolved))
+                ),
+            )
+    latest_resolved = set(latest_pending.resolved) | set(updated.resolved)
+    body = f"Reassessed {len(decisions)} findings for the current head: {len(latest_resolved) - len(latest_pending.resolved)} addressed or safely dismissed; {len(current_inventory.findings) - len(latest_resolved)} remain pending. All approval requirements still apply."
     if not bundle.enumeration_complete:
         body = "Current changed-file enumeration is incomplete. " + body
     if execution.pending:
         body += " Some required evidence or provider work could not be completed within the configured bounds; those findings remain pending."
+    if selected_ids is not None:
+        assessed = {item.fingerprint for item in decisions}
+        body += f" {len(current_inventory.pending) - len(assessed)} pending findings were not assessed in this operation."
+    if requests and checkpoint is not None:
+        body += " Additional scope was requested; durable scope integration is required before those concerns can be reassessed."
     reply = HumanAssessmentReply(body, decisions)
     if scope_execution is not None and any(
         request.kind == "discovery"
@@ -320,14 +547,23 @@ def reassess(
         body += " Broader discovery was requested; the affected concerns remain pending until a new full result is reconciled and published through the trusted review flow."
         reply = HumanAssessmentReply(body, decisions)
     result = HumanAssessmentWork(
-        reply, execution, current_inventory, scope_execution, discovery
+        reply,
+        execution,
+        current_inventory,
+        scope_execution,
+        discovery,
+        updated_queue,
+        selected_ids,
+        queue,
+        feedback_digest,
     )
     validate_work(
         result,
-        pending=pending,
+        pending=latest_pending,
         bundle=bundle,
         source_body=source_body,
-        authority_digest=authority_digest,
+        authority_digest=original_authority,
+        feedback=feedback,
     )
     return result
 
@@ -339,8 +575,34 @@ def validate_work(
     bundle: EvidenceBundle,
     source_body: str,
     authority_digest: str,
+    feedback: object | None = None,
 ) -> None:
     """Revalidate every accepted decision against its original complete batch."""
+    feedback_options, feedback_digest = _feedback_handoff(feedback, bundle)
+    if work.feedback_digest != feedback_digest:
+        raise ReviewInputError("complete feedback receipt authority changed")
+    authority_digest = _feedback_authority(authority_digest, feedback_digest)
+    latest = pending
+    if work.admitted_queue is not None:
+        from .assessment_queue import inventory_digest
+
+        if (
+            work.admitted_queue.snapshot != bundle.snapshot
+            or work.admitted_queue.inventory_digest != inventory_digest(pending)
+            or not set(work.admitted_queue.resolved_ids) <= set(pending.resolved)
+            or work.queue is None
+            or work.selected_ids is None
+            or len(set(work.selected_ids)) != len(work.selected_ids)
+            or not set(work.selected_ids) <= set(work.admitted_queue.pending_order)
+            or any(
+                not set(item.requirement_ids) <= set(work.selected_ids)
+                for item in work.execution.plan.batches
+            )
+        ):
+            raise ReviewInputError("assessment queue admission authority is invalid")
+        pending = replace(pending, resolved=work.admitted_queue.resolved_ids)
+    elif work.queue is not None or work.selected_ids is not None:
+        raise ReviewInputError("assessment queue admission receipt is missing")
     plan = work.execution.plan
     if (
         plan.mode != "reassessment"
@@ -397,6 +659,7 @@ def validate_work(
                 diff_context=completed.batch.diff_context,
                 allow_context_requests=True,
                 allowed_context_paths=set(bundle.by_path()),
+                **feedback_options,
             )
             if validated != completed.value:
                 raise ReviewInputError("human assessment scope receipt is invalid")
@@ -452,8 +715,22 @@ def validate_work(
                 by_id[decision.fingerprint],
                 source_body=source_body,
                 diff_context=batch.diff_context,
+                **feedback_options,
             )
             decisions.append(decision)
     if tuple(decisions) != work.reply.decisions:
         raise ReviewInputError("human assessment aggregate decisions conflict")
     pending.apply(work.reply.decisions)
+    if work.queue is not None and work.admitted_queue is not None:
+        resolved = tuple(
+            sorted(
+                set(latest.resolved) | set(pending.apply(work.reply.decisions).resolved)
+            )
+        )
+        if (
+            work.queue.inventory_ids != work.admitted_queue.inventory_ids
+            or work.queue.snapshot != bundle.snapshot
+            or work.queue.resolved_ids != resolved
+            or work.queue.inventory_digest != work.admitted_queue.inventory_digest
+        ):
+            raise ReviewInputError("assessment queue progress changed obligations")

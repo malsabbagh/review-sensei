@@ -46,9 +46,11 @@ from ...session import (
     InMemorySessionLedger,
     LocalSessionLedger,
     SessionIdentity,
+    SessionRecord,
     checkpoint_review_analysis,
     next_session_generation,
     prepare_review_transaction,
+    read_session_baseline,
     session_reservation_id,
     should_skip_automation,
 )
@@ -68,6 +70,8 @@ def restored_compatible_baseline(
     *,
     current_key: ReviewContextCacheKey,
     policy: ReviewConvergencePolicy,
+    ledger: object | None = None,
+    record: SessionRecord | None = None,
 ) -> ReviewBaseline | None:
     """Return a completed baseline only when it parses and is compatible.
 
@@ -81,7 +85,13 @@ def restored_compatible_baseline(
     ):
         return None
     try:
-        restored = baseline_from_history_document(prior_history.get("baseline"))
+        restored = (
+            read_session_baseline(ledger, record)
+            if ledger is not None and record is not None
+            else baseline_from_history_document(prior_history.get("baseline"))
+        )
+        if restored is None:
+            return None
         compatible = (
             evaluate_baseline_compatibility(
                 restored,
@@ -600,6 +610,8 @@ def run_observed_review_sequence(
                 prior_history,
                 current_key=current_key,
                 policy=policy,
+                ledger=ledger,
+                record=prior_record,
             )
             # True only when this job restored a compatible baseline. That
             # same object is what publication consumes. A missing or

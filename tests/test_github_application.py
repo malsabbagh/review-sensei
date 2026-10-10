@@ -1116,7 +1116,7 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(legacy_reviewer.calls[0]["evidence_confirmed_concerns"], ())
 
         with patch(
-            "review_sensei.hosting.github.application.baseline_from_history_document",
+            "review_sensei.hosting.github.application.read_session_baseline",
             side_effect=ReviewInputError("corrupt persisted baseline"),
         ):
             malformed = application.publish_review(**publish_kwargs)

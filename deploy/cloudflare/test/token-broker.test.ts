@@ -8,6 +8,8 @@ import type { WorkerEnv } from "../src/env";
 import { GitHubApi } from "../src/github-api";
 import { TokenBroker } from "../src/token-broker";
 import commandParityCases from "../../../tests/fixtures/maintainer-command-parity.json";
+import feedbackFixture from "../../../tests/fixtures/feedback-session-attestation.json";
+import { canonicalFeedback, feedbackDigest, parseFeedbackAttestation } from "../src/feedback-attestation";
 
 const SHA = "a".repeat(40);
 const TAG_OBJECT_SHA = "b".repeat(40);
@@ -119,6 +121,98 @@ beforeEach(() => {
 });
 
 describe("token broker authorization", () => {
+  it("binds a full Unicode feedback selection to live canonical sources and OIDC numeric actor", async () => {
+    const { broker, github, ledgerFetch } = harness();
+    const live = feedbackFixture.selection.sources;
+    Object.assign(github, {
+      feedbackPullRequest: vi.fn(async () => ({ base_sha: "c".repeat(40), head_sha: SHA })),
+      feedbackComment: vi.fn(async (_repo: string, _pr: number, kind: string, id: number) => live.find(source => source.kind === kind && source.comment_id === id)),
+    });
+    oidc.verify.mockResolvedValue(claims({ event_name: "issue_comment" }));
+    const request = { ...feedbackFixture.request, issued_at: Math.floor(Date.now() / 1000) };
+    const result = await broker.exchange({ oidc_token: "feedback-assertion", capability: "review_session", session: { repository_id: request.repository_id, pull_request: 7, head_sha: SHA }, session_attestation: request });
+    expect(result.session_attestation).toEqual({ ...request, actor: "octocat", actor_id: 12345678, actor_type: "User", association: "OWNER" });
+    expect(canonicalFeedback(result.session_attestation)).not.toContain(live[0].body);
+    expect(await feedbackDigest(feedbackFixture.selection)).toBe(request.feedback.selection_digest);
+    const verified = await broker.verifySessionGrant(result.session_grant, result.session_attestation);
+    expect(verified).toEqual(result.session_attestation);
+    expect(ledgerFetch.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).action)).toContain("session_verify");
+  });
+
+  it("refuses changed feedback actors, source bodies and missing trigger mentions before issuing a grant", async () => {
+    for (const mutation of ["numeric-actor", "body", "missing", "snapshot"]) {
+      const { broker, github, ledgerFetch } = harness();
+      const sources = structuredClone(feedbackFixture.selection.sources);
+      Object.assign(github, {
+        feedbackPullRequest: vi.fn(async () => ({ base_sha: mutation === "snapshot" ? "e".repeat(40) : "c".repeat(40), head_sha: SHA })),
+        feedbackComment: vi.fn(async (_repo: string, _pr: number, kind: string, id: number) => {
+          const value = sources.find(source => source.kind === kind && source.comment_id === id);
+          return mutation === "missing" ? null : mutation === "body" ? { ...value, body: "edited" } : value;
+        }),
+      });
+      oidc.verify.mockResolvedValue(claims({ event_name: "issue_comment", actor_id: mutation === "numeric-actor" ? 999 : 12345678 }));
+      const request = { ...feedbackFixture.request, issued_at: Math.floor(Date.now() / 1000) };
+      await expect(broker.exchange({ oidc_token: "feedback-assertion", capability: "review_session", session: { repository_id: request.repository_id, pull_request: 7, head_sha: SHA }, session_attestation: request })).rejects.toThrow();
+      expect(ledgerFetch.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).action)).not.toContain("session_issue");
+    }
+  });
+
+  it("keeps feedback-v2 closed and never treats it as command or unauthenticated review", () => {
+    for (const patch of [{ operation: "command" }, { version: 1 }, { extra: true }, { source_comment_id: 999 }]) {
+      expect(() => parseFeedbackAttestation({ ...feedbackFixture.request, ...patch })).toThrow("broker_feedback_attestation_invalid");
+    }
+    const request = structuredClone(feedbackFixture.request);
+    request.mutation.read_accounting.calls = 65;
+    expect(() => parseFeedbackAttestation(request)).toThrow("broker_feedback_attestation_invalid");
+  });
+
+  it("binds combined admission and dispatch to both exact request digests", async () => {
+    const { broker, github } = harness();
+    const live = feedbackFixture.selection.sources;
+    Object.assign(github, {
+      feedbackPullRequest: vi.fn(async () => ({ base_sha: "c".repeat(40), head_sha: SHA })),
+      feedbackComment: vi.fn(async (_repo: string, _pr: number, kind: string, id: number) => live.find(source => source.kind === kind && source.comment_id === id)),
+    });
+    oidc.verify.mockResolvedValue(claims({ event_name: "issue_comment" }));
+    const request = {
+      ...feedbackFixture.request, issued_at: Math.floor(Date.now() / 1000),
+      mutation: { ...feedbackFixture.request.mutation, reason: "admission-dispatch", request_digest: "1".repeat(64), dispatch_digest: "2".repeat(64) },
+    };
+    expect(parseFeedbackAttestation(request)).toEqual(request);
+    for (const key of ["request_digest", "dispatch_digest"]) {
+      expect(() => parseFeedbackAttestation({ ...request, mutation: { ...request.mutation, [key]: null } })).toThrow("broker_feedback_attestation_invalid");
+    }
+    expect(() => parseFeedbackAttestation({ ...request, mutation: { ...request.mutation, reason: ["admission-dispatch"] } })).toThrow("broker_feedback_attestation_invalid");
+    const grant = await broker.exchange({ oidc_token: "feedback-assertion", capability: "review_session", session: { repository_id: request.repository_id, pull_request: 7, head_sha: SHA }, session_attestation: request });
+    expect(grant.session_attestation?.mutation).toEqual(request.mutation);
+    expect(await broker.verifySessionGrant(grant.session_grant, grant.session_attestation)).toEqual(grant.session_attestation);
+  });
+
+  it("rejects array coercion in every closed feedback enum", () => {
+    const request = feedbackFixture.request;
+    const invalid = [
+      { ...request, mutation: { ...request.mutation, reason: ["dispatch"] } },
+      { ...request, feedback: { ...request.feedback, trigger: { ...request.feedback.trigger, kind: ["issue"] } } },
+      ...["kind", "association"].map(key => ({ ...request, feedback: { ...request.feedback, sources: request.feedback.sources.map((source, index) => index === 0 ? { ...source, [key]: [source[key as "kind" | "association"]] } : source) } })),
+    ];
+    for (const value of invalid) expect(() => parseFeedbackAttestation(value)).toThrow("broker_feedback_attestation_invalid");
+    const metadata = structuredClone(request);
+    metadata.feedback.sources[1].author = "\ufeffcollaborator";
+    expect(parseFeedbackAttestation(metadata)).toEqual(metadata);
+  });
+
+  it("refuses a coerced mutation reason before live authorization can issue a grant", async () => {
+    const { broker, github, ledgerFetch } = harness();
+    const live = feedbackFixture.selection.sources;
+    Object.assign(github, {
+      feedbackPullRequest: vi.fn(async () => ({ base_sha: "c".repeat(40), head_sha: SHA })),
+      feedbackComment: vi.fn(async (_repo: string, _pr: number, kind: string, id: number) => live.find(source => source.kind === kind && source.comment_id === id)),
+    });
+    oidc.verify.mockResolvedValue(claims({ event_name: "issue_comment" }));
+    const request = { ...feedbackFixture.request, issued_at: Math.floor(Date.now() / 1000), mutation: { ...feedbackFixture.request.mutation, reason: ["dispatch"] } };
+    await expect(broker.exchange({ oidc_token: "feedback-assertion", capability: "review_session", session: { repository_id: request.repository_id, pull_request: 7, head_sha: SHA }, session_attestation: request })).rejects.toThrow("broker_feedback_attestation_invalid");
+    expect(ledgerFetch.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).action)).not.toContain("session_issue");
+  });
   it("issues recovery evidence authority with Actions read only", async () => {
     const { broker, github } = harness();
     const result = await broker.exchange({ oidc_token: "oidc.token", capability: "review_actions" });

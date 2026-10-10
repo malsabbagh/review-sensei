@@ -21,7 +21,7 @@ from .coverage import (
 from .dependencies import lockfile_kind
 from .diff import DiffAnalysis, DiffFileRecord, DiffHunk, analyze_diff
 from .errors import ReviewInputError
-from .evidence import EvidenceBundle, EvidenceRecord, evidence_digest
+from .evidence import EvidenceBundle, EvidenceRecord, EvidenceSnapshot, evidence_digest
 from .validation import (
     DEFAULT_REVIEW_LIMITS,
     DEFAULT_TOTAL_WORK_BUDGET,
@@ -255,6 +255,8 @@ def plan_work(
     batches: list[WorkBatch] = []
     unprocessed: list[tuple[str, str]] = []
     current: tuple[WorkRequirement, ...] = ()
+    failure_reason = "required-evidence-oversized"
+    planning_expired = False
 
     def batch_for(candidates: tuple[WorkRequirement, ...]) -> WorkBatch:
         ids = {key for item in candidates for key in item.evidence_ids}
@@ -267,6 +269,11 @@ def plan_work(
         return WorkBatch(mode, candidates, selected)
 
     def fits(candidates: tuple[WorkRequirement, ...]) -> bool:
+        nonlocal failure_reason, planning_expired
+        if planning_expired:
+            failure_reason = "planning-deadline-exceeded"
+            return False
+        failure_reason = "required-evidence-oversized"
         batch = batch_for(candidates)
         if mode == "reassessment" and len(candidates) > budgets.max_findings_per_batch:
             return False
@@ -277,7 +284,16 @@ def plan_work(
             return False
         try:
             request = render(batch)
-        except ReviewInputError:
+        except ReviewInputError as exc:
+            if exc.error_category == "mandatory_context_oversized":
+                failure_reason = "mandatory-context-and-evidence-oversized"
+            elif exc.error_category == "planning_deadline_exhausted":
+                failure_reason = "planning-deadline-exceeded"
+                planning_expired = True
+            elif exc.error_category == "host_context_output_oversized":
+                failure_reason = "host-context-output-oversized"
+            elif exc.error_category == "host_context_diagnostics_oversized":
+                failure_reason = "host-context-diagnostics-oversized"
             return False
         if not isinstance(request, ProviderRequest):
             raise ReviewInputError("work renderer must return a ProviderRequest")
@@ -309,7 +325,7 @@ def plan_work(
             unprocessed.append((item.identity, "required-evidence-missing"))
             continue
         if not fits((item,)):
-            unprocessed.append((item.identity, "required-evidence-oversized"))
+            unprocessed.append((item.identity, failure_reason))
             continue
         if current and not fits(current + (item,)):
             flush()
@@ -484,6 +500,8 @@ def _classify_file(
     paths = record.coverage_paths
     if record.binary or any(path in analysis.binary_paths for path in paths):
         return "unsupported", "binary"
+    if not EvidenceRecord.from_diff_record(record, EvidenceSnapshot()).complete:
+        return "unsupported", "incomplete-enumeration"
     if any(lockfile_kind(path) == "unsupported" for path in paths):
         return "unsupported", "lockfile-format"
     # npm lockfiles are material review input, even below a generated directory.

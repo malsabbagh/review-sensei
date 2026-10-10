@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import Mapping
 
-from .diff import DiffFileRecord, analyze_diff
+from .bounded_evidence import canonical_bytes
+from .diff import DiffAnalysis, DiffFileRecord, analyze_diff
 from .errors import ReviewInputError
 from .validation import (
     DEFAULT_TOTAL_WORK_BUDGET,
@@ -64,9 +65,11 @@ class EvidenceSnapshot:
 
 def patch_diff(path: str, patch: str, *, old_path: str | None = None) -> str:
     """Frame exact API hunks with validated Git paths, without line rewriting."""
-    validate_repository_path(path, label="evidence path")
+    validate_repository_path(path, label="evidence path", allow_glob_chars=True)
     if old_path is not None:
-        validate_repository_path(old_path, label="evidence old path")
+        validate_repository_path(
+            old_path, label="evidence old path", allow_glob_chars=True
+        )
     old = old_path or path
     old_name = json.dumps("a/" + old, ensure_ascii=False)
     new_name = json.dumps("b/" + path, ensure_ascii=False)
@@ -86,9 +89,13 @@ class EvidenceRecord:
     expected_deletions: int | None = None
 
     def __post_init__(self) -> None:
-        validate_repository_path(self.path, label="evidence path")
+        validate_repository_path(
+            self.path, label="evidence path", allow_glob_chars=True
+        )
         if self.old_path is not None:
-            validate_repository_path(self.old_path, label="evidence old path")
+            validate_repository_path(
+                self.old_path, label="evidence old path", allow_glob_chars=True
+            )
         if not isinstance(self.snapshot, EvidenceSnapshot) or not isinstance(
             self.supplied_complete, bool
         ):
@@ -128,15 +135,10 @@ class EvidenceRecord:
         )
 
     @cached_property
-    def complete(self) -> bool:
-        if (
-            not self.supplied_complete
-            or not self.patch.strip()
-            or self.provenance == "discovery-hunk"
-        ):
-            return False
+    def analysis(self) -> DiffAnalysis | None:
+        """Canonical bounded syntax/count facts, independent of supplied claims."""
         try:
-            analysis = analyze_diff(
+            return analyze_diff(
                 self.diff,
                 allow_incomplete=True,
                 max_bytes=DEFAULT_TOTAL_WORK_BUDGET.max_total_diff_bytes,
@@ -145,7 +147,28 @@ class EvidenceRecord:
                 max_hunks=DEFAULT_TOTAL_WORK_BUDGET.max_total_hunks,
             )
         except ReviewInputError:
+            return None
+
+    @cached_property
+    def complete(self) -> bool:
+        analysis = self.analysis
+        if (
+            not self.supplied_complete
+            or not self.patch.strip()
+            or self.provenance == "discovery-hunk"
+            or analysis is None
+        ):
             return False
+        # A syntactically valid duplicate/overlapping hunk is not an exhaustive
+        # canonical patch. Set-based line counts alone can hide duplicated ranges.
+        old_end = new_end = 0
+        for hunk in analysis.hunk_records:
+            old_begin = hunk.old_start - (1 if hunk.old_count else 0)
+            new_begin = hunk.new_start - (1 if hunk.new_count else 0)
+            if old_begin < old_end or new_begin < new_end:
+                return False
+            old_end = hunk.old_start + hunk.old_count - (1 if hunk.old_count else 0)
+            new_end = hunk.new_start + hunk.new_count - (1 if hunk.new_count else 0)
         return (
             analysis.enumeration_complete
             and len(analysis.file_records) == 1
@@ -259,3 +282,192 @@ class EvidenceBundle:
 
     def by_id(self) -> Mapping[str, EvidenceRecord]:
         return {record.evidence_id: record for record in self.records}
+
+
+@dataclass(frozen=True)
+class EvidenceGroup:
+    """An exhaustive atomic group, independent of transport or prompt packing.
+
+    Group digests are integrity identities, not authenticated read or assessment
+    receipts. A caller must authenticate the shared partition root and current
+    snapshot before using a restored group. Parts never become complete files.
+    """
+
+    bundle: EvidenceBundle
+    required_paths: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.bundle, EvidenceBundle)
+            or self.bundle.snapshot.base_sha is None
+            or self.bundle.snapshot.head_sha is None
+            or not isinstance(self.required_paths, tuple)
+            or not 1 <= len(self.required_paths) <= 64
+            or any(not isinstance(path, str) for path in self.required_paths)
+            or len(set(self.required_paths)) != len(self.required_paths)
+        ):
+            raise ReviewInputError("evidence group scope is invalid")
+        for path in self.required_paths:
+            validate_repository_path(
+                path, label="evidence group path", allow_glob_chars=True
+            )
+        # Reject fragment bundles; no historical/discovery hunk can stand in for
+        # one of the required canonical current files.
+        self.bundle.by_path()
+        object.__setattr__(self, "required_paths", tuple(sorted(self.required_paths)))
+
+    @cached_property
+    def records(self) -> tuple[EvidenceRecord, ...]:
+        available = self.bundle.by_path()
+        return tuple(
+            available[path] for path in self.required_paths if path in available
+        )
+
+    @cached_property
+    def pending(self) -> tuple[tuple[str, str], ...]:
+        available = self.bundle.by_path()
+        pending = []
+        for path in self.required_paths:
+            if not self.bundle.enumeration_complete:
+                reason = "incomplete-enumeration"
+            elif path not in available:
+                reason = "required-evidence-missing"
+            elif not available[path].complete:
+                reason = "required-evidence-incomplete"
+            else:
+                continue
+            pending.append((path, reason))
+        return tuple(pending)
+
+    @property
+    def complete(self) -> bool:
+        return not self.pending
+
+    def coverage_document(self) -> dict[str, object]:
+        return {
+            "snapshot": self.bundle.snapshot.to_dict(),
+            "enumeration_complete": self.bundle.enumeration_complete,
+            "required_paths": list(self.required_paths),
+            "files": [
+                {
+                    **record.to_dict(),
+                    "evidence_id": record.evidence_id,
+                    "complete": record.complete,
+                    "hunks": len(record.analysis.hunk_records)
+                    if record.analysis is not None
+                    else None,
+                    "additions": sum(
+                        len(hunk.added_lines) for hunk in record.analysis.hunk_records
+                    )
+                    if record.analysis is not None
+                    else None,
+                    "deletions": sum(
+                        len(hunk.deleted_lines) for hunk in record.analysis.hunk_records
+                    )
+                    if record.analysis is not None
+                    else None,
+                }
+                for record in self.records
+            ],
+            "pending": [list(item) for item in self.pending],
+        }
+
+    @cached_property
+    def group_id(self) -> str:
+        return evidence_digest(
+            {"domain": "reviewsensei:evidence-group:v1", **self.coverage_document()}
+        )
+
+    @property
+    def diff_context(self) -> str:
+        if not self.complete:
+            raise ReviewInputError("evidence group is incomplete")
+        return "\n".join(
+            f"path={record.path}\n{record.patch}" for record in self.records
+        )
+
+    def to_document(self) -> dict[str, object]:
+        """Materialize whole exact records for the common bounded part codec.
+
+        The 2 MiB canonical document bound matches the proposed common decoded
+        envelope; it does not raise the existing 8 MiB whole-diff work bound.
+        Pending groups are retained losslessly, but cannot authorize a decision.
+        """
+        document: dict[str, object] = {
+            "schema_version": "1",
+            "group_id": self.group_id,
+            "coverage": self.coverage_document(),
+            "records": [
+                {
+                    "path": record.path,
+                    "patch": record.patch,
+                    "old_path": record.old_path,
+                    "original_diff": record.original_diff,
+                    "supplied_complete": record.supplied_complete,
+                    "provenance": record.provenance,
+                    "expected_additions": record.expected_additions,
+                    "expected_deletions": record.expected_deletions,
+                }
+                for record in self.records
+            ],
+        }
+        if len(canonical_bytes(document)) > 2 * 1024 * 1024:
+            raise ReviewInputError(
+                "evidence group exceeds the materialization byte bound"
+            )
+        return document
+
+    @classmethod
+    def from_document(cls, value: object) -> EvidenceGroup:
+        """Restore only a closed, exact whole document; no external lookups."""
+        try:
+            if not isinstance(value, dict) or set(value) != {
+                "schema_version",
+                "group_id",
+                "coverage",
+                "records",
+            }:
+                raise ValueError("shape")
+            if (
+                value["schema_version"] != "1"
+                or len(canonical_bytes(value)) > 2 * 1024 * 1024
+            ):
+                raise ValueError("bound")
+            coverage = value["coverage"]
+            if not isinstance(coverage, dict) or not isinstance(
+                coverage.get("snapshot"), dict
+            ):
+                raise ValueError("coverage")
+            snapshot = EvidenceSnapshot(**coverage["snapshot"])
+            records = value["records"]
+            paths = coverage.get("required_paths")
+            enumeration = coverage.get("enumeration_complete")
+            if (
+                not isinstance(records, list)
+                or not isinstance(paths, list)
+                or len(records) > 64
+                or not isinstance(enumeration, bool)
+            ):
+                raise ValueError("records")
+            restored = cls(
+                EvidenceBundle(
+                    snapshot,
+                    tuple(
+                        EvidenceRecord(snapshot=snapshot, **record)
+                        for record in records
+                    ),
+                    enumeration,
+                ),
+                tuple(paths),
+            )
+            if canonical_bytes(restored.to_document()) != canonical_bytes(value):
+                raise ValueError("identity")
+            return restored
+        except (
+            TypeError,
+            ValueError,
+            KeyError,
+            ReviewInputError,
+            RecursionError,
+        ) as exc:
+            raise ReviewInputError("materialized evidence group is invalid") from exc

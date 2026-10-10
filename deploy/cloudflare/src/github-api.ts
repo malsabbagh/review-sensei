@@ -579,6 +579,39 @@ export class GitHubApi {
     };
   }
 
+  /** Exact open PR snapshot for complete feedback authorization. */
+  async feedbackPullRequest(repository: string, pullRequest: number, token: string): Promise<{ base_sha: string; head_sha: string }> {
+    if (!Number.isSafeInteger(pullRequest) || pullRequest <= 0) throw new Error("github_feedback_scope_invalid");
+    const response = await this.request("GET", `${repositoryPath(repository)}/pulls/${pullRequest}`, token);
+    if (response.status !== 200 || !isObject(response.data) || response.data.number !== pullRequest || response.data.state !== "open" || response.data.draft !== false || !isObject(response.data.base) || !isObject(response.data.head)) throw new Error("github_feedback_snapshot_invalid");
+    const base = response.data.base.sha; const head = response.data.head.sha;
+    if (typeof base !== "string" || !PUBLIC_WORKFLOW_SHA_PATTERN.test(base) || typeof head !== "string" || !PUBLIC_WORKFLOW_SHA_PATTERN.test(head)) throw new Error("github_feedback_snapshot_invalid");
+    return { base_sha: base, head_sha: head };
+  }
+
+  /** Full bounded source from a host-selected canonical endpoint, never a supplied URL. */
+  async feedbackComment(repository: string, pullRequest: number, kind: "issue" | "inline", commentId: number, token: string): Promise<JsonObject> {
+    if (!Number.isSafeInteger(pullRequest) || pullRequest <= 0 || !Number.isSafeInteger(commentId) || commentId <= 0 || !["issue", "inline"].includes(kind)) throw new Error("github_feedback_scope_invalid");
+    const base = repositoryPath(repository);
+    const path = kind === "issue" ? `${base}/issues/comments/${commentId}` : `${base}/pulls/comments/${commentId}`;
+    const response = await this.request("GET", path, token);
+    if (response.status !== 200 || !isObject(response.data)) throw new Error("github_feedback_source_unavailable");
+    const source = response.data; const user = source.user;
+    const body = source.body; const updatedAt = source.updated_at;
+    const expectedUrl = `${this.apiUrl}${base}/${kind === "issue" ? "issues" : "pulls"}/${pullRequest}`;
+    if (source.id !== commentId || (kind === "issue" ? source.issue_url : source.pull_request_url) !== expectedUrl || !isObject(user) || user.type !== "User" || typeof user.id !== "number" || !Number.isSafeInteger(user.id) || user.id <= 0 || typeof user.login !== "string" || typeof body !== "string" || body.length === 0 || typeof updatedAt !== "string" || updatedAt.length === 0 || typeof source.author_association !== "string" || !["OWNER", "MEMBER", "COLLABORATOR"].includes(source.author_association)) throw new Error("github_feedback_source_invalid");
+    const bytes = new TextEncoder().encode(body);
+    const loginBytes = new TextEncoder().encode(user.login);
+    const updatedBytes = new TextEncoder().encode(updatedAt);
+    const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+    if (bytes.length > 65536 || decoder.decode(bytes) !== body || loginBytes.length > 256 || user.login.length === 0 || decoder.decode(loginBytes) !== user.login || updatedBytes.length > 128 || decoder.decode(updatedBytes) !== updatedAt) throw new Error("github_feedback_source_invalid");
+    const root = kind === "issue" ? null : source.in_reply_to_id ?? source.id;
+    if (kind === "inline" && (typeof root !== "number" || !Number.isSafeInteger(root) || root <= 0)) throw new Error("github_feedback_source_invalid");
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    const bodyHash = [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, "0")).join("");
+    return { kind, comment_id: commentId, updated_at: updatedAt, author: user.login, author_id: user.id, association: source.author_association, root_comment_id: root, body_bytes: bytes.length, body_sha256: bodyHash, body };
+  }
+
   /**
    * Resolve the operator-managed public workflow tag to its immutable commit.
    *

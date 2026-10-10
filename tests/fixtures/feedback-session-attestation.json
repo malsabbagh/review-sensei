@@ -1,0 +1,119 @@
+{
+  "request": {
+    "version": 2,
+    "repository": "acme/widgets",
+    "repository_id": 987654321,
+    "pull_request": 7,
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "operation": "feedback",
+    "source_comment_id": 13579,
+    "run_id": "10000000001",
+    "issued_at": 1,
+    "concurrency_group": "reviewsensei-session-987654321-7",
+    "job_workflow_ref": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
+    "job_workflow_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "feedback": {
+      "interface": "feedback-v1",
+      "repository": "acme/widgets",
+      "pull_request": 7,
+      "base_sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "trigger": {
+        "kind": "issue",
+        "comment_id": 13579,
+        "updated_at": "2026-10-10T00:00:00Z"
+      },
+      "target_ids": [
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      ],
+      "total_bytes": 4367,
+      "sources": [
+        {
+          "kind": "issue",
+          "comment_id": 13579,
+          "updated_at": "2026-10-10T00:00:00Z",
+          "author": "octocat",
+          "author_id": 12345678,
+          "association": "OWNER",
+          "root_comment_id": null,
+          "body_bytes": 4328,
+          "body_sha256": "d942d447830e7a6291440de13097d1125020a618c0ec46444c1c999c0069dd8e"
+        },
+        {
+          "kind": "inline",
+          "comment_id": 24680,
+          "updated_at": "2026-10-10T00:00:01Z",
+          "author": "collaborator",
+          "author_id": 42,
+          "association": "COLLABORATOR",
+          "root_comment_id": 24680,
+          "body_bytes": 39,
+          "body_sha256": "276a1a0bca3813c8c9f871e089523651826d071659d03fb79949677b204a3de0"
+        }
+      ],
+      "selection_digest": "cd7b1e9ce129466d0d67702aacfa9a6aa968d9bc7a15981940174d1c78a79a81",
+      "event_key": "3b83acfe292acfb5c8376fdf5e350b9945b7e96579dbb42bedcd8d263e66d003"
+    },
+    "mutation": {
+      "operation_id": "1111111111111111111111111111111111111111111111111111111111111111",
+      "source_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+      "authority_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+      "execution_identity": "44444444444444444444444444444444",
+      "inventory_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+      "inventory_generation": 0,
+      "reservation_id": "test-original-attempt",
+      "root_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+      "root_generation": 1,
+      "reason": "dispatch",
+      "request_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+      "dispatch_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+      "read_accounting": {
+        "schema_version": "1.0",
+        "calls": 20,
+        "deadline_unix_ms": 1800000000000
+      }
+    }
+  },
+  "selection": {
+    "interface": "feedback-v1",
+    "repository": "acme/widgets",
+    "pull_request": 7,
+    "base_sha": "cccccccccccccccccccccccccccccccccccccccc",
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "trigger": {
+      "kind": "issue",
+      "comment_id": 13579,
+      "updated_at": "2026-10-10T00:00:00Z"
+    },
+    "target_ids": [
+      "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    ],
+    "total_bytes": 4367,
+    "sources": [
+      {
+        "kind": "issue",
+        "comment_id": 13579,
+        "updated_at": "2026-10-10T00:00:00Z",
+        "author": "octocat",
+        "author_id": 12345678,
+        "association": "OWNER",
+        "root_comment_id": null,
+        "body_bytes": 4328,
+        "body_sha256": "d942d447830e7a6291440de13097d1125020a618c0ec46444c1c999c0069dd8e",
+        "body": "@sensei 早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。早い証拠を保存。"
+      },
+      {
+        "kind": "inline",
+        "comment_id": 24680,
+        "updated_at": "2026-10-10T00:00:01Z",
+        "author": "collaborator",
+        "author_id": 42,
+        "association": "COLLABORATOR",
+        "root_comment_id": 24680,
+        "body_bytes": 39,
+        "body_sha256": "276a1a0bca3813c8c9f871e089523651826d071659d03fb79949677b204a3de0",
+        "body": "The linked caller rejects remote input."
+      }
+    ]
+  }
+}

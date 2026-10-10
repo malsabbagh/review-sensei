@@ -46,6 +46,7 @@ from review_sensei.human_assessment import (
     HumanAssessmentReply,
     HumanAssessmentService,
     PendingHumanReview,
+    finding_instance_fingerprint,
 )
 from review_sensei.models import (
     ConversationContext,
@@ -175,6 +176,11 @@ class State:
 
     def pr(self):
         return {
+            "changed_files": (
+                len(self.files)
+                if self.files is not None
+                else len({item.path for item in self.eligibility.human_review.findings})
+            ),
             "state": "open",
             "draft": False,
             "user": {"login": "alice", "type": "User"},
@@ -540,7 +546,9 @@ class HumanAssessmentTests(unittest.TestCase):
             self.human_result((comment, comment)), BASE
         )
         self.assertEqual(len(single.findings), 1)
-        self.assertEqual(single.findings[0].fingerprint, lifecycle_id)
+        self.assertEqual(
+            single.findings[0].fingerprint, finding_instance_fingerprint(comment)
+        )
         document = inventory.to_dict()
         document["findings"].append(document["findings"][0])
         with self.assertRaisesRegex(ReviewInputError, "duplicated"):

@@ -27,8 +27,25 @@ from dataclasses import InitVar, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol, Sequence, cast
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol, Sequence, cast
 
+from .bounded_evidence import (
+    MAX_PART_BYTES,
+    MAX_STORED_PART_BYTES,
+    MAX_STORED_PARTS,
+    PARTITION_ENCODING,
+    ActivationTailPlan,
+    AuthenticatedPart,
+    EvidenceReadBudget,
+    EvidenceTailTicket,
+    NonResumableActivationError,
+    TailDispatch,
+    canonical_bytes,
+    partition_evidence,
+    read_partitioned_evidence,
+    stage_partitioned_evidence,
+    validate_manifest,
+)
 from .convergence import (
     DIAGNOSTIC_ROUND_CEILING,
     MAX_FAILED_ATTEMPTS,
@@ -40,8 +57,19 @@ from .convergence import (
 )
 from .coverage import FileCoverage, HunkCoverage
 from .errors import ReviewInputError
+from .history_association import (
+    HistoryAssociation,
+    _read_history_child,
+    associate_history,
+    history_payload,
+    indexed_document,
+    read_associated_history,
+)
 from .models import ReviewResult, ReviewTransaction
 from .schemas import validate_public_document
+
+if TYPE_CHECKING:
+    from .baseline import ReviewBaseline
 
 PUBLIC_SCHEMA_VERSION = "1.0"
 SESSION_LEDGER_ENV = "REVIEWSENSEI_SESSION_LEDGER"
@@ -56,6 +84,8 @@ MAX_SESSION_TTL = timedelta(days=90)
 # surrounding state; allocate less history for larger retained/escaped fields.
 MAX_CONVERGENCE_HISTORY_BYTES = 12_288
 MAX_SESSION_RECORD_BYTES = MAX_CONVERGENCE_HISTORY_BYTES + 8192
+MAX_ASSESSMENT_QUEUE_ROOT_BYTES = 8192
+MAX_ASSESSMENT_QUEUE_SUMMARY_BYTES = 1024
 MAX_CONVERGENCE_PROGRESS_ENTRIES = 3
 SESSION_SHA256_PATTERN = r"^[a-f0-9]{64}$"
 # This is a deliberately coarse structural ceiling, independent of the byte
@@ -155,6 +185,50 @@ def _stored_continuation_grants(value: object) -> tuple[dict[str, object], ...]:
     return tuple(grants)
 
 
+def _stored_assessment_queue(value: object) -> dict[str, object] | None:
+    """Validate only C's dedicated root/summary, never queue payload semantics."""
+    if value is None:
+        return None
+    normalized = json.loads(canonical_bytes(value))
+    validate_public_document(normalized, "assessment-queue-root")
+    if len(canonical_bytes(normalized)) > MAX_ASSESSMENT_QUEUE_ROOT_BYTES:
+        raise ReviewInputError(
+            "assessment queue root exceeds actual bounded allocation"
+        )
+    manifest = validate_manifest(normalized["state_manifest"])
+    binding = cast(dict[str, object], manifest["binding"])
+    if (
+        binding["purpose"] != "queue"
+        or binding["generation"] != normalized["inventory_generation"]
+    ):
+        raise ReviewInputError(
+            "assessment queue inventory/domain binding does not match"
+        )
+    active = normalized["active_operation"]
+    if active is not None:
+        deadline = _parse_aware_datetime(
+            active["deadline_at"], label="assessment deadline"
+        )
+        expires = _parse_aware_datetime(active["expires_at"], label="assessment expiry")
+        if (
+            deadline.utcoffset() != timedelta(0)
+            or expires.utcoffset() != timedelta(0)
+            or expires < deadline
+        ):
+            raise ReviewInputError(
+                "assessment queue deadline/expiry must be ordered UTC instants"
+            )
+        if active["response_bytes"] + active["response_bytes_reserved"] > 1_048_576:
+            raise ReviewInputError(
+                "assessment actual and reserved response bytes exceed original ceiling"
+            )
+    summary = dict(normalized)
+    summary["state_manifest"] = {}
+    if len(canonical_bytes(summary)) > MAX_ASSESSMENT_QUEUE_SUMMARY_BYTES:
+        raise ReviewInputError("assessment queue summary exceeds growth reserve")
+    return normalized
+
+
 def _stored_convergence_history(
     value: object,
 ) -> dict[str, object] | None:
@@ -192,7 +266,13 @@ def _stored_convergence_history(
         # so schema validation alone cannot protect this boundary.
         from .baseline import baseline_from_history_document
 
-        baseline_from_history_document(baseline)
+        if (
+            isinstance(baseline, dict)
+            and baseline.get("encoding") == PARTITION_ENCODING
+        ):
+            validate_manifest(baseline)
+        else:
+            baseline_from_history_document(baseline)
     progress = normalized.get("progress")
     if (
         not isinstance(progress, list)
@@ -610,6 +690,7 @@ class SessionRecord:
     transaction: ReviewTransaction | None = None
     convergence_history: Mapping[str, object] | None = None
     reservation_owner: Mapping[str, object] | None = None
+    assessment_queue: Mapping[str, object] | None = None
     # The shape is selected only while loading an existing untrusted document;
     # it is not part of the public record or its equality contract.
     _digest_shape_input: InitVar[str] = "current"
@@ -765,6 +846,27 @@ class SessionRecord:
             raise ReviewInputError(
                 "session convergence history requires the current digest shape"
             )
+        object.__setattr__(
+            self, "assessment_queue", _stored_assessment_queue(self.assessment_queue)
+        )
+        if self.assessment_queue is not None:
+            if self._digest_shape != "current":
+                raise ReviewInputError(
+                    "assessment queue requires current authenticated digest shape"
+                )
+            manifest = self.assessment_queue["state_manifest"]
+            assert isinstance(manifest, dict)
+            binding = manifest["binding"]
+            assert isinstance(binding, dict)
+            if (
+                binding["repository"] != self.repository
+                or binding["pull_request"] != self.pull_request
+                or binding["repository_id"] != self.repository_id
+                or binding["generation"] > self.generation
+            ):
+                raise ReviewInputError(
+                    "assessment queue does not match session identity/generation"
+                )
         expected_payload = {
             "current": self._payload,
             "operator-paused": self._payload_without_dispositions,
@@ -801,6 +903,8 @@ class SessionRecord:
             payload["transaction"] = self.transaction.to_dict()
         if self.convergence_history is not None:
             payload["convergence_history"] = dict(self.convergence_history)
+        if self.assessment_queue is not None:
+            payload["assessment_queue"] = dict(self.assessment_queue)
         return payload
 
     def _payload_without_dispositions(self) -> dict[str, object]:
@@ -852,6 +956,7 @@ class SessionRecord:
         transaction: ReviewTransaction | None = None,
         convergence_history: Mapping[str, object] | None = None,
         reservation_owner: Mapping[str, object] | None = None,
+        assessment_queue: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         normalized_dispositions = _stored_dispositions(dispositions)
         normalized_grants = _stored_continuation_grants(continuation_grants)
@@ -885,6 +990,9 @@ class SessionRecord:
         normalized_history = _stored_convergence_history(convergence_history)
         if normalized_history is not None:
             payload["convergence_history"] = normalized_history
+        normalized_queue = _stored_assessment_queue(assessment_queue)
+        if normalized_queue is not None:
+            payload["assessment_queue"] = normalized_queue
         if (
             len(
                 json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
@@ -916,6 +1024,7 @@ class SessionRecord:
             transaction=transaction,
             convergence_history=normalized_history,
             reservation_owner=normalized_owner,
+            assessment_queue=normalized_queue,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -970,6 +1079,9 @@ class SessionRecord:
         has_transaction = "transaction" in value
         has_history = "convergence_history" in value
         has_owner = "reservation_owner" in value
+        has_queue = "assessment_queue" in value
+        if has_queue and value["assessment_queue"] is None:
+            raise ReviewInputError("assessment queue cannot be a null absence marker")
         has_attempt_head = value.get("failed_attempts_head_sha") is not None
         if has_dispositions and not has_operator_paused:
             raise ReviewInputError(
@@ -983,6 +1095,7 @@ class SessionRecord:
             or has_history
             or has_attempt_head
             or has_owner
+            or has_queue
             else "operator-paused"
             if has_operator_paused
             else "legacy"
@@ -1059,6 +1172,7 @@ class SessionRecord:
                 value.get("convergence_history")
             ),
             reservation_owner=_stored_reservation_owner(value.get("reservation_owner")),
+            assessment_queue=_stored_assessment_queue(value.get("assessment_queue")),
             _digest_shape_input=digest_shape,
         )
         validate_public_document(record.to_dict(), "session-record")
@@ -1085,6 +1199,7 @@ class SessionRecord:
         transaction: ReviewTransaction | None = None,
         convergence_history: Mapping[str, object] | None = None,
         reservation_owner: Mapping[str, object] | None = None,
+        assessment_queue: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         created = _aware_now(now)
         if isinstance(expires_at, str):
@@ -1121,6 +1236,7 @@ class SessionRecord:
             transaction=transaction,
             convergence_history=convergence_history,
             reservation_owner=reservation_owner,
+            assessment_queue=assessment_queue,
         )
 
     def evolve(
@@ -1141,6 +1257,7 @@ class SessionRecord:
         transaction: ReviewTransaction | None | object = ...,
         convergence_history: Mapping[str, object] | None | object = ...,
         reservation_owner: Mapping[str, object] | None | object = ...,
+        assessment_queue: Mapping[str, object] | None | object = ...,
     ) -> "SessionRecord":
         updated = _format_datetime(_aware_now(now))
         return type(self)._construct(
@@ -1205,6 +1322,11 @@ class SessionRecord:
                 if transaction is ...
                 else cast(ReviewTransaction | None, transaction)
             ),
+            assessment_queue=(
+                self.assessment_queue
+                if assessment_queue is ...
+                else cast(Mapping[str, object] | None, assessment_queue)
+            ),
             convergence_history=(
                 self.convergence_history
                 if convergence_history is ...
@@ -1262,6 +1384,10 @@ def checkpoint_baseline_capacity(record: SessionRecord) -> int:
     ).to_dict()
     transaction.update(phase="publication_suppressed", result_sha256="a" * 64)
     shell["transaction"] = transaction
+    if record.assessment_queue is not None:
+        # Reserve the entire legal queue root across later summary/counter and
+        # reference growth, rather than charging only today's short root.
+        shell["assessment_queue"] = "q" * MAX_ASSESSMENT_QUEUE_ROOT_BYTES
     # Subtract the empty object's two bytes; key/colon/comma and the record
     # digest remain included. Nested JSON is an object, not an escaped string.
     outside = len(json.dumps(shell, sort_keys=True, separators=(",", ":")).encode()) - 2
@@ -1274,6 +1400,61 @@ def checkpoint_baseline_capacity(record: SessionRecord) -> int:
             MAX_HISTORY_BASELINE_BYTES,
             history_bytes - MAX_HISTORY_ENVELOPE_RESERVE_BYTES,
         ),
+    )
+
+
+def assessment_queue_manifest_capacity(record: SessionRecord) -> int:
+    """Allocate the queue manifest beside retained baseline and future lifecycle.
+
+    The 8 KiB queue cap includes its 1 KiB summary reserve. Preserve existing
+    baseline bytes plus its 1 KiB history lifecycle reserve. The conservative
+    shell includes mutually exclusive future transaction/ownership fields.
+    """
+    from .baseline import MAX_HISTORY_ENVELOPE_RESERVE_BYTES
+
+    shell = record.to_dict()
+    shell.pop("assessment_queue", None)
+    history = shell.pop("convergence_history", None)
+    shell.update(
+        generation=MAX_GENERATION,
+        completed_initial_reviews=DIAGNOSTIC_ROUND_CEILING,
+        completed_verification_rounds=DIAGNOSTIC_ROUND_CEILING,
+        failed_attempts=MAX_FAILED_ATTEMPTS,
+        failed_attempts_head_sha="a" * 64,
+        reservation_id="a" * 64,
+        reserved_slot="failed-attempt",
+        last_committed_reservation_id="b" * 64,
+        reservation_owner={"run_id": "9" * 19, "head_sha": "a" * 40},
+    )
+    updated = "9999-12-31T23:59:59.999999Z"
+    if len(updated) > len(str(shell["updated_at"])):
+        shell["updated_at"] = updated
+    transaction = ReviewTransaction.create(
+        repository=record.repository,
+        pull_request=record.pull_request,
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        policy_digest="c" * 64,
+        configuration_digest="d" * 64,
+        evidence_digest="e" * 64,
+        reservation_id="f" * 64,
+        generation=MAX_GENERATION,
+    ).to_dict()
+    transaction.update(phase="publication_suppressed", result_sha256="a" * 64)
+    shell["transaction"] = transaction
+    history_bytes = (
+        len(canonical_bytes(history)) if history is not None else 0
+    ) + MAX_HISTORY_ENVELOPE_RESERVE_BYTES
+    outside = (
+        len(canonical_bytes(shell))
+        + len(',"assessment_queue":')
+        + len(',"convergence_history":')
+        + history_bytes
+    )
+    return max(
+        0,
+        min(MAX_ASSESSMENT_QUEUE_ROOT_BYTES, MAX_SESSION_RECORD_BYTES - outside)
+        - MAX_ASSESSMENT_QUEUE_SUMMARY_BYTES,
     )
 
 
@@ -1735,6 +1916,8 @@ def _checkpoint_transaction_record(
     baseline: object | None = None,
     review_complete: bool = True,
     now: datetime | None = None,
+    partition_writer: Callable[[dict[str, object], int, int], dict[str, object]]
+    | None = None,
 ) -> SessionRecord:
     if (
         record.transaction is None
@@ -1815,6 +1998,7 @@ def _checkpoint_transaction_record(
                 baseline,
                 max_bytes=checkpoint_baseline_capacity(record),
                 require_complete=True,
+                partition_writer=partition_writer,
             ),
             "progress": [
                 *prior_progress,
@@ -1911,6 +2095,29 @@ def checkpoint_review_analysis(
             baseline=baseline,
             review_complete=result.review_status == "complete",
             now=now,
+            partition_writer=(
+                lambda document, count, allowance: getattr(ledger, "stage_evidence")(
+                    identity,
+                    binding={
+                        "repository": transaction.repository,
+                        "repository_id": identity.repository_id,
+                        "pull_request": transaction.pull_request,
+                        "base_sha": transaction.base_sha,
+                        "head_sha": transaction.head_sha,
+                        "policy_digest": transaction.policy_digest,
+                        "configuration_digest": transaction.configuration_digest,
+                        "generation": record.generation + 1,
+                        "producer": getattr(ledger, "evidence_producer")(),
+                        "purpose": "baseline",
+                        "schema_version": "1.0",
+                    },
+                    document=document,
+                    item_count=count,
+                    max_manifest_bytes=allowance,
+                )
+            )
+            if getattr(ledger, "enable_partition_writes", False)
+            else None,
         ),
         now=now,
     )
@@ -2585,6 +2792,426 @@ def _safe_ledger_name(repository: str) -> str:
     return repository.replace("/", "%2F")
 
 
+def _trusted_evidence_resolver(
+    ledger: object,
+) -> tuple[Callable[[], str], Callable[..., object]]:
+    producer = getattr(ledger, "evidence_producer", None)
+    reader = getattr(ledger, "read_evidence", None)
+    budget = getattr(ledger, "evidence_budget", None)
+    if (
+        not callable(producer)
+        or not callable(reader)
+        or not isinstance(budget, EvidenceReadBudget)
+    ):
+        raise ReviewInputError(
+            "partition authority requires a trusted resolver and shared budget"
+        )
+    budget.check()
+    return producer, reader
+
+
+def read_session_assessment_queue(
+    ledger: object, record: SessionRecord
+) -> object | None:
+    """Reconstruct C's whole journal; C owns payload/count/receipt validation."""
+    root = record.assessment_queue
+    if root is None:
+        return None
+    manifest = root["state_manifest"]
+    assert isinstance(manifest, dict)
+    binding = manifest["binding"]
+    assert isinstance(binding, dict)
+    producer, reader = _trusted_evidence_resolver(ledger)
+    if binding["producer"] != producer():
+        raise ReviewInputError(
+            "assessment queue producer does not match authenticated session"
+        )
+    identity = SessionIdentity(
+        record.repository, record.pull_request, repository_id=record.repository_id
+    )
+    document = reader(identity, manifest, expected_binding=binding)
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version") != binding["schema_version"]
+    ):
+        raise ReviewInputError("assessment journal schema is unsupported")
+    cache = getattr(ledger, "_history_documents", None)
+    if indexed_document(document):
+        if not getattr(ledger, "enable_history_graph", False) or cache is None:
+            raise ReviewInputError(
+                "indexed history requires explicit reader enablement"
+            )
+        payload = history_payload(record, document)
+        encoded = canonical_bytes(payload)
+        key = _history_cache_key(record)
+        prospective = {**cache, key: encoded}
+        if (
+            len(prospective) > 64
+            or sum(len(value) for value in prospective.values()) > 2_097_152
+        ):
+            raise ReviewInputError("history reader cache exceeds finite bound")
+        cache[key] = encoded
+        if getattr(ledger, "_activation_ticket", None) is not None:
+            for row in payload["sources"]:
+                _read_history_child(ledger, identity, payload, row)
+    elif cache is not None and getattr(ledger, "enable_history_graph", False):
+        if len(cache) >= 64 and _history_cache_key(record) not in cache:
+            raise ReviewInputError("history reader cache exceeds finite bound")
+        cache[_history_cache_key(record)] = b""
+    return document
+
+
+def _history_cache_key(record: SessionRecord) -> str:
+    if record.assessment_queue is None:
+        return ""
+    return hashlib.sha256(
+        canonical_bytes(record.assessment_queue["state_manifest"])
+    ).hexdigest()
+
+
+def _history_cached(ledger: Any, record: SessionRecord) -> dict[str, Any] | None:
+    key = _history_cache_key(record)
+    if not key:
+        return None
+    if key not in ledger._history_documents:
+        raise ReviewInputError("complete queue reference inventory was not read")
+    value = ledger._history_documents[key]
+    return json.loads(value) if value else None
+
+
+def _history_extra_ids(ledger: Any, record: SessionRecord) -> tuple[str, ...]:
+    if not ledger.enable_history_graph:
+        return ()
+    payload = _history_cached(ledger, record)
+    return (
+        tuple(row["reference"]["storage_id"] for row in payload["sources"])
+        if payload is not None
+        else ()
+    )
+
+
+def _history_legacy_write_guard(ledger: Any, record: SessionRecord) -> None:
+    if ledger.enable_history_graph and _history_cached(ledger, record) is not None:
+        raise ReviewInputError(
+            "indexed history mutation requires a sealed activation tail"
+        )
+
+
+def _history_preserve_sources(
+    ledger: Any, before: SessionRecord, after: SessionRecord
+) -> None:
+    if not ledger.enable_history_graph:
+        return
+    old, new = _history_cached(ledger, before), _history_cached(ledger, after)
+    if old is None:
+        if before.assessment_queue is not None and new is not None:
+            raise ReviewInputError(
+                "indexed legacy migration requires complete original source proof"
+            )
+        if new is not None and new["sources"]:
+            raise ReviewInputError(
+                "initial indexed root cannot invent archived original accounting"
+            )
+        return
+    if new is None:
+        raise ReviewInputError(
+            "indexed history cannot discard its complete source inventory"
+        )
+
+    def identities(
+        payload: dict[str, Any], record: SessionRecord
+    ) -> dict[str, tuple[str, object]]:
+        from .assessment_history_index import IndexedAssessmentJournal
+
+        journal = IndexedAssessmentJournal.from_document(payload["envelope"]["journal"])
+        rows = {
+            row["source_digest"]: (row["operation_id"], row["read_accounting"])
+            for row in payload["sources"]
+        }
+        current = journal._current()
+        if current is not None:
+            active = cast(Mapping[str, Any], record.assessment_queue)[
+                "active_operation"
+            ]
+            if (
+                not isinstance(active, Mapping)
+                or active["source_digest"] != current["source_digest"]
+                or active["operation_id"] != current["operation_id"]
+            ):
+                raise ReviewInputError(
+                    "indexed current original accounting carrier differs"
+                )
+            rows[current["source_digest"]] = (
+                current["operation_id"],
+                active["read_accounting"],
+            )
+        return rows
+
+    previous, following = identities(old, before), identities(new, after)
+    active = cast(Mapping[str, Any], after.assessment_queue)["active_operation"]
+    changing = active["source_digest"] if isinstance(active, Mapping) else None
+    for source, (operation, accounting) in previous.items():
+        candidate = following.get(source)
+        if candidate is None or candidate[0] != operation:
+            raise ReviewInputError(
+                "indexed history omitted or substituted an original source"
+            )
+        if source != changing and candidate[1] != accounting:
+            raise ReviewInputError("indexed history changed original sealed accounting")
+    old_archived = {row["source_digest"]: row for row in old["sources"]}
+    new_archived = {row["source_digest"]: row for row in new["sources"]}
+    for source, row in old_archived.items():
+        if source != changing and new_archived.get(source) != row:
+            raise ReviewInputError(
+                "indexed history substituted a retained child reference"
+            )
+    for source, row in new_archived.items():
+        if source in old_archived or source not in previous:
+            continue
+        manifest = cast(Mapping[str, Any], before.assessment_queue)["state_manifest"]
+        if len(manifest["parts"]) != 1 or row["reference"] != {
+            **manifest["parts"][0],
+            "decoded_bytes": manifest["decoded_bytes"],
+        }:
+            raise ReviewInputError(
+                "indexed archival requires exact prior owned current part"
+            )
+
+
+def _validate_queue_retention(before: SessionRecord, after: SessionRecord) -> None:
+    if before.assessment_queue is not None and after.assessment_queue is None:
+        raise ReviewInputError(
+            "assessment queue must retain an explicit tombstone, never absence"
+        )
+    if after.assessment_queue is not None:
+        manifest = after.assessment_queue["state_manifest"]
+        if len(canonical_bytes(manifest)) > assessment_queue_manifest_capacity(after):
+            raise ReviewInputError(
+                "assessment queue exceeds future session growth allocation"
+            )
+
+
+def _tail_operation_binding(value: Mapping[str, object]) -> dict[str, object]:
+    fields = {
+        "operation_id",
+        "source_digest",
+        "authority_digest",
+        "execution_identity",
+        "inventory_digest",
+        "inventory_generation",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise ReviewInputError("activation operation binding is invalid")
+    for name in fields - {"execution_identity", "inventory_generation"}:
+        digest = value[name]
+        if (
+            not isinstance(digest, str)
+            or re.fullmatch(SESSION_SHA256_PATTERN, digest) is None
+        ):
+            raise ReviewInputError("activation operation digest is invalid")
+    if (
+        not isinstance(value["execution_identity"], str)
+        or re.fullmatch(r"[a-f0-9]{32}", value["execution_identity"]) is None
+    ):
+        raise ReviewInputError("activation execution identity is invalid")
+    _require_bounded_int(
+        value["inventory_generation"],
+        label="inventory_generation",
+        minimum=0,
+        maximum=MAX_GENERATION,
+    )
+    return dict(value)
+
+
+def _tail_attempt_scope(
+    identity: SessionIdentity, reservation_id: str, operation: Mapping[str, object]
+) -> str:
+    _reservation_id(reservation_id, label="reservation_id")
+    return hashlib.sha256(
+        canonical_bytes(
+            {
+                "repository": identity.repository,
+                "repository_id": identity.repository_id,
+                "pull_request": identity.pull_request,
+                "reservation_id": reservation_id,
+                "operation": _tail_operation_binding(operation),
+            }
+        )
+    ).hexdigest()
+
+
+def _tail_part_ids(
+    record: SessionRecord, *, history_ids: tuple[str, ...] = ()
+) -> tuple[str, ...]:
+    manifests = []
+    history = record.convergence_history
+    baseline = history.get("baseline") if isinstance(history, Mapping) else None
+    if isinstance(baseline, dict) and baseline.get("encoding") == PARTITION_ENCODING:
+        manifests.append(validate_manifest(baseline))
+    if record.assessment_queue is not None:
+        manifests.append(validate_manifest(record.assessment_queue["state_manifest"]))
+    return (
+        tuple(
+            ref["storage_id"]
+            for manifest in manifests
+            for ref in cast(list[dict[str, Any]], manifest["parts"])
+        )
+        + history_ids
+    )
+
+
+def _tail_record_shape(record: SessionRecord) -> bytes:
+    document = json.loads(canonical_bytes(record.to_dict()))
+    document.pop("record_sha256", None)
+    root = document.get("assessment_queue")
+    if not isinstance(root, dict) or not isinstance(root.get("active_operation"), dict):
+        raise ReviewInputError(
+            "activation requires a retained operation accounting carrier"
+        )
+    root["active_operation"].pop("read_accounting", None)
+    return canonical_bytes(document)
+
+
+def _validate_tail_draft(
+    before: SessionRecord,
+    draft: SessionRecord,
+    *,
+    operation: Mapping[str, object],
+    reservation_id: str,
+    budget: EvidenceReadBudget,
+) -> None:
+    SessionRecord.from_dict(draft.to_dict())
+    if (
+        (draft.repository, draft.repository_id, draft.pull_request)
+        != (before.repository, before.repository_id, before.pull_request)
+        or before.reservation_id != reservation_id
+        or draft.reservation_id != reservation_id
+        or draft.generation != before.generation + 1
+    ):
+        raise ReviewInputError(
+            "activation draft identity, reservation or generation changed"
+        )
+    for record in (before, draft):
+        root = record.assessment_queue
+        if root is None and record is before:
+            continue
+        if root is None or not isinstance(root["active_operation"], Mapping):
+            raise ReviewInputError(
+                "activation requires a retained operation accounting carrier"
+            )
+        active = root["active_operation"]
+        binding = {
+            name: root[name] if name.startswith("inventory_") else active[name]
+            for name in operation
+        }
+        if (
+            binding != operation
+            or active["read_accounting"]["deadline_at_ms"] != budget.wall_deadline_ms
+            or active["read_accounting"]["calls"] > budget.calls
+        ):
+            raise ReviewInputError(
+                "activation original operation or accounting does not match"
+            )
+    _validate_queue_retention(before, draft)
+
+
+def _tail_plan_scope(
+    adapter: str,
+    before: SessionRecord,
+    draft: SessionRecord,
+    *,
+    operation: Mapping[str, object],
+    budget: EvidenceReadBudget,
+    scan_pages: int = 0,
+    head_sha: str | None = None,
+    root_id: int | None = None,
+    grant_sha256: str | None = None,
+    old_history_ids: tuple[str, ...] = (),
+    new_history_ids: tuple[str, ...] = (),
+) -> str:
+    return hashlib.sha256(
+        canonical_bytes(
+            {
+                "adapter": adapter,
+                "current_root": before.record_sha256,
+                "draft_shape": hashlib.sha256(_tail_record_shape(draft)).hexdigest(),
+                "old_parts": _tail_part_ids(before, history_ids=old_history_ids),
+                "new_parts": _tail_part_ids(draft, history_ids=new_history_ids),
+                "operation": dict(operation),
+                "original_deadline_ms": budget.wall_deadline_ms,
+                "scan_pages": scan_pages,
+                "head_sha": head_sha,
+                "root_id": root_id,
+                "grant_sha256": grant_sha256,
+            }
+        )
+    ).hexdigest()
+
+
+def _seal_tail_accounting(
+    draft: SessionRecord,
+    seal_accounting: Callable[[SessionRecord, Mapping[str, int]], SessionRecord],
+    budget: EvidenceReadBudget,
+) -> SessionRecord:
+    accounting = {"calls": budget.calls, "deadline_at_ms": budget.wall_deadline_ms}
+    sealed = seal_accounting(draft, dict(accounting))
+    if not isinstance(sealed, SessionRecord):
+        raise ReviewInputError(
+            "activation accounting callback returned invalid authority"
+        )
+    SessionRecord.from_dict(sealed.to_dict())
+    root = cast(Mapping[str, Any], sealed.assessment_queue)
+    if (
+        _tail_record_shape(sealed) != _tail_record_shape(draft)
+        or root["active_operation"]["read_accounting"] != accounting
+    ):
+        raise ReviewInputError(
+            "activation accounting callback changed sealed authority"
+        )
+    return sealed
+
+
+def read_session_baseline(
+    ledger: object, record: SessionRecord
+) -> ReviewBaseline | None:
+    """Read the complete inventory from this integrity-checked authority root.
+
+    Immutable review generation may precede mutable receipt generation. Snapshot
+    comparisons for the current operation still belong to the caller/planner.
+    This seam never projects or rehashes a persisted record.
+    """
+    from .baseline import baseline_from_history_document
+
+    if (
+        record.convergence_history is None
+        or "baseline" not in record.convergence_history
+    ):
+        return None
+    value = record.convergence_history["baseline"]
+    if not isinstance(value, dict) or value.get("encoding") != PARTITION_ENCODING:
+        return baseline_from_history_document(value)
+    manifest = validate_manifest(value)
+    producer, reader = _trusted_evidence_resolver(ledger)
+    binding = manifest["binding"]
+    assert isinstance(binding, dict)
+    if (
+        binding["repository"] != record.repository
+        or binding["repository_id"] != record.repository_id
+        or binding["pull_request"] != record.pull_request
+        or binding["generation"] > record.generation
+        or binding["purpose"] != "baseline"
+        or binding["producer"] != producer()
+    ):
+        raise ReviewInputError("partition root does not match authenticated session")
+    identity = SessionIdentity(
+        record.repository, record.pull_request, repository_id=record.repository_id
+    )
+    return baseline_from_history_document(
+        value,
+        reader=lambda root: reader(identity, root, expected_binding=binding),
+    )
+
+
 class LocalSessionLedger:
     """Filesystem ledger under an operator-supplied directory.
 
@@ -2602,10 +3229,322 @@ class LocalSessionLedger:
 
     SINGLE_WRITER_PER_IDENTITY = True
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        evidence_budget: EvidenceReadBudget | None = None,
+        enable_partition_writes: bool = False,
+        enable_history_graph: bool = False,
+    ) -> None:
         if not isinstance(root, Path):
             raise ReviewInputError("session ledger root is invalid")
         self.root = root
+        self.evidence_budget = evidence_budget or EvidenceReadBudget()
+        self._explicit_evidence_budget = evidence_budget is not None
+        self.enable_partition_writes = enable_partition_writes
+        self.enable_history_graph = enable_history_graph
+        self._history_documents: dict[str, bytes] = {}
+        self._history_associations: dict[object, Any] = {}
+        self._shared_control_budget = evidence_budget is not None
+        self._activation_ticket: EvidenceTailTicket | None = None
+        self._activation_identity: SessionIdentity | None = None
+        self._tail_preparing = False
+
+    def _control_accounting_enabled(self) -> bool:
+        return self._shared_control_budget or self.enable_partition_writes
+
+    def _dispatch_evidence(self, label: str, *, fence: bool = False) -> None:
+        if self._activation_ticket is not None:
+            self._activation_ticket.consume(label, fence=fence)
+        else:
+            self.evidence_budget.consume(fence=fence)
+
+    def _consume_control_io(
+        self, *, fence: bool = False, label: str = "unplanned"
+    ) -> None:
+        if self._control_accounting_enabled():
+            self._dispatch_evidence(label, fence=fence)
+
+    def _observe_control_document(self, document: Mapping[str, object]) -> None:
+        history = document.get("convergence_history")
+        baseline = history.get("baseline") if isinstance(history, Mapping) else None
+        if "assessment_queue" in document or (
+            isinstance(baseline, Mapping)
+            and baseline.get("encoding") == PARTITION_ENCODING
+        ):
+            self._shared_control_budget = True
+
+    def _reserve_local_io(self, calls: int, *, label: str = "unplanned") -> None:
+        """Charge bounded physical work, including mandatory durable cleanup.
+
+        One durable file-write dispatch includes its mandatory sync/cleanup;
+        charges are never refunded after a fault. Metadata containment inspection
+        is one bounded dispatch;
+        enumeration and each enumerated stat are charged separately.
+        """
+        if not self._control_accounting_enabled():
+            return
+        if self._activation_ticket is None:
+            self.evidence_budget.preflight(calls)
+        for _ in range(calls):
+            self._dispatch_evidence(label)
+
+    @staticmethod
+    def evidence_producer() -> str:
+        return "local-ledger"
+
+    def _history_load(
+        self,
+        identity: SessionIdentity,
+        *,
+        max_scan_pages: int | None,
+        now: datetime | None,
+    ) -> tuple[SessionRecord | None, object]:
+        if max_scan_pages is not None:
+            raise ReviewInputError(
+                "local history reader does not accept remote scan scope"
+            )
+        # Read-only authority may outlive execution deadlines; it never admits a mutation.
+        document = self._read_document(self._path(identity), fence=True)
+        if document is None:
+            raise ReviewInputError("history current root is missing")
+        record = SessionRecord.from_dict(document)
+        if (record.repository, record.repository_id, record.pull_request) != (
+            identity.repository,
+            identity.repository_id,
+            identity.pull_request,
+        ):
+            raise ReviewInputError("history root identity differs")
+        read_session_baseline(self, record)
+        return record, read_session_assessment_queue(self, record)
+
+    @staticmethod
+    def _history_head(identity: SessionIdentity, binding: Mapping[str, object]) -> None:
+        # Local caller supplies the trusted immutable Git snapshot context.
+        if (
+            binding.get("repository") != identity.repository
+            or binding.get("pull_request") != identity.pull_request
+        ):
+            raise ReviewInputError("history trusted local snapshot differs")
+
+    def associate_assessment_history(
+        self,
+        identity: SessionIdentity,
+        *,
+        expected_binding: Mapping[str, object],
+        expected_root_sha256: str,
+        expected_generation: int,
+        now: datetime | None = None,
+    ) -> HistoryAssociation:
+        return associate_history(
+            self,
+            identity,
+            expected_binding=expected_binding,
+            expected_root_sha256=expected_root_sha256,
+            expected_generation=expected_generation,
+            now=now,
+        )
+
+    def read_associated_history(
+        self,
+        proof: HistoryAssociation,
+        *,
+        source_digest: str,
+        operation_id: str,
+        now: datetime | None = None,
+    ) -> object:
+        return read_associated_history(
+            self, proof, source_digest=source_digest, operation_id=operation_id, now=now
+        )
+
+    def _part_directory(
+        self, identity: SessionIdentity, *, storage_id: str | None = None
+    ) -> Path:
+        if (
+            self._activation_ticket is not None
+            and identity != self._activation_identity
+        ):
+            raise ReviewInputError("activation part identity changed")
+        self._dispatch_evidence(f"part:{storage_id}:directory")
+        root = self.root.resolve()
+        directory = (
+            self.root
+            / ".evidence"
+            / _safe_ledger_name(identity.repository)
+            / str(identity.pull_request)
+        )
+        for path in (self.root, self.root / ".evidence", directory.parent, directory):
+            if path.is_symlink():
+                raise ReviewInputError("partition directory must not be a symlink")
+        resolved = directory.resolve()
+        if root not in resolved.parents or (
+            resolved.exists() and not resolved.is_dir()
+        ):
+            raise ReviewInputError("partition directory is outside ledger root")
+        return resolved
+
+    def _read_part(
+        self, identity: SessionIdentity, storage_id: str
+    ) -> AuthenticatedPart:
+        if not re.fullmatch(r"[a-f0-9]{64}", storage_id):
+            raise ReviewInputError("local partition identity is invalid")
+        self._dispatch_evidence(f"part:{storage_id}:resolve")
+        path = self._part_directory(identity, storage_id=storage_id) / storage_id
+        self._dispatch_evidence(f"part:{storage_id}:read")
+        if path.is_symlink():
+            raise ReviewInputError("local partition must not be a symlink")
+        try:
+            with path.open("rb") as handle:
+                raw = handle.read(MAX_PART_BYTES + 1)
+            if (
+                len(raw) > MAX_PART_BYTES
+                or hashlib.sha256(raw).hexdigest() != storage_id
+            ):
+                raise ValueError("invalid part")
+            document = json.loads(raw)
+            if canonical_bytes(document) != raw:
+                raise ValueError("noncanonical part")
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise ReviewInputError("local partition is missing or invalid") from exc
+        self.evidence_budget.check()
+        return AuthenticatedPart(document, self.evidence_producer())
+
+    def read_evidence(
+        self,
+        identity: SessionIdentity,
+        manifest: dict[str, object],
+        *,
+        expected_binding: Mapping[str, object],
+    ) -> object:
+        if (
+            expected_binding.get("repository") != identity.repository
+            or expected_binding.get("pull_request") != identity.pull_request
+            or expected_binding.get("repository_id") != identity.repository_id
+            or expected_binding.get("producer") != self.evidence_producer()
+        ):
+            raise ReviewInputError("local partition binding does not match")
+        return read_partitioned_evidence(
+            manifest,
+            reader=lambda storage_id: self._read_part(identity, storage_id),
+            expected_binding=expected_binding,
+            budget=self.evidence_budget,
+        )
+
+    def stage_evidence(
+        self,
+        identity: SessionIdentity,
+        *,
+        binding: dict[str, object],
+        document: object,
+        item_count: int,
+        max_manifest_bytes: int,
+    ) -> dict[str, object]:
+        if not self.enable_partition_writes:
+            raise ReviewInputError(
+                "partition writers require explicit reader-first enablement"
+            )
+        if (
+            binding.get("repository") != identity.repository
+            or binding.get("pull_request") != identity.pull_request
+            or binding.get("repository_id") != identity.repository_id
+            or binding.get("producer") != self.evidence_producer()
+        ):
+            raise ReviewInputError("local partition binding does not match")
+        directory = self._part_directory(identity)
+        self._reserve_local_io(2)  # directory creation and bounded enumeration
+        directory.mkdir(parents=True, exist_ok=True)
+        sizes: dict[str, int] = {}
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                self.evidence_budget.consume()  # metadata/stat per retained entry
+                if (
+                    len(sizes) >= MAX_STORED_PARTS
+                    or entry.is_symlink()
+                    or not entry.is_file()
+                    or not re.fullmatch(
+                        r"(?:[a-f0-9]{64}|\.staging-[A-Za-z0-9_-]{1,64})", entry.name
+                    )
+                ):
+                    raise ReviewInputError(
+                        "partition retention scan exceeded finite bounds"
+                    )
+                sizes[entry.name] = entry.stat().st_size
+        if sum(sizes.values()) > MAX_STORED_PART_BYTES:
+            raise ReviewInputError("partition retention byte capacity exceeded")
+        prospective_parts = partition_evidence(
+            document, binding=binding, item_count=item_count
+        )
+        # Physical local writes include durable sync/cleanup; reads include
+        # containment and object inspection. Reserve later root/fence work too.
+        if not self._tail_preparing:
+            self.evidence_budget.preflight(8 * len(prospective_parts) + 16)
+        missing_sizes = [
+            len(canonical_bytes(part))
+            for part in prospective_parts
+            if hashlib.sha256(canonical_bytes(part)).hexdigest() not in sizes
+        ]
+        if (
+            len(sizes) + len(missing_sizes) > MAX_STORED_PARTS
+            or sum(sizes.values()) + sum(missing_sizes) > MAX_STORED_PART_BYTES
+        ):
+            raise ReviewInputError(
+                "partition whole retention capacity exceeded before staging"
+            )
+
+        def write(part: dict[str, object]) -> str:
+            raw = canonical_bytes(part)
+            storage_id = hashlib.sha256(raw).hexdigest()
+            if storage_id not in sizes:
+                if (
+                    len(sizes) >= MAX_STORED_PARTS
+                    or sum(sizes.values()) + len(raw) > MAX_STORED_PART_BYTES
+                ):
+                    raise ReviewInputError("partition retention capacity exceeded")
+                # One durable immutable write includes temp write, mandatory
+                # sync and cleanup. Charge before any physical write.
+                self._reserve_local_io(1)
+                path = directory / storage_id
+                # Install a complete fsynced inode atomically without replacing
+                # an existing immutable object. A crash leaves only .staging
+                # debris charged to retention, never referenced as authority.
+                temporary = tempfile.NamedTemporaryFile(
+                    dir=directory, prefix=".staging-", delete=False
+                )
+                try:
+                    temporary.write(raw)
+                    temporary.flush()
+                    os.fsync(temporary.fileno())
+                    temporary.close()
+                    self.evidence_budget.check()
+                    try:
+                        os.link(temporary.name, path)
+                    except FileExistsError:
+                        pass
+                    if os.name != "nt":
+                        fd = os.open(directory, os.O_RDONLY)
+                        try:
+                            os.fsync(fd)
+                        finally:
+                            os.close(fd)
+                finally:
+                    temporary.close()
+                    os.unlink(temporary.name)
+                sizes[storage_id] = len(raw)
+            return storage_id
+
+        return stage_partitioned_evidence(
+            document,
+            binding=binding,
+            item_count=item_count,
+            max_manifest_bytes=max_manifest_bytes,
+            writer=write,
+            reader=lambda storage_id: self._read_part(identity, storage_id),
+            budget=self.evidence_budget,
+            preflight_calls=(len(missing_sizes) + 3 * len(prospective_parts))
+            if self._tail_preparing
+            else None,
+        )
 
     def _path(self, identity: SessionIdentity) -> Path:
         return (
@@ -2636,6 +3575,7 @@ class LocalSessionLedger:
         never let that read or write escape the ledger.
         """
 
+        self._consume_control_io()
         root = self.root.resolve()
         directory = self.root / ".enrollments"
         if directory.is_symlink():
@@ -2653,6 +3593,7 @@ class LocalSessionLedger:
         """Return the witness path after rejecting symlinks and non-files."""
 
         path = self._enrollment_directory() / self._enrollment_path(identity).name
+        self._consume_control_io()
         if path.is_symlink():
             raise ReviewInputError("session enrollment witness is invalid")
         if path.exists() and not path.is_file():
@@ -2671,14 +3612,19 @@ class LocalSessionLedger:
         ).encode("ascii")
 
     def _has_enrollment_witness(self, identity: SessionIdentity) -> bool:
+        path = self._validated_enrollment_path(identity)
+        self._consume_control_io()
         try:
-            raw = self._validated_enrollment_path(identity).read_bytes()
+            with path.open("rb") as handle:
+                raw = handle.read(66)
         except FileNotFoundError:
             return False
         except OSError as exc:
             raise ReviewInputError(
                 "session enrollment witness could not be read"
             ) from exc
+        if self._control_accounting_enabled():
+            self.evidence_budget.check()
         if raw != self._enrollment_witness(identity):
             raise ReviewInputError("session enrollment witness is invalid")
         return True
@@ -2712,7 +3658,13 @@ class LocalSessionLedger:
             raise ReviewInputError(
                 "only an expired or witness-only session can be re-enrolled"
             )
+        expired_document = self._read_document(self._path(identity))
+        if expired_document is not None and "assessment_queue" in expired_document:
+            raise ReviewInputError(
+                "assessment queue requires retained tombstone authority before re-enrollment"
+            )
         witness = self._validated_enrollment_path(identity)
+        self._reserve_local_io(2)  # explicit witness and root retirement
         try:
             witness.unlink()
         except FileNotFoundError:
@@ -2733,6 +3685,7 @@ class LocalSessionLedger:
 
     def _create_enrollment_witness(self, identity: SessionIdentity) -> None:
         path = self._validated_enrollment_path(identity)
+        self._reserve_local_io(1)  # durable enrollment write including sync
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with path.open("xb") as handle:
@@ -2762,21 +3715,38 @@ class LocalSessionLedger:
                 "session enrollment witness could not be written"
             ) from exc
 
-    def _read_document(self, path: Path) -> Mapping[str, object] | None:
+    def _read_document(
+        self, path: Path, *, fence: bool = False, tail_label: str = "unplanned"
+    ) -> Mapping[str, object] | None:
+        accounted = self._control_accounting_enabled()
+        if self._activation_ticket is not None and (
+            self._activation_identity is None
+            or path != self._path(self._activation_identity)
+        ):
+            raise ReviewInputError("activation root path changed")
+        self._consume_control_io(fence=fence, label=tail_label)
         try:
-            raw = path.read_bytes()
+            with path.open("rb") as handle:
+                raw = handle.read(MAX_SESSION_RECORD_BYTES + 1)
         except FileNotFoundError:
             return None
         except OSError as exc:
             raise ReviewInputError("session ledger could not be read") from exc
+        if accounted:
+            self.evidence_budget.check()
         if len(raw) > MAX_SESSION_RECORD_BYTES:
             raise ReviewInputError("session record exceeds the configured size limit")
         try:
             payload = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
             raise ReviewInputError("session record was not valid JSON") from exc
         if not isinstance(payload, dict):
             raise ReviewInputError("session record is invalid")
+        self._observe_control_document(payload)
+        if not accounted and self._control_accounting_enabled():
+            # First richer-root read is retroactively charged before exposing
+            # authority. Default inline-only callers retain legacy behavior.
+            self._consume_control_io(fence=fence, label=tail_label)
         return payload
 
     def _write(
@@ -2786,7 +3756,16 @@ class LocalSessionLedger:
         *,
         exclusive: bool = False,
     ) -> None:
+        self._observe_control_document(record.to_dict())
+        if self._activation_ticket is not None and (
+            identity != self._activation_identity
+            or record.record_sha256 != self._activation_ticket._root_sha256
+        ):
+            raise ReviewInputError("activation root differs from sealed authority")
         path = self._path(identity)
+        # One durable temporary-write dispatch includes directory creation,
+        # file sync and unconditional cleanup. Activation is a separate fence.
+        self._reserve_local_io(1, label="root:write")
         path.parent.mkdir(parents=True, exist_ok=True)
         encoded = json.dumps(
             record.to_dict(), sort_keys=True, separators=(",", ":")
@@ -2809,6 +3788,9 @@ class LocalSessionLedger:
             os.fsync(handle.fileno())
             handle.close()
             handle_closed = True
+            # Deadline/count is checked again immediately before authority
+            # activation, after serialization, temp write and file sync.
+            self._consume_control_io(fence=True, label="root:activate")
             if exclusive:
                 # Link a fully fsynced temporary file into place without
                 # replacing an existing destination. This is the filesystem
@@ -2826,7 +3808,9 @@ class LocalSessionLedger:
                     os.fsync(directory_fd)
                 finally:
                     os.close(directory_fd)
-        except OSError as exc:
+            if self._control_accounting_enabled():
+                self.evidence_budget.check()
+        except (OSError, ReviewInputError) as exc:
             if not handle_closed:
                 try:
                     handle.close()
@@ -2841,6 +3825,8 @@ class LocalSessionLedger:
                 raise ReviewInputError(
                     "session already exists (concurrent initialization)"
                 ) from exc
+            if isinstance(exc, ReviewInputError):
+                raise
             if installed:
                 raise ReviewInputError(
                     "session ledger replaced but directory sync failed"
@@ -2940,6 +3926,8 @@ class LocalSessionLedger:
                     return SessionLoadResult(status="expired")
                 return SessionLoadResult(status="migrated", record=migrated_record)
             record = SessionRecord.from_dict(document)
+            read_session_baseline(self, record)
+            read_session_assessment_queue(self, record)
         except ReviewInputError:
             return SessionLoadResult(status="integrity-failed")
         if (
@@ -2994,7 +3982,29 @@ class LocalSessionLedger:
         if loaded.status != "ok" or loaded.record is None:
             raise ReviewInputError("session record is missing")
         updated = mutate(loaded.record)
+        _history_legacy_write_guard(self, loaded.record)
+        _validate_queue_retention(loaded.record, updated)
+        read_session_baseline(self, updated)
+        read_session_assessment_queue(self, updated)
+        _history_legacy_write_guard(self, updated)
+        current_document = self._read_document(self._path(identity), fence=True)
+        if current_document is None:
+            raise ReviewInputError("session generation conflict before activation")
+        current = SessionRecord.from_dict(current_document)
+        if (
+            current.generation != loaded.record.generation
+            or current.record_sha256 != loaded.record.record_sha256
+        ):
+            raise ReviewInputError("session generation conflict before activation")
         self._write(identity, updated)
+        persisted = self._read_document(self._path(identity), fence=True)
+        if (
+            persisted is None
+            or SessionRecord.from_dict(persisted).record_sha256 != updated.record_sha256
+        ):
+            raise ReviewInputError(
+                "session activation readback is ambiguous or conflicting"
+            )
         return updated
 
     # Kept as a compatibility shim for older in-process callers. New code
@@ -3007,6 +4017,199 @@ class LocalSessionLedger:
         now: datetime | None = None,
     ) -> SessionRecord:
         return self.replace(identity, mutate, now=now)
+
+    def reserve_for_tail(
+        self,
+        identity: SessionIdentity,
+        *,
+        operation_binding: Mapping[str, object],
+        slot: str,
+        reservation_id: str,
+        expected_generation: int,
+        head_sha: str | None = None,
+        now: datetime | None = None,
+    ) -> SessionRecord:
+        """Create the existing reservation and retain its live owned-readback proof.
+
+        Loaded/duplicate reservations cannot mint a new original attempt. No
+        independent local witness, persistent field or credential is introduced.
+        """
+        if (
+            not self.enable_partition_writes
+            or not self._explicit_evidence_budget
+            or not isinstance(self.evidence_budget, EvidenceReadBudget)
+        ):
+            raise ReviewInputError(
+                "prepaid activation writers or original budget are unavailable"
+            )
+        budget = self.evidence_budget
+        scope = _tail_attempt_scope(identity, reservation_id, operation_binding)
+        if (
+            budget.restored
+            or scope in budget._live_attempts
+            or scope in budget._failed_attempts
+        ):
+            raise NonResumableActivationError(
+                "original activation attempt cannot be restarted"
+            )
+
+        def admit(record: SessionRecord) -> SessionRecord:
+            if (
+                record.reservation_id is not None
+                or record.last_committed_reservation_id == reservation_id
+            ):
+                raise NonResumableActivationError(
+                    "loaded reservation is not a live original attempt proof"
+                )
+            return mutate_reserved(
+                record,
+                slot=slot,
+                reservation_id=reservation_id,
+                expected_generation=expected_generation,
+                head_sha=head_sha,
+                now=now,
+            )
+
+        try:
+            reserved = self.replace(identity, admit, now=now)
+            budget._remember_live_attempt(scope, reserved.record_sha256, owner=self)
+            return reserved
+        except BaseException:
+            budget._burn_live_attempt(scope)
+            raise
+
+    def replace_with_tail(
+        self,
+        identity: SessionIdentity,
+        prepare: Callable[[SessionRecord], SessionRecord],
+        *,
+        operation_binding: Mapping[str, object],
+        attempt_reservation_id: str,
+        seal_accounting: Callable[[SessionRecord, Mapping[str, int]], SessionRecord],
+        now: datetime | None = None,
+    ) -> SessionRecord:
+        """Stage, prepay a sealed exact tail, then conditionally activate/read back.
+
+        Every failure burns the live attempt. Restart needs a future reviewed
+        authenticated original-attempt witness; a snapshot/grant alone refuses.
+        """
+        if (
+            not self.enable_partition_writes
+            or not self._explicit_evidence_budget
+            or not isinstance(self.evidence_budget, EvidenceReadBudget)
+        ):
+            raise ReviewInputError(
+                "prepaid activation writers or original budget are unavailable"
+            )
+        budget = self.evidence_budget
+        operation = _tail_operation_binding(operation_binding)
+        scope = _tail_attempt_scope(identity, attempt_reservation_id, operation)
+        if (
+            budget.restored
+            or scope not in budget._live_attempts
+            or budget._live_attempt_owners.get(scope) is not self
+            or scope in budget._failed_attempts
+        ):
+            raise NonResumableActivationError(
+                "original activation attempt witness is unavailable"
+            )
+        ticket: EvidenceTailTicket | None = None
+        try:
+            loaded = self.load(identity, now=now)
+            if loaded.status != "ok" or loaded.record is None:
+                raise ReviewInputError(
+                    "prepaid activation current authority is unavailable"
+                )
+            before = loaded.record
+            budget._require_live_attempt(scope, before.record_sha256, owner=self)
+            self._tail_preparing = True
+            draft = prepare(before)
+            self._tail_preparing = False
+            _validate_tail_draft(
+                before,
+                draft,
+                operation=operation,
+                reservation_id=attempt_reservation_id,
+                budget=budget,
+            )
+            if self.enable_history_graph:
+                read_session_assessment_queue(self, draft)
+                _history_preserve_sources(self, before, draft)
+            old_ids = _history_extra_ids(self, before)
+            new_ids = _history_extra_ids(self, draft)
+            plan_scope = _tail_plan_scope(
+                "local",
+                before,
+                draft,
+                operation=operation,
+                budget=budget,
+                old_history_ids=old_ids,
+                new_history_ids=new_ids,
+            )
+            steps = tuple(
+                TailDispatch(f"part:{part_id}:{unit}")
+                for part_id in _tail_part_ids(draft, history_ids=new_ids)
+                for unit in ("resolve", "directory", "read")
+            ) + (
+                TailDispatch("root:reload", fence=True),
+                TailDispatch("root:write"),
+                TailDispatch("root:activate", fence=True),
+                TailDispatch("root:readback", fence=True),
+            )
+            plan = ActivationTailPlan("local", plan_scope, steps)
+            ticket = budget.reserve_tail(plan)
+            sealed = _seal_tail_accounting(draft, seal_accounting, budget)
+            _validate_queue_retention(before, sealed)
+            ticket.seal(sealed.record_sha256)
+            ticket.start(
+                scope_sha256=_tail_plan_scope(
+                    "local",
+                    before,
+                    sealed,
+                    operation=operation,
+                    budget=budget,
+                    old_history_ids=old_ids,
+                    new_history_ids=new_ids,
+                ),
+                root_sha256=sealed.record_sha256,
+            )
+            self._activation_ticket, self._activation_identity = ticket, identity
+            read_session_baseline(self, sealed)
+            read_session_assessment_queue(self, sealed)
+            current_document = self._read_document(
+                self._path(identity), fence=True, tail_label="root:reload"
+            )
+            if (
+                current_document is None
+                or SessionRecord.from_dict(current_document).record_sha256
+                != before.record_sha256
+            ):
+                raise ReviewInputError(
+                    "session generation conflict before prepaid activation"
+                )
+            self._write(identity, sealed)
+            persisted = self._read_document(
+                self._path(identity), fence=True, tail_label="root:readback"
+            )
+            if (
+                persisted is None
+                or SessionRecord.from_dict(persisted).record_sha256
+                != sealed.record_sha256
+            ):
+                raise ReviewInputError(
+                    "prepaid activation readback is ambiguous or conflicting"
+                )
+            ticket.finish()
+            budget._advance_live_attempt(scope, sealed.record_sha256)
+            return sealed
+        except BaseException:
+            budget._burn_live_attempt(scope)
+            raise
+        finally:
+            if ticket is not None:
+                ticket.abort()
+            self._activation_ticket = self._activation_identity = None
+            self._tail_preparing = False
 
     def reserve(
         self,

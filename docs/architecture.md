@@ -675,7 +675,7 @@ compute. A hosted review service would require a new ADR and a fresh issue set.
 The optional OIDC installation-token broker is a narrow boundary outside the
 provider-neutral review core: `oidc.py` verifies GitHub Actions identity and
 `broker.py` applies workflow policy before reusing `GitHubAppAuth`. The App
-private key remains in managed storage, the broker handles no review content,
+private key remains in managed storage, the broker receives no diff or provider response,
 and forks, missing or suspended installations, rate limits, and verification
 or GitHub failures are rejected fail-closed.
 
@@ -692,6 +692,13 @@ GitHub Actions OIDC id_token (audience=sts.reviewsensei.dev, id-token: write)
 ```
 
 ## Issue-64 setup-v4 tagged publication architecture
+
+The proposed [feedback mutation protocol](adr/0073-authenticated-feedback-mutation-grants.md)
+adds a distinct version-2 session grant. The Worker transiently reloads complete
+human sources to verify numeric actors, exact snapshot and selection digests;
+credentials and ledger records retain metadata and hashes. It does not receive
+review diffs or provider responses. This grant alone cannot authenticate original
+attempt accounting or authorize the disabled richer hosted queue route.
 
 Setup-v4 separates the customer caller, public execution workflow, and
 issuance-only Worker:

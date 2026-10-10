@@ -225,6 +225,32 @@ class WorkRecoveryStore:
         decode: Callable[[object, WorkBatch], T],
         request_digests: Mapping[str, str | None],
     ) -> WorkExecution[T] | None:
+        admitted = self._load(plan, tracker, budgets, decode, request_digests)
+        return admitted[0] if admitted is not None else None
+
+    def load_admission(
+        self,
+        plan: ReviewWorkPlan,
+        tracker: ResourceBudgetTracker,
+        budgets: EffectiveWorkBudget,
+        decode: Callable[[object, WorkBatch], T],
+    ) -> tuple[WorkExecution[T], Mapping[str, str | None]] | None:
+        """Restore authenticated original admission before request rendering.
+
+        The executor must compare freshly rendered request digests and validate
+        every cached decision before reuse. This private diagnostic receipt is
+        not public session authority and cannot authorize a new queue mutation.
+        """
+        return self._load(plan, tracker, budgets, decode, None)
+
+    def _load(
+        self,
+        plan: ReviewWorkPlan,
+        tracker: ResourceBudgetTracker,
+        budgets: EffectiveWorkBudget,
+        decode: Callable[[object, WorkBatch], T],
+        request_digests: Mapping[str, str | None] | None,
+    ) -> tuple[WorkExecution[T], Mapping[str, str | None]] | None:
         if not self.enabled:
             return None
         self._validate_directory()
@@ -274,9 +300,23 @@ class WorkRecoveryStore:
                 _canonical(document["plan"]) != _canonical(_plan_document(plan))
                 or document["resource_budget"] != asdict(tracker.budget)
                 or plan.budget_digest != budgets.digest
-                or document["request_digests"] != dict(request_digests)
+                or (
+                    request_digests is not None
+                    and document["request_digests"] != dict(request_digests)
+                )
             ):
                 raise ValueError("identity")
+            stored_digests = document["request_digests"]
+            if (
+                not isinstance(stored_digests, dict)
+                or set(stored_digests) != {batch.batch_id for batch in plan.batches}
+                or any(
+                    value is not None
+                    and (not isinstance(value, str) or not _HASH.fullmatch(value))
+                    for value in stored_digests.values()
+                )
+            ):
+                raise ValueError("request identities")
             saved = datetime.fromisoformat(document["saved_at"])
             expires = datetime.fromisoformat(document["expires_at"])
             now = self.now()
@@ -328,6 +368,7 @@ class WorkRecoveryStore:
             ):
                 raise ValueError("receipts")
             completed = []
+            completed_ids: set[str] = set()
             for item in document["completed"]:
                 if (
                     not isinstance(item, dict)
@@ -337,6 +378,12 @@ class WorkRecoveryStore:
                 ):
                     raise ValueError("receipt")
                 batch = batches[item["batch_id"]]
+                if (
+                    batch.batch_id in completed_ids
+                    or item["request_digest"] != stored_digests[batch.batch_id]
+                ):
+                    raise ValueError("receipt request identity")
+                completed_ids.add(batch.batch_id)
                 completed.append(
                     CompletedBatch(
                         batch, decode(item["result"], batch), item["request_digest"]
@@ -369,7 +416,7 @@ class WorkRecoveryStore:
             tick = tracker.monotonic()
             current_elapsed = max(0, int((tick - tracker.started) * 1000))
             tracker.started = tick - max(current_elapsed, restored_elapsed) / 1000
-            return execution
+            return execution, dict(stored_digests)
         except (
             OSError,
             ValueError,

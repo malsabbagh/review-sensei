@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
-from ...baseline import ReviewBaseline, baseline_from_history_document
+from ...baseline import ReviewBaseline
 from ...budgets import ReviewWorkBudgets
 from ...context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from ...convergence import (
@@ -43,6 +43,7 @@ from ...session import (
     convergence_progress_blocker_markers,
     load_review_transaction_for_publication,
     prepare_session_round,
+    read_session_baseline,
     record_admitted_blocker_progress,
     record_session_failed_attempt,
     review_analysis_checkpoint_eligible,
@@ -534,9 +535,11 @@ class GitHubApplication:
                         baseline_recovery_required = True
                     else:
                         try:
-                            durable_baseline = baseline_from_history_document(
-                                history.get("baseline")
+                            durable_baseline = read_session_baseline(
+                                ledger, record_for_baseline
                             )
+                            if durable_baseline is None:
+                                baseline_recovery_required = True
                         except ReviewInputError:
                             baseline_recovery_required = True
         if (
@@ -1567,11 +1570,7 @@ class GitHubApplication:
                                 prepared=prepared,
                                 app_slug=app_slug,
                             )
-                            return (
-                                source is not None
-                                and source["body"] == human.source_body
-                                and source["user"]["login"] == human.source_actor
-                            )
+                            return assessor.source_matches(source, human)
 
                         if not source_guard():
                             return replace(

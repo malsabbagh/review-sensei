@@ -17,7 +17,6 @@ from .baseline import (
     BaselinePersistenceError,
     admission_context_document,
     admission_context_from_document,
-    baseline_from_history_document,
     baseline_history_document,
     plan_verification_scope,
     reconcile_overflow_review,
@@ -88,6 +87,7 @@ from .providers.openrouter import (
 from .providers.profiles import get_provider_profile
 from .providers.routing import bind_stage_providers
 from .service import DEFAULT_STAGES, ReviewService
+from .session import read_session_baseline
 from .validation import DEFAULT_REVIEW_LIMITS, read_bounded_utf8
 from .work_recovery import WorkRecoveryStore
 from .workflow import prepare_diff
@@ -3851,9 +3851,7 @@ def main(argv: list[str] | None = None) -> int:
                         # whose current context is proved by its full baseline.
                         if prior.transaction is not None and isinstance(history, dict):
                             try:
-                                previous = baseline_from_history_document(
-                                    history.get("baseline")
-                                )
+                                previous = read_session_baseline(ledger, prior)
                             except ReviewInputError:
                                 previous = None
                             tx = prior.transaction
@@ -3952,11 +3950,13 @@ def main(argv: list[str] | None = None) -> int:
             if not isinstance(history, dict) or history.get("state") != "completed":
                 return emit_durable_baseline_recovery("missing-or-unfinished-history")
             try:
-                persisted_baseline = baseline_from_history_document(
-                    history.get("baseline")
+                persisted_baseline = read_session_baseline(
+                    ledger, prepared_round.record
                 )
             except ReviewInputError:
                 return emit_durable_baseline_recovery("malformed-baseline")
+            if persisted_baseline is None:
+                return emit_durable_baseline_recovery("missing-baseline")
             # Reserving this round advances generation once. Valid prior history
             # precedes that reserved generation; equality denotes future history.
             if (

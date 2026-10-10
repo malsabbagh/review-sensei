@@ -74,7 +74,9 @@ class EvidenceReference:
     excerpt: str | None = None
 
     def __post_init__(self) -> None:
-        validate_repository_path(self.path, label="evidence path")
+        validate_repository_path(
+            self.path, label="evidence path", allow_glob_chars=True
+        )
         if (
             isinstance(self.line, bool)
             or not isinstance(self.line, int)
@@ -124,7 +126,9 @@ class CandidateFinding:
                 raise ReviewInputError(
                     f"candidate {name} must be a bounded non-empty string"
                 )
-        validate_repository_path(self.impacted_path, label="candidate impacted_path")
+        validate_repository_path(
+            self.impacted_path, label="candidate impacted_path", allow_glob_chars=True
+        )
         if not isinstance(self.evidence, tuple) or any(
             not isinstance(reference, EvidenceReference) for reference in self.evidence
         ):
@@ -263,7 +267,7 @@ def _check_snapshot_bounds(
     for path, content in snapshot.items():
         if not isinstance(path, str) or not isinstance(content, str):
             raise ReviewInputError("snapshot paths and contents must be strings")
-        validate_repository_path(path, label="snapshot path")
+        validate_repository_path(path, label="snapshot path", allow_glob_chars=True)
         path_bytes = utf8_size(path, label="snapshot path")
         content_bytes = utf8_size(content, label="snapshot content")
         if path_bytes + content_bytes > limits.max_diff_bytes:

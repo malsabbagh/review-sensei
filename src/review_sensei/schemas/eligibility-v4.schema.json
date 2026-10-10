@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/eligibility-v4.schema.json",
+  "title": "Proposed reader-first result-bound eligibility v4",
+  "description": "Structural validation only; authenticated host context, exact digests/counts/ownership, fresh all-part readback and framed future root allocation remain runtime requirements. Writers remain disabled.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "head_sha",
+    "result_digest",
+    "facts",
+    "immutable_generation",
+    "activation_generation",
+    "human_inventory",
+    "visible_prose",
+    "human_resolution"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "4"
+    },
+    "head_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "result_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "facts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "enabled",
+        "app_authored",
+        "review_status",
+        "evidence_policy",
+        "has_blocking_findings",
+        "has_human_adjudication_findings",
+        "coverage_blocker",
+        "qualification",
+        "check_published"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "1"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "app_authored": {
+          "type": "boolean"
+        },
+        "review_status": {
+          "enum": [
+            "complete",
+            "partial",
+            "incomplete",
+            "summary-only"
+          ]
+        },
+        "evidence_policy": {
+          "enum": [
+            "legacy",
+            "confirmed"
+          ]
+        },
+        "has_blocking_findings": {
+          "type": "boolean"
+        },
+        "has_human_adjudication_findings": {
+          "type": "boolean"
+        },
+        "coverage_blocker": {
+          "enum": [
+            null,
+            "reviewed",
+            "partial",
+            "incomplete",
+            "unknown"
+          ]
+        },
+        "qualification": {
+          "enum": [
+            "not-required",
+            "qualified",
+            "missing",
+            "unverified"
+          ]
+        },
+        "check_published": {
+          "type": "boolean"
+        },
+        "persistence_status": {
+          "const": "capacity-exceeded"
+        }
+      },
+      "if": {
+        "required": [
+          "persistence_status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "review_status": {
+            "const": "partial"
+          }
+        }
+      }
+    },
+    "immutable_generation": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    },
+    "activation_generation": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    },
+    "human_inventory": {
+      "allOf": [
+        {
+          "$ref": "https://reviewsensei.dev/schemas/v1/evidence-manifest.schema.json"
+        },
+        {
+          "properties": {
+            "binding": {
+              "properties": {
+                "purpose": {
+                  "const": "human-inventory"
+                }
+              }
+            },
+            "item_count": {
+              "maximum": 250
+            }
+          }
+        }
+      ]
+    },
+    "visible_prose": {
+      "allOf": [
+        {
+          "$ref": "https://reviewsensei.dev/schemas/v1/evidence-manifest.schema.json"
+        },
+        {
+          "properties": {
+            "binding": {
+              "properties": {
+                "purpose": {
+                  "const": "evidence"
+                }
+              }
+            },
+            "item_count": {
+              "maximum": 250
+            }
+          }
+        }
+      ]
+    },
+    "human_resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "inventory_digest",
+        "resolved"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "1"
+        },
+        "inventory_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "resolved": {
+          "type": "array",
+          "maxItems": 250,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        }
+      }
+    }
+  }
+}

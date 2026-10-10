@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -32,6 +33,72 @@ class Provider:
 
 
 class WorkRecoveryTests(unittest.TestCase):
+    def test_receipt_first_admission_restores_original_tracker_and_request_ids(self):
+        plan, resource, budgets, render = self.fixture()
+        with tempfile.TemporaryDirectory() as root:
+            first_store = WorkRecoveryStore(
+                Path(root), key=b"k" * 32, artifacts="diagnostics", now=lambda: NOW
+            )
+            provider = Provider()
+            first, original = self.run_plan(
+                plan, resource, budgets, render, provider, first_store
+            )
+            resumed = WorkRecoveryStore(
+                Path(root),
+                key=b"k" * 32,
+                artifacts="diagnostics",
+                now=lambda: NOW + timedelta(seconds=121),
+            )
+            tracker = ResourceBudgetTracker(resource)
+            admitted = resumed.load_admission(
+                plan, tracker, budgets, lambda value, batch: value["text"]
+            )
+            self.assertIsNotNone(admitted)
+            execution, digests = admitted
+            self.assertEqual(execution.completed, first.completed)
+            self.assertEqual(tracker.execution_identity, original.execution_identity)
+            self.assertEqual(tracker.provider_calls, original.provider_calls)
+            self.assertGreaterEqual(tracker.elapsed_ms(), 121000)
+            self.assertEqual(set(digests), {batch.batch_id for batch in plan.batches})
+            self.assertEqual(provider.calls, 2)
+
+    def test_receipt_first_rejects_incomplete_or_inconsistent_signed_request_table(
+        self,
+    ):
+        plan, resource, budgets, render = self.fixture()
+        with tempfile.TemporaryDirectory() as root:
+            store = WorkRecoveryStore(
+                Path(root), key=b"k" * 32, artifacts="diagnostics", now=lambda: NOW
+            )
+            self.run_plan(plan, resource, budgets, render, Provider(), store)
+            path = next(Path(root).glob("*.json"))
+            original = json.loads(path.read_text())
+            first_id = plan.batches[0].batch_id
+            for mutation in ("missing", "extra", "null", "different", "duplicate"):
+                with self.subTest(mutation=mutation):
+                    envelope = deepcopy(original)
+                    document = envelope["document"]
+                    if mutation == "missing":
+                        document["request_digests"].pop(first_id)
+                    elif mutation == "extra":
+                        document["request_digests"]["e" * 64] = "f" * 64
+                    elif mutation == "null":
+                        document["request_digests"][first_id] = None
+                    elif mutation == "different":
+                        document["request_digests"][first_id] = "e" * 64
+                    else:
+                        document["completed"].append(document["completed"][0])
+                    envelope["authentication"] = store._signature(document)
+                    path.write_text(json.dumps(envelope))
+                    tracker = ResourceBudgetTracker(resource)
+                    original_identity = tracker.execution_identity
+                    with self.assertRaises(ReviewInputError):
+                        store.load_admission(
+                            plan, tracker, budgets, lambda value, batch: value["text"]
+                        )
+                    self.assertEqual(tracker.provider_calls, 0)
+                    self.assertEqual(tracker.execution_identity, original_identity)
+
     def test_restoration_uses_one_tick_and_preserves_current_elapsed_time(self):
         plan, resource, budgets, render = self.fixture()
         with tempfile.TemporaryDirectory() as root:
