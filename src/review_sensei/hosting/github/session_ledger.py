@@ -40,6 +40,11 @@ from ...bounded_evidence import (
     stage_partitioned_evidence,
 )
 from ...errors import ReviewInputError
+from ...history_association import (
+    HistoryAssociation,
+    associate_history,
+    read_associated_history,
+)
 from ...session import (
     MAX_SESSION_COMMENT_BYTES,
     SessionIdentity,
@@ -47,6 +52,9 @@ from ...session import (
     SessionLoadReason,
     SessionLoadResult,
     SessionRecord,
+    _history_extra_ids,
+    _history_legacy_write_guard,
+    _history_preserve_sources,
     _seal_tail_accounting,
     _tail_attempt_scope,
     _tail_operation_binding,
@@ -235,6 +243,7 @@ class GitHubIssueCommentSessionLedger:
         actions_token_provider: Callable[[], str] | None = None,
         evidence_budget: EvidenceReadBudget | None = None,
         enable_partition_writes: bool = False,
+        enable_history_graph: bool = False,
     ) -> None:
         if not isinstance(http, GitHubHttp):
             raise ReviewInputError("GitHub session ledger requires GitHubHttp")
@@ -281,6 +290,10 @@ class GitHubIssueCommentSessionLedger:
         self._actions_token_provider = actions_token_provider
         self.evidence_budget = evidence_budget
         self.enable_partition_writes = enable_partition_writes
+        self.enable_history_graph = enable_history_graph
+        self._history_documents: dict[str, bytes] = {}
+        self._history_associations: dict[object, Any] = {}
+        self._history_reading = False
         self._evidence_author_id: int | None = None
         self._mutation_active = False
         self._tail_authorizing = False
@@ -303,6 +316,82 @@ class GitHubIssueCommentSessionLedger:
             )
         return f"github-bot:{self._evidence_author_id}"
 
+    def _history_load(
+        self,
+        identity: SessionIdentity,
+        *,
+        max_scan_pages: int | None,
+        now: datetime | None,
+    ) -> tuple[SessionRecord | None, object]:
+        if max_scan_pages is None:
+            raise ReviewInputError("history reader requires sealed finite scan scope")
+        self._validate_tail_scan_pages(max_scan_pages)
+        if self._activation_ticket is not None or self._history_reading:
+            raise ReviewInputError("history association cannot consume activation work")
+        previous = self._tail_scan_pages
+        self._history_reading, self._tail_scan_pages = True, max_scan_pages
+        try:
+            _, record = self._discover(identity, now=now)
+            if record is None:
+                raise ReviewInputError("history current root is missing")
+            # _discover already authenticated and decoded the complete envelope.
+            from ...session import _history_cached
+
+            payload = _history_cached(self, record)
+            if payload is None:
+                raise ReviewInputError("history current envelope is not indexed")
+            return record, payload["envelope"]
+        finally:
+            self._history_reading, self._tail_scan_pages = False, previous
+
+    def _history_head(
+        self, identity: SessionIdentity, binding: Mapping[str, object]
+    ) -> None:
+        # This read fence is required even without a mutation broker/grant.
+        path = self.http.repository_path(
+            identity.repository, f"/pulls/{identity.pull_request}"
+        )
+        status, payload = self._request("GET", path)
+        if (
+            status != 200
+            or not isinstance(payload, dict)
+            or not isinstance(payload.get("head"), dict)
+            or payload["head"].get("sha") != binding["head_sha"]
+        ):
+            raise ReviewInputError("history trusted current PR head differs")
+
+    def associate_assessment_history(
+        self,
+        identity: SessionIdentity,
+        *,
+        expected_binding: Mapping[str, object],
+        expected_root_sha256: str,
+        expected_generation: int,
+        max_scan_pages: int,
+        now: datetime | None = None,
+    ) -> HistoryAssociation:
+        return associate_history(
+            self,
+            identity,
+            expected_binding=expected_binding,
+            expected_root_sha256=expected_root_sha256,
+            expected_generation=expected_generation,
+            max_scan_pages=max_scan_pages,
+            now=now,
+        )
+
+    def read_associated_history(
+        self,
+        proof: HistoryAssociation,
+        *,
+        source_digest: str,
+        operation_id: str,
+        now: datetime | None = None,
+    ) -> object:
+        return read_associated_history(
+            self, proof, source_digest=source_digest, operation_id=operation_id, now=now
+        )
+
     def _part_owner(self, item: object, identity: SessionIdentity) -> dict[str, object]:
         if not isinstance(item, dict):
             raise ReviewInputError("GitHub partition object is invalid")
@@ -315,6 +404,7 @@ class GitHubIssueCommentSessionLedger:
             or not isinstance(author.get("login"), str)
             or author["login"].casefold() != self.app_slug.casefold()
             or isinstance(author.get("id"), bool)
+            or not isinstance(author.get("id"), int)
             or author.get("id") != self._evidence_author_id
             or item.get("issue_url") != expected_issue
         ):
@@ -340,7 +430,7 @@ class GitHubIssueCommentSessionLedger:
         if status != 200:
             raise ReviewInputError("GitHub partition is missing")
         item = self._part_owner(payload, identity)
-        if item.get("id") != int(storage_id):
+        if type(item.get("id")) is not int or item.get("id") != int(storage_id):
             raise ReviewInputError("GitHub partition identity does not match")
         body = item.get("body")
         if (
@@ -756,7 +846,11 @@ class GitHubIssueCommentSessionLedger:
                 )
             found.append((comment_id, record))
             author_id = author.get("id") if isinstance(author, dict) else None
-            if self._tail_authorizing or self._activation_ticket is not None:
+            if (
+                self._tail_authorizing
+                or self._activation_ticket is not None
+                or self._history_reading
+            ):
                 if (
                     isinstance(author_id, bool)
                     or not isinstance(author_id, int)
@@ -942,12 +1036,14 @@ class GitHubIssueCommentSessionLedger:
         ):
             raise ReviewInputError("session generation conflict")
         record = latest_record
+        _history_legacy_write_guard(self, record)
         self._mutation_active = True
         try:
             updated = mutate(record)
             _validate_queue_retention(record, updated)
             read_session_baseline(self, updated)
             read_session_assessment_queue(self, updated)
+            _history_legacy_write_guard(self, updated)
         finally:
             self._mutation_active = False
         if self.evidence_budget is not None:
@@ -1312,6 +1408,11 @@ class GitHubIssueCommentSessionLedger:
                 reservation_id=attempt_reservation_id,
                 budget=budget,
             )
+            if self.enable_history_graph:
+                read_session_assessment_queue(self, draft)
+                _history_preserve_sources(self, before, draft)
+            old_ids = _history_extra_ids(self, before)
+            new_ids = _history_extra_ids(self, draft)
             if self._session_grant is None:
                 raise ReviewInputError("activation grant is unavailable")
             grant_digest = hashlib.sha256(self._session_grant.encode()).hexdigest()
@@ -1335,6 +1436,8 @@ class GitHubIssueCommentSessionLedger:
                     head_sha=self._head_sha,
                     root_id=comment_id,
                     grant_sha256=grant_digest,
+                    old_history_ids=old_ids,
+                    new_history_ids=new_ids,
                 )
 
             def part_steps(record: SessionRecord) -> tuple[TailDispatch, ...]:
@@ -1342,7 +1445,13 @@ class GitHubIssueCommentSessionLedger:
                     TailDispatch(
                         f"GET {self.http.repository_path(identity.repository, f'/issues/comments/{part_id}')}"
                     )
-                    for part_id in _tail_part_ids(record)
+                    for part_id in _tail_part_ids(
+                        record,
+                        history_ids=new_ids
+                        if record is draft
+                        or record.record_sha256 != before.record_sha256
+                        else old_ids,
+                    )
                 )
 
             def scan_steps() -> tuple[TailDispatch, ...]:
