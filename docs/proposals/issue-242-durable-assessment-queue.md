@@ -342,3 +342,83 @@ or standalone codec constructor passes cannot qualify hosted admission. Public
 writers remain off; numbered ADR/shared schemas/public call sites remain owned
 by the coordinator. Diagnostic early restore and multistage durable scope
 expansion are still pending.
+
+## Indexed immutable checkpoint prototype
+
+`assessment_history_index.py` defines opt-in `assessment-history-index-v1`.
+The exact host envelope remains `{schema_version: "1.0", kind:
+"assessment-queue-state", journal: <closed indexed document>}`. Public routes
+and the v1/v2 host adapter do not select this prototype automatically.
+
+The indexed document has exactly `schema_version`, `state`, and `sources`.
+`state` is a complete factored immutable inventory/current queue plus zero or
+one original inline operation receipt. Every other stable source remains in
+`sources`, bound to its exact operation, active status, original sealed control
+summary, and one exact already-written accepted checkpoint part. No source
+key, receipt, human obligation, text or budget is evicted. Each reference binds
+storage ID, canonical framed-part SHA-256/bytes, and decoded envelope bytes.
+Old-source lookup reads that one exact authenticated child and checks its
+inline source/operation/receipt and immutable inventory, plus monotonic latest
+resolutions. It never traverses the child's older source references.
+
+`history_references()` returns the complete direct source segment inventory.
+A must authenticate every referenced part's transitive association with the
+latest owned root and protect the complete graph before activation or orphan
+cleanup. Prose references alone are insufficient. There is no graph cleanup or
+public hosted graph reader here. `resolve_history_part` uses A's strict owned
+part decoder and the caller's original shared allowance; it refuses missing,
+altered, foreign-producer/snapshot, multipart and wrong-envelope children.
+
+`source_read_accounting(source_digest, operation_id, authenticated_root,
+expected_binding)` requires the trusted host reader's exact latest fenced
+`QueueHostState`: same full indexed envelope, immutable binding, generation
+shape and complete inventory count. It returns only the already sealed
+original control summary. A typed result is a callback trust contract, not
+cryptographic authentication; the host must supply actual ownership,
+freshness, original-attempt and complete index association proofs. There is no
+raw-document-only control budget accessor or default refill.
+
+`from_retained` is an explicit lossless v1/v2 migration. The host must already
+have durably segmented and authenticated every exact inline original receipt
+under its original authority and accounting. The converter requires the
+complete source-key set, all original sealed summaries and owned references,
+then directly revalidates every child. Missing or extra sources, changed
+receipts and unavailable original accounting refuse. It performs no writes
+and cannot invent historical witnesses. Unmigrated v1/v2 journals remain
+readable by their existing adapters.
+
+The finite retained ceiling remains 256, separately from 32 active operations.
+Individual decoded envelopes remain bounded by 2 MiB; each direct lookup
+requires only the current envelope and one bounded child. A whole-history
+reconstruction is not required or inferred. Physical retention remains A's
+256 parts/8 MiB, each framed part at most 32 KiB; every test preflights the
+entire prospective store before a write. No allowance or retention ceiling
+has been increased.
+
+Queue-only measured runs used A's actual framed codec, F's actual varied
+100/250 Unicode inventory construction (three distinct observations and one
+unique path per finding), complete D feedback bodies/exact target sets, one
+original provider call per authorized source, an initial semantic rejection,
+source33, exact rejected/accepted replay, same-source changed authority and
+expiry refusal. The 250 run retained 64 source authorities (63 exact child
+references plus the current inline receipt) across all transitions. One
+measurement retained 194 checkpoint pieces, 4,534,182 framed bytes; the largest
+current envelope was 85,746 decoded bytes/30,091 framed bytes, and the largest
+current-plus-child lookup was 168,900 decoded bytes. All 63 referenced
+historical envelopes totaled 4,450,885 decoded bytes. The 100 run used 26
+sources/79 pieces, 836,729 framed bytes; maxima were 35,823 decoded/13,347 framed
+bytes and 70,761 decoded bytes per current-plus-child lookup. Exact piece/byte
+counts include replay snapshots and can vary slightly with original timing and
+execution IDs; every observed transition must satisfy the unchanged bounds.
+
+The synthetic transport charges physical part write/readback and exact old
+receipt reads against the same original per-source control object (maximum
+observed 12). These are **queue-only transport lower bounds**, excluding A root
+scan/fences, consuming broker/OIDC, original source guards, provider transport,
+acknowledgment and the other authority artifacts. No qualified joint hosted
+root factory exists yet. Baseline, complete human/result/visible prose, full
+feedback, evidence and control reserves remain explicitly unqualified until
+the coordinator composes actual serialized artifacts through A's reviewed
+graph reader and measures the complete original 64-call/60-second lifecycle.
+D60's full-history source56/258-part refusal remains the existing supported
+profile blocker; this opt-in primitive is not a claim that hosted250 is enabled.
