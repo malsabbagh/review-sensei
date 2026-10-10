@@ -12,6 +12,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Sequence
 
 from ...baseline import ReviewBaseline
+from ...bounded_evidence import EvidenceReadBudget
 from ...context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from ...convergence import (
     LEGACY_REVIEW_MODE,
@@ -67,6 +68,7 @@ from .checks import (
 )
 from .errors import (
     GitHubHTTPError,
+    GitHubHTTPPaginationLimitError,
     GitHubHTTPTransientError,
     GitHubPublicationError,
     GitHubPublicationTransientError,
@@ -679,6 +681,41 @@ class _FinalizationPreflight:
     app_authored: bool = False
 
 
+class _BudgetedReviewPagination(GitHubHttp):
+    """Use the existing adaptive pager with caller-owned dispatch accounting."""
+
+    def __init__(self, http: GitHubHttp, budget: EvidenceReadBudget) -> None:
+        self.transport = http
+        self.budget = budget
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        token: str,
+        body: dict[str, object] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> tuple[int, dict[str, Any] | list[Any] | None]:
+        try:
+            remaining = self.budget.consume()
+            result = self.transport.request(
+                method,
+                path,
+                token=token,
+                body=body,
+                timeout_seconds=min(remaining, timeout_seconds)
+                if timeout_seconds is not None
+                else remaining,
+            )
+            self.budget.check()
+            return result
+        except ReviewInputError:
+            raise GitHubHTTPPaginationLimitError(
+                "review scan shared budget exhausted"
+            ) from None
+
+
 class ReviewApprovalFinalizer:
     """Converge an eligible exact-head PR to one App approval decision.
 
@@ -696,8 +733,27 @@ class ReviewApprovalFinalizer:
     blocking roots remain unresolved.
     """
 
-    def __init__(self, *, http: GitHubHttp) -> None:
+    def __init__(
+        self, *, http: GitHubHttp, evidence_budget: EvidenceReadBudget | None = None
+    ) -> None:
         self.http = http
+        self.evidence_budget = evidence_budget
+
+    def _review_pages(
+        self, *, token: str, repository: str, pull_request: int
+    ) -> list[Any]:
+        # Legacy scans acquire one finite read budget. Partition consumers must
+        # supply the same object used for parts/readback/fences; no phase reset.
+        budget = self.evidence_budget or EvidenceReadBudget()
+        return _BudgetedReviewPagination(self.http, budget).paginate(
+            path=self.http.repository_path(
+                repository, f"/pulls/{pull_request}/reviews"
+            ),
+            token=token,
+            page_sizes=(100, 50, 25, 5, 1),
+            max_requests=64,
+            timeout_seconds=60,
+        )
 
     def finalize(
         self,
@@ -894,11 +950,8 @@ class ReviewApprovalFinalizer:
         pull_request: int,
     ) -> list[Any]:
         try:
-            return self.http.paginate(
-                path=self.http.repository_path(
-                    repository, f"/pulls/{pull_request}/reviews"
-                ),
-                token=token,
+            return self._review_pages(
+                token=token, repository=repository, pull_request=pull_request
             )
         except GitHubHTTPTransientError as exc:
             raise GitHubPublicationTransientError(
@@ -1191,11 +1244,8 @@ class ReviewApprovalFinalizer:
         failed: str,
     ) -> bool:
         try:
-            reviews = self.http.paginate(
-                path=self.http.repository_path(
-                    repository, f"/pulls/{pull_request}/reviews"
-                ),
-                token=token,
+            reviews = self._review_pages(
+                token=token, repository=repository, pull_request=pull_request
             )
         except GitHubHTTPTransientError as exc:
             raise GitHubPublicationTransientError(transient) from exc
