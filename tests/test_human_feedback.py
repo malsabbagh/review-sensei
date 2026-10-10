@@ -338,17 +338,22 @@ class CompleteFeedbackTests(unittest.TestCase):
                     before_read=lambda: value,
                 )
         self.assertEqual(len(self.http.calls), 1)
-        with patch(
-            "review_sensei.hosting.github.human_assessment.time.monotonic",
-            side_effect=[0, 61],
-        ):
-            with self.assertRaises(FeedbackAdmissionError):
-                self.revalidate()
+
+        def expired_original_budget():
+            raise FeedbackAdmissionError("feedback_read_budget_exhausted")
+
+        with self.assertRaises(FeedbackAdmissionError):
+            self.publisher.revalidate_feedback(
+                token="synthetic",
+                feedback=self.feedback,
+                app_slug=APP,
+                before_read=expired_original_budget,
+            )
         self.assertEqual(len(self.http.calls), 1)
         # A transport that ignores its timeout cannot activate a late response.
         with patch(
             "review_sensei.hosting.github.human_assessment.time.monotonic",
-            side_effect=[0, 0, 0, 61],
+            side_effect=[0, 61],
         ):
             with self.assertRaises(FeedbackAdmissionError):
                 self.revalidate()

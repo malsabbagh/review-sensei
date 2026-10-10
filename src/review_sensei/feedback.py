@@ -17,6 +17,8 @@ from .evidence import evidence_digest
 from .validation import DEFAULT_REVIEW_LIMITS, validate_bounded_text
 
 FEEDBACK_INTERFACE_VERSION = "feedback-v1"
+FEEDBACK_SELECTOR_VERSION = "feedback-selector-v1"
+MAX_FEEDBACK_SELECTOR_BYTES = 32 * 1024
 MAX_FEEDBACK_SOURCES = 32
 MAX_FEEDBACK_SOURCE_BYTES = 64 * 1024
 MAX_FEEDBACK_BYTES = 256 * 1024
@@ -41,6 +43,8 @@ FEEDBACK_DIAGNOSTICS = frozenset(
         "feedback_read_budget_exhausted",
         "feedback_prompt_oversized",
         "feedback_prompt_invalid",
+        "feedback_selector_invalid",
+        "feedback_selector_oversized",
     }
 )
 
@@ -238,6 +242,45 @@ class FeedbackSelection:
     def digest(self) -> str:
         return evidence_digest(self.to_dict())
 
+    @property
+    def event_key(self) -> str:
+        """Stable journal lookup; changed content must conflict, not re-enroll.
+
+        The host scopes the journal to its original inventory. This key excludes
+        timestamps, body, actor, selected sources/targets and mutable snapshots;
+        the complete selection digest binds those facts to the operation.
+        """
+        return feedback_event_key(
+            repository=self.repository,
+            pull_request=self.pull_request,
+            trigger=self.trigger,
+        )
+
+    def authorization_document(self) -> dict[str, object]:
+        """Exact metadata for a dedicated live host/broker source attestation.
+
+        This serializable reference is neither a grant nor authenticated input.
+        Each consuming mutation must independently reload the canonical sources
+        and compare all fields, then obtain its own scoped broker authorization.
+        Raw bodies are omitted here; their complete lengths/digests remain bound.
+        """
+        return {
+            "interface": FEEDBACK_INTERFACE_VERSION,
+            "repository": self.repository,
+            "pull_request": self.pull_request,
+            "base_sha": self.base_sha,
+            "head_sha": self.head_sha,
+            "event_key": self.event_key,
+            "selection_digest": self.digest,
+            "trigger": self.trigger.to_dict(),
+            "target_ids": list(self.target_ids),
+            "total_bytes": self.total_bytes,
+            "sources": [
+                {key: value for key, value in item.to_dict().items() if key != "body"}
+                for item in self.sources
+            ],
+        }
+
     def contains_excerpt(self, excerpt: str) -> bool:
         """Citations must occur in one complete original source, never framing."""
         return (
@@ -290,3 +333,135 @@ class FeedbackSelection:
             "total_bytes": self.total_bytes,
             "sources": [item.to_dict() for item in self.sources],
         }
+
+
+def feedback_event_key(
+    *, repository: str, pull_request: int, trigger: FeedbackReference
+) -> str:
+    # Reuse exact repository/PR validation without introducing a snapshot into
+    # the identity. A timestamp remains required source metadata, but is omitted.
+    validate_feedback_context(
+        repository=repository,
+        pull_request=pull_request,
+        base_sha="0" * 40,
+        head_sha="0" * 40,
+        target_ids=(),
+    )
+    if not isinstance(trigger, FeedbackReference):
+        raise FeedbackAdmissionError("feedback_selection_invalid")
+    return evidence_digest(
+        {
+            "domain": "reviewsensei:feedback-event:v1",
+            "repository": repository,
+            "pull_request": pull_request,
+            "trigger": {"kind": trigger.kind, "comment_id": trigger.comment_id},
+        }
+    )
+
+
+@dataclass(frozen=True)
+class FeedbackSelector:
+    """Explicit operator metadata, never source text or evidence authority.
+
+    All bodies/authors/associations are reloaded from canonical host endpoints.
+    The selector binds the exact reviewed snapshot and ordered source timestamps.
+    Multiple sources require explicit full targets; the single-trigger default
+    can retain the ordinary complete-inventory assessment scope.
+    """
+
+    repository: str
+    pull_request: int
+    base_sha: str
+    head_sha: str
+    trigger: FeedbackReference
+    references: tuple[FeedbackReference, ...]
+    target_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        validate_feedback_context(
+            repository=self.repository,
+            pull_request=self.pull_request,
+            base_sha=self.base_sha,
+            head_sha=self.head_sha,
+            target_ids=self.target_ids,
+        )
+        if not isinstance(self.trigger, FeedbackReference):
+            raise FeedbackAdmissionError("feedback_selector_invalid")
+        validate_feedback_references(self.references, trigger=self.trigger)
+        if len(self.references) > 1 and not self.target_ids:
+            raise FeedbackAdmissionError("feedback_targets_invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "interface": FEEDBACK_SELECTOR_VERSION,
+            "repository": self.repository,
+            "pull_request": self.pull_request,
+            "base_sha": self.base_sha,
+            "head_sha": self.head_sha,
+            "trigger": self.trigger.to_dict(),
+            "sources": [item.to_dict() for item in self.references],
+            "target_ids": list(self.target_ids),
+        }
+
+    @classmethod
+    def from_json(cls, raw: bytes) -> FeedbackSelector:
+        """Parse one bounded closed document supplied by a trusted operator.
+
+        No file/URL resolution, schema coercion, body-derived selection or new
+        command syntax. Duplicate keys, unknown fields and prefixes refuse.
+        """
+        if not isinstance(raw, bytes):
+            raise FeedbackAdmissionError("feedback_selector_invalid")
+        if len(raw) > MAX_FEEDBACK_SELECTOR_BYTES:
+            raise FeedbackAdmissionError("feedback_selector_oversized")
+
+        def closed_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            document: dict[str, object] = {}
+            for key, value in pairs:
+                if key in document:
+                    raise FeedbackAdmissionError("feedback_selector_invalid")
+                document[key] = value
+            return document
+
+        def reference(value: object) -> FeedbackReference:
+            if not isinstance(value, dict) or set(value) != {
+                "kind",
+                "comment_id",
+                "updated_at",
+            }:
+                raise FeedbackAdmissionError("feedback_selector_invalid")
+            return FeedbackReference(**value)
+
+        try:
+            value = json.loads(raw.decode("utf-8"), object_pairs_hook=closed_pairs)
+            if (
+                not isinstance(value, dict)
+                or set(value)
+                != {
+                    "interface",
+                    "repository",
+                    "pull_request",
+                    "base_sha",
+                    "head_sha",
+                    "trigger",
+                    "sources",
+                    "target_ids",
+                }
+                or value["interface"] != FEEDBACK_SELECTOR_VERSION
+                or not isinstance(value["sources"], list)
+                or not 1 <= len(value["sources"]) <= MAX_FEEDBACK_SOURCES
+                or not isinstance(value["target_ids"], list)
+                or len(value["target_ids"]) > MAX_FEEDBACK_TARGETS
+            ):
+                raise FeedbackAdmissionError("feedback_selector_invalid")
+            return cls(
+                repository=value["repository"],
+                pull_request=value["pull_request"],
+                base_sha=value["base_sha"],
+                head_sha=value["head_sha"],
+                trigger=reference(value["trigger"]),
+                references=tuple(reference(item) for item in value["sources"]),
+                target_ids=tuple(value["target_ids"]),
+            )
+        except (ValueError, UnicodeError, TypeError, RecursionError) as exc:
+            raise FeedbackAdmissionError("feedback_selector_invalid") from exc
