@@ -5,7 +5,7 @@ Date: 2026-10-10
 Owners/Reviewers: Maintainers
 Approved by: not applicable
 Related issues: [#238](https://github.com/malsabbagh/review-sensei/issues/238), [#244](https://github.com/malsabbagh/review-sensei/issues/244), [#245](https://github.com/malsabbagh/review-sensei/issues/245)
-Related PR: pending; isolated follow-up to [#257](https://github.com/malsabbagh/review-sensei/pull/257)
+Related PR: [#265](https://github.com/malsabbagh/review-sensei/pull/265), isolated follow-up to [#257](https://github.com/malsabbagh/review-sensei/pull/257)
 
 ## Context
 
