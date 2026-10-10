@@ -43,6 +43,13 @@ fragment, control characters or parent path components. Comparison is exact;
 there is no alias normalization or live discovery. Capability and strict adapter
 work digests bind the policy so earlier receipts cannot silently gain it.
 Legacy adapters without the contract retain their prior work identity.
+The executor also refences identity after a durable dispatch callback. A conflict
+there withholds transport and retains the already charged call and unknown output
+reservation; it cannot refund or reopen the original allowance.
+Budget wrappers expose the current underlying provider/model rather than copied
+identity. Ollama revalidates current constructor and effective output limits at
+dispatch, so negative, boolean, noninteger or oversized mutations refuse before
+transport even after a durable host callback.
 
 The contract name is a trusted adapter declaration, not process attestation or
 independent proof of remote model/tokenizer identity. Offline token bounds and

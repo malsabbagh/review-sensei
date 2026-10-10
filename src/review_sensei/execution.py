@@ -238,7 +238,8 @@ def execute_call(
     original = request
     output_accounting = output_accounting or OutputAccounting()
     corrected = False
-    while True:
+
+    def require_binding() -> None:
         if budgets.capabilities is not None:
             selected_model = (
                 request.model
@@ -246,6 +247,9 @@ def execute_call(
                 else None
             ) or provider.model
             budgets.capabilities.require_provider(provider, model=selected_model)
+
+    while True:
+        require_binding()
         diagnostic = tracker.admit_call(request.prompt)
         if diagnostic:
             return CallResult(diagnostic=diagnostic)
@@ -295,6 +299,15 @@ def execute_call(
                     }
                 )
             )
+        # A durable host callback runs after admission. Fence the actual
+        # dispatch again, retaining its charge and reservation on conflict.
+        try:
+            require_binding()
+        except ReviewInputError:
+            output_accounting.uncertain()
+            if after_accounting is not None:
+                after_accounting()
+            return CallResult(diagnostic="provider_identity_changed")
         try:
             response = provider.complete(bounded)
         except ProviderError as exc:

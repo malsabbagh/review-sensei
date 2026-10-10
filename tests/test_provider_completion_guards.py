@@ -7,11 +7,15 @@ from dataclasses import replace
 
 from review_sensei.budgets import ProviderCapabilities, ReviewWorkBudgets
 from review_sensei.errors import ProviderError, ReviewInputError
-from review_sensei.execution import execute_call, provider_work_identity
-from review_sensei.models import ProviderRequest, ReviewRequest
+from review_sensei.execution import (
+    OutputAccounting,
+    execute_call,
+    provider_work_identity,
+)
+from review_sensei.models import ProviderRequest, ProviderResponse, ReviewRequest
 from review_sensei.outcomes import ResourceBudget, ResourceBudgetTracker
 from review_sensei.providers.ollama import OllamaProvider
-from review_sensei.service import ReviewService
+from review_sensei.service import ReviewService, _BudgetedProvider, _CallBudget
 from review_sensei.stages import Stage
 from review_sensei.validation import ReviewLimits
 
@@ -161,6 +165,38 @@ class OllamaCompletionGuardTests(unittest.TestCase):
         self.assertFalse(raised.exception.transient)
         self.assertEqual(len(calls), 1)
 
+    def test_mutated_constructor_output_caps_refuse_before_transport(self):
+        for cap in (-1, 0, True, 1.5, 16385, "128"):
+            instance, calls = provider(complete_document(), strict=True)
+            instance.max_output_tokens = cap
+            with self.subTest(cap=cap), self.assertRaises(ProviderError):
+                instance.complete(
+                    ProviderRequest(prompt="synthetic", max_output_tokens=128)
+                )
+            self.assertEqual(calls, [])
+
+    def test_callback_output_cap_mutation_stays_pending_without_transport(self):
+        instance, calls = provider(complete_document(), strict=True)
+        resource = ResourceBudget.create()
+        tracker = ResourceBudgetTracker(resource)
+        budgets = ReviewWorkBudgets(mode="unified").effective(
+            limits=ReviewLimits(),
+            resource=resource,
+            mode="reassessment",
+            capabilities=capability(),
+        )
+        result = execute_call(
+            ProviderRequest(prompt="synthetic", max_output_tokens=128),
+            provider=instance,
+            validate=lambda response: response.text,
+            tracker=tracker,
+            budgets=budgets,
+            before_dispatch=lambda digest: setattr(instance, "max_output_tokens", -1),
+        )
+        self.assertEqual(calls, [])
+        self.assertEqual(result.diagnostic, "provider_failed")
+        self.assertEqual(tracker.provider_calls, 1)
+
     def test_length_terminated_valid_json_stays_pending_in_real_review_service(self):
         instance, calls = provider(complete_document(done_reason="length"))
         stage = Stage(
@@ -267,6 +303,104 @@ class QualifiedEndpointGuardTests(unittest.TestCase):
             )
         self.assertEqual(calls, [])
         self.assertEqual(tracker.provider_calls, 0)
+
+    def test_callback_endpoint_change_withholds_dispatch_without_refunding_charge(self):
+        class DeclaredAdapter:
+            name = "ollama"
+            model = MODEL
+            endpoint = ENDPOINT
+            completion_contract = CONTRACT
+            calls = 0
+
+            def complete(self, request):
+                self.calls += 1
+                return ProviderResponse(text=TEXT)
+
+        instance = DeclaredAdapter()
+        resource = ResourceBudget.create()
+        tracker = ResourceBudgetTracker(resource)
+        accounting = OutputAccounting()
+        budgets = ReviewWorkBudgets(mode="unified").effective(
+            limits=ReviewLimits(),
+            resource=resource,
+            mode="reassessment",
+            capabilities=capability(),
+        )
+
+        def callback(digest):
+            self.assertEqual(tracker.provider_calls, 1)
+            instance.endpoint = "https://other.example/api/generate"
+
+        result = execute_call(
+            ProviderRequest(prompt="synthetic"),
+            provider=instance,
+            validate=lambda response: response.text,
+            tracker=tracker,
+            budgets=budgets,
+            before_dispatch=callback,
+            output_accounting=accounting,
+        )
+        self.assertEqual(instance.calls, 0)
+        self.assertIsNone(result.value)
+        self.assertEqual(result.diagnostic, "provider_identity_changed")
+        self.assertEqual(tracker.provider_calls, 1)
+        self.assertEqual(tracker.response_bytes, 0)
+        self.assertEqual(accounting.unknown_response_bytes, budgets.batch_output_bytes)
+
+    def test_budgeted_wrapper_reads_underlying_identity_before_and_after_callback(self):
+        class DeclaredAdapter:
+            name = "ollama"
+            model = MODEL
+            endpoint = ENDPOINT
+            completion_contract = CONTRACT
+            allow_model_override = False
+            calls = 0
+
+            def complete(self, request):
+                self.calls += 1
+                return ProviderResponse(text=TEXT)
+
+        for field, changed in (
+            ("model", "changed-model"),
+            ("name", "changed-provider"),
+        ):
+            for moment in ("initial", "callback"):
+                with self.subTest(field=field, moment=moment):
+                    instance = DeclaredAdapter()
+                    wrapped = _BudgetedProvider(instance, budget=_CallBudget(3))
+                    resource = ResourceBudget.create()
+                    tracker = ResourceBudgetTracker(resource)
+                    budgets = ReviewWorkBudgets(mode="unified").effective(
+                        limits=ReviewLimits(),
+                        resource=resource,
+                        mode="reassessment",
+                        capabilities=capability(),
+                    )
+                    if moment == "initial":
+                        setattr(instance, field, changed)
+                        with self.assertRaises(ReviewInputError):
+                            execute_call(
+                                ProviderRequest(prompt="synthetic"),
+                                provider=wrapped,
+                                validate=lambda response: response.text,
+                                tracker=tracker,
+                                budgets=budgets,
+                            )
+                        self.assertEqual(tracker.provider_calls, 0)
+                    else:
+                        result = execute_call(
+                            ProviderRequest(prompt="synthetic"),
+                            provider=wrapped,
+                            validate=lambda response: response.text,
+                            tracker=tracker,
+                            budgets=budgets,
+                            before_dispatch=lambda digest: setattr(
+                                instance, field, changed
+                            ),
+                        )
+                        self.assertEqual(result.diagnostic, "provider_identity_changed")
+                        self.assertEqual(tracker.provider_calls, 1)
+                    self.assertEqual(instance.calls, 0)
 
     def test_strict_contract_and_endpoint_are_bound_into_work_identity(self):
         instance, _ = provider(complete_document(), strict=True)

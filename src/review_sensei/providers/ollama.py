@@ -219,6 +219,13 @@ class OllamaProvider:
         }
         if request.json_mode:
             payload["format"] = "json"
+        # Configuration is public and mutable: validate the current cap before
+        # taking its minimum, never send a malformed/unbounded num_predict.
+        if self.max_output_tokens is not None and (
+            type(self.max_output_tokens) is not int
+            or not 1 <= self.max_output_tokens <= 16384
+        ):
+            raise ProviderError("Ollama output token limit is invalid")
         output_tokens = request.max_output_tokens
         if self.max_output_tokens is not None:
             output_tokens = (
@@ -226,6 +233,10 @@ class OllamaProvider:
                 if output_tokens is not None
                 else self.max_output_tokens
             )
+        if output_tokens is not None and (
+            type(output_tokens) is not int or not 1 <= output_tokens <= 16384
+        ):
+            raise ProviderError("Ollama effective output token limit is invalid")
         if output_tokens is not None:
             payload["options"] = {"num_predict": output_tokens}
         elif self.require_completion_metadata:
