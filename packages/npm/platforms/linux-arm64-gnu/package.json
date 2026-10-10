@@ -1,6 +1,6 @@
 {
   "name": "@reviewsensei/cli-linux-arm64-gnu",
-  "version": "0.6.18",
+  "version": "0.6.19",
   "description": "ReviewSensei AI code review engine for Linux arm64 with glibc 2.36+; native payload used by @reviewsensei/cli",
   "license": "MIT",
   "repository": {
