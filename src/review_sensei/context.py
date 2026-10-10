@@ -811,6 +811,7 @@ class SourceContextExcerpt:
             validate_repository_path(
                 self.path,
                 label="source context excerpt path",
+                allow_glob_chars=True,
             )
             validate_bounded_text(
                 self.content,
@@ -963,7 +964,9 @@ class SourceContextCoverage:
             raise ContextLoadError("source context coverage has too many outcomes")
         for path, status in self.outcomes:
             try:
-                validate_repository_path(path, label="source context coverage path")
+                validate_repository_path(
+                    path, label="source context coverage path", allow_glob_chars=True
+                )
                 validate_bounded_text(
                     status,
                     64,
@@ -1199,7 +1202,9 @@ class SymbolAwareContextSelector:
 
         try:
             relative = path.relative_to(self.store.root).as_posix()
-            validate_repository_path(relative, label="source context path")
+            validate_repository_path(
+                relative, label="source context path", allow_glob_chars=True
+            )
         except (ValueError, ReviewInputError):
             return None
         return relative
@@ -1791,7 +1796,9 @@ class SymbolAwareContextSelector:
                 incomplete = True
                 continue
             try:
-                validate_repository_path(path, label="changed source path")
+                validate_repository_path(
+                    path, label="changed source path", allow_glob_chars=True
+                )
             except ReviewInputError:
                 outcomes[path] = "unsupported"
                 incomplete = True
@@ -1932,6 +1939,7 @@ def _normalized_finding_parts(
             validate_repository_path(
                 raw_path,
                 label="finding fingerprint path",
+                allow_glob_chars=True,
             )
         except ReviewInputError as exc:
             raise ContextLoadError("finding fingerprint path is invalid") from exc
@@ -2033,7 +2041,9 @@ class FindingLifecycle:
             raise ContextLoadError("finding lifecycle concern is invalid")
         if self.path is not None:
             try:
-                validate_repository_path(self.path, label="finding lifecycle path")
+                validate_repository_path(
+                    self.path, label="finding lifecycle path", allow_glob_chars=True
+                )
             except ReviewInputError as exc:
                 raise ContextLoadError("finding lifecycle path is invalid") from exc
         if (
@@ -2194,7 +2204,9 @@ def reconcile_finding_set(
             if not isinstance(path, str) or not path:
                 raise ContextLoadError("reconciled reviewed path must be a string")
             try:
-                validate_repository_path(path, label="reconciled reviewed path")
+                validate_repository_path(
+                    path, label="reconciled reviewed path", allow_glob_chars=True
+                )
             except ReviewInputError as exc:
                 raise ContextLoadError("reconciled reviewed path is invalid") from exc
             reviewed.add(path)
@@ -2337,7 +2349,9 @@ class IncrementalReviewPlan:
                 raise ContextLoadError("incremental reviewed_paths are invalid")
             for path in self.reviewed_paths:
                 try:
-                    validate_repository_path(path, label="incremental reviewed path")
+                    validate_repository_path(
+                        path, label="incremental reviewed path", allow_glob_chars=True
+                    )
                 except ReviewInputError as exc:
                     raise ContextLoadError(
                         "incremental reviewed path is invalid"
@@ -2348,7 +2362,9 @@ class IncrementalReviewPlan:
             raise ContextLoadError("incremental related_paths are invalid")
         for path in self.related_paths:
             try:
-                validate_repository_path(path, label="incremental related path")
+                validate_repository_path(
+                    path, label="incremental related path", allow_glob_chars=True
+                )
             except ReviewInputError as exc:
                 raise ContextLoadError("incremental related path is invalid") from exc
         if not isinstance(self.context_complete, bool):
