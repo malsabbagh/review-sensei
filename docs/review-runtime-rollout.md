@@ -71,14 +71,8 @@ configuration from becoming active after a merge. Preserve the release hold.
    and compatibility are qualified. It generates the receipt-bound version,
    six npm manifests/dependencies, current install pins, changelog and source
    docs. Do not hand-edit those generated release payloads into this config PR.
-   For a release actually prepared on 2026-10-09, the first dispatch is:
-
-   ```bash
-   gh workflow run prepare-release.yml --repo malsabbagh/review-sensei --ref main \
-     -f version=0.6.19 -f release_date=2026-10-09 -f sign_tag=false
-   ```
-
-   Use the actual date if preparation starts later; retries retain that date.
+   Use the maintainer dispatch procedure in [the release runbook](releasing.md),
+   with the freshly selected version and actual date; retries retain that date.
 3. Qualify the emitted prepared SHA with all fifteen exact-head main jobs and
    credential-free installed-wheel/reader checks. If additional native inspection
    is needed before signing, the existing manual npm workflow's `publish=false`
@@ -123,20 +117,13 @@ source SHAs and signer verification. Do not run the version-tag signer with a
 fabricated version to move the channel. Channel signing is the separate existing
 owner operation described in [the release runbook](releasing.md#public-reusable-workflow-tag-channel).
 
-After recording the freshly verified `old_v5_object` and
-`qualified_release_sha`, the owner's channel operation is:
-
-```bash
-git verify-tag v0.6.19
-test "$(git rev-parse 'v0.6.19^{commit}')" = "$qualified_release_sha"
-reviewed_old_v5_object=$old_v5_object
-old_v5_object=$(git ls-remote --exit-code origin refs/tags/v5 | awk '$2 == "refs/tags/v5" {print $1}')
-[[ "$old_v5_object" =~ ^[a-f0-9]{40}$ ]]
-test "$old_v5_object" = "$reviewed_old_v5_object"
-git tag -s -f v5 "$qualified_release_sha" -m "ReviewSensei setup v5, library 0.6.19"
-git verify-tag v5
-git push origin refs/tags/v5 --force-with-lease="refs/tags/v5:$old_v5_object"
-```
+The audited owner operation belongs to [the canonical channel-promotion
+runbook](releasing.md#public-reusable-workflow-tag-channel); this plan does not
+duplicate executable release or tag commands. In that operation, re-fetch the
+remote `v5` tag object immediately before the push, validate the complete object
+SHA and compare it with the reviewed `old_v5_object`. Stop if it changed. Verify
+that the signed immutable release tag targets `qualified_release_sha`, and bind
+the compatibility record to the actual published artifacts before promotion.
 
 The lease is the exact old annotated tag object, not its peeled commit. Read
 back the new remote object, GitHub signature verification and peeled source
