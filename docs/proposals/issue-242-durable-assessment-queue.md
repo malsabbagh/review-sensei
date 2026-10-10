@@ -422,3 +422,15 @@ the coordinator composes actual serialized artifacts through A's reviewed
 graph reader and measures the complete original 64-call/60-second lifecycle.
 D60's full-history source56/258-part refusal remains the existing supported
 profile blocker; this opt-in primitive is not a claim that hosted250 is enabled.
+
+### Structural profile acquisition clock
+
+The queue-only synthetic codec/retention profile uses an explicit deterministic
+acquisition clock and a fixed initial wall clock for each original control
+budget. Coverage CPU is excluded from this structural measurement; it is not a
+host elapsed-time or throughput qualification. Same-source replay retains the
+same budget object, calls and original deadline. A negative test advances that
+clock to the unchanged 60-second boundary and refuses a fresh archived receipt
+read without changing the journal, counters or deadline. Original provider
+execution accounting, changed-source refusal and seven-hour receipt expiry
+checks remain unchanged. Production time sources and limits are unchanged.
