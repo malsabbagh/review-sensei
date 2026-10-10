@@ -902,7 +902,23 @@ class ReviewPublisherTests(unittest.TestCase):
             body["body"],
         )
         self.assertIn(
+            "After an override, comment `@reviewsensei verify` to apply it.",
+            body["body"],
+        )
+        self.assertIn(
+            "An override applies to the current commit only. A new push needs a new override.",
+            body["body"],
+        )
+        self.assertIn(
             "@reviewsensei override RS-ABCDEF acceptable risk",
+            body["comments"][0]["body"],
+        )
+        self.assertIn(
+            "After an override, comment `@reviewsensei verify` to apply it.",
+            body["comments"][0]["body"],
+        )
+        self.assertIn(
+            "An override applies to the current commit only. A new push needs a new override.",
             body["comments"][0]["body"],
         )
 

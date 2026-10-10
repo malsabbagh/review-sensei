@@ -43,6 +43,8 @@ A maintainer or admin handles this review with one comment. Copy a command exact
 - Approve the media files without listing each file: `@reviewsensei I reviewed the media files and I approve`
 - Override one finding by its id: `@reviewsensei override RS-ABCDEF acceptable risk` or `@reviewsensei RS-ABCDEF is acceptable risk`. Replace `RS-ABCDEF` with the finding id in this review.
 
+After an override, comment `@reviewsensei verify` to apply it. An override applies to the current commit only. A new push needs a new override.
+
 The override is stored on this pull request as an acceptable-risk decision. The AI review stays partial. Write access alone cannot use these commands.\
 """
 
@@ -615,7 +617,7 @@ def build_review_summary_view(
 def append_response_instructions(text: str) -> str:
     """Attach the maintainer commands unless this response already states them."""
 
-    if (
+    if "### Maintainer commands" in text or (
         "I reviewed the media files and I approve" in text
         and "override RS-ABCDEF acceptable risk" in text
     ):

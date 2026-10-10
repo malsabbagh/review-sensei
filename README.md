@@ -768,7 +768,9 @@ mode sends that bounded conversation context to Ollama Cloud; local mode keeps
 it on the configured local service. Published review summaries and inline
 findings also tell readers to reply with @reviewsensei followed by their question,
 and they include the maintainer commands for approving media and overriding a
-finding by its `RS-` id.
+finding by its `RS-` id. After an override, comment `@reviewsensei verify` to
+apply it. An override applies to the current commit only. A new push needs a
+new override.
 `review.json` is uploaded only when
 `github.artifacts: diagnostics` is set in `.reviewsensei.yml`; setup-v5 does not
 create a separate version artifact. See

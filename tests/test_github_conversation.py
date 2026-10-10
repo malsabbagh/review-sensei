@@ -1172,6 +1172,14 @@ class ConversationPublisherTests(unittest.TestCase):
             "@reviewsensei override RS-ABCDEF acceptable risk",
             post_body["body"],
         )
+        self.assertIn(
+            "After an override, comment `@reviewsensei verify` to apply it.",
+            post_body["body"],
+        )
+        self.assertIn(
+            "An override applies to the current commit only. A new push needs a new override.",
+            post_body["body"],
+        )
         self.assertEqual(set(post_body), {"body"})
         self.assertTrue(calls[-1][1].endswith("/pulls/1/comments/10/replies"))
 
