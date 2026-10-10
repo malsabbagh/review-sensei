@@ -603,7 +603,7 @@ export class GitHubApi {
     const bytes = new TextEncoder().encode(body);
     const loginBytes = new TextEncoder().encode(user.login);
     const updatedBytes = new TextEncoder().encode(updatedAt);
-    const decoder = new TextDecoder("utf-8", { fatal: true });
+    const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
     if (bytes.length > 65536 || decoder.decode(bytes) !== body || loginBytes.length > 256 || user.login.length === 0 || decoder.decode(loginBytes) !== user.login || updatedBytes.length > 128 || decoder.decode(updatedBytes) !== updatedAt) throw new Error("github_feedback_source_invalid");
     const root = kind === "issue" ? null : source.in_reply_to_id ?? source.id;
     if (kind === "inline" && (typeof root !== "number" || !Number.isSafeInteger(root) || root <= 0)) throw new Error("github_feedback_source_invalid");

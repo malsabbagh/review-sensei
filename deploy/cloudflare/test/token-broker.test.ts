@@ -165,6 +165,32 @@ describe("token broker authorization", () => {
     request.mutation.read_accounting.calls = 65;
     expect(() => parseFeedbackAttestation(request)).toThrow("broker_feedback_attestation_invalid");
   });
+
+  it("rejects array coercion in every closed feedback enum", () => {
+    const request = feedbackFixture.request;
+    const invalid = [
+      { ...request, mutation: { ...request.mutation, reason: ["dispatch"] } },
+      { ...request, feedback: { ...request.feedback, trigger: { ...request.feedback.trigger, kind: ["issue"] } } },
+      ...["kind", "association"].map(key => ({ ...request, feedback: { ...request.feedback, sources: request.feedback.sources.map((source, index) => index === 0 ? { ...source, [key]: [source[key as "kind" | "association"]] } : source) } })),
+    ];
+    for (const value of invalid) expect(() => parseFeedbackAttestation(value)).toThrow("broker_feedback_attestation_invalid");
+    const metadata = structuredClone(request);
+    metadata.feedback.sources[1].author = "\ufeffcollaborator";
+    expect(parseFeedbackAttestation(metadata)).toEqual(metadata);
+  });
+
+  it("refuses a coerced mutation reason before live authorization can issue a grant", async () => {
+    const { broker, github, ledgerFetch } = harness();
+    const live = feedbackFixture.selection.sources;
+    Object.assign(github, {
+      feedbackPullRequest: vi.fn(async () => ({ base_sha: "c".repeat(40), head_sha: SHA })),
+      feedbackComment: vi.fn(async (_repo: string, _pr: number, kind: string, id: number) => live.find(source => source.kind === kind && source.comment_id === id)),
+    });
+    oidc.verify.mockResolvedValue(claims({ event_name: "issue_comment" }));
+    const request = { ...feedbackFixture.request, issued_at: Math.floor(Date.now() / 1000), mutation: { ...feedbackFixture.request.mutation, reason: ["dispatch"] } };
+    await expect(broker.exchange({ oidc_token: "feedback-assertion", capability: "review_session", session: { repository_id: request.repository_id, pull_request: 7, head_sha: SHA }, session_attestation: request })).rejects.toThrow("broker_feedback_attestation_invalid");
+    expect(ledgerFetch.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).action)).not.toContain("session_issue");
+  });
   it("issues recovery evidence authority with Actions read only", async () => {
     const { broker, github } = harness();
     const result = await broker.exchange({ oidc_token: "oidc.token", capability: "review_actions" });

@@ -53,7 +53,7 @@ function integer(value: unknown, min = 1, max = Number.MAX_SAFE_INTEGER): number
 function text(value: unknown, maximum: number): string {
   if (typeof value !== "string" || value.length === 0) return fail();
   const bytes = new TextEncoder().encode(value);
-  if (bytes.length > maximum || new TextDecoder("utf-8", { fatal: true }).decode(bytes) !== value) return fail();
+  if (bytes.length > maximum || new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes) !== value) return fail();
   return value;
 }
 function hash(value: unknown): string { const result = text(value, 64); if (!HASH.test(result)) return fail(); return result; }
@@ -81,7 +81,7 @@ export function parseFeedbackAttestation(value: unknown, grant = false): Feedbac
   const selection = exact(data.feedback, SELECTION_KEYS);
   if (selection.interface !== "feedback-v1" || selection.repository !== repository || selection.pull_request !== data.pull_request || selection.head_sha !== data.head_sha || !SHA.test(text(selection.base_sha, 40))) return fail();
   const trigger = exact(selection.trigger, ["kind", "comment_id", "updated_at"]);
-  if (!["issue", "inline"].includes(String(trigger.kind)) || trigger.comment_id !== data.source_comment_id) return fail();
+  if (typeof trigger.kind !== "string" || !["issue", "inline"].includes(trigger.kind) || trigger.comment_id !== data.source_comment_id) return fail();
   text(trigger.updated_at, 128); hash(selection.selection_digest); hash(selection.event_key);
   if (!Array.isArray(selection.target_ids) || selection.target_ids.length > 250 || new Set(selection.target_ids).size !== selection.target_ids.length) return fail();
   selection.target_ids.forEach(hash);
@@ -89,9 +89,9 @@ export function parseFeedbackAttestation(value: unknown, grant = false): Feedbac
   const identities = new Set<string>(); let total = 0; let selectedTrigger: Record<string, unknown> | undefined;
   for (const raw of selection.sources) {
     const source = exact(raw, SOURCE_KEYS);
-    if (!["issue", "inline"].includes(String(source.kind))) return fail();
+    if (typeof source.kind !== "string" || !["issue", "inline"].includes(source.kind)) return fail();
     integer(source.comment_id); integer(source.author_id); text(source.updated_at, 128); text(source.author, 256);
-    if (!ASSOCIATIONS.has(String(source.association))) return fail();
+    if (typeof source.association !== "string" || !ASSOCIATIONS.has(source.association)) return fail();
     if (source.kind === "issue" ? source.root_comment_id !== null : !Number.isSafeInteger(source.root_comment_id) || Number(source.root_comment_id) <= 0) return fail();
     total += integer(source.body_bytes, 1, 65536); hash(source.body_sha256);
     const identity = `${source.kind}:${source.comment_id}`;
@@ -103,7 +103,7 @@ export function parseFeedbackAttestation(value: unknown, grant = false): Feedbac
   for (const key of ["operation_id", "source_digest", "authority_digest", "inventory_digest", "root_digest"]) hash(mutation[key]);
   if (!/^[a-f0-9]{32}$/.test(text(mutation.execution_identity, 32))) return fail();
   text(mutation.reservation_id, 128); integer(mutation.inventory_generation, 0, 2147483647); integer(mutation.root_generation, 0, 2147483647);
-  if (!["admission", "dispatch", "accounting", "accepted", "pending", "replay", "finalize"].includes(String(mutation.reason))) return fail();
+  if (typeof mutation.reason !== "string" || !["admission", "dispatch", "accounting", "accepted", "pending", "replay", "finalize"].includes(mutation.reason)) return fail();
   for (const key of ["request_digest", "dispatch_digest"]) if (mutation[key] !== null) hash(mutation[key]);
   const accounting = exact(mutation.read_accounting, ["schema_version", "calls", "deadline_unix_ms"]);
   if (accounting.schema_version !== "1.0") return fail(); integer(accounting.calls, 0, 64); integer(accounting.deadline_unix_ms);

@@ -70,6 +70,15 @@ describe("canonical complete broker feedback reads", () => {
     expect(result.body).toBe(body);
   });
 
+  it("preserves valid leading BOM bytes in complete bodies and metadata", async () => {
+    const body = "\ufeffpreface\n@sensei Explain this.";
+    const author = "\ufeffcollaborator";
+    const result = await readComment({ ...canonicalComment(), body, user: { id: source.author_id, login: author, type: "User" } });
+    expect(result.body).toBe(body);
+    expect(result.body_bytes).toBe(32);
+    expect(result.author).toBe(author);
+  });
+
   it.each([
     ["closed", { state: "closed" }], ["draft", { draft: true }],
     ["foreign PR response", { number: 8 }], ["malformed head", { head: { sha: "short" } }],

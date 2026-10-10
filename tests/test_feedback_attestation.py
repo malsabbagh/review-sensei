@@ -68,6 +68,47 @@ class FeedbackAttestationTests(unittest.TestCase):
                 with self.assertRaises(GitHubBrokerClientError):
                     parse_feedback_attestation(value)
 
+    def test_trigger_id_is_an_integer_even_when_float_equality_and_digest_match(self):
+        request = self.fixture()["request"]
+        request["feedback"]["trigger"]["comment_id"] = float(
+            request["source_comment_id"]
+        )
+        request["feedback"]["event_key"] = evidence_digest(
+            {
+                "domain": "reviewsensei:feedback-event:v1",
+                "repository": request["repository"],
+                "pull_request": request["pull_request"],
+                "trigger": {
+                    "kind": "issue",
+                    "comment_id": float(request["source_comment_id"]),
+                },
+            }
+        )
+        with self.assertRaises(GitHubBrokerClientError):
+            parse_feedback_attestation(request)
+
+    def test_valid_leading_bom_metadata_is_preserved_and_enums_are_scalar(self):
+        request = self.fixture()["request"]
+        request["feedback"]["sources"][1]["author"] = "\ufeffcollaborator"
+        self.assertEqual(
+            parse_feedback_attestation(request)["feedback"]["sources"][1]["author"],
+            "\ufeffcollaborator",
+        )
+        for path, value in (
+            (("mutation", "reason"), ["dispatch"]),
+            (("feedback", "sources", 0, "association"), ["OWNER"]),
+            (("feedback", "sources", 0, "kind"), ["issue"]),
+            (("feedback", "trigger", "kind"), ["issue"]),
+        ):
+            with self.subTest(path=path):
+                invalid = copy.deepcopy(self.fixture()["request"])
+                current = invalid
+                for key in path[:-1]:
+                    current = current[key]
+                current[path[-1]] = value
+                with self.assertRaises(GitHubBrokerClientError):
+                    parse_feedback_attestation(invalid)
+
     def test_client_charges_each_oidc_issue_and_verify_before_dispatch(self):
         request = self.fixture()["request"]
         grant = {
