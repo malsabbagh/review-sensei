@@ -103,8 +103,11 @@ export function parseFeedbackAttestation(value: unknown, grant = false): Feedbac
   for (const key of ["operation_id", "source_digest", "authority_digest", "inventory_digest", "root_digest"]) hash(mutation[key]);
   if (!/^[a-f0-9]{32}$/.test(text(mutation.execution_identity, 32))) return fail();
   text(mutation.reservation_id, 128); integer(mutation.inventory_generation, 0, 2147483647); integer(mutation.root_generation, 0, 2147483647);
-  if (typeof mutation.reason !== "string" || !["admission", "dispatch", "accounting", "accepted", "pending", "replay", "finalize"].includes(mutation.reason)) return fail();
-  for (const key of ["request_digest", "dispatch_digest"]) if (mutation[key] !== null) hash(mutation[key]);
+  if (typeof mutation.reason !== "string" || !["admission", "admission-dispatch", "dispatch", "accounting", "accepted", "pending", "replay", "finalize"].includes(mutation.reason)) return fail();
+  for (const key of ["request_digest", "dispatch_digest"]) {
+    if (mutation[key] !== null) hash(mutation[key]);
+    else if (mutation.reason === "admission-dispatch") return fail();
+  }
   const accounting = exact(mutation.read_accounting, ["schema_version", "calls", "deadline_unix_ms"]);
   if (accounting.schema_version !== "1.0") return fail(); integer(accounting.calls, 0, 64); integer(accounting.deadline_unix_ms);
   if (grant) {

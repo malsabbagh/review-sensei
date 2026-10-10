@@ -27,6 +27,12 @@ bound. The mutation reference binds operation, source, authority, execution,
 inventory, reservation, root, generation, request, dispatch and original
 control accounting. These fields are reference data until independently checked.
 
+The optional `admission-dispatch` reason identifies a single checkpoint that
+retains complete original admission and the first charged request together.
+Both exact request and dispatch digests are required. Its grant has the same
+source checks and one-use consumption as other mutations; the reason does not
+enable coalescing, establish an original-attempt witness or increase a budget.
+
 The Worker validates the original OIDC repository, run and reusable workflow
 identity. It reloads the open PR and every selected source from the canonical
 GitHub endpoints. Each source must belong to this PR and have an exact numeric

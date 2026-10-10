@@ -44,6 +44,25 @@ class FeedbackAttestationTests(unittest.TestCase):
         request["feedback"]["target_ids"].clear()
         self.assertEqual(len(fixture["request"]["feedback"]["target_ids"]), 1)
 
+    def test_combined_admission_dispatch_requires_exact_request_and_dispatch(self):
+        request = self.fixture()["request"]
+        request["mutation"].update(
+            reason="admission-dispatch",
+            request_digest="1" * 64,
+            dispatch_digest="2" * 64,
+        )
+        self.assertEqual(parse_feedback_attestation(request), request)
+        for key in ("request_digest", "dispatch_digest"):
+            with self.subTest(key=key):
+                missing = copy.deepcopy(request)
+                missing["mutation"][key] = None
+                with self.assertRaises(GitHubBrokerClientError):
+                    parse_feedback_attestation(missing)
+        invalid = copy.deepcopy(request)
+        invalid["mutation"]["reason"] = ["admission-dispatch"]
+        with self.assertRaises(GitHubBrokerClientError):
+            parse_feedback_attestation(invalid)
+
     def test_invalid_identity_original_accounting_and_ambient_fields_refuse(self):
         paths = [
             (("operation",), "command"),

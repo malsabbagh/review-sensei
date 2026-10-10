@@ -166,6 +166,28 @@ describe("token broker authorization", () => {
     expect(() => parseFeedbackAttestation(request)).toThrow("broker_feedback_attestation_invalid");
   });
 
+  it("binds combined admission and dispatch to both exact request digests", async () => {
+    const { broker, github } = harness();
+    const live = feedbackFixture.selection.sources;
+    Object.assign(github, {
+      feedbackPullRequest: vi.fn(async () => ({ base_sha: "c".repeat(40), head_sha: SHA })),
+      feedbackComment: vi.fn(async (_repo: string, _pr: number, kind: string, id: number) => live.find(source => source.kind === kind && source.comment_id === id)),
+    });
+    oidc.verify.mockResolvedValue(claims({ event_name: "issue_comment" }));
+    const request = {
+      ...feedbackFixture.request, issued_at: Math.floor(Date.now() / 1000),
+      mutation: { ...feedbackFixture.request.mutation, reason: "admission-dispatch", request_digest: "1".repeat(64), dispatch_digest: "2".repeat(64) },
+    };
+    expect(parseFeedbackAttestation(request)).toEqual(request);
+    for (const key of ["request_digest", "dispatch_digest"]) {
+      expect(() => parseFeedbackAttestation({ ...request, mutation: { ...request.mutation, [key]: null } })).toThrow("broker_feedback_attestation_invalid");
+    }
+    expect(() => parseFeedbackAttestation({ ...request, mutation: { ...request.mutation, reason: ["admission-dispatch"] } })).toThrow("broker_feedback_attestation_invalid");
+    const grant = await broker.exchange({ oidc_token: "feedback-assertion", capability: "review_session", session: { repository_id: request.repository_id, pull_request: 7, head_sha: SHA }, session_attestation: request });
+    expect(grant.session_attestation?.mutation).toEqual(request.mutation);
+    expect(await broker.verifySessionGrant(grant.session_grant, grant.session_attestation)).toEqual(grant.session_attestation);
+  });
+
   it("rejects array coercion in every closed feedback enum", () => {
     const request = feedbackFixture.request;
     const invalid = [
