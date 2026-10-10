@@ -81,6 +81,8 @@ Process: `docs/process/adr-process.md`
 | [0056](0056-host-fact-placement-and-honest-approval-presentation.md) | Proposed | Host-fact placement and honest approval presentation | #181 D | Conversation resolution is host authority; approval only from an eligible admitted artifact |
 | [0057](0057-one-check-run-as-the-single-merge-authority.md) | Proposed | One head-bound `ReviewSensei` check run as the only merge authority, with evidence-bound default approval | #181 F | Review events stay `COMMENT`; required-check setup and stale change-request reconciliation remain administrator/transition work |
 
+| [0073](0073-authenticated-feedback-mutation-grants.md) | Proposed | Authenticate complete human feedback as a distinct session mutation source | #238, #242, #243, #245 | Live numeric actor/source authorization; version-1 compatibility; original-attempt and whole-budget composition remain activation gates |
+
 ## Policy
 
 Publication-control ADRs 0017 and 0018 are internal-only and are excluded from

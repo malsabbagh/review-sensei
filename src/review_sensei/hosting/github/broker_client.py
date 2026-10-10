@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from collections.abc import Callable
@@ -13,6 +14,7 @@ from urllib.request import Request, urlopen
 
 from ...broker_diagnostics import parse_broker_diagnostic
 from .errors import GitHubBrokerClientError, GitHubHTTPTransientError
+from .feedback_attestation import parse_feedback_attestation
 
 MAX_BROKER_BODY_BYTES = 256 * 1024
 DEFAULT_BROKER_URL = "https://github.reviewsensei.dev/github/token"
@@ -76,6 +78,7 @@ class BrokerClient:
         broker_url: str = DEFAULT_BROKER_URL,
         opener: Opener = urlopen,
         timeout: int = 30,
+        before_request: Callable[[], float] | None = None,
     ) -> None:
         if (
             not isinstance(broker_url, str)
@@ -88,6 +91,22 @@ class BrokerClient:
         self.broker_url = broker_url
         self.opener = opener
         self.timeout = timeout
+        if before_request is not None and not callable(before_request):
+            raise GitHubBrokerClientError("Broker request accounting is invalid")
+        self.before_request = before_request
+
+    def _request_timeout(self) -> float:
+        if self.before_request is None:
+            return self.timeout
+        remaining = self.before_request()
+        if (
+            isinstance(remaining, bool)
+            or not isinstance(remaining, (int, float))
+            or not math.isfinite(remaining)
+            or not 0 < remaining <= 60
+        ):
+            raise GitHubBrokerClientError("Broker request allowance is exhausted")
+        return min(self.timeout, remaining)
 
     def request_oidc_token(self) -> str:
         """Request the standard GitHub Actions OIDC token from env claims."""
@@ -102,7 +121,7 @@ class BrokerClient:
             method="GET",
         )
         try:
-            with self.opener(request, timeout=self.timeout) as response:
+            with self.opener(request, timeout=self._request_timeout()) as response:
                 raw = response.read(MAX_BROKER_BODY_BYTES + 1)
                 if not isinstance(raw, (bytes, bytearray)):
                     raise ValueError
@@ -298,6 +317,8 @@ class BrokerClient:
 
     @staticmethod
     def _validated_attestation_request(value: object) -> dict[str, object]:
+        if isinstance(value, Mapping) and value.get("version") == 2:
+            return parse_feedback_attestation(value)
         if (
             not isinstance(value, Mapping)
             or set(value) != _SESSION_ATTESTATION_REQUEST_KEYS
@@ -343,6 +364,8 @@ class BrokerClient:
 
     @classmethod
     def _validated_attestation_grant(cls, value: object) -> dict[str, object]:
+        if isinstance(value, Mapping) and value.get("version") == 2:
+            return parse_feedback_attestation(value, grant=True)
         if (
             not isinstance(value, Mapping)
             or set(value) != _SESSION_ATTESTATION_GRANT_KEYS
@@ -391,7 +414,7 @@ class BrokerClient:
             method="POST",
         )
         try:
-            with self.opener(request, timeout=self.timeout) as response:
+            with self.opener(request, timeout=self._request_timeout()) as response:
                 raw = response.read(MAX_BROKER_BODY_BYTES + 1)
                 if not isinstance(raw, (bytes, bytearray)):
                     raise ValueError
