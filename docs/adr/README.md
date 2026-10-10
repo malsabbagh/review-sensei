@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 Project: ReviewSensei
-Last updated: 2026-10-09
+Last updated: 2026-10-10
 
 ADRs capture durable architecture decisions for this repository. Use `docs/adr/NNNN-short-title.md` for individual records.
 
@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0072](0072-lossless-inline-review-evidence.md) | Proposed | Lossless inline review evidence with lifecycle capacity | User-authorized PR #231 recovery | Complete bounded inventories, reader-first rollout and distinct capacity status |
 | [0071](0071-generated-release-notes.md) | Proposed | Generate missing release notes from exact first-parent merged-source history | Maintainer-requested Release Marshal correction | Existing direct App commit, exact tag/source provenance and unchanged publication gates |
 | [0070](0070-bounded-checkpoint-overflow.md) | Proposed | Preserve full finding publication as partial when durable baseline metadata cannot fit | User-authorized PR #231 recovery | Exact sanitized limits, unchanged bounded history, withheld approval and opt-in failure evidence |
 | [0068](0068-dedicated-release-key-and-publication-approval.md) | Proposed | Sign prepared release tags with a dedicated GPG key and retain Mo's publication approvals | User-requested automation | User-run setup; no personal key, new App permission or tag bypass |
@@ -95,5 +96,3 @@ Create or update an ADR for changes that affect:
 - irreversible or expensive-to-reverse decisions
 
 Use `.project-ai/templates/adr.md.tmpl` as the starter template.
-
-- [0072 — Lossless inline review evidence with lifecycle capacity](0072-lossless-inline-review-evidence.md) — Proposed

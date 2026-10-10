@@ -36,8 +36,9 @@ def encode_evidence(value: object, *, max_decoded_bytes: int) -> dict[str, objec
 def decode_evidence(
     value: object, *, max_encoded_bytes: int, max_decoded_bytes: int
 ) -> object:
-    """Bound the entire canonical JSON envelope, including base64 framing.
+    """Bound canonical envelope bytes and decoded expansion independently.
 
+    The encoded bound includes base64 framing; max_decoded_bytes caps expansion.
     The cheap inner string check avoids serializing an already oversized
     payload; it does not allocate a separate allowance for that payload.
     """
