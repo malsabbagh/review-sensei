@@ -2,7 +2,7 @@
 
 Status: Proposed. Date: 2026-10-10. Decision owner: maintainer; reviewers:
 Epic #238 coordinator and lanes B–F. Issue: https://github.com/malsabbagh/review-sensei/issues/240.
-PR: pending. This isolated implementation is a prototype for review. No ADR
+PR: https://github.com/malsabbagh/review-sensei/pull/250. This isolated implementation is a prototype for review. No ADR
 acceptance or production reader/writer rollout is implied. The coordinator owns
 numbered ADR registration and architecture/index changes.
 
@@ -125,3 +125,48 @@ refuse. Read-only invocations may get new budgets; resumed queue execution must
 provide original durable accounting. Item count is a generic <=4096 ceiling;
 baseline reconstruction verifies exact finding count and its existing <=512
 contract. B/C/D/E readers must validate their own exact domain inventory counts.
+
+
+## Queue-slot amendment v1 (separate from codec v1.1)
+
+The initial prototype codec remains immutable at
+`ba89418d21898d14e6d1e535a5409c47c7cff3b2`. This amendment adds
+`SessionRecord.assessment_queue` and the closed
+`https://reviewsensei.dev/schemas/v1/assessment-queue-root.schema.json`.
+Root fields are schema_version 1.0, inventory_digest, immutable
+inventory_generation, state_manifest (purpose queue), and active_operation.
+The active summary binds operation/source/authority digests, execution identity,
+ordered aware UTC deadline/expiry, bounded call/retry/prompt/output counters,
+and original durable read_accounting calls/deadline_at_ms. C confirmed the exact
+response_bytes_reserved field: persist the enforced output limit before dispatch,
+convert it to measured response_bytes only with durable response capture, retain
+unknown reservations without refund or redispatch. Runtime enforces measured plus
+reserved <= the prototype 1 MiB aggregate ceiling; C additionally validates each
+original admitted budget and journal/receipt binding. JSON Schema expresses scalar
+bounds; runtime supplies cross-field arithmetic, exact dates and root allocation.
+
+`assessment_queue_manifest_capacity(record) -> int` allocates manifest bytes
+inside the total 8192-byte root including a 1024-byte summary growth reserve,
+beside retained baseline/history, dispositions/attestations and maximum lifecycle
+counter/transaction/ownership growth. Allocation is recomputed before activation;
+new baseline checkpoints reserve the whole queue root. The root parser checks
+actual canonical root/summary bytes, immutable generation and session association.
+`read_session_assessment_queue(ledger, record) -> object | None` reconstructs the
+complete authenticated document and checks document schema version; C owns closed
+journal parsing, complete inventory count, all receipts, and source/tombstone
+semantics. Both adapters validate all queue references before activation/load.
+An existing slot cannot be removed through replace; retired state must retain an
+explicit authenticated tombstone. Writers remain disabled by default.
+
+C's current journal limit is 32 retained source operations under the unchanged
+2 MiB total decoded ceiling. This is not 32 fresh storage budgets: every staged
+baseline/queue/feedback/evidence object and orphan shares the per-PR 256-object /
+8 MiB retention envelope and scan/dispatch budget. No automatic cleanup exists.
+A full old/new history can refuse a later checkpoint even when individual codec
+objects fit. Hosted object fixtures demonstrate storage boundaries, not permission
+to issue repeated root writes. Each broker-bound replace consumes its one-attempt
+grant; a staging callback covers only that mutation's parts. The coordinator must
+compose authenticated fresh grants per permitted mutation or a reviewed transaction
+protocol, and qualify the actual consuming broker before host acceptance. Current
+conditional reload/PATCH remains non-atomic; single-writer deployment serialization
+and ambiguity reconciliation remain required. No broker validation is weakened.

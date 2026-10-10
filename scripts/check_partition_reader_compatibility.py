@@ -85,6 +85,7 @@ def main() -> int:
     from review_sensei.hosting.github.session_ledger import render_session_comment
     from review_sensei.session import LocalSessionLedger, SessionRecord
     from tests import test_review_transaction as fixture
+    from tests.test_assessment_queue_storage import activate
     from tests.test_authenticated_partitions import checkpoint
 
     with tempfile.TemporaryDirectory(prefix="lane-a-readers-") as temporary:
@@ -128,7 +129,21 @@ def main() -> int:
                 }
             )
         )
-        for commit in READERS:
+        queue_ledger = LocalSessionLedger(
+            directory / "queue-ledger", enable_partition_writes=True
+        )
+        queue_ledger.initialize(fixture.IDENTITY, now=fixture.NOW)
+        queue_record, _ = activate(queue_ledger)
+        queue_fixture = json.loads(data_path.read_text())
+        queue_fixture["record"] = queue_record.to_dict()
+        queue_fixture["comments"][1]["body"] = render_session_comment(
+            repository_id=99,
+            pull_request=fixture.IDENTITY.pull_request,
+            record=queue_record,
+        )
+        queue_path = directory / "queue-fixture.json"
+        queue_path.write_text(json.dumps(queue_fixture))
+        for commit in (*READERS, "ba89418d21898d14e6d1e535a5409c47c7cff3b2"):
             archive = subprocess.run(
                 ["git", "archive", "--format=tar", commit, "src"],
                 cwd=ROOT,
@@ -155,18 +170,21 @@ def main() -> int:
                     if stream is None:
                         raise ValueError("reader archive missing bytes")
                     destination.write_bytes(stream.read())
-            subprocess.run(
-                [
-                    sys.executable,
-                    "-I",
-                    str(Path(__file__).resolve()),
-                    "--worker",
-                    str(target / "src"),
-                    str(data_path),
-                ],
-                cwd=directory,
-                check=True,
-            )
+            for fixture_document in (
+                (data_path, queue_path) if commit in READERS else (queue_path,)
+            ):
+                subprocess.run(
+                    [
+                        sys.executable,
+                        "-I",
+                        str(Path(__file__).resolve()),
+                        "--worker",
+                        str(target / "src"),
+                        str(fixture_document),
+                    ],
+                    cwd=directory,
+                    check=True,
+                )
     return 0
 
 

@@ -42,10 +42,12 @@ from ...session import (
     SessionLoadReason,
     SessionLoadResult,
     SessionRecord,
+    _validate_queue_retention,
     load_session_status,
     mutate_abort,
     mutate_commit,
     mutate_reserved,
+    read_session_assessment_queue,
     read_session_baseline,
 )
 from .errors import (
@@ -678,7 +680,8 @@ class GitHubIssueCommentSessionLedger:
             else None
         )
         if (
-            isinstance(stored_baseline, dict)
+            record.assessment_queue is not None
+            or isinstance(stored_baseline, dict)
             and stored_baseline.get("encoding") == PARTITION_ENCODING
         ):
             if self.evidence_budget is None:
@@ -696,6 +699,7 @@ class GitHubIssueCommentSessionLedger:
                     identity,
                 )
                 read_session_baseline(self, record)
+                read_session_assessment_queue(self, record)
             except ReviewInputError as exc:
                 raise SessionLoadError(
                     SessionLoadReason.INTEGRITY_FAILED,
@@ -835,7 +839,9 @@ class GitHubIssueCommentSessionLedger:
         self._mutation_active = True
         try:
             updated = mutate(record)
+            _validate_queue_retention(record, updated)
             read_session_baseline(self, updated)
+            read_session_assessment_queue(self, updated)
         finally:
             self._mutation_active = False
         if self.evidence_budget is not None:
