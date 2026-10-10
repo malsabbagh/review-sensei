@@ -12,6 +12,7 @@ from review_sensei.assessment_queue import (
 )
 from review_sensei.budgets import ReviewWorkBudgets
 from review_sensei.errors import ReviewInputError
+from review_sensei.execution import CheckpointMutation
 from review_sensei.outcomes import ResourceBudget, ResourceBudgetTracker
 from tests.test_assessment_queue import DocumentStore, QueueFixture, fixture
 from tests.test_review_work import AssessingProvider
@@ -205,6 +206,20 @@ class CoalescedAdmissionTests(QueueFixture, unittest.TestCase):
                 )
             with self.assertRaises(ReviewInputError):
                 adapter.checkpoint(coalesce_admission_dispatch=invalid)
+
+    def test_combined_closed_metadata_requires_both_exact_digests(self):
+        for values in (
+            {},
+            {"request_digest": "a" * 64},
+            {"dispatch_digest": "b" * 64},
+            {"request_digest": "short", "dispatch_digest": "b" * 64},
+            {"request_digest": "a" * 64, "dispatch_digest": []},
+        ):
+            with self.assertRaises(ReviewInputError):
+                CheckpointMutation("admission-dispatch", **values)
+        CheckpointMutation(
+            "admission-dispatch", request_digest="a" * 64, dispatch_digest="b" * 64
+        )
 
     def test_partial_accepted_receipt_remains_durable_before_later_rejection(self):
         import json

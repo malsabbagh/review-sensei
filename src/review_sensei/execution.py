@@ -52,6 +52,12 @@ class CheckpointMutation:
             "finalize",
         }:
             raise ReviewInputError("checkpoint mutation reason is invalid")
+        if self.reason == "admission-dispatch" and (
+            self.request_digest is None or self.dispatch_digest is None
+        ):
+            raise ReviewInputError(
+                "combined admission requires exact request and dispatch digests"
+            )
         for value in (self.batch_id, self.request_digest, self.dispatch_digest):
             if value is not None and (
                 not isinstance(value, str)
