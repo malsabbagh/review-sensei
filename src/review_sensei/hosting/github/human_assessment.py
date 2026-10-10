@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
 from ...budgets import ReviewWorkBudgets
 from ...errors import ReviewInputError
 from ...evidence import EvidenceBundle, evidence_digest
+from ...feedback import (
+    MAX_FEEDBACK_BYTES,
+    FeedbackAdmissionError,
+    FeedbackReference,
+    FeedbackSelection,
+    FeedbackSource,
+    validate_feedback_context,
+    validate_feedback_references,
+)
 from ...human_assessment import (
     HUMAN_ASSESSMENT_EVIDENCE_DIAGNOSTICS,
     MAX_HUMAN_SOURCE_BYTES,
@@ -40,6 +52,7 @@ class PreparedHumanAssessment:
     source_actor: str
     evidence_diagnostic: str | None = None
     evidence_bundle: EvidenceBundle | None = None
+    source_metadata_digest: str | None = None
 
     @property
     def authority_digest(self) -> str:
@@ -57,6 +70,7 @@ class PreparedHumanAssessment:
                     self.source_body.encode()
                 ).hexdigest(),
                 "source_actor": self.source_actor,
+                "source_metadata_digest": self.source_metadata_digest,
             }
         )
 
@@ -87,6 +101,220 @@ class HumanAssessmentPublisher:
         self.conversation = ConversationPublisher(http=http)
         self.finalizer = ReviewApprovalFinalizer(http=http)
 
+    @staticmethod
+    def _source_metadata_digest(source: dict[str, Any]) -> str:
+        user = source["user"]
+        return evidence_digest(
+            {
+                "comment_id": source.get("id"),
+                "author_id": user.get("id"),
+                "author": user.get("login"),
+                "author_type": user.get("type"),
+                "association": source["author_association"].upper(),
+                "inline_parent_id": source.get("in_reply_to_id"),
+            }
+        )
+
+    def source_matches(
+        self, source: dict[str, Any] | None, prepared: PreparedHumanAssessment
+    ) -> bool:
+        """Fence complete body and actor metadata, including immutable account ID."""
+        return (
+            source is not None
+            and source["body"] == prepared.source_body
+            and source["user"]["login"] == prepared.source_actor
+            and self._source_metadata_digest(source) == prepared.source_metadata_digest
+        )
+
+    def _feedback_source(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        reference: FeedbackReference,
+        trigger: FeedbackReference,
+        app_slug: str,
+        before_read: Callable[[], float],
+    ) -> FeedbackSource:
+        suffix = "pulls" if reference.kind == "inline" else "issues"
+        timeout = before_read()
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or not 0 < timeout <= 60
+        ):
+            raise FeedbackAdmissionError("feedback_read_budget_exhausted")
+        started = time.monotonic()
+        status, source = self.http.request(
+            "GET",
+            self.http.repository_path(
+                repository, f"/{suffix}/comments/{reference.comment_id}"
+            ),
+            token=token,
+            timeout_seconds=timeout,
+        )
+        if time.monotonic() - started >= timeout:
+            raise FeedbackAdmissionError("feedback_read_budget_exhausted")
+        if status == 404:
+            raise FeedbackAdmissionError("feedback_source_missing")
+        if status != 200 or not isinstance(source, dict):
+            raise FeedbackAdmissionError("feedback_source_lookup_failed")
+        if type(source.get("id")) is not int or source["id"] != reference.comment_id:
+            raise FeedbackAdmissionError("feedback_source_identity_invalid")
+        try:
+            self.conversation._require_comment_association(
+                comment=source,
+                repository=repository,
+                pull_request=pull_request,
+                source_kind=reference.kind,
+            )
+        except GitHubConversationError as exc:
+            raise FeedbackAdmissionError("feedback_source_association_invalid") from exc
+        if (
+            not authorized_human_comment(source, app_slug=app_slug)
+            or source["user"].get("type") != "User"
+        ):
+            raise FeedbackAdmissionError("feedback_source_unauthorized")
+        if source.get("updated_at") != reference.updated_at:
+            raise FeedbackAdmissionError("feedback_source_changed")
+        if reference == trigger and not has_standalone_sensei_mention(
+            source.get("body")
+        ):
+            raise FeedbackAdmissionError("feedback_trigger_mention_missing")
+        body = source.get("body")
+        if not isinstance(body, str):
+            raise FeedbackAdmissionError("feedback_source_invalid")
+        return FeedbackSource(
+            reference=reference,
+            author=source["user"]["login"],
+            author_id=source["user"].get("id"),
+            association=source["author_association"].upper(),
+            body=body,
+            root_comment_id=source.get("in_reply_to_id", reference.comment_id)
+            if reference.kind == "inline"
+            else None,
+        )
+
+    def load_feedback(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        prepared: PreparedConversation,
+        app_slug: str,
+        references: tuple[FeedbackReference, ...],
+        before_read: Callable[[], float],
+        target_ids: tuple[str, ...] = (),
+    ) -> FeedbackSelection:
+        """Admit an explicit trusted selection; never enumerate or parse chat.
+
+        The caller must validate target IDs against the exact pending inventory
+        and bind this selection to the durable operation before inference.
+        Ordinary conversation/CLI callers do not opt in implicitly.
+        before_read charges each physical read attempt against the caller's
+        shared A/D/E operation envelope and returns its remaining timeout.
+        """
+        trigger = FeedbackReference(
+            prepared.source_kind, prepared.source_comment_id, prepared.source_updated_at
+        )
+        validate_feedback_references(references, trigger=trigger)
+        if prepared.context.base_sha is None:
+            raise FeedbackAdmissionError("feedback_snapshot_invalid")
+        validate_feedback_context(
+            repository=repository,
+            pull_request=pull_request,
+            base_sha=prepared.context.base_sha,
+            head_sha=prepared.head_sha,
+            target_ids=target_ids,
+        )
+        guard = self._bounded_feedback_before_read(before_read)
+        sources = []
+        total_bytes = 0
+        for reference in references:
+            source = self._feedback_source(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                reference=reference,
+                trigger=trigger,
+                app_slug=app_slug,
+                before_read=guard,
+            )
+            if (
+                reference == trigger
+                and reference.kind == "inline"
+                and source.root_comment_id != prepared.root_comment_id
+            ):
+                raise FeedbackAdmissionError("feedback_source_association_invalid")
+            total_bytes += source.body_bytes
+            if total_bytes > MAX_FEEDBACK_BYTES:
+                raise FeedbackAdmissionError("feedback_total_oversized")
+            sources.append(source)
+        return FeedbackSelection(
+            repository=repository,
+            pull_request=pull_request,
+            base_sha=prepared.context.base_sha,
+            head_sha=prepared.head_sha,
+            trigger=trigger,
+            sources=tuple(sources),
+            target_ids=target_ids,
+        )
+
+    def revalidate_feedback(
+        self,
+        *,
+        token: str,
+        feedback: FeedbackSelection,
+        app_slug: str,
+        before_read: Callable[[], float],
+    ) -> None:
+        """Fence every selected comment before publication/receipt activation.
+
+        GitHub has no atomic multi-comment read. The caller must also fence the
+        exact current PR snapshot/latest inventory before activating authority.
+        Reuse the same before_read accounting/deadline as admission and parts;
+        constructing a fresh allowance for this fence is unsupported.
+        """
+        guard = self._bounded_feedback_before_read(before_read)
+        for original in feedback.sources:
+            current = self._feedback_source(
+                token=token,
+                repository=feedback.repository,
+                pull_request=feedback.pull_request,
+                reference=original.reference,
+                trigger=feedback.trigger,
+                app_slug=app_slug,
+                before_read=guard,
+            )
+            if current != original:
+                raise FeedbackAdmissionError("feedback_source_changed")
+
+    @staticmethod
+    def _bounded_feedback_before_read(
+        before_read: Callable[[], float],
+    ) -> Callable[[], float]:
+        """Keep the caller's charged shared envelope and a 60s phase ceiling."""
+        deadline = time.monotonic() + 60
+
+        def guarded() -> float:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise FeedbackAdmissionError("feedback_read_budget_exhausted")
+            charged = before_read()
+            if (
+                isinstance(charged, bool)
+                or not isinstance(charged, (int, float))
+                or not math.isfinite(charged)
+                or not 0 < charged <= 60
+            ):
+                raise FeedbackAdmissionError("feedback_read_budget_exhausted")
+            return min(remaining, charged)
+
+        return guarded
+
     def _source(
         self,
         *,
@@ -108,6 +336,11 @@ class HumanAssessmentPublisher:
             return None
         if status != 200 or not isinstance(source, dict):
             raise GitHubConversationError("human assessment source lookup failed")
+        if (
+            type(source.get("id")) is not int
+            or source["id"] != prepared.source_comment_id
+        ):
+            return None
         self.conversation._require_comment_association(
             comment=source,
             repository=repository,
@@ -122,10 +355,12 @@ class HumanAssessmentPublisher:
         ):
             return None
         body = source.get("body")
-        if (
-            not isinstance(body, str)
-            or len(body.encode("utf-8")) > MAX_HUMAN_SOURCE_BYTES
-        ):
+        if not isinstance(body, str):
+            return None
+        try:
+            if len(body.encode("utf-8")) > MAX_HUMAN_SOURCE_BYTES:
+                return None
+        except UnicodeError:
             return None
         return source
 
@@ -218,6 +453,7 @@ class HumanAssessmentPublisher:
                 eligibility=eligibility,
                 source_body=source["body"],
                 source_actor=source["user"]["login"],
+                source_metadata_digest=self._source_metadata_digest(source),
                 evidence_bundle=bundle,
             )
         if any(item.required_paths for item in eligibility.human_review.pending):
@@ -237,6 +473,7 @@ class HumanAssessmentPublisher:
             eligibility=eligibility,
             source_body=source["body"],
             source_actor=source["user"]["login"],
+            source_metadata_digest=self._source_metadata_digest(source),
             evidence_diagnostic=selected.diagnostic,
         )
 
@@ -301,11 +538,7 @@ class HumanAssessmentPublisher:
             prepared=conversation,
             app_slug=app_slug,
         )
-        if (
-            source is None
-            or source["body"] != prepared.source_body
-            or source["user"]["login"] != prepared.source_actor
-        ):
+        if not self.source_matches(source, prepared):
             return ReplyResult(status="skipped_edited_source")
         if "<!-- reviewsensei:" in reply.body:
             raise GitHubConversationError(
@@ -394,11 +627,7 @@ class HumanAssessmentPublisher:
             prepared=conversation,
             app_slug=app_slug,
         )
-        if (
-            source is None
-            or source["body"] != prepared.source_body
-            or source["user"]["login"] != prepared.source_actor
-        ):
+        if not self.source_matches(source, prepared):
             return ReplyResult(
                 status="skipped_edited_source", comment_id=outcome.comment_id
             )
@@ -458,6 +687,7 @@ class HumanAssessmentPublisher:
                         prepared.source_body.encode()
                     ).hexdigest(),
                     "source_actor": prepared.source_actor,
+                    "source_metadata_digest": prepared.source_metadata_digest,
                     "diff_sha256": prepared.evidence_bundle.digest
                     if work is not None and prepared.evidence_bundle is not None
                     else hashlib.sha256(
