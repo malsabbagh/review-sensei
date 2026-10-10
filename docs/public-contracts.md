@@ -1096,7 +1096,9 @@ review data migration is required.
 locations against the exact diff, rereads the open non-draft same-repository PR
 head, and submits one App-authored review whose formatted summary and inline
 comments append the fixed follow-up instruction `To discuss this finding, reply
-with @reviewsensei followed by your question.` and carry the marker
+with @reviewsensei followed by your question.` and the maintainer commands
+`@reviewsensei I reviewed the media files and I approve` and
+`@reviewsensei override RS-ABCDEF acceptable risk`, and carry the marker
 `<!-- reviewsensei:review:v1 repo=<id> pr=<n> head=<sha> result=<sha256> -->`.
 The default evidence policy is `legacy` single-pass mode. `confirmed` publishes
 only snapshot-bound confirmed candidates; unverified comments never become

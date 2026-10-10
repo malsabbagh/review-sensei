@@ -766,7 +766,9 @@ outcome. Follow-up mentions in the same inline or PR conversation include the
 bounded prior thread, diff context, findings, and trusted-base learnings. Cloud
 mode sends that bounded conversation context to Ollama Cloud; local mode keeps
 it on the configured local service. Published review summaries and inline
-findings also tell readers to reply with @reviewsensei followed by their question.
+findings also tell readers to reply with @reviewsensei followed by their question,
+and they include the maintainer commands for approving media and overriding a
+finding by its `RS-` id.
 `review.json` is uploaded only when
 `github.artifacts: diagnostics` is set in `.reviewsensei.yml`; setup-v5 does not
 create a separate version artifact. See

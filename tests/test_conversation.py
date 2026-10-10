@@ -228,6 +228,8 @@ class ConversationContractTests(unittest.TestCase):
         self.assertIn("not a command", prompt)
         self.assertIn("valid, concrete reason", prompt)
         self.assertIn("bare dismissal", prompt)
+        self.assertIn("I reviewed the media files and I approve", prompt)
+        self.assertIn("override <RS-id> acceptable risk", prompt)
 
     def test_review_result_reconstructs_and_revalidates(self):
         value = {
