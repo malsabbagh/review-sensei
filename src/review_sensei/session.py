@@ -34,8 +34,12 @@ from .bounded_evidence import (
     MAX_STORED_PART_BYTES,
     MAX_STORED_PARTS,
     PARTITION_ENCODING,
+    ActivationTailPlan,
     AuthenticatedPart,
     EvidenceReadBudget,
+    EvidenceTailTicket,
+    NonResumableActivationError,
+    TailDispatch,
     canonical_bytes,
     partition_evidence,
     read_partitioned_evidence,
@@ -2839,6 +2843,179 @@ def _validate_queue_retention(before: SessionRecord, after: SessionRecord) -> No
             )
 
 
+def _tail_operation_binding(value: Mapping[str, object]) -> dict[str, object]:
+    fields = {
+        "operation_id",
+        "source_digest",
+        "authority_digest",
+        "execution_identity",
+        "inventory_digest",
+        "inventory_generation",
+    }
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise ReviewInputError("activation operation binding is invalid")
+    for name in fields - {"execution_identity", "inventory_generation"}:
+        digest = value[name]
+        if (
+            not isinstance(digest, str)
+            or re.fullmatch(SESSION_SHA256_PATTERN, digest) is None
+        ):
+            raise ReviewInputError("activation operation digest is invalid")
+    if (
+        not isinstance(value["execution_identity"], str)
+        or re.fullmatch(r"[a-f0-9]{32}", value["execution_identity"]) is None
+    ):
+        raise ReviewInputError("activation execution identity is invalid")
+    _require_bounded_int(
+        value["inventory_generation"],
+        label="inventory_generation",
+        minimum=0,
+        maximum=MAX_GENERATION,
+    )
+    return dict(value)
+
+
+def _tail_attempt_scope(
+    identity: SessionIdentity, reservation_id: str, operation: Mapping[str, object]
+) -> str:
+    _reservation_id(reservation_id, label="reservation_id")
+    return hashlib.sha256(
+        canonical_bytes(
+            {
+                "repository": identity.repository,
+                "repository_id": identity.repository_id,
+                "pull_request": identity.pull_request,
+                "reservation_id": reservation_id,
+                "operation": _tail_operation_binding(operation),
+            }
+        )
+    ).hexdigest()
+
+
+def _tail_part_ids(record: SessionRecord) -> tuple[str, ...]:
+    manifests = []
+    history = record.convergence_history
+    baseline = history.get("baseline") if isinstance(history, Mapping) else None
+    if isinstance(baseline, dict) and baseline.get("encoding") == PARTITION_ENCODING:
+        manifests.append(validate_manifest(baseline))
+    if record.assessment_queue is not None:
+        manifests.append(validate_manifest(record.assessment_queue["state_manifest"]))
+    return tuple(
+        ref["storage_id"]
+        for manifest in manifests
+        for ref in cast(list[dict[str, Any]], manifest["parts"])
+    )
+
+
+def _tail_record_shape(record: SessionRecord) -> bytes:
+    document = json.loads(canonical_bytes(record.to_dict()))
+    document.pop("record_sha256", None)
+    root = document.get("assessment_queue")
+    if not isinstance(root, dict) or not isinstance(root.get("active_operation"), dict):
+        raise ReviewInputError(
+            "activation requires a retained operation accounting carrier"
+        )
+    root["active_operation"].pop("read_accounting", None)
+    return canonical_bytes(document)
+
+
+def _validate_tail_draft(
+    before: SessionRecord,
+    draft: SessionRecord,
+    *,
+    operation: Mapping[str, object],
+    reservation_id: str,
+    budget: EvidenceReadBudget,
+) -> None:
+    SessionRecord.from_dict(draft.to_dict())
+    if (
+        (draft.repository, draft.repository_id, draft.pull_request)
+        != (before.repository, before.repository_id, before.pull_request)
+        or before.reservation_id != reservation_id
+        or draft.reservation_id != reservation_id
+        or draft.generation != before.generation + 1
+    ):
+        raise ReviewInputError(
+            "activation draft identity, reservation or generation changed"
+        )
+    for record in (before, draft):
+        root = record.assessment_queue
+        if root is None and record is before:
+            continue
+        if root is None or not isinstance(root["active_operation"], Mapping):
+            raise ReviewInputError(
+                "activation requires a retained operation accounting carrier"
+            )
+        active = root["active_operation"]
+        binding = {
+            name: root[name] if name.startswith("inventory_") else active[name]
+            for name in operation
+        }
+        if (
+            binding != operation
+            or active["read_accounting"]["deadline_at_ms"] != budget.wall_deadline_ms
+            or active["read_accounting"]["calls"] > budget.calls
+        ):
+            raise ReviewInputError(
+                "activation original operation or accounting does not match"
+            )
+    _validate_queue_retention(before, draft)
+
+
+def _tail_plan_scope(
+    adapter: str,
+    before: SessionRecord,
+    draft: SessionRecord,
+    *,
+    operation: Mapping[str, object],
+    budget: EvidenceReadBudget,
+    scan_pages: int = 0,
+    head_sha: str | None = None,
+    root_id: int | None = None,
+    grant_sha256: str | None = None,
+) -> str:
+    return hashlib.sha256(
+        canonical_bytes(
+            {
+                "adapter": adapter,
+                "current_root": before.record_sha256,
+                "draft_shape": hashlib.sha256(_tail_record_shape(draft)).hexdigest(),
+                "old_parts": _tail_part_ids(before),
+                "new_parts": _tail_part_ids(draft),
+                "operation": dict(operation),
+                "original_deadline_ms": budget.wall_deadline_ms,
+                "scan_pages": scan_pages,
+                "head_sha": head_sha,
+                "root_id": root_id,
+                "grant_sha256": grant_sha256,
+            }
+        )
+    ).hexdigest()
+
+
+def _seal_tail_accounting(
+    draft: SessionRecord,
+    seal_accounting: Callable[[SessionRecord, Mapping[str, int]], SessionRecord],
+    budget: EvidenceReadBudget,
+) -> SessionRecord:
+    accounting = {"calls": budget.calls, "deadline_at_ms": budget.wall_deadline_ms}
+    sealed = seal_accounting(draft, dict(accounting))
+    if not isinstance(sealed, SessionRecord):
+        raise ReviewInputError(
+            "activation accounting callback returned invalid authority"
+        )
+    SessionRecord.from_dict(sealed.to_dict())
+    root = cast(Mapping[str, Any], sealed.assessment_queue)
+    if (
+        _tail_record_shape(sealed) != _tail_record_shape(draft)
+        or root["active_operation"]["read_accounting"] != accounting
+    ):
+        raise ReviewInputError(
+            "activation accounting callback changed sealed authority"
+        )
+    return sealed
+
+
 def read_session_baseline(
     ledger: object, record: SessionRecord
 ) -> ReviewBaseline | None:
@@ -2908,15 +3085,27 @@ class LocalSessionLedger:
             raise ReviewInputError("session ledger root is invalid")
         self.root = root
         self.evidence_budget = evidence_budget or EvidenceReadBudget()
+        self._explicit_evidence_budget = evidence_budget is not None
         self.enable_partition_writes = enable_partition_writes
         self._shared_control_budget = evidence_budget is not None
+        self._activation_ticket: EvidenceTailTicket | None = None
+        self._activation_identity: SessionIdentity | None = None
+        self._tail_preparing = False
 
     def _control_accounting_enabled(self) -> bool:
         return self._shared_control_budget or self.enable_partition_writes
 
-    def _consume_control_io(self, *, fence: bool = False) -> None:
-        if self._control_accounting_enabled():
+    def _dispatch_evidence(self, label: str, *, fence: bool = False) -> None:
+        if self._activation_ticket is not None:
+            self._activation_ticket.consume(label, fence=fence)
+        else:
             self.evidence_budget.consume(fence=fence)
+
+    def _consume_control_io(
+        self, *, fence: bool = False, label: str = "unplanned"
+    ) -> None:
+        if self._control_accounting_enabled():
+            self._dispatch_evidence(label, fence=fence)
 
     def _observe_control_document(self, document: Mapping[str, object]) -> None:
         history = document.get("convergence_history")
@@ -2927,7 +3116,7 @@ class LocalSessionLedger:
         ):
             self._shared_control_budget = True
 
-    def _reserve_local_io(self, calls: int) -> None:
+    def _reserve_local_io(self, calls: int, *, label: str = "unplanned") -> None:
         """Charge bounded physical work, including mandatory durable cleanup.
 
         One durable file-write dispatch includes its mandatory sync/cleanup;
@@ -2937,16 +3126,24 @@ class LocalSessionLedger:
         """
         if not self._control_accounting_enabled():
             return
-        self.evidence_budget.preflight(calls)
+        if self._activation_ticket is None:
+            self.evidence_budget.preflight(calls)
         for _ in range(calls):
-            self.evidence_budget.consume()
+            self._dispatch_evidence(label)
 
     @staticmethod
     def evidence_producer() -> str:
         return "local-ledger"
 
-    def _part_directory(self, identity: SessionIdentity) -> Path:
-        self.evidence_budget.consume()
+    def _part_directory(
+        self, identity: SessionIdentity, *, storage_id: str | None = None
+    ) -> Path:
+        if (
+            self._activation_ticket is not None
+            and identity != self._activation_identity
+        ):
+            raise ReviewInputError("activation part identity changed")
+        self._dispatch_evidence(f"part:{storage_id}:directory")
         root = self.root.resolve()
         directory = (
             self.root
@@ -2969,9 +3166,9 @@ class LocalSessionLedger:
     ) -> AuthenticatedPart:
         if not re.fullmatch(r"[a-f0-9]{64}", storage_id):
             raise ReviewInputError("local partition identity is invalid")
-        self.evidence_budget.consume()
-        path = self._part_directory(identity) / storage_id
-        self.evidence_budget.consume()
+        self._dispatch_evidence(f"part:{storage_id}:resolve")
+        path = self._part_directory(identity, storage_id=storage_id) / storage_id
+        self._dispatch_evidence(f"part:{storage_id}:read")
         if path.is_symlink():
             raise ReviewInputError("local partition must not be a symlink")
         try:
@@ -3057,7 +3254,8 @@ class LocalSessionLedger:
         )
         # Physical local writes include durable sync/cleanup; reads include
         # containment and object inspection. Reserve later root/fence work too.
-        self.evidence_budget.preflight(8 * len(prospective_parts) + 16)
+        if not self._tail_preparing:
+            self.evidence_budget.preflight(8 * len(prospective_parts) + 16)
         missing_sizes = [
             len(canonical_bytes(part))
             for part in prospective_parts
@@ -3120,6 +3318,9 @@ class LocalSessionLedger:
             writer=write,
             reader=lambda storage_id: self._read_part(identity, storage_id),
             budget=self.evidence_budget,
+            preflight_calls=(len(missing_sizes) + 3 * len(prospective_parts))
+            if self._tail_preparing
+            else None,
         )
 
     def _path(self, identity: SessionIdentity) -> Path:
@@ -3292,10 +3493,15 @@ class LocalSessionLedger:
             ) from exc
 
     def _read_document(
-        self, path: Path, *, fence: bool = False
+        self, path: Path, *, fence: bool = False, tail_label: str = "unplanned"
     ) -> Mapping[str, object] | None:
         accounted = self._control_accounting_enabled()
-        self._consume_control_io(fence=fence)
+        if self._activation_ticket is not None and (
+            self._activation_identity is None
+            or path != self._path(self._activation_identity)
+        ):
+            raise ReviewInputError("activation root path changed")
+        self._consume_control_io(fence=fence, label=tail_label)
         try:
             with path.open("rb") as handle:
                 raw = handle.read(MAX_SESSION_RECORD_BYTES + 1)
@@ -3317,7 +3523,7 @@ class LocalSessionLedger:
         if not accounted and self._control_accounting_enabled():
             # First richer-root read is retroactively charged before exposing
             # authority. Default inline-only callers retain legacy behavior.
-            self._consume_control_io(fence=fence)
+            self._consume_control_io(fence=fence, label=tail_label)
         return payload
 
     def _write(
@@ -3328,10 +3534,15 @@ class LocalSessionLedger:
         exclusive: bool = False,
     ) -> None:
         self._observe_control_document(record.to_dict())
+        if self._activation_ticket is not None and (
+            identity != self._activation_identity
+            or record.record_sha256 != self._activation_ticket._root_sha256
+        ):
+            raise ReviewInputError("activation root differs from sealed authority")
         path = self._path(identity)
         # One durable temporary-write dispatch includes directory creation,
         # file sync and unconditional cleanup. Activation is a separate fence.
-        self._reserve_local_io(1)
+        self._reserve_local_io(1, label="root:write")
         path.parent.mkdir(parents=True, exist_ok=True)
         encoded = json.dumps(
             record.to_dict(), sort_keys=True, separators=(",", ":")
@@ -3356,7 +3567,7 @@ class LocalSessionLedger:
             handle_closed = True
             # Deadline/count is checked again immediately before authority
             # activation, after serialization, temp write and file sync.
-            self._consume_control_io(fence=True)
+            self._consume_control_io(fence=True, label="root:activate")
             if exclusive:
                 # Link a fully fsynced temporary file into place without
                 # replacing an existing destination. This is the filesystem
@@ -3581,6 +3792,182 @@ class LocalSessionLedger:
         now: datetime | None = None,
     ) -> SessionRecord:
         return self.replace(identity, mutate, now=now)
+
+    def reserve_for_tail(
+        self,
+        identity: SessionIdentity,
+        *,
+        operation_binding: Mapping[str, object],
+        slot: str,
+        reservation_id: str,
+        expected_generation: int,
+        head_sha: str | None = None,
+        now: datetime | None = None,
+    ) -> SessionRecord:
+        """Create the existing reservation and retain its live owned-readback proof.
+
+        Loaded/duplicate reservations cannot mint a new original attempt. No
+        independent local witness, persistent field or credential is introduced.
+        """
+        if (
+            not self.enable_partition_writes
+            or not self._explicit_evidence_budget
+            or not isinstance(self.evidence_budget, EvidenceReadBudget)
+        ):
+            raise ReviewInputError(
+                "prepaid activation writers or original budget are unavailable"
+            )
+        budget = self.evidence_budget
+        scope = _tail_attempt_scope(identity, reservation_id, operation_binding)
+        if (
+            budget.restored
+            or scope in budget._live_attempts
+            or scope in budget._failed_attempts
+        ):
+            raise NonResumableActivationError(
+                "original activation attempt cannot be restarted"
+            )
+
+        def admit(record: SessionRecord) -> SessionRecord:
+            if (
+                record.reservation_id is not None
+                or record.last_committed_reservation_id == reservation_id
+            ):
+                raise NonResumableActivationError(
+                    "loaded reservation is not a live original attempt proof"
+                )
+            return mutate_reserved(
+                record,
+                slot=slot,
+                reservation_id=reservation_id,
+                expected_generation=expected_generation,
+                head_sha=head_sha,
+                now=now,
+            )
+
+        try:
+            reserved = self.replace(identity, admit, now=now)
+            budget._remember_live_attempt(scope, reserved.record_sha256, owner=self)
+            return reserved
+        except BaseException:
+            budget._burn_live_attempt(scope)
+            raise
+
+    def replace_with_tail(
+        self,
+        identity: SessionIdentity,
+        prepare: Callable[[SessionRecord], SessionRecord],
+        *,
+        operation_binding: Mapping[str, object],
+        attempt_reservation_id: str,
+        seal_accounting: Callable[[SessionRecord, Mapping[str, int]], SessionRecord],
+        now: datetime | None = None,
+    ) -> SessionRecord:
+        """Stage, prepay a sealed exact tail, then conditionally activate/read back.
+
+        Every failure burns the live attempt. Restart needs a future reviewed
+        authenticated original-attempt witness; a snapshot/grant alone refuses.
+        """
+        if (
+            not self.enable_partition_writes
+            or not self._explicit_evidence_budget
+            or not isinstance(self.evidence_budget, EvidenceReadBudget)
+        ):
+            raise ReviewInputError(
+                "prepaid activation writers or original budget are unavailable"
+            )
+        budget = self.evidence_budget
+        operation = _tail_operation_binding(operation_binding)
+        scope = _tail_attempt_scope(identity, attempt_reservation_id, operation)
+        if (
+            budget.restored
+            or scope not in budget._live_attempts
+            or budget._live_attempt_owners.get(scope) is not self
+            or scope in budget._failed_attempts
+        ):
+            raise NonResumableActivationError(
+                "original activation attempt witness is unavailable"
+            )
+        ticket: EvidenceTailTicket | None = None
+        try:
+            loaded = self.load(identity, now=now)
+            if loaded.status != "ok" or loaded.record is None:
+                raise ReviewInputError(
+                    "prepaid activation current authority is unavailable"
+                )
+            before = loaded.record
+            budget._require_live_attempt(scope, before.record_sha256, owner=self)
+            self._tail_preparing = True
+            draft = prepare(before)
+            self._tail_preparing = False
+            _validate_tail_draft(
+                before,
+                draft,
+                operation=operation,
+                reservation_id=attempt_reservation_id,
+                budget=budget,
+            )
+            plan_scope = _tail_plan_scope(
+                "local", before, draft, operation=operation, budget=budget
+            )
+            steps = tuple(
+                TailDispatch(f"part:{part_id}:{unit}")
+                for part_id in _tail_part_ids(draft)
+                for unit in ("resolve", "directory", "read")
+            ) + (
+                TailDispatch("root:reload", fence=True),
+                TailDispatch("root:write"),
+                TailDispatch("root:activate", fence=True),
+                TailDispatch("root:readback", fence=True),
+            )
+            plan = ActivationTailPlan("local", plan_scope, steps)
+            ticket = budget.reserve_tail(plan)
+            sealed = _seal_tail_accounting(draft, seal_accounting, budget)
+            _validate_queue_retention(before, sealed)
+            ticket.seal(sealed.record_sha256)
+            ticket.start(
+                scope_sha256=_tail_plan_scope(
+                    "local", before, sealed, operation=operation, budget=budget
+                ),
+                root_sha256=sealed.record_sha256,
+            )
+            self._activation_ticket, self._activation_identity = ticket, identity
+            read_session_baseline(self, sealed)
+            read_session_assessment_queue(self, sealed)
+            current_document = self._read_document(
+                self._path(identity), fence=True, tail_label="root:reload"
+            )
+            if (
+                current_document is None
+                or SessionRecord.from_dict(current_document).record_sha256
+                != before.record_sha256
+            ):
+                raise ReviewInputError(
+                    "session generation conflict before prepaid activation"
+                )
+            self._write(identity, sealed)
+            persisted = self._read_document(
+                self._path(identity), fence=True, tail_label="root:readback"
+            )
+            if (
+                persisted is None
+                or SessionRecord.from_dict(persisted).record_sha256
+                != sealed.record_sha256
+            ):
+                raise ReviewInputError(
+                    "prepaid activation readback is ambiguous or conflicting"
+                )
+            ticket.finish()
+            budget._advance_live_attempt(scope, sealed.record_sha256)
+            return sealed
+        except BaseException:
+            budget._burn_live_attempt(scope)
+            raise
+        finally:
+            if ticket is not None:
+                ticket.abort()
+            self._activation_ticket = self._activation_identity = None
+            self._tail_preparing = False
 
     def reserve(
         self,
