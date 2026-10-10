@@ -6,7 +6,6 @@ import unittest
 from dataclasses import replace
 
 from review_sensei.bounded_evidence import (
-    EvidenceReadBudget,
     canonical_bytes,
     read_partitioned_evidence,
     stage_partitioned_evidence,
@@ -38,6 +37,7 @@ from tests.test_complete_publication_staging import (
     Parts,
     Reviews,
     inventory_context,
+    synthetic_budget,
 )
 from tests.test_evidence_capacity import human_result, varied_comments
 from tests.test_finalizer_adaptive_reviews import ReviewPages
@@ -55,7 +55,7 @@ class Bundle:
         self.result_digest = review_result_digest(result)
         self.evidence = Parts()
         self.reviews = Reviews()
-        self.budget = EvidenceReadBudget()
+        self.budget = synthetic_budget()
         self.store = self.reviews.store(self.budget)
         self.inventory_manifest = stage_result_human_inventory(
             self.inventory,

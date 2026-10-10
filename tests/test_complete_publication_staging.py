@@ -33,6 +33,13 @@ from tests.test_human_assessment import APP, BASE, HEAD
 PRODUCER = 12345
 
 
+def synthetic_budget():
+    # Synthetic transports dispatch instantly. An exact clock keeps their
+    # strict timeout assertions independent of platform monotonic precision.
+    # Expiration tests below advance their clock explicitly.
+    return EvidenceReadBudget(clock=lambda: 0.0)
+
+
 def inventory_context(**changes):
     value = binding(producer=f"github-bot:{PRODUCER}", purpose="human-inventory")
     value.update(repository="owner/repo", base_sha=BASE, head_sha=HEAD)
@@ -112,7 +119,7 @@ class Reviews:
             pull_request=1,
             producer_id=PRODUCER,
             app_slug=APP,
-            budget=budget or EvidenceReadBudget(),
+            budget=budget or synthetic_budget(),
         )
 
 
@@ -163,7 +170,7 @@ class CompletePublicationStagingTests(unittest.TestCase):
                 comments = varied_comments(count, detail=3, unique_paths=count)
                 inventory = PendingHumanReview.from_result(human_result(comments), BASE)
                 parts = prepare_finding_prose_parts(comments, head_sha=HEAD)
-                budget = EvidenceReadBudget()
+                budget = synthetic_budget()
                 evidence = Parts()
                 manifest = stage_human_inventory(
                     inventory,
@@ -237,7 +244,7 @@ class CompletePublicationStagingTests(unittest.TestCase):
                     max_manifest_bytes=limit,
                     writer=evidence.write,
                     reader=evidence.read,
-                    budget=EvidenceReadBudget(),
+                    budget=synthetic_budget(),
                 )
             self.assertEqual(evidence.calls, [])
         manifest = stage_human_inventory(
@@ -246,7 +253,7 @@ class CompletePublicationStagingTests(unittest.TestCase):
             max_manifest_bytes=8192,
             writer=evidence.write,
             reader=evidence.read,
-            budget=EvidenceReadBudget(),
+            budget=synthetic_budget(),
         )
         for changed in (
             dict(manifest, item_count=99),
@@ -257,7 +264,7 @@ class CompletePublicationStagingTests(unittest.TestCase):
                     changed,
                     expected_binding=inventory_context(),
                     reader=evidence.read,
-                    budget=EvidenceReadBudget(),
+                    budget=synthetic_budget(),
                 )
         evidence.owner = "github-bot:999"
         with self.assertRaises(ReviewInputError):
@@ -265,7 +272,7 @@ class CompletePublicationStagingTests(unittest.TestCase):
                 manifest,
                 expected_binding=inventory_context(),
                 reader=evidence.read,
-                budget=EvidenceReadBudget(),
+                budget=synthetic_budget(),
             )
 
     def test_missing_or_mutated_inventory_part_never_materializes_partial_state(self):
@@ -279,7 +286,7 @@ class CompletePublicationStagingTests(unittest.TestCase):
             max_manifest_bytes=8192,
             writer=evidence.write,
             reader=evidence.read,
-            budget=EvidenceReadBudget(),
+            budget=synthetic_budget(),
         )
         key = next(iter(evidence.values))
         part = evidence.values.pop(key)
@@ -288,7 +295,7 @@ class CompletePublicationStagingTests(unittest.TestCase):
                 manifest,
                 expected_binding=inventory_context(),
                 reader=evidence.read,
-                budget=EvidenceReadBudget(),
+                budget=synthetic_budget(),
             )
         evidence.values[key] = dict(part, data=part["data"][:-4] + "AAAA")
         with self.assertRaises(ReviewInputError):
@@ -296,7 +303,7 @@ class CompletePublicationStagingTests(unittest.TestCase):
                 manifest,
                 expected_binding=inventory_context(),
                 reader=evidence.read,
-                budget=EvidenceReadBudget(),
+                budget=synthetic_budget(),
             )
 
     def test_each_post_and_readback_failure_retains_and_reconciles(self):
@@ -374,7 +381,7 @@ class CompletePublicationStagingTests(unittest.TestCase):
         parts = prepare_finding_prose_parts(
             varied_comments(100, detail=3), head_sha=HEAD
         )
-        budget = EvidenceReadBudget()
+        budget = synthetic_budget()
         for _ in range(58):
             budget.consume()
         original = budget.snapshot()
