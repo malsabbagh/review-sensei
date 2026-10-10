@@ -21,7 +21,7 @@ from .coverage import (
 from .dependencies import lockfile_kind
 from .diff import DiffAnalysis, DiffFileRecord, DiffHunk, analyze_diff
 from .errors import ReviewInputError
-from .evidence import EvidenceBundle, EvidenceRecord, evidence_digest
+from .evidence import EvidenceBundle, EvidenceRecord, EvidenceSnapshot, evidence_digest
 from .validation import (
     DEFAULT_REVIEW_LIMITS,
     DEFAULT_TOTAL_WORK_BUDGET,
@@ -484,6 +484,8 @@ def _classify_file(
     paths = record.coverage_paths
     if record.binary or any(path in analysis.binary_paths for path in paths):
         return "unsupported", "binary"
+    if not EvidenceRecord.from_diff_record(record, EvidenceSnapshot()).complete:
+        return "unsupported", "incomplete-enumeration"
     if any(lockfile_kind(path) == "unsupported" for path in paths):
         return "unsupported", "lockfile-format"
     # npm lockfiles are material review input, even below a generated directory.
