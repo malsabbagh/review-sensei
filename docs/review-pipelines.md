@@ -173,6 +173,13 @@ Missing latest eligibility or incomplete scans cannot expose an older clean resu
 
 ## Reply routes
 
+See [human assessment workflows](human-assessment.md) for factual mention and
+operator examples, the separate disposition/thread/approval boundaries, and
+`feedback-v1` complete selection admission. Its 32-source/64-KiB-per-source/
+256-KiB-total domain ceilings do not enable long feedback in the default hosted
+route; shared persistence/queue integration, source fences and full-prompt
+preflight remain qualification requirements.
+
 An authorized mention is permission to reassess or converse, not permission to
 approve. Ordinary conversation, legacy human reassessment, unified targeted
 reassessment and unified broader discovery have distinct prompts and evidence
