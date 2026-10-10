@@ -1,6 +1,6 @@
 # Plan: GitHub-only operation entry for PR 271
 
-Status: Accepted (decisions D-A, D-B, D-C recorded)
+Status: Accepted (D-A, D-B, D-C recorded; D-D open)
 Date: 2026-10-10
 Branch: `feat/pr253-gap-closure` ([PR 271](https://github.com/malsabbagh/review-sensei/pull/271))
 Related: [#267](https://github.com/malsabbagh/review-sensei/issues/267), [#268](https://github.com/malsabbagh/review-sensei/issues/268), ADR 0074, ADR 0076, ADR 0077
@@ -9,9 +9,11 @@ Related: [#267](https://github.com/malsabbagh/review-sensei/issues/267), [#268](
 
 Full review, reply, reassessment and verify go through one entry,
 `run_review_trigger`. Its record lives on the pull request as App-authored
-GitHub comments. The Cloudflare worker issues credentials and deduplicates
-webhooks. It stores no review or operation state. The unused original-attempt
-journal is removed. The limits stay 49,152 prompt bytes, 60 ordinary
+GitHub comments. The Cloudflare worker only verifies GitHub identity and issues
+credentials. It has no SQLite, no Durable Objects and no stored state of any
+kind. Every piece of state it holds today moves to GitHub or becomes a signed,
+self-checking value (Phase 4b). The unused original-attempt journal is
+removed. The limits stay 49,152 prompt bytes, 60 ordinary
 dispatches, 64 total dispatches and a 60-second control deadline.
 
 ## Where PR 271 is today
@@ -44,7 +46,7 @@ Not done:
 | Result-part comments (D-A) have no author fence, size bound or readback rule. | A forged result part could be published as the accepted review. |
 | The command job will read the review result and finding ids from GitHub. `setup.py`, `setup-content.ts` and the example workflow do not grant or pass that. | Installed repositories cannot run verify, media approval or `RS-` overrides. |
 | No step removes the legacy paths. | With the route on by default, two paths stay indefinitely. |
-| `DeliveryLedger` stores the repository name in clear in `setup_outcomes.repository`, and repository slugs plus the permission map in `setup_continuations.cursor`. | Repository names are stored outside GitHub. |
+| The worker still has two SQLite Durable Objects. `BrokerLedger` holds token replay ids, rate counters, session enrollment witnesses and one-use session grants. `DeliveryLedger` holds webhook delivery ids, setup continuation cursors (repository slugs and the permission map) and setup failure records (repository name in clear). | State, including repository names, is stored outside GitHub. |
 
 ## Decisions
 
@@ -135,8 +137,8 @@ count is recorded.
 
 ## Phase 1: admission proof from GitHub-hosted auth
 
-Build `AdmissionProof` from what the broker already issues. `BrokerLedger`
-stays because it is auth state.
+Build `AdmissionProof` from what the broker issues. After Phase 4b, the
+session grant is a signed value and the broker stores nothing.
 
 | Field | Source |
 | --- | --- |
@@ -146,9 +148,14 @@ stays because it is auth state.
 | `owner_digest` | sha256 of the App id |
 | `reservation_digest` | the session reservation id from the session ledger |
 
-`server_authenticated` is true only when the broker session grant verified.
-`consume_grant` calls the broker's one-use session grant verification. A grant
-cannot be replayed into a second allowance.
+`server_authenticated` is true only when the broker verified the session
+grant's signature, scope, attestation, audience and expiry. One-use is
+enforced on GitHub, not in the worker. `consume_grant` records the grant's
+sha256 in the operation record for that pull request. A digest already in the
+record refuses as `replay`. Grants are bound to one `repository:pull
+request:head` scope, and every writer runs in that pull request's concurrency
+group (Phase 3), so the record serializes consumption. A grant cannot be
+replayed into a second allowance.
 
 `OperationRequest.event_id` is the stable GitHub event:
 
@@ -271,35 +278,67 @@ media sentence pass through the CLI.
 - Python's "original attempt witness" checks in `session.py`,
   `assessment_queue.py` and `bounded_evidence.py` accept the operation-record
   handle as the witness. They must not be loosened to accept a snapshot.
-- Keep `BrokerLedger` (token ids, rate limits, session grants, enrollment
-  witnesses) and `DeliveryLedger` (webhook delivery ids, setup continuation).
-  Add a test that lists their `CREATE TABLE` columns and fails if a review,
-  prompt, finding or result column appears.
 - Retitle #268 to the GitHub record, or close it as superseded.
 
-## Phase 4b: worker stores no repository names
+## Phase 4b: remove all worker SQLite and Durable Objects
 
-- `setup_outcomes.repository` stores the sha256 of the repository id instead
-  of the name. Use the same `digest` helper as the broker's `scope_hash`. A
-  numeric id does not reveal the name, and a guessed name cannot be confirmed
-  against a hash of the full name. Today the continuation carries only slugs
-  (`failedRepository`). The id comes from the `/installation/repositories`
-  listing in the next bullet, so do both changes in one commit. Diagnostics
-  show the hash. An operator matches it against the installation's
-  repositories on GitHub.
-- `setup_continuations.cursor` stops storing repository slugs and the
-  permission map. It stores only the installation id, a page number and an
-  offset. Each step re-reads `/installation/repositories` and the permissions
-  from GitHub with the installation token. If the listing changed under the
-  cursor, setup restarts from the first page. Setup is idempotent, so this is
-  safe.
-- Add a migration in `DeliveryLedger` that rewrites or drops existing rows.
-  Rows expire within the retention window anyway, so dropping in-flight
-  continuations and recording `setup_continuation_invalid` is acceptable.
-- Extend the column test: no column may hold a repository name, slug,
-  permission map, comment body or file path in clear.
-- Update the `DeliveryLedger` header comment and `deploy/cloudflare/README.md`
-  to say the worker stores only hashes, ids, counters and timestamps.
+After this phase `deploy/cloudflare` has no `ctx.storage`, no `sql.exec`, no
+`DurableObject` class and no `durable_objects` binding. Each stored item is
+replaced as follows.
+
+| Stored today | Replacement | What changes |
+| --- | --- | --- |
+| One-use session grants (`broker_session_grants`) | A signed grant: HMAC-SHA256 over the scope, attestation digest, audience, run id hash and expiry, 10-minute TTL. `/github/session-grant` checks the signature and expiry. One-use is recorded on GitHub (Phase 1, `consume_grant`). | None for callers. The grant string format changes, so the broker and Python client ship together. |
+| Session enrollment witness (`broker_session_enrollments`) | GitHub. `known` means an App-authored submitted pull request review with `commit_id` equal to the head, or an App-authored operation record for that pull request, already exists. Users cannot delete submitted reviews. Otherwise `enrolled`. | A crash after enrollment and before the first review or record leaves no witness. A deleted ledger comment in that window starts fresh instead of `recovery-required`. Only write-access users can delete App comments. |
+| OIDC replay ids (`broker_replays`) | No stored replay set. Keep exact claim checks (repository, workflow ref and sha, event, run id, audience). Add a short maximum token age: refuse an `iat` older than 5 minutes. The minted token stays scoped to one repository and one capability. | A copied OIDC token can be exchanged again within 5 minutes for the same repository and capability. The OIDC token is a job credential, and that job can already request that token. |
+| Rate counters (`broker_rates`) | See decision D-D. | |
+| Webhook delivery ids (`deliveries`) | No dedup store. Setup is idempotent on GitHub: branch creation and pull request creation return 422 when they already exist, and `github-app.ts` already treats that as done. GitHub does not redeliver automatically. A manual redelivery reruns the same idempotent setup. | Two concurrent deliveries for the same repository both run. One gets 422 and stops. Add a test for that race. |
+| Setup continuation cursors and alarm (`setup_continuations`) | A signed cursor. After each repository, the worker calls its own `/github/setup-continue` route through a self service binding (`services` in `wrangler.jsonc`), not the public URL, inside `ctx.waitUntil`. The request carries an HMAC-signed cursor: installation id, delivery id, page, offset and expiry. The repository list and permissions are re-read from GitHub with the installation token on each step. The cursor never holds repository names or the permission map. | No durable alarm. If a continuation request is lost, setup stops part way. Recovery is redelivering the webhook from the App settings, or the next `installation_repositories` event. Setup is idempotent, so a rerun is safe. |
+| Setup failure records (`setup_outcomes`) | Workers logs only, with `delivery_id`, `error_code` and failure count. No repository name or slug in any log line. | No queryable failure table. |
+
+Work:
+
+- Add one Worker secret, `REVIEWSENSEI_SIGNING_KEY`. Derive separate keys
+  with HKDF labels `session-grant-v1` and `setup-cursor-v1`, so a grant cannot
+  verify as a cursor. Missing secret refuses with
+  `configuration_unavailable`.
+- Delete `broker-ledger.ts`, `delivery-ledger.ts` and `setup-alarm.ts`, plus
+  `broker-ledger.test.ts` and `delivery-ledger.test.ts`. Rewrite
+  `claimLedger`, `enrollSession` and `sessionGrantLedger` in
+  `token-broker.ts`, and `ledgerRequest` in `worker.ts`.
+- Remove `DELIVERY_LEDGER` and `BROKER_LEDGER` from `env.ts` and
+  `wrangler.jsonc`. Add migration tag `v3` with
+  `"deleted_classes": ["DeliveryLedger", "BrokerLedger"]`. Deploying it
+  deletes the stored rows. They are only replay, rate and dedup state, so
+  nothing needs exporting.
+- Update `worker-webhook.test.ts`, `token-broker.test.ts`,
+  `epic238-consuming-broker-fixture.ts` and `epic238-consuming-grants.test.ts`
+  for signed grants and stateless webhooks. Python `broker_client.py` keeps
+  accepting only `enrolled` and `known`.
+- The legacy session-ledger write path, which stays while
+  `github.operation_entry` exists, also records the consumed grant digest in
+  the App-authored session ledger comment and refuses a repeat. Without this,
+  a disabled switch would make grants reusable for 10 minutes.
+- Add a test that fails if any file under `deploy/cloudflare/src` uses
+  `ctx.storage`, `sql.exec`, `DurableObject` or `setAlarm`, or if
+  `wrangler.jsonc` declares `durable_objects`, `kv_namespaces`,
+  `d1_databases` or `r2_buckets`.
+- Update `deploy/cloudflare/README.md`, `docs/data-handling.md` and the ADRs
+  that name `BrokerLedger` or `DeliveryLedger`. The worker stores nothing.
+
+**D-D. Rate limiting without SQLite.** The broker counts 10 requests per
+minute per scope today. Options:
+
+- Recommended: the Workers Rate Limiting binding (`ratelimits` in
+  `wrangler.jsonc`), keyed on sha256 of the client address for the pre-auth
+  check and sha256 of `repository_id:actor_id:capability` after OIDC checks.
+  It is not SQL and not a Durable Object. Cloudflare keeps short-lived
+  counters per location, so limits are approximate. Confirm it is available
+  on the Workers Free plan before choosing it, because
+  `deploy/cloudflare/README.md` promises Free-plan compatibility.
+- Alternative: no worker rate limit. Rely on GitHub's own limits on the App
+  installation, plus a Cloudflare WAF rule on `/github/token` configured
+  outside this repository.
 
 ## Phase 5: ADR 0076 corrections
 
@@ -345,11 +384,13 @@ stays open.
    - Phases 2.0, 1 and 2.1
    - Phases 2.6 and 2.7, which are independent
    - Phases 4 and 5, which are docs and deletion
-   - Phase 4b, which is worker-only
 3. Phases 2.2 to 2.5 follow Phase 1.
-4. Phase 3 follows Phase 2.
-5. Phase 6 follows Phase 3.
-6. Phase 7 runs last, and only if Phase 6 passes.
+4. Phase 4b follows Phase 1. Grant one-use must already be recorded on GitHub
+   before the worker stops tracking it. The webhook and setup parts of 4b do
+   not depend on Phase 1 and can start after Phase 0.
+5. Phase 3 follows Phase 2.
+6. Phase 6 follows Phases 3 and 4b.
+7. Phase 7 runs last, and only if Phase 6 passes.
 
 Each phase is its own commit on `feat/pr253-gap-closure`.
 
@@ -381,6 +422,11 @@ Before Phase 7, set `github.operation_entry: disabled` in the repository
 policy. The legacy paths still exist, so the switch restores them. After
 Phase 7, rollback is reverting the Phase 7 commit.
 
-Phase 4b's migration drops in-flight setup continuations. Rollback does not
-restore them. Setup for an affected installation is rerun from the start. Operation comments stay on the pull request for audit and are
-never deleted. A disabled route does not reset a recorded charge.
+The switch does not bring back the worker's SQLite. After Phase 4b is
+deployed, rolling it back means redeploying the previous Worker version. Its
+migration recreates empty ledgers, so replay ids, rate counters and
+enrollment witnesses start empty. In-flight setup continuations are dropped
+at deploy. Setup for an affected installation is rerun from the start.
+
+Operation comments stay on the pull request for audit and are never deleted.
+A disabled route does not reset a recorded charge.
