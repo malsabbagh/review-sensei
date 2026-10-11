@@ -1226,6 +1226,16 @@ are `github.reviews: auto-approve`, `github.automatic_reviews: true`, and
 `github.operation_entry` defaults to `enabled`. The measured P1 profile does
 not fit 60 ordinary dispatches (#267). `disabled` keeps the previous review
 paths. Caps stay 60 ordinary dispatches, 64 total, and 60 seconds.
+Actions publication reads accepted operation receipts with the existing
+read-only metadata token (`GITHUB_TOKEN` or `GH_TOKEN`); both publication steps
+expose `github.token` without adding permissions. GitHub mutations remain
+broker-authorized. The receipt scan uses the existing bounds of ten pages of
+100 comments, 512 KiB per response, and one 60-second read deadline. A short
+final page must establish completion. API errors, invalid or oversized pages,
+timeouts, and a full final page at the limit refuse publication with
+`operation record inventory is incomplete or unavailable`; an unread tail
+cannot authorize the legacy no-record path. Only a complete scan can establish
+an absent record or compare the result with an accepted operation digest.
 Automatic approval can be disabled with `github.reviews: blocking` (publish and
 enforce, never approve) or `github.reviews: advisory` (no ReviewSensei merge
 gate). When automatic review and GitHub writes are

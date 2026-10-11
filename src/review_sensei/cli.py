@@ -2089,19 +2089,25 @@ def _require_accepted_result(
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if not isinstance(token, str) or not token.strip():
         raise ReviewInputError("operation record is unavailable")
-    from .hosting.github.http import GitHubHttp
+    from .hosting.github.errors import GitHubHTTPError
+    from .hosting.github.http import MAX_PAGINATION_PAGES, GitHubHttp
     from .hosting.github.operation_entry import accepted_payload_matches
 
     http = GitHubHttp()
-    status, comments = http.request(
-        "GET",
-        http.repository_path(
-            repository, f"/issues/{pull_request}/comments?per_page=100"
-        ),
-        token=token.strip(),
-    )
-    if status != 200 or not isinstance(comments, list):
-        raise ReviewInputError("operation record is unavailable")
+    try:
+        comments = http.paginate(
+            path=http.repository_path(repository, f"/issues/{pull_request}/comments"),
+            token=token.strip(),
+            max_requests=MAX_PAGINATION_PAGES,
+            timeout_seconds=60,
+        )
+    except GitHubHTTPError:
+        # A missing record permits the legacy path only after a complete read.
+        # A full final page, rejected page or bounded transport failure cannot
+        # establish that no accepted operation exists beyond the observed prefix.
+        raise ReviewInputError(
+            "operation record inventory is incomplete or unavailable"
+        ) from None
     bodies: list[str] = []
     for comment in comments:
         if not isinstance(comment, dict):
