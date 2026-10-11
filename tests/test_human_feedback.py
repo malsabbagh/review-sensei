@@ -452,7 +452,7 @@ class LegacySourceFenceTests(unittest.TestCase):
                     self.assertEqual(state.reply_count, int(when == "after-reply"))
 
     def test_legacy_boundary_is_complete_or_refused(self):
-        for length in (4095, 4096, 4097):
+        for length in (32767, 32768, 32769):
             state = State()
             state.source["body"] = "@reviewsensei " + "x" * (
                 length - len("@reviewsensei ")
@@ -465,6 +465,6 @@ class LegacySourceFenceTests(unittest.TestCase):
                 prepared=state.prepared(),
                 app_slug=APP,
             )
-            self.assertEqual(admitted is not None, length <= 4096)
+            self.assertEqual(admitted is not None, length <= 32768)
             if admitted is not None:
                 self.assertEqual(admitted["body"], state.source["body"])

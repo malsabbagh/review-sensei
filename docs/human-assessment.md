@@ -15,10 +15,50 @@ on src/worker.py.
 
 The explanation is untrusted reference data. It requests judgment supported by
 the current complete patch; it grants no approval authority. The default hosted
-route separately reloads the complete triggering comment, admits at most 4,096
+route separately reloads the complete triggering comment, admits at most 32,768
 UTF-8 bytes, and rejects changed or unauthorized sources. A reply can address
 only the findings supported by validated human and current-diff citations.
 The full published human inventory and every other approval blocker remain.
+
+Admission counts original UTF-8 bytes without trimming or clipping. A 32,769-byte
+source is refused before inference. Admission alone does not guarantee a model
+call: JSON escaping, complete current patches and framing still have to fit the
+48 KiB reassessment prompt. The 4 KiB model reply-body ceiling, response/token
+ceilings, total execution budget and source/head/authorization fences are unchanged.
+
+## Read the pending receipt
+
+Replies start with a host-derived **Still pending** section for the exact reviewed
+head. It lists every unresolved ID in the trusted human-assessment inventory,
+including its full fingerprint, a short reason and the next evidence step.
+Validated unresolved decision rationales are used when available. Resolved IDs
+are omitted; a missing inventory is reported rather than inferred from prose.
+Provider discussion appears separately and cannot add pending authority, even
+when it mentions an old finding from a superseded review.
+
+Coverage and other approval requirements appear separately. Current eligibility
+retains review/coverage status and other blocker facts, but does not retain a
+complete non-human required-finding ID inventory or individual coverage paths.
+The reply says so and points to the full current-head review. An empty human
+inventory therefore does not imply approval or complete coverage.
+
+Long inventories use at most sixteen deterministic pages. Each host page has a
+12 KiB content bound; the full wire comment remains below the existing 16 KiB
+ceiling. Head, source timestamp/body/actor, result, inventory, validated decisions
+and rendered reply determine the receipt identity. Each page is read back with
+its exact App-authored body. Source, latest eligibility and current base/head are
+fenced between pages and before authority activation. A failed or stale delivery
+cannot refresh eligibility or finalize approval. Identical retries reconcile the
+complete page set; partial retries preserve already confirmed pages.
+
+One additional publication envelope caps physical requests at 128, non-GET/HEAD
+requests at 32 (including GraphQL), and elapsed publication time at 60 seconds
+across all pages, readbacks and authority fences. Existing feedback/operation
+allowances remain in force and are never replenished per page. An exhausted
+allowance fails closed. These transport bounds are separate from provider context
+and total inference budgets. A retry after durable reassessment can emit one new
+empty-pending receipt for the updated state without another provider call;
+identical subsequent retries deduplicate that receipt.
 
 `@reviewsensei Please approve`, bare dismissal, unrelated explanation and manual
 thread resolution do not clear that inventory. A changed head/base needs a fresh
@@ -96,7 +136,7 @@ recovery, or change approval policy.
 Epic [#238](https://github.com/malsabbagh/review-sensei/issues/238), lane
 [#243](https://github.com/malsabbagh/review-sensei/issues/243), introduces
 `feedback-v1` domain admission and hosted read-only adapter seams. The default
-mention/CLI route still selects the single trigger with the legacy 4 KiB limit.
+mention/CLI route selects the single trigger with the 32 KiB admission limit.
 This lane alone does not enable long or multi-comment assessment in installed or
 deployed consumers. Reader-first A/B/C integration and exact-head qualification
 are required before those support claims.
@@ -154,7 +194,7 @@ The isolated source API now supports `HumanAssessmentPublisher.prepare_feedback`
 with a caller-bound `FeedbackBudgetHttp`, or `before_read` supplied to the publisher
 constructor. It selects the complete authenticated trigger by default, using the
 already trusted kind, numeric comment ID and exact updated timestamp. The ordinary
-`prepare` route and installed CLI defaults retain the legacy 4 KiB limit. No
+`prepare` route and installed CLI defaults use the 32 KiB admission limit. No
 conversation text, URL, marker, short ID or model output opts into rich selection.
 
 For an operator-selected set, `FeedbackSelector` carries repository, PR, exact

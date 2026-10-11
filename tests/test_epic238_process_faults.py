@@ -255,7 +255,7 @@ class ProcessFaultTests(unittest.TestCase):
                     )
                 self.assertNotIn("APPROVE", state.events())
                 self.assertEqual(state.reviews[1]["body"], retained_body)
-                self.assertEqual(state.reply_count, 1)
+                self.assertEqual(state.reply_count, 2 if change == "newer" else 1)
 
     def test_killed_dispatch_and_receipt_boundaries_preserve_original_allowance(self):
         for boundary, completed_before in (
@@ -338,7 +338,7 @@ class ProcessFaultTests(unittest.TestCase):
                     )
                 self.assertEqual(state.events(), ["COMMENT", "APPROVE"])
                 self.assertEqual(state.provider_calls, 1)
-                self.assertEqual(state.reply_count, 1)
+                self.assertEqual(state.reply_count, 2)
                 self.assertEqual(state.reviews[1]["body"], original_body)
                 self.assertEqual(state.replies[0]["body"], original_reply)
 

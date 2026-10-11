@@ -96,7 +96,13 @@ class PackingLifecycleTests(unittest.TestCase):
                 self.assertEqual(replay.approval_status, "already_approved")
                 self.assertFalse(replay_provider.calls)
                 self.assertEqual(state.events(), ["COMMENT", "APPROVE"])
-                self.assertEqual(state.reply_count, 1)
+                self.assertEqual(state.reply_count, 2)
+                again, _ = state.application_reply(
+                    replay_provider, work_budgets=ReviewWorkBudgets(mode="unified")
+                )
+                self.assertEqual(again.status, "already_replied")
+                self.assertEqual(state.reply_count, 2)
+                self.assertFalse(replay_provider.calls)
 
     def test_shared_eight_paths_count_as_five_decisions_and_output_cap_tightens(self):
         for output_tokens, expected in ((None, (4, 1)), (2048, (3, 2))):
