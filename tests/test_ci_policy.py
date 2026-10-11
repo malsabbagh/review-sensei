@@ -752,6 +752,12 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(
             text.count("plan custom endpoint permission requires openai-compatible"), 2
         )
+
+    @unittest.skipIf(
+        os.name == "nt", "Hosted Linux argument assembly requires POSIX Bash"
+    )
+    def test_custom_endpoint_flag_reaches_all_linux_workflow_commands(self):
+        text = _reusable_workflow_text()
         blocks = [
             b
             for b in _run_blocks(text)
