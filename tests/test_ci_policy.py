@@ -1173,6 +1173,20 @@ class ActionPinPolicyTests(unittest.TestCase):
             },
         )
 
+    def test_publication_reads_operations_with_existing_metadata_token(self):
+        text = _reusable_workflow_text()
+        for job_id, name in (
+            ("hosted", "Publish or promote validated review through the broker"),
+            ("local", "Publish or promote validated local review and learnings"),
+        ):
+            job = _job_section(text, job_id)
+            step = _step_block(job, name)
+            self.assertIn("GITHUB_TOKEN: ${{ github.token }}", step)
+            self.assertIn("issues: read", job)
+            self.assertNotIn("issues: write", job)
+            self.assertNotIn("pull-requests: write", job)
+            self.assertIn("--github-session-ledger", step)
+
     def test_reusable_workflow_owns_no_policy_markdown_or_budget_logic(self):
         # The workflow owns events, runners, jobs, concurrency, permissions,
         # secret injection, and installation. The engine owns model defaults,

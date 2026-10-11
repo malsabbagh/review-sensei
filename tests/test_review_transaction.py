@@ -2413,10 +2413,14 @@ diff --git a/src/helper.py b/src/helper.py
                     "review_sensei.cli.ReviewService.run",
                     side_effect=KeyboardInterrupt(),
                 ),
-                redirect_stderr(io.StringIO()),
+                redirect_stderr(io.StringIO()) as stderr,
             ):
-                with self.assertRaises(KeyboardInterrupt):
-                    main(argv)
+                self.assertEqual(main(argv), 130)
+                self.assertTrue(
+                    stderr.getvalue().endswith("review-sensei: cancelled\n")
+                )
+                self.assertEqual(stderr.getvalue().count("review-sensei: cancelled"), 1)
+                self.assertNotIn("Traceback", stderr.getvalue())
 
             record = LocalSessionLedger(ledger_path).load(IDENTITY).record
             self.assertIsNone(record.transaction)

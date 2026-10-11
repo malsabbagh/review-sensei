@@ -22,6 +22,15 @@ therefore require `--categories-dir`. Malformed configuration, empty
 directories, and symlinked assets are reported as `action` rather than
 silently treated as available. Doctor also records that symbol-aware source
 context is an opt-in trusted-base policy that stays disabled by default.
+Without a named profile, `doctor` and `plan` resolve the canonical
+`.reviewsensei.yml` (or `--config` path) using the same backend/model precedence
+as review: explicit flags, `REVIEWSENSEI_PROVIDER` / `REVIEWSENSEI_MODEL`, file,
+then packaged defaults. Invalid canonical schema/resource settings are
+actionable errors. Retired provider environment variables do not affect this
+selection. An explicit `plan --provider-mode` remains a legacy display-only
+preview; it does not select the backend for an actual review. Credential
+presence is a boolean, never a rendered key. A ready plan is still not proof
+of provider execution, approval eligibility, or enforcement of every budget.
 It reports the review-convergence policy resolved from `--review-mode` or
 `REVIEWSENSEI_REVIEW_MODE` (`merge-focused` by default). Explicit historical
 `legacy` configuration reports an actionable migration error before execution.
@@ -84,6 +93,11 @@ Exit codes:
 | `review` | `0` | The review completed and no required fixes remain |
 | `review` | `1` | The review completed with required fixes remaining |
 | `review` | `2` | The review could not complete, the input was invalid, or an operator must intervene |
+| Any CLI entry point | `130` | Ctrl+C interrupted the command; command-specific cleanup ran before returning |
+
+Cancellation prints `review-sensei: cancelled` on stderr without a traceback
+or PyInstaller failure banner. It does not produce a completed review or reset
+the durable accounting performed before the interruption.
 
 `review` exits `1` and `2` print one `review-sensei: reason=<token>` line on
 stderr; the selected `--format` never changes the exit. Exit `2` includes
