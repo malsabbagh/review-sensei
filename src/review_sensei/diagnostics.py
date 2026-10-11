@@ -37,6 +37,7 @@ from .diff import analyze_diff
 from .errors import ReviewInputError, ReviewSenseiError
 from .provider_config import (
     LOCAL_LOOPBACK_HOSTS,
+    is_allowlisted_openrouter_endpoint,
     provider_mode_default,
     resolve_effective_provider_configuration,
 )
@@ -116,7 +117,11 @@ def _diagnostic_provider_configuration(
         cli_model=model,
         environ=environment,
     )
-    endpoint = base_url if base_url is not None else resolved.base_url
+    endpoint = base_url.strip() if base_url is not None else resolved.base_url
+    if resolved.backend == "openrouter" and not is_allowlisted_openrouter_endpoint(
+        endpoint
+    ):
+        raise ReviewInputError("openrouter endpoint is not allowlisted")
     credential_env = api_key_env if api_key_env is not None else resolved.credential_env
     mode = "local" if resolved.inference_location == "local" else "cloud"
     return mode, {

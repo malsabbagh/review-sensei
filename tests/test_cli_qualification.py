@@ -153,6 +153,16 @@ class CanonicalDiagnosticsTests(unittest.TestCase):
                 json.loads(output)["provider_configuration"]["profile"], "local-private"
             )
 
+    def test_openrouter_endpoint_override_preserves_allowlist(self):
+        for command in ("doctor", "plan"):
+            status, output, error = self.run_command(
+                command,
+                "schema: 1\ninference:\n  backend: openrouter\n",
+                arguments=("--base-url", "https://untrusted.example/v1"),
+            )
+            self.assertEqual(status, 2)
+            self.assertIn("openrouter endpoint is not allowlisted", output + error)
+
     def test_invalid_profile_config_and_empty_explicit_values_fail_closed(self):
         for command in ("doctor", "plan"):
             status, _, _ = self.run_command(

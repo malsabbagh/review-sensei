@@ -108,6 +108,22 @@ def qualify(executable: Path) -> list[dict[str, object]]:
                 assert {
                     p.name: p.read_bytes() for p in root.iterdir() if p.is_file()
                 } == before
+            rejected = run(
+                command + "-openrouter-endpoint-rejected",
+                [
+                    command,
+                    "--json",
+                    "--provider",
+                    "openrouter",
+                    "--base-url",
+                    "https://untrusted.example/v1",
+                ],
+                2,
+            )
+            assert (
+                "openrouter endpoint is not allowlisted"
+                in rejected.stdout + rejected.stderr
+            )
             for label, text in (
                 ("schema", "schema: 2\n"),
                 (
