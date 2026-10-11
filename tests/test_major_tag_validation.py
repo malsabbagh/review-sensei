@@ -12,6 +12,7 @@ import sys
 import tempfile
 import tomllib
 import unittest
+import zipfile
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -29,7 +30,21 @@ finally:
 OBJECT, SOURCE, IMMUTABLE = "a" * 40, "b" * 40, "c" * 40
 REPO = gate.docs.REPOSITORY
 VERSION = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
-WHEEL = b"synthetic wheel, never executed"
+
+
+def wheel_bytes(version=VERSION, name="review-sensei", metadata=None):
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as archive:
+        archive.writestr(
+            f"review_sensei-{VERSION}.dist-info/METADATA",
+            metadata
+            if metadata is not None
+            else f"Name: {name}\nVersion: {version}\n\n",
+        )
+    return stream.getvalue()
+
+
+WHEEL = wheel_bytes()
 DIGEST = hashlib.sha256(WHEEL).hexdigest()
 
 
@@ -134,9 +149,19 @@ class MajorEventTests(unittest.TestCase):
                 gate.bind_event(selected, obj, commit)
 
     def test_peeled_push_is_explicitly_source_bound(self):
-        selected = gate.event_identity(event(after=SOURCE), "push", context())
+        selected = gate.event_identity(
+            event(after=SOURCE), "push", {**context(), "GITHUB_SHA": SOURCE}
+        )
         self.assertEqual(
             gate.bind_event(selected, OBJECT, SOURCE)["event_binding"], "peeled-source"
+        )
+        self.assertFalse(
+            gate.bind_event(selected, OBJECT, SOURCE)["event_object_bound"]
+        )
+        selected["event_sha"] = OBJECT
+        self.assertTrue(gate.bind_event(selected, OBJECT, SOURCE)["event_object_bound"])
+        self.assertEqual(
+            gate.bind_event(selected, OBJECT, SOURCE)["event_binding"], "tag-object"
         )
 
     def test_dispatch_binds_exact_object_on_default_branch(self):
@@ -159,6 +184,156 @@ class MajorEventTests(unittest.TestCase):
 
 
 class MajorIntegrityTests(unittest.TestCase):
+    def test_metadata_budget_edges_and_duplicate_or_invalid_archive(self):
+        prefix = f"Name: review-sensei\nVersion: {VERSION}\n\n".encode()
+        for size in [gate.MAX_WHEEL_METADATA - 1, gate.MAX_WHEEL_METADATA]:
+            gate.validate_wheel_metadata(
+                wheel_bytes(metadata=prefix + b"x" * (size - len(prefix))), VERSION
+            )
+        for raw in [
+            b"not a wheel",
+            wheel_bytes(metadata=b""),
+            wheel_bytes(
+                metadata=prefix + b"x" * (gate.MAX_WHEEL_METADATA + 1 - len(prefix))
+            ),
+        ]:
+            with self.assertRaises(ValueError):
+                gate.validate_wheel_metadata(raw, VERSION)
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w") as archive:
+            archive.writestr(f"review_sensei-{VERSION}.dist-info/METADATA", prefix)
+            archive.writestr("other.dist-info/METADATA", prefix)
+        with self.assertRaises(ValueError):
+            gate.validate_wheel_metadata(stream.getvalue(), VERSION)
+
+    def test_real_failed_child_process_is_noninteractive_host_fixed_and_redacted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            child = Path(temp) / "child.py"
+            child.write_text(
+                "import os,sys\nassert os.environ['GH_HOST']=='github.com'\nassert 'GH_DEBUG' not in os.environ\nassert os.environ['GH_PROMPT_DISABLED']=='1'\nprint('synthetic-secret-token',file=sys.stderr)\nsys.exit(4)\n"
+            )
+            with (
+                patch.dict(os.environ, {"GH_HOST": "wrong.invalid", "GH_DEBUG": "api"}),
+                self.assertRaisesRegex(ValueError, "dispatch.*exit 4") as caught,
+            ):
+                gate.docs.gh_run(
+                    [sys.executable, str(child)], "GitHub major validation dispatch"
+                )
+            self.assertNotIn("synthetic-secret-token", str(caught.exception))
+
+    def test_missing_signature_verification_fails_closed(self):
+        def api(path):
+            value = self.signed_api(path)
+            if path.startswith("git/tags/"):
+                value.pop("verification")
+            return value
+
+        with (
+            patch.object(gate.docs, "api", side_effect=api),
+            self.assertRaisesRegex(ValueError, "not verified"),
+        ):
+            gate.signed_major("v5")
+
+    def test_github_metadata_host_and_environment_are_fixed(self):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "GH_HOST": "wrong.invalid",
+                    "GH_DEBUG": "api",
+                    "GH_TOKEN": "synthetic",
+                },
+            ),
+            patch.object(
+                gate.docs.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, "{}", ""),
+            ) as run,
+        ):
+            gate.docs.api("git/ref/tags/v5")
+        args, kwargs = run.call_args
+        self.assertIn("--hostname", args[0])
+        self.assertIn("github.com", args[0])
+        self.assertEqual(kwargs["env"]["GH_HOST"], "github.com")
+        self.assertNotIn("GH_DEBUG", kwargs["env"])
+        self.assertEqual(kwargs["env"]["GH_TOKEN"], "synthetic")
+        self.assertEqual(kwargs["timeout"], 60)
+
+    def test_asset_inventory_refuses_fifth_item_after_one_request(self):
+        with patch.object(
+            gate.docs, "api", return_value=assets() + [assets()[0]]
+        ) as api:
+            with self.assertRaises(ValueError):
+                gate.published_assets(17, binding())
+        api.assert_called_once_with("releases/17/assets?per_page=5&page=1")
+
+    def test_non_object_release_binding_is_explicitly_rejected(self):
+        for value in [[], 1, "text", None]:
+            body = "<!-- reviewsensei-release:" + json.dumps(value) + " -->"
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValueError, "JSON object"),
+            ):
+                gate.release_binding(
+                    {**release(), "body": body}, VERSION, IMMUTABLE, SOURCE
+                )
+
+    def test_valid_digest_with_wrong_wheel_metadata_refuses_before_attestation(self):
+        for raw in [
+            wheel_bytes("0.0.1"),
+            wheel_bytes(name="other"),
+            wheel_bytes(
+                metadata="Name: review-sensei\nVersion: "
+                + VERSION
+                + "\nVersion: 0.0.1\n"
+            ),
+            wheel_bytes(metadata=b"x" * 65537),
+        ]:
+            digest = hashlib.sha256(raw).hexdigest()
+            bound = binding()
+            bound["assets"][f"review_sensei-{VERSION}-py3-none-any.whl"] = digest
+            with (
+                tempfile.TemporaryDirectory() as temp,
+                patch.object(
+                    gate.docs.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess([], 0, raw, b""),
+                ) as run,
+            ):
+                with self.assertRaisesRegex(ValueError, "wheel metadata"):
+                    gate.verify_wheel(
+                        {**assets()[0], "size": len(raw)}, bound, VERSION, Path(temp)
+                    )
+                self.assertEqual(run.call_count, 1)
+
+    def test_attestation_nonzero_and_timeout_have_safe_stage_diagnostics(self):
+        for failure, expected in [
+            (
+                subprocess.CalledProcessError(
+                    4, ["gh"], stderr=b"synthetic-secret-token"
+                ),
+                "attestation.*exit 4",
+            ),
+            (
+                subprocess.TimeoutExpired(["gh"], 60, stderr=b"synthetic-secret-token"),
+                "attestation.*timed out",
+            ),
+        ]:
+            with (
+                tempfile.TemporaryDirectory() as temp,
+                patch.object(
+                    gate.docs.subprocess,
+                    "run",
+                    side_effect=[
+                        subprocess.CompletedProcess([], 0, WHEEL, b""),
+                        failure,
+                    ],
+                ),
+            ):
+                with self.assertRaisesRegex(ValueError, expected) as caught:
+                    gate.verify_wheel(assets()[0], binding(), VERSION, Path(temp))
+                self.assertNotIn("synthetic-secret-token", str(caught.exception))
+
     def signed_api(self, path):
         if path == "git/ref/tags/v5":
             return {"ref": "refs/tags/v5", "object": {"type": "tag", "sha": OBJECT}}
@@ -262,7 +437,7 @@ class MajorIntegrityTests(unittest.TestCase):
                 )
 
     def test_missing_duplicate_or_changed_asset_digest_fails_closed(self):
-        with patch.object(gate.docs, "api_pages", return_value=assets()):
+        with patch.object(gate.docs, "api", return_value=assets()):
             self.assertEqual(len(gate.published_assets(17, binding())), 4)
         for bad in [
             assets()[:-1],
@@ -271,7 +446,7 @@ class MajorIntegrityTests(unittest.TestCase):
             [{**a, "state": "new"} for a in assets()],
         ]:
             with (
-                patch.object(gate.docs, "api_pages", return_value=bad),
+                patch.object(gate.docs, "api", return_value=bad),
                 self.assertRaises(ValueError),
             ):
                 gate.published_assets(17, binding())
@@ -287,12 +462,13 @@ class MajorIntegrityTests(unittest.TestCase):
 
         with (
             tempfile.TemporaryDirectory() as temp,
-            patch.object(gate.subprocess, "run", side_effect=run),
+            patch.object(gate.docs.subprocess, "run", side_effect=run),
         ):
             self.assertEqual(
                 gate.verify_wheel(assets()[0], binding(), VERSION, Path(temp)), DIGEST
             )
-        self.assertEqual(len(commands), 2)
+        attestations = [c for c in commands if c[1:3] == ["attestation", "verify"]]
+        self.assertEqual(len(attestations), 1)
         for arg in [
             "--source-digest",
             SOURCE,
@@ -301,12 +477,12 @@ class MajorIntegrityTests(unittest.TestCase):
             "--deny-self-hosted-runners",
             "--signer-workflow",
         ]:
-            self.assertIn(arg, commands[1])
+            self.assertIn(arg, attestations[0])
         self.assertTrue(all(command[0] == "gh" for command in commands))
         with (
             tempfile.TemporaryDirectory() as temp,
             patch.object(
-                gate.subprocess,
+                gate.docs.subprocess,
                 "run",
                 return_value=subprocess.CompletedProcess([], 0, b"wrong", b""),
             ),
@@ -327,8 +503,11 @@ class MajorIntegrityTests(unittest.TestCase):
         with (
             patch.object(gate, "signed_major", return_value=(OBJECT, SOURCE)),
             patch.object(gate.docs, "tag_identity", return_value=(IMMUTABLE, SOURCE)),
-            patch.object(gate.docs, "api", return_value=release()),
-            patch.object(gate.docs, "api_pages", return_value=assets()),
+            patch.object(
+                gate.docs,
+                "api",
+                side_effect=lambda path: assets() if "assets?" in path else release(),
+            ),
         ):
             gate.assert_current(receipt)
             with (
@@ -337,7 +516,13 @@ class MajorIntegrityTests(unittest.TestCase):
             ):
                 gate.assert_current(receipt)
             with (
-                patch.object(gate.docs, "api_pages", return_value=assets()[:-1]),
+                patch.object(
+                    gate.docs,
+                    "api",
+                    side_effect=lambda path: (
+                        assets()[:-1] if "assets?" in path else release()
+                    ),
+                ),
                 self.assertRaises(ValueError),
             ):
                 gate.assert_current(receipt)
@@ -359,6 +544,8 @@ class MajorIntegrityTests(unittest.TestCase):
 class SurfaceTests(unittest.TestCase):
     def test_real_promoted_data_contract(self):
         data = surface.validate_surface(ROOT)
+        # Bootstrap, command, hosted and local runtime lanes must each install
+        # the exact version; a missing lane is deliberate contract drift.
         self.assertEqual(data["installation_lanes"], 4)
         self.assertIn("not a proven runtime defect", data["diagnostics"][0])
 
@@ -369,11 +556,41 @@ class SurfaceTests(unittest.TestCase):
             folder.mkdir(parents=True)
             for name in ["review-sensei-run.yml", "review-sensei-review.yml"]:
                 text = (ROOT / ".github/workflows" / name).read_text()
-                # Synthetic parser fixture only. This is not a product fix or
-                # proof github.workflow_* identifies a called reusable workflow.
-                text = text.replace("job.workflow_ref", "github.workflow_ref").replace(
-                    "job.workflow_sha", "github.workflow_sha"
-                )
+                if name == "review-sensei-run.yml":
+                    data = surface.workflow_data(text)
+                    identity = next(
+                        step
+                        for step in data["jobs"]["bootstrap"]["steps"]
+                        if step.get("id") == "release-identity"
+                    )
+                    for key, field in [
+                        ("REVIEW_SENSEI_WORKFLOW_REF", "workflow_ref"),
+                        ("REVIEW_SENSEI_WORKFLOW_SHA", "workflow_sha"),
+                    ]:
+                        self.assertEqual(
+                            identity["env"][key], "${{ job." + field + " }}"
+                        )
+                        original = "${{ job." + field + " }}"
+                        replacement = "${{ github." + field + " }}"
+                        changed = text.replace(original, replacement, 1)
+                        self.assertNotEqual(changed, text)
+                        text = changed
+                    # Preserve the Action pin comments while proving the exact
+                    # semantic env fields changed, rather than trusting replace.
+                    changed_data = surface.workflow_data(text)
+                    changed_identity = next(
+                        step
+                        for step in changed_data["jobs"]["bootstrap"]["steps"]
+                        if step.get("id") == "release-identity"
+                    )
+                    self.assertEqual(
+                        changed_identity["env"]["REVIEW_SENSEI_WORKFLOW_REF"],
+                        "${{ github.workflow_ref }}",
+                    )
+                    self.assertEqual(
+                        changed_identity["env"]["REVIEW_SENSEI_WORKFLOW_SHA"],
+                        "${{ github.workflow_sha }}",
+                    )
                 (folder / name).write_text(text)
             with self.assertRaisesRegex(ValueError, "callee identity contract changed"):
                 surface.validate_surface(root)
@@ -454,8 +671,68 @@ class SurfaceTests(unittest.TestCase):
         self.assertIn("if: always()", text)
         self.assertEqual(surface.check_workflow_text(text), [])
 
+    def test_workflows_and_ci_use_the_same_yaml_requirement(self):
+        self.assertEqual(
+            (ROOT / "requirements/major-tag-validation.txt").read_text().strip(),
+            "PyYAML==6.0.3",
+        )
+        self.assertIn(
+            "-r major-tag-validation.txt", (ROOT / "requirements/ci.txt").read_text()
+        )
+        for name in ["major-tag-validation.yml", "major-tag-validation-ci.yml"]:
+            text = (ROOT / ".github/workflows" / name).read_text()
+            self.assertIn("-r requirements/major-tag-validation.txt", text)
+            self.assertNotIn("PyYAML==", text)
+
 
 class GateProcessTests(unittest.TestCase):
+    def test_invalid_output_main_writes_no_partial_eligible_true(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            event_file = root / "event.json"
+            event_file.write_text(json.dumps(event()))
+            output = root / "outputs.txt"
+            receipt = {
+                "status": "PASS",
+                "version": VERSION + "\nextra=true",
+                "wheel_sha256": DIGEST,
+                "source_sha": SOURCE,
+                "tag_object": OBJECT,
+                "channel": "v5",
+            }
+            env = {
+                **context(),
+                "GITHUB_EVENT_NAME": "push",
+                "GITHUB_EVENT_PATH": str(event_file),
+                "GITHUB_OUTPUT": str(output),
+            }
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch.object(sys, "argv", ["gate", "--output", str(root / "report")]),
+                patch.object(gate, "qualify", return_value=receipt),
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertTrue(gate.main())
+            self.assertFalse(output.exists())
+            self.assertEqual(
+                json.loads((root / "report/gate.json").read_text())["status"], "ERROR"
+            )
+
+    def test_workflow_outputs_reject_newlines_before_any_eligible_output(self):
+        receipt = {
+            "status": "PASS",
+            "version": VERSION,
+            "wheel_sha256": DIGEST,
+            "source_sha": SOURCE,
+            "tag_object": OBJECT,
+            "channel": "v5",
+        }
+        for key in ["version", "wheel_sha256", "source_sha", "tag_object", "channel"]:
+            for bad in ["\nextra=true", "\rextra=true", None]:
+                with self.subTest(key=key, bad=bad), self.assertRaises(ValueError):
+                    gate.workflow_outputs({**receipt, key: bad})
+        self.assertTrue(gate.workflow_outputs(receipt).startswith("eligible=true\n"))
+
     def test_dispatch_bridge_preserves_object_and_existing_auth_without_tag_writes(
         self,
     ):
@@ -583,6 +860,8 @@ class FullGateTests(unittest.TestCase):
                 "size": len(raw),
                 "content": base64.b64encode(raw).decode(),
             }
+        if path == "releases/17/assets?per_page=5&page=1":
+            return assets()
         if path == "releases/tags/v" + VERSION:
             return release()
         if path == "actions/runs/123":
@@ -595,8 +874,6 @@ class FullGateTests(unittest.TestCase):
         if path == "actions/runs/123/jobs?filter=all":
             self.assertEqual(key, "jobs")
             return self.jobs
-        if path == "releases/17/assets":
-            return assets()
         raise AssertionError(path)
 
     def test_full_gate_reads_only_frozen_source_and_attested_exact_release(self):

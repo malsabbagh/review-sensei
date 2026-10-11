@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import io
 import json
 import os
 import re
-import subprocess
 import sys
 import tomllib
+import zipfile
+from email.parser import BytesParser
 from pathlib import Path
 
 import check_release_version as versions
@@ -20,6 +22,8 @@ import release_docs as docs
 MAJOR = re.compile(r"v(?:0|[1-9][0-9]*)\Z")
 DIGEST = re.compile(r"[a-f0-9]{64}\Z")
 MAX_FILE = 512 * 1024
+MAX_WHEEL_METADATA = 64 * 1024
+MAX_WHEEL_ENTRIES = 4096
 SBOM = "review-sensei-sbom.spdx.json"
 
 
@@ -103,7 +107,11 @@ def bind_event(selection, tag_object, source):
             "event_sha"
         ] not in {tag_object, source}:
             raise ValueError("stale promotion: current tag differs from the event")
-        binding = "tag-object" if selection["after"] == tag_object else "peeled-source"
+        binding = (
+            "tag-object"
+            if tag_object in {selection["after"], selection["event_sha"]}
+            else "peeled-source"
+        )
     else:
         if (selection["tag_object"], selection["source_sha"]) != (tag_object, source):
             raise ValueError("stale object-bound promotion dispatch")
@@ -113,6 +121,7 @@ def bind_event(selection, tag_object, source):
         "tag_object": tag_object,
         "source_sha": source,
         "event_binding": binding,
+        "event_object_bound": binding == "tag-object",
     }
 
 
@@ -150,6 +159,8 @@ def release_binding(release, version, tag_object, source):
     if len(matches) != 1:
         raise ValueError("one authoritative release binding is required")
     binding = json.loads(matches[0])
+    if not isinstance(binding, dict):
+        raise ValueError("release binding is not a JSON object")
     if (
         type(binding.get("schema")) is not int
         or binding.get("schema") != 1
@@ -180,7 +191,13 @@ def release_binding(release, version, tag_object, source):
 
 
 def published_assets(release_id, binding):
-    assets = docs.api_pages(f"releases/{release_id}/assets")
+    # Five requested entries suffice to prove or reject this exact four-item
+    # inventory. A fifth item fails before any later page can be fetched.
+    assets = docs.api(f"releases/{release_id}/assets?per_page=5&page=1")
+    if not isinstance(assets, list) or len(assets) > 4:
+        raise ValueError(
+            "published release asset inventory exceeds the exact four-item bound"
+        )
     result = {}
     for item in assets:
         name = item.get("name")
@@ -201,27 +218,62 @@ def published_assets(release_id, binding):
     return result
 
 
+def validate_wheel_metadata(raw, version):
+    """Read bounded wheel metadata as data, before eligibility or installation."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            entries = archive.infolist()
+            metadata = [
+                entry
+                for entry in entries
+                if entry.filename.endswith(".dist-info/METADATA")
+            ]
+            if len(entries) > MAX_WHEEL_ENTRIES or len(metadata) != 1:
+                raise ValueError("wheel metadata inventory differs")
+            entry = metadata[0]
+            if (
+                entry.filename != f"review_sensei-{version}.dist-info/METADATA"
+                or not 0 < entry.file_size <= MAX_WHEEL_METADATA
+            ):
+                raise ValueError("wheel metadata path or size differs")
+            with archive.open(entry) as stream:
+                data = stream.read(MAX_WHEEL_METADATA + 1)
+            if len(data) != entry.file_size or len(data) > MAX_WHEEL_METADATA:
+                raise ValueError("wheel metadata size differs")
+            fields = BytesParser().parsebytes(data, headersonly=True)
+            names, versions = fields.get_all("Name", []), fields.get_all("Version", [])
+            if (
+                len(names) != 1
+                or re.sub(r"[-_.]+", "-", names[0]).lower() != "review-sensei"
+                or versions != [version]
+            ):
+                raise ValueError("wheel metadata package/version differs")
+    except (zipfile.BadZipFile, RuntimeError, OSError) as error:
+        raise ValueError("wheel metadata is unavailable or malformed") from error
+
+
 def verify_wheel(asset, binding, version, output):
     # Read by validated numeric API id, never by an artifact-provided URL.
-    fetched = subprocess.run(
+    fetched = docs.gh_run(
         [
             "gh",
             "api",
             f"repos/{docs.REPOSITORY}/releases/assets/{asset['id']}",
             "-H",
             "Accept: application/octet-stream",
+            "--hostname",
+            "github.com",
         ],
-        capture_output=True,
-        check=True,
-        timeout=60,
+        "GitHub release wheel download",
     )
     digest = hashlib.sha256(fetched.stdout).hexdigest()
     name = f"review_sensei-{version}-py3-none-any.whl"
     if len(fetched.stdout) != asset["size"] or digest != binding["assets"][name]:
         raise ValueError("release wheel bytes differ from authoritative digest")
+    validate_wheel_metadata(fetched.stdout, version)
     wheel = output / name
     wheel.write_bytes(fetched.stdout)
-    subprocess.run(
+    docs.gh_run(
         [
             "gh",
             "attestation",
@@ -238,10 +290,10 @@ def verify_wheel(asset, binding, version, output):
             "--deny-self-hosted-runners",
             "--format",
             "json",
+            "--hostname",
+            "github.com",
         ],
-        check=True,
-        capture_output=True,
-        timeout=60,
+        "GitHub wheel attestation verification",
     )
     return digest
 
@@ -356,6 +408,29 @@ def qualify(selection, output):
     return receipt
 
 
+def workflow_outputs(receipt):
+    values = {"eligible": str(receipt["status"] == "PASS").lower()}
+    if receipt["status"] == "PASS":
+        values.update(
+            {
+                key: receipt[key]
+                for key in [
+                    "version",
+                    "wheel_sha256",
+                    "source_sha",
+                    "tag_object",
+                    "channel",
+                ]
+            }
+        )
+    if any(
+        not isinstance(value, str) or "\n" in value or "\r" in value
+        for value in values.values()
+    ):
+        raise ValueError("workflow output must be a single-line string")
+    return "".join(key + "=" + value + "\n" for key, value in values.items())
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
@@ -388,19 +463,9 @@ def main():
                 }
             )
         if os.environ.get("GITHUB_OUTPUT"):
+            lines = workflow_outputs(receipt)
             with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
-                stream.write(
-                    "eligible=" + str(receipt["status"] == "PASS").lower() + "\n"
-                )
-                if receipt["status"] == "PASS":
-                    for key in [
-                        "version",
-                        "wheel_sha256",
-                        "source_sha",
-                        "tag_object",
-                        "channel",
-                    ]:
-                        stream.write(key + "=" + receipt[key] + "\n")
+                stream.write(lines)
     except Exception as error:
         # subprocess diagnostics can include authentication details: never copy them.
         receipt = {

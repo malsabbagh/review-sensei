@@ -29,7 +29,13 @@ def require_wheel_digest(actual, expected):
 
 
 def require_installed_distribution(identity, version, environment):
-    origin = Path(identity.get("origin", "")).resolve()
+    if (
+        not isinstance(identity, dict)
+        or not isinstance(identity.get("origin"), str)
+        or not identity["origin"]
+    ):
+        raise ValueError("installed identity must include a non-empty origin path")
+    origin = Path(identity["origin"]).resolve()
     if (
         identity.get("version") != version
         or "site-packages" not in origin.parts

@@ -58,7 +58,7 @@ jobs:
         with:
           python-version: "3.14"
       - name: Install bounded workflow-data parser
-        run: python -m pip install --disable-pip-version-check PyYAML==6.0.3
+        run: python -m pip install --disable-pip-version-check -r requirements/major-tag-validation.txt
       - id: gate
         env:
           GH_TOKEN: ${{ github.token }}
@@ -139,7 +139,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
-      - run: python -m pip install --disable-pip-version-check PyYAML==6.0.3
+      - run: python -m pip install --disable-pip-version-check -r requirements/major-tag-validation.txt
       - name: Recheck exact signed identity and propagate all lane failures
         env:
           GH_TOKEN: ${{ github.token }}

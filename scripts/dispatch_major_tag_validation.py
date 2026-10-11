@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 
 from major_tag_gate import MAJOR, docs, sha, signed_major
@@ -23,7 +22,7 @@ def command(channel, tag_object, source):
         "run",
         "major-tag-validation.yml",
         "--repo",
-        docs.REPOSITORY,
+        "github.com/" + docs.REPOSITORY,
         "--ref",
         "main",
         "-f",
@@ -49,7 +48,7 @@ def main():
     try:
         argv = command(args.channel, args.tag_object, args.source_sha)
         if args.dispatch:
-            subprocess.run(argv, check=True, capture_output=True, timeout=30)
+            docs.gh_run(argv, "GitHub major validation dispatch", timeout=30)
         print(
             json.dumps(
                 {"command": argv, "dispatched": args.dispatch, "tag_moved": False}

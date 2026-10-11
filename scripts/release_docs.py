@@ -58,12 +58,50 @@ def version_tuple(tag: str) -> tuple[int, ...]:
     return tuple(int(part) for part in match.groups())
 
 
+def gh_run(command: list[str], stage: str, *, timeout: int = 60, text: bool = False):
+    """Keep GitHub authority fixed and report failures without raw diagnostics."""
+    env = {
+        **os.environ,
+        "GH_HOST": "github.com",
+        "GH_PAGER": "cat",
+        "GH_PROMPT_DISABLED": "1",
+    }
+    env.pop("GH_DEBUG", None)
+    try:
+        result = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=text,
+            timeout=timeout,
+            env=env,
+        )
+        if result.returncode:
+            raise subprocess.CalledProcessError(result.returncode, command)
+        return result
+    except subprocess.CalledProcessError as error:
+        raise ValueError(
+            f"{stage} failed (exit {error.returncode}); raw diagnostics withheld"
+        ) from None
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"{stage} timed out; raw diagnostics withheld") from None
+    except OSError:
+        raise ValueError(
+            f"{stage} could not start; check the installed GitHub CLI"
+        ) from None
+
+
 def api(path: str) -> Any:
     """Use gh's authenticated GitHub API, never URLs supplied by artifacts."""
-    result = subprocess.run(
-        ["gh", "api", f"repos/{REPOSITORY}/{path}"],
-        check=True,
-        capture_output=True,
+    kind = path.split("/", 1)[0]
+    kind = (
+        kind
+        if kind in {"git", "contents", "releases", "actions", "compare"}
+        else "repository"
+    )
+    result = gh_run(
+        ["gh", "api", f"repos/{REPOSITORY}/{path}", "--hostname", "github.com"],
+        f"GitHub {kind} metadata read",
         text=True,
     )
     return json.loads(result.stdout)
