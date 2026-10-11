@@ -1,4 +1,9 @@
 {
+  "configuration_unavailable": {
+    "stage": "broker_configuration",
+    "action": "contact_operator",
+    "hint": "Broker configuration could not be used. Ask the broker operator to validate the existing configuration."
+  },
   "broker_capability_invalid": {
     "stage": "request_validation",
     "action": "check_request",

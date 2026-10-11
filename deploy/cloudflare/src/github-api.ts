@@ -869,4 +869,137 @@ export class GitHubApi {
       permissions: normalized,
     };
   }
+
+  /** App user login. Submitted reviews and operation records are matched to this bot. */
+  async appBotLogin(): Promise<string> {
+    const response = await this.request("GET", "/app", await this.appJwt());
+    if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
+      throw new Error("github_app_lookup_failed");
+    }
+    const slug = response.data.slug;
+    if (typeof slug !== "string" || !/^[A-Za-z0-9-]{1,100}$/.test(slug)) {
+      throw new Error("github_app_lookup_failed");
+    }
+    return `${slug}[bot]`;
+  }
+
+  /**
+   * Installation permissions plus the current repository list.
+   * Callers compare a digest of this view and restart when it changes.
+   */
+  async installationSetupView(installationId: number): Promise<{
+    permissions: Record<string, string>;
+    repositories: string[];
+  }> {
+    if (!Number.isSafeInteger(installationId) || installationId <= 0) {
+      throw new Error("github_installation_invalid");
+    }
+    const response = await this.request(
+      "GET",
+      `/app/installations/${installationId}`,
+      await this.appJwt(),
+    );
+    if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
+      throw new Error(`github_installation_token_failed_${response.status}`);
+    }
+    const permissions: Record<string, string> = {};
+    if (isObject(response.data.permissions)) {
+      for (const [key, value] of Object.entries(response.data.permissions)) {
+        if (typeof value === "string") {
+          const normalizedKey = key.trim().toLowerCase().replaceAll("-", "_");
+          permissions[normalizedKey] = value.trim().toLowerCase();
+        }
+      }
+    }
+    const repositories = await this.installationRepositories(installationId);
+    return { permissions, repositories };
+  }
+
+  /**
+   * Known when an App-authored submitted review matches the head, or an
+   * App-authored operation record already exists. Otherwise the caller enrolls.
+   */
+  async sessionAlreadyKnown(
+    repository: string,
+    pullRequest: number,
+    headSha: string,
+    token: string,
+  ): Promise<boolean> {
+    if (!Number.isSafeInteger(pullRequest) || pullRequest <= 0 || !/^[a-f0-9]{40}$/.test(headSha)) {
+      throw new Error("broker_session_invalid");
+    }
+    const login = (await this.appBotLogin()).toLowerCase();
+    const root = repositoryPath(repository);
+    if (await this.appSubmittedReview(root, pullRequest, headSha, login, token)) {
+      return true;
+    }
+    return this.appOperationRecord(root, pullRequest, login, token);
+  }
+
+  private async pagedItems(path: string, token: string, invalidCode: string): Promise<unknown[]> {
+    const items: unknown[] = [];
+    for (let page = 1; page <= 10; page += 1) {
+      const response = await this.request("GET", `${path}?per_page=100&page=${page}`, token);
+      if (response.status < 200 || response.status >= 300 || !Array.isArray(response.data)) {
+        throw new Error(invalidCode);
+      }
+      items.push(...response.data);
+      if (response.data.length < 100) {
+        return items;
+      }
+    }
+    throw new Error(invalidCode);
+  }
+
+  private appAuthored(item: unknown, login: string): item is JsonObject {
+    if (!isObject(item) || !isObject(item.user)) {
+      return false;
+    }
+    return item.user.type === "Bot" &&
+      typeof item.user.login === "string" &&
+      item.user.login.toLowerCase() === login;
+  }
+
+  private async appSubmittedReview(
+    root: string,
+    pullRequest: number,
+    headSha: string,
+    login: string,
+    token: string,
+  ): Promise<boolean> {
+    const reviews = await this.pagedItems(
+      `${root}/pulls/${pullRequest}/reviews`,
+      token,
+      "github_session_witness_failed",
+    );
+    return reviews.some((review) => {
+      if (!this.appAuthored(review, login)) {
+        return false;
+      }
+      const state = review.state;
+      return review.commit_id === headSha &&
+        (state === "APPROVED" ||
+          state === "CHANGES_REQUESTED" ||
+          state === "COMMENTED" ||
+          state === "DISMISSED");
+    });
+  }
+
+  private async appOperationRecord(
+    root: string,
+    pullRequest: number,
+    login: string,
+    token: string,
+  ): Promise<boolean> {
+    const comments = await this.pagedItems(
+      `${root}/issues/${pullRequest}/comments`,
+      token,
+      "github_session_witness_failed",
+    );
+    return comments.some((comment) =>
+      this.appAuthored(comment, login) &&
+      typeof comment.body === "string" &&
+      comment.body.includes("<!-- review-sensei-operation -->"),
+    );
+  }
 }

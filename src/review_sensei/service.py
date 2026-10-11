@@ -175,11 +175,14 @@ class ReviewRun:
     ``result`` is present only when a publisher-ready aggregate was produced.
     ``error`` preserves the original fail-closed exception for callers of
     ``review()``; logs and ``outcome.diagnostic`` never include that text.
+    ``context_admission`` is the per-batch document admission record for
+    executed unified batches; it is a log diagnostic, never published.
     """
 
     outcome: RunOutcome
     result: ReviewResult | None = None
     error: BaseException | None = None
+    context_admission: Mapping[str, object] | None = None
 
 
 @dataclass
@@ -395,8 +398,21 @@ class ReviewService:
     def _attach_coverage(
         self, result: ReviewResult, coverage: CoverageManifest
     ) -> ReviewResult:
+        from .human_file_review import coverage_only_binary
+
         status = self._status_with_coverage(result.review_status, coverage)
-        return replace(result, coverage=coverage, review_status=status)
+        return replace(
+            result,
+            coverage=coverage,
+            review_status=status,
+            coverage_only_partial=(
+                (result.coverage_only_partial and coverage_only_binary(coverage))
+                or (
+                    result.review_status == "complete"
+                    and coverage_only_binary(coverage)
+                )
+            ),
+        )
 
     @staticmethod
     def _status_with_coverage(status: str, coverage: CoverageManifest) -> str:
@@ -672,6 +688,14 @@ class ReviewService:
                 repository=request.repository,
                 pull_request_number=request.pull_request_number,
             )
+        from .human_file_review import coverage_only_binary
+
+        if (
+            planned_chunks
+            and chunks_completed == planned_chunks
+            and coverage_only_binary(coverage)
+        ):
+            result = replace(result, coverage=coverage, coverage_only_partial=True)
         result = self._attach_coverage(result, coverage)
         status, diagnostic = self._run_outcome_for_result(result)
         return self._finish_run(
@@ -1340,6 +1364,7 @@ class ReviewService:
         )
         # Decide completeness before resolving prior findings or caching a
         # complete pass. Attaching coverage afterwards is too late.
+        analysis_complete = review_status == "complete"
         review_status = self._status_with_coverage(review_status, change_plan.coverage)
         try:
             result = self._finalize_result(
@@ -1368,6 +1393,12 @@ class ReviewService:
                 pull_request_number=request.pull_request_number,
             )
         if attach_change_coverage or not executed_comment_stage:
+            from .human_file_review import coverage_only_binary
+
+            if analysis_complete and coverage_only_binary(change_plan.coverage):
+                result = replace(
+                    result, coverage=change_plan.coverage, coverage_only_partial=True
+                )
             result = self._attach_coverage(result, change_plan.coverage)
         status, diagnostic = self._run_outcome_for_result(result)
         return self._finish_run(
@@ -1391,6 +1422,7 @@ class ReviewService:
         error: BaseException | None = None,
         repository: str | None = None,
         pull_request_number: int | None = None,
+        context_admission: Mapping[str, object] | None = None,
     ) -> ReviewRun:
         return ReviewRun(
             RunOutcome(
@@ -1408,6 +1440,7 @@ class ReviewService:
             ),
             result=result,
             error=error,
+            context_admission=context_admission,
         )
 
     def _coverage_decision(

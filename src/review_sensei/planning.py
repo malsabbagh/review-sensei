@@ -25,6 +25,7 @@ from .evidence import EvidenceBundle, EvidenceRecord, EvidenceSnapshot, evidence
 from .validation import (
     DEFAULT_REVIEW_LIMITS,
     DEFAULT_TOTAL_WORK_BUDGET,
+    TOTAL_WORK_MAX_CHUNKS_CEILING,
     ReviewLimits,
     TotalWorkBudget,
     utf8_size,
@@ -227,7 +228,7 @@ def plan_work(
     if (
         isinstance(max_batches, bool)
         or not isinstance(max_batches, int)
-        or not 1 <= max_batches <= 8
+        or not 1 <= max_batches <= TOTAL_WORK_MAX_CHUNKS_CEILING
     ):
         raise ReviewInputError("work plan batch budget is invalid")
     if budgets.resource_budget is not None:

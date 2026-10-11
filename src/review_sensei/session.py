@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol, Sequence, cast
 
 from .bounded_evidence import (
+    INLINE_ENCODING,
     MAX_PART_BYTES,
     MAX_STORED_PART_BYTES,
     MAX_STORED_PARTS,
@@ -40,8 +41,10 @@ from .bounded_evidence import (
     EvidenceTailTicket,
     NonResumableActivationError,
     TailDispatch,
+    _operation_witness_matches,
     canonical_bytes,
     partition_evidence,
+    read_inline_evidence,
     read_partitioned_evidence,
     stage_partitioned_evidence,
     validate_manifest,
@@ -195,8 +198,16 @@ def _stored_assessment_queue(value: object) -> dict[str, object] | None:
         raise ReviewInputError(
             "assessment queue root exceeds actual bounded allocation"
         )
-    manifest = validate_manifest(normalized["state_manifest"])
-    binding = cast(dict[str, object], manifest["binding"])
+    state_manifest = normalized["state_manifest"]
+    if (
+        isinstance(state_manifest, dict)
+        and state_manifest.get("encoding") == INLINE_ENCODING
+    ):
+        read_inline_evidence(state_manifest, expected_binding=state_manifest["binding"])
+        binding = cast(dict[str, object], state_manifest["binding"])
+    else:
+        manifest = validate_manifest(state_manifest)
+        binding = cast(dict[str, object], manifest["binding"])
     if (
         binding["purpose"] != "queue"
         or binding["generation"] != normalized["inventory_generation"]
@@ -3049,7 +3060,12 @@ def _tail_part_ids(
     if isinstance(baseline, dict) and baseline.get("encoding") == PARTITION_ENCODING:
         manifests.append(validate_manifest(baseline))
     if record.assessment_queue is not None:
-        manifests.append(validate_manifest(record.assessment_queue["state_manifest"]))
+        state_manifest = record.assessment_queue["state_manifest"]
+        if (
+            isinstance(state_manifest, dict)
+            and state_manifest.get("encoding") == PARTITION_ENCODING
+        ):
+            manifests.append(validate_manifest(state_manifest))
     return (
         tuple(
             ref["storage_id"]
@@ -3424,6 +3440,8 @@ class LocalSessionLedger:
             or expected_binding.get("producer") != self.evidence_producer()
         ):
             raise ReviewInputError("local partition binding does not match")
+        if isinstance(manifest, dict) and manifest.get("encoding") == INLINE_ENCODING:
+            return read_inline_evidence(manifest, expected_binding=expected_binding)
         return read_partitioned_evidence(
             manifest,
             reader=lambda storage_id: self._read_part(identity, storage_id),
@@ -4028,11 +4046,13 @@ class LocalSessionLedger:
         expected_generation: int,
         head_sha: str | None = None,
         now: datetime | None = None,
+        witness: object = None,
     ) -> SessionRecord:
         """Create the existing reservation and retain its live owned-readback proof.
 
-        Loaded/duplicate reservations cannot mint a new original attempt. No
-        independent local witness, persistent field or credential is introduced.
+        A restored budget is admitted only when ``witness`` is an OperationHandle
+        whose binding is ``reservation_id``. A snapshot or digest is not that
+        witness. Loaded or duplicate reservations cannot mint another attempt.
         """
         if (
             not self.enable_partition_writes
@@ -4044,10 +4064,11 @@ class LocalSessionLedger:
             )
         budget = self.evidence_budget
         scope = _tail_attempt_scope(identity, reservation_id, operation_binding)
+        witnessed = _operation_witness_matches(witness, reservation_id)
         if (
-            budget.restored
-            or scope in budget._live_attempts
+            scope in budget._live_attempts
             or scope in budget._failed_attempts
+            or (budget.restored and not witnessed)
         ):
             raise NonResumableActivationError(
                 "original activation attempt cannot be restarted"
@@ -4072,7 +4093,13 @@ class LocalSessionLedger:
 
         try:
             reserved = self.replace(identity, admit, now=now)
-            budget._remember_live_attempt(scope, reserved.record_sha256, owner=self)
+            budget._remember_live_attempt(
+                scope,
+                reserved.record_sha256,
+                owner=self,
+                witness=witness,
+                reservation_id=reservation_id,
+            )
             return reserved
         except BaseException:
             budget._burn_live_attempt(scope)
@@ -4087,11 +4114,13 @@ class LocalSessionLedger:
         attempt_reservation_id: str,
         seal_accounting: Callable[[SessionRecord, Mapping[str, int]], SessionRecord],
         now: datetime | None = None,
+        witness: object = None,
     ) -> SessionRecord:
         """Stage, prepay a sealed exact tail, then conditionally activate/read back.
 
-        Every failure burns the live attempt. Restart needs a future reviewed
-        authenticated original-attempt witness; a snapshot/grant alone refuses.
+        Every failure burns the live attempt. A missing live attempt or a
+        restored budget is admitted only when ``witness`` is an OperationHandle
+        whose binding is the attempt reservation. A snapshot or grant refuses.
         """
         if (
             not self.enable_partition_writes
@@ -4104,11 +4133,14 @@ class LocalSessionLedger:
         budget = self.evidence_budget
         operation = _tail_operation_binding(operation_binding)
         scope = _tail_attempt_scope(identity, attempt_reservation_id, operation)
-        if (
-            budget.restored
-            or scope not in budget._live_attempts
-            or budget._live_attempt_owners.get(scope) is not self
-            or scope in budget._failed_attempts
+        witnessed = _operation_witness_matches(witness, attempt_reservation_id)
+        if scope in budget._failed_attempts or (
+            not witnessed
+            and (
+                budget.restored
+                or scope not in budget._live_attempts
+                or budget._live_attempt_owners.get(scope) is not self
+            )
         ):
             raise NonResumableActivationError(
                 "original activation attempt witness is unavailable"
@@ -4121,7 +4153,13 @@ class LocalSessionLedger:
                     "prepaid activation current authority is unavailable"
                 )
             before = loaded.record
-            budget._require_live_attempt(scope, before.record_sha256, owner=self)
+            budget._require_live_attempt(
+                scope,
+                before.record_sha256,
+                owner=self,
+                witness=witness,
+                reservation_id=attempt_reservation_id,
+            )
             self._tail_preparing = True
             draft = prepare(before)
             self._tail_preparing = False
@@ -4157,7 +4195,13 @@ class LocalSessionLedger:
                 TailDispatch("root:readback", fence=True),
             )
             plan = ActivationTailPlan("local", plan_scope, steps)
-            ticket = budget.reserve_tail(plan)
+            ticket = (
+                budget.reserve_tail(plan)
+                if witness is None
+                else budget.reserve_tail(
+                    plan, witness=witness, reservation_id=attempt_reservation_id
+                )
+            )
             sealed = _seal_tail_accounting(draft, seal_accounting, budget)
             _validate_queue_retention(before, sealed)
             ticket.seal(sealed.record_sha256)

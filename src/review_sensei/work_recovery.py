@@ -26,6 +26,7 @@ from .outcomes import (
     DEFAULT_RECOVERY_TTL_SECONDS,
     MAX_RECOVERY_RESULT_BYTES,
     MAX_RECOVERY_TTL_SECONDS,
+    RESOURCE_BUDGET_MAX_PROVIDER_CALLS_CEILING,
     ResourceBudgetTracker,
 )
 from .planning import ReviewWorkPlan, WorkBatch
@@ -364,7 +365,8 @@ class WorkRecoveryStore:
             batches = {batch.batch_id: batch for batch in plan.batches}
             if (
                 not isinstance(document["completed"], list)
-                or len(document["completed"]) > 8
+                or len(document["completed"])
+                > RESOURCE_BUDGET_MAX_PROVIDER_CALLS_CEILING
             ):
                 raise ValueError("receipts")
             completed = []

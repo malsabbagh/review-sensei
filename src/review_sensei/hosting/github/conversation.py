@@ -20,6 +20,7 @@ from ...models import (
     ConversationReply,
     LearningEntry,
 )
+from ...presentation import append_response_instructions
 from ...validation import validate_repository_path
 from .errors import (
     GitHubConversationError,
@@ -1341,7 +1342,7 @@ class ConversationPublisher:
         ):
             return ReplyResult(status="skipped_fork")
 
-        body = f"{reply.body}\n\n{marker}"
+        body = f"{append_response_instructions(reply.body)}\n\n{marker}"
         if len(body.encode("utf-8")) > MAX_REPLY_BYTES:
             raise GitHubConversationError("reply body exceeds the configured limit")
         request_body: dict[str, object] = {"body": body}

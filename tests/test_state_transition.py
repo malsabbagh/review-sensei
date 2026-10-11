@@ -70,14 +70,14 @@ class StateTransitionProcedureTests(unittest.TestCase):
             DEFAULT_LEARNING_DIRECTORY.as_posix(), ".github/review-sensei/learnings"
         )
         self.assertIn(DEFAULT_LEARNING_DIRECTORY.as_posix(), section)
-        for namespace in ("DeliveryLedger", "BrokerLedger"):
-            with self.subTest(namespace=namespace):
-                self.assertIn(namespace, section)
-                self.assertIn(namespace, WORKER_README.read_text(encoding="utf-8"))
-        self.assertIn(
-            "Do not delete the `DeliveryLedger` or `BrokerLedger` namespace "
-            "during rollback",
-            _normalized(WORKER_README.read_text(encoding="utf-8")),
+        readme = _normalized(WORKER_README.read_text(encoding="utf-8"))
+        removed = "`DeliveryLedger` and `BrokerLedger` are removed"
+        self.assertIn(removed, _normalized(section))
+        self.assertIn(removed, readme)
+        self.assertIn("The Worker stores nothing", readme)
+        self.assertNotIn(
+            "Do not delete the `DeliveryLedger` or `BrokerLedger` namespace",
+            readme,
         )
 
     def test_in_flight_runs_execute_the_identity_they_started_with(self):

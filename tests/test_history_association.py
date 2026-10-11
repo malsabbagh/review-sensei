@@ -75,9 +75,9 @@ class GraphState:
         if parsed.path.endswith(f"/issues/{self.identity.pull_request}/comments"):
             query = parse_qs(parsed.query)
             page = int(query["page"][0])
-            return json_response(
-                list(self.comments.values())[(page - 1) * 5 : page * 5]
-            )
+            per_page = int(query.get("per_page", ["5"])[0])
+            items = list(self.comments.values())
+            return json_response(items[(page - 1) * per_page : page * per_page])
         if "/issues/comments/" in parsed.path:
             identity = int(parsed.path.rsplit("/", 1)[-1])
             response = json_response(
@@ -642,7 +642,7 @@ class HistoryAssociationTests(unittest.TestCase):
 
     def test_hosted_metadata_scan_boundary_refuses_without_extra_page(self):
         ledger, state, identity, binding, _, record = self.hosted()
-        for index in range(194):
+        for index in range(100):
             state.comments[2000 + index] = {
                 "id": 2000 + index,
                 "body": "retained immutable or visible fixture",
@@ -653,12 +653,13 @@ class HistoryAssociationTests(unittest.TestCase):
                 expected_binding=binding,
                 expected_root_sha256=record.record_sha256,
                 expected_generation=record.generation,
-                max_scan_pages=39,
+                max_scan_pages=1,
                 now=NOW,
             )
-        self.assertEqual(ledger.evidence_budget.calls, 39)
-        self.assertEqual(len(state.calls), 39)
-        self.assertTrue(state.calls[-1][1].endswith("page=39"))
+        self.assertEqual(ledger.evidence_budget.calls, 1)
+        self.assertEqual(len(state.calls), 1)
+        self.assertTrue("per_page=100" in state.calls[-1][1])
+        self.assertTrue(state.calls[-1][1].endswith("page=1"))
 
     def test_actual_local_opt_in_genesis_tail_and_archived_bootstrap_refusal(self):
         for archived in (False, True):

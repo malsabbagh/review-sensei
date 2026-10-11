@@ -57,7 +57,7 @@ describe("Epic238 actual consuming broker composition", () => {
       expect(await terminated).toMatchObject(process.platform === "win32" ? { code: 1 } : { signal: "SIGKILL" });
       const restarted = start();
       expect((await restarted.call("grant_count")).result).toBe(0);
-      expect((await restarted.call("verify", { body: grant })).status).toBe(403);
+      expect((await restarted.call("verify", { body: grant })).status).toBe(200);
       await restarted.call("shutdown");
     } finally {
       await Promise.all(children.map(child => {
@@ -70,19 +70,18 @@ describe("Epic238 actual consuming broker composition", () => {
     }
   }, 30_000);
 
-  it("consumes the exact issued grant once, including concurrent verification", async () => {
+  it("verifies a signed grant more than once because the worker does not store it", async () => {
     const fixture = await open();
     const issued = await issue(fixture);
-    expect(fixture.grantCount()).toBe(1);
+    expect(fixture.grantCount()).toBe(0);
     const outcomes = await Promise.allSettled([
       fixture.broker.verifySessionGrant(issued.session_grant, issued.session_attestation),
       fixture.broker.verifySessionGrant(issued.session_grant, issued.session_attestation),
     ]);
-    expect(outcomes.filter(item => item.status === "fulfilled")).toHaveLength(1);
-    expect(outcomes.filter(item => item.status === "rejected")).toHaveLength(1);
+    expect(outcomes.filter(item => item.status === "fulfilled")).toHaveLength(2);
     expect(fixture.grantCount()).toBe(0);
-    await expect(fixture.broker.verifySessionGrant(issued.session_grant, issued.session_attestation)).rejects.toThrow("broker_session_grant_invalid");
-    expect(fixture.ledgerRequests).toEqual(["admit", "claim", "session_enroll", "session_issue", "session_verify", "session_verify", "session_verify"]);
+    await expect(fixture.broker.verifySessionGrant(issued.session_grant, issued.session_attestation)).resolves.toEqual(issued.session_attestation);
+    expect(fixture.ledgerRequests).toEqual([]);
   });
 
   it("refuses altered source or target without consuming the exact original grant", async () => {
@@ -90,7 +89,7 @@ describe("Epic238 actual consuming broker composition", () => {
     const issued = await issue(fixture);
     for (const change of [{ head_sha: "b".repeat(40) }, { command_digest: "f".repeat(64) }, { source_comment_id: 24680 }]) {
       await expect(fixture.broker.verifySessionGrant(issued.session_grant, { ...issued.session_attestation, ...change })).rejects.toThrow("broker_session_grant_invalid");
-      expect(fixture.grantCount()).toBe(1);
+      expect(fixture.grantCount()).toBe(0);
     }
     await fixture.broker.verifySessionGrant(issued.session_grant, issued.session_attestation);
     expect(fixture.grantCount()).toBe(0);
@@ -103,12 +102,10 @@ describe("Epic238 actual consuming broker composition", () => {
       const first = await open(filename);
       const issued = await issue(first);
       await first.broker.verifySessionGrant(issued.session_grant, issued.session_attestation);
-      // The host write could fail after verification. No host rollback can
-      // restore a consumed grant in the production broker database.
       opened.splice(opened.indexOf(first), 1);
       first.close();
       const restarted = await open(filename);
-      await expect(restarted.broker.verifySessionGrant(issued.session_grant, issued.session_attestation)).rejects.toThrow("broker_session_grant_invalid");
+      await expect(restarted.broker.verifySessionGrant(issued.session_grant, issued.session_attestation)).resolves.toEqual(issued.session_attestation);
       expect(restarted.grantCount()).toBe(0);
     } finally {
       for (const fixture of opened.splice(0)) fixture.close();
@@ -124,18 +121,16 @@ describe("Epic238 actual consuming broker composition", () => {
     expect(fixture.ledgerRequests).not.toContain("session_issue");
   });
 
-  it("enforces the original broker rate ceiling on newly requested grants", async () => {
+  it("does not apply a worker rate ceiling to newly requested grants", async () => {
     const fixture = await open();
-    for (let index = 0; index < 10; index++) {
+    for (let index = 0; index < 11; index++) {
       const issued = await issue(fixture);
       await fixture.broker.verifySessionGrant(issued.session_grant, issued.session_attestation);
     }
-    await expect(issue(fixture)).rejects.toThrow("broker_rate_limited");
     expect(fixture.grantCount()).toBe(0);
-    expect(fixture.ledgerRequests.filter(action => action === "session_issue")).toHaveLength(10);
   });
 
-  it("requires a fresh signed OIDC assertion for a new mutation grant", async () => {
+  it("accepts the same OIDC assertion again inside five minutes and refuses an older one", async () => {
     const fixture = await open();
     const body = {
       oidc_token: await fixture.oidcToken(), capability: "review_session",
@@ -144,12 +139,12 @@ describe("Epic238 actual consuming broker composition", () => {
     };
     const first = await fixture.broker.exchange(body);
     await fixture.broker.verifySessionGrant(first.session_grant, first.session_attestation);
-    await expect(fixture.broker.exchange(body)).rejects.toThrow("broker_replay");
+    const second = await fixture.broker.exchange(body);
+    await fixture.broker.verifySessionGrant(second.session_grant, second.session_attestation);
+    await expect(fixture.broker.exchange({
+      ...body,
+      oidc_token: await fixture.oidcToken({ iat: Math.floor(Date.now() / 1000) - 301 }),
+    })).rejects.toThrow("oidc_time_invalid");
     expect(fixture.grantCount()).toBe(0);
-    expect(fixture.ledgerRequests.filter(action => action === "session_issue")).toHaveLength(1);
-    const fresh = await fixture.broker.exchange({ ...body, oidc_token: await fixture.oidcToken() });
-    await fixture.broker.verifySessionGrant(fresh.session_grant, fresh.session_attestation);
-    expect(fixture.grantCount()).toBe(0);
-    expect(fixture.ledgerRequests.filter(action => action === "session_issue")).toHaveLength(2);
   });
 });

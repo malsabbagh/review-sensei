@@ -33,6 +33,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_NAMES = (
     "conversation-reply",
     "review-result",
+    "human-file-review",
+    "human-file-receipt",
     "review-comment",
     "learning-entry",
     "learning-proposal",

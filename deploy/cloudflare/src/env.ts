@@ -1,5 +1,6 @@
-import type { DeliveryLedger } from "./delivery-ledger";
-import type { BrokerLedger } from "./broker-ledger";
+export interface WorkerExecution {
+  waitUntil(promise: Promise<unknown>): void;
+}
 
 export interface WorkerEnv {
   GITHUB_APP_ID: string;
@@ -8,8 +9,10 @@ export interface WorkerEnv {
   /** Install-time update channel resolved before a setup caller is generated. */
   PUBLIC_WORKFLOW_TAG: string;
   GITHUB_API_URL?: string;
-  DELIVERY_LEDGER: DurableObjectNamespace<DeliveryLedger>;
-  BROKER_LEDGER: DurableObjectNamespace<BrokerLedger>;
+  /** HMAC root for session grants and setup cursors. Absent means configuration_unavailable. */
+  REVIEWSENSEI_SIGNING_KEY?: string;
+  /** Service binding to this Worker. Setup continuation never uses the public URL. */
+  SELF?: Fetcher;
 }
 
 declare global {

@@ -1,0 +1,15 @@
+{
+  "kind": "unchanged-source-v1",
+  "repository": "acme/widgets",
+  "pull_request": 253,
+  "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "path": "src/app.py",
+  "mode": "100644",
+  "base_blob_sha": "25b92209b0335e2e5e1f4a04f23ce80e5042574d",
+  "head_blob_sha": "25b92209b0335e2e5e1f4a04f23ce80e5042574d",
+  "range_start": 1,
+  "range_end": 2,
+  "content_sha256": "dd46cb2f80fe2d22e284d503f04d3f7c6a66956a171eaa0e8d128e7e2dee5a0e",
+  "content_bytes": 27
+}

@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/human-file-receipt.schema.json",
+  "title": "human-file-receipt",
+  "description": "Bounded reference data. Runtime semantic validation and independent live host authentication are required; this document alone is not approval authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "request_digest",
+    "request_comment_id",
+    "source_comment_id",
+    "source_updated_at",
+    "source_sha256",
+    "actor_id",
+    "actor",
+    "selected_ids"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "human-file-receipt-v1"
+    },
+    "request_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "request_comment_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "source_comment_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "source_updated_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "source_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "actor_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "actor": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}$"
+    },
+    "selected_ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      }
+    }
+  }
+}

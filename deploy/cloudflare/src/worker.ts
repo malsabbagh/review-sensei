@@ -1,6 +1,4 @@
-import type { WorkerEnv } from "./env";
-import { DeliveryLedger } from "./delivery-ledger";
-import { BrokerLedger } from "./broker-ledger";
+import type { WorkerEnv, WorkerExecution } from "./env";
 import { TokenBroker } from "./token-broker";
 import { brokerDiagnostic } from "./broker-diagnostics";
 import {
@@ -9,14 +7,9 @@ import {
   deferInstallationSetup,
   parseVerifiedDelivery,
   processDelivery,
-  type VerifiedDelivery,
 } from "./github-app";
-import type { SetupContinuationRequest } from "./setup-continuation";
-
-const LEDGER_NAME = "reviewsensei-deliveries";
-
-export { DeliveryLedger };
-export { BrokerLedger };
+import { freshSetupCursor, signSetupCursor } from "./signed-mac";
+import { runSignedSetupStep, scheduleSetupContinue } from "./setup-step";
 
 function response(body: unknown, status = 200, noStore = false): Response {
   return new Response(JSON.stringify(body), {
@@ -190,12 +183,7 @@ async function token(request: Request, env: WorkerEnv): Promise<Response> {
     return response(result, 200, true);
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
-    const status =
-      message === "broker_rate_limited"
-        ? 429
-        : message === "broker_ledger_unavailable"
-          ? 503
-          : 403;
+    const status = message === "configuration_unavailable" ? 503 : 403;
     const rayId = brokerRayId(request);
     const diagnostic = brokerDiagnostic(error, rayId);
     console.error("github_broker_failed", {
@@ -206,7 +194,10 @@ async function token(request: Request, env: WorkerEnv): Promise<Response> {
       capability: brokerCapability(body),
       ...(rayId === undefined ? {} : { cf_ray: rayId }),
     });
-    return response({ error: "capability_not_issued", diagnostic }, status, true);
+    const errorCode = message === "configuration_unavailable"
+      ? "configuration_unavailable"
+      : "capability_not_issued";
+    return response({ error: errorCode, diagnostic }, status, true);
   }
 }
 
@@ -264,11 +255,10 @@ async function sessionGrant(request: Request, env: WorkerEnv): Promise<Response>
       ...("upstream_status" in diagnostic ? { upstream_status: diagnostic.upstream_status } : {}),
       ...(rayId === undefined ? {} : { cf_ray: rayId }),
     });
-    const status =
-      error instanceof Error && error.message === "broker_ledger_unavailable"
-        ? 503
-        : 403;
-    return response({ error: "session_grant_not_verified", diagnostic }, status, true);
+    const unavailable = error instanceof Error && error.message === "configuration_unavailable";
+    const status = unavailable ? 503 : 403;
+    const errorCode = unavailable ? "configuration_unavailable" : "session_grant_not_verified";
+    return response({ error: errorCode, diagnostic }, status, true);
   }
 }
 
@@ -333,48 +323,11 @@ async function hmacMatches(
   return constantTimeEquals(signature, `sha256=${hex(digest)}`);
 }
 
-async function bodyDigest(body: ArrayBuffer): Promise<string> {
-  return hex(await crypto.subtle.digest("SHA-256", body));
-}
-
-interface LedgerReply {
-  state: "accepted" | "in_flight" | "claimed" | "conflict";
-}
-
-async function ledgerRequest(
+async function webhook(
+  request: Request,
   env: WorkerEnv,
-  action: "claim" | "complete" | "release" | "schedule",
-  app: number,
-  deliveryId: string,
-  digest: string,
-  extra?: Record<string, unknown>,
-): Promise<LedgerReply> {
-  const id = env.DELIVERY_LEDGER.idFromName(LEDGER_NAME);
-  const stub = env.DELIVERY_LEDGER.get(id);
-  const request = await stub.fetch(`https://ledger/${action}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      app_id: app,
-      delivery_id: deliveryId,
-      digest,
-      ...extra,
-    }),
-  });
-  if (!request.ok) {
-    throw new LedgerRequestError(request.status);
-  }
-  return (await request.json()) as LedgerReply;
-}
-
-class LedgerRequestError extends Error {
-  constructor(readonly status: number) {
-    super(status === 409 ? "delivery_conflict" : "delivery ledger request failed");
-    this.name = "LedgerRequestError";
-  }
-}
-
-async function webhook(request: Request, env: WorkerEnv): Promise<Response> {
+  ctx: WorkerExecution | undefined,
+): Promise<Response> {
   const app = appId(env.GITHUB_APP_ID);
   if (
     app === null ||
@@ -415,97 +368,95 @@ async function webhook(request: Request, env: WorkerEnv): Promise<Response> {
     return response({ error: "signature_invalid" }, 401);
   }
 
-  const digest = await bodyDigest(body);
-  let claim: LedgerReply;
-  try {
-    claim = await ledgerRequest(env, "claim", app, deliveryId, digest);
-  } catch {
-    return response({ error: "delivery_ledger_unavailable" }, 503);
-  }
-  if (claim.state === "accepted" || claim.state === "in_flight") {
-    return response({ accepted: true, duplicate: true }, 202);
-  }
-  if (claim.state === "conflict") {
-    return response({ error: "delivery_conflict" }, 409);
-  }
-
   try {
     const delivery = parseVerifiedDelivery(body, event, deliveryId, app);
     if (delivery !== null && deferInstallationSetup(delivery)) {
-      // The claim above is already durable. Scheduling persists the cursor and
-      // arms the ledger alarm before this 202, so a dropped waitUntil cannot
-      // ack the delivery with no continuation.
-      await ledgerRequest(env, "schedule", app, deliveryId, digest, {
-        continuation: continuationRequest(delivery, digest),
-      });
+      if (
+        ctx === undefined ||
+        env.SELF === undefined ||
+        !env.REVIEWSENSEI_SIGNING_KEY ||
+        !env.REVIEWSENSEI_SIGNING_KEY.trim()
+      ) {
+        return response({ error: "configuration_unavailable" }, 503);
+      }
+      const cursor = await signSetupCursor(
+        env.REVIEWSENSEI_SIGNING_KEY,
+        freshSetupCursor({
+          installationId: delivery.installationId,
+          deliveryId: delivery.deliveryId,
+        }),
+      );
+      scheduleSetupContinue(env, ctx, cursor);
       return response({ accepted: true }, 202);
     }
     if (delivery !== null) {
       await processDelivery(delivery, env);
     }
-    await ledgerRequest(env, "complete", app, deliveryId, digest);
     return response({ accepted: true }, 202);
   } catch (error) {
     if (error instanceof WebhookPayloadError) {
-      try {
-        await ledgerRequest(env, "complete", app, deliveryId, digest);
-      } catch {
-        // The lease expiry remains the recovery path if completion fails.
-      }
       return response({ accepted: false }, 202);
-    }
-    if (error instanceof LedgerRequestError && error.status === 409) {
-      try {
-        await ledgerRequest(env, "release", app, deliveryId, digest);
-      } catch {
-        // The lease expiry remains the recovery path if release also fails.
-      }
-      console.error("github_setup_failed", {
-        delivery_id: deliveryId,
-        event,
-        error_code: "delivery_conflict",
-      });
-      return response({ error: "delivery_conflict", error_code: "delivery_conflict" }, 409, true);
-    }
-    try {
-      await ledgerRequest(env, "release", app, deliveryId, digest);
-    } catch {
-      // The lease expiry remains the recovery path if release also fails.
     }
     const errorCode = setupErrorCode(error);
     console.error("github_setup_failed", {
       delivery_id: deliveryId,
-      event,
       error_code: errorCode,
+      failure_count: 1,
     });
     return response({ error: "setup_unavailable", error_code: errorCode }, 503, true);
   }
 }
 
-function continuationRequest(
-  delivery: VerifiedDelivery,
-  digest: string,
-): SetupContinuationRequest {
-  return {
-    appId: delivery.appId,
-    event: delivery.event,
-    action: delivery.action,
-    installationId: delivery.installationId,
-    deliveryId: delivery.deliveryId,
-    digest,
-    permissions: delivery.permissions,
-    repositories: delivery.repositories.length === 0 ? [] : [...delivery.repositories],
-    unresolved: delivery.repositories.length === 0,
-    attempt: 0,
-    failed: false,
-    failureCode: null,
-    failureCount: 0,
-    failedRepository: null,
-  };
+async function setupContinue(
+  request: Request,
+  env: WorkerEnv,
+  ctx: WorkerExecution | undefined,
+): Promise<Response> {
+  if (
+    ctx === undefined ||
+    env.SELF === undefined ||
+    !env.REVIEWSENSEI_SIGNING_KEY ||
+    !env.REVIEWSENSEI_SIGNING_KEY.trim()
+  ) {
+    return response({ error: "configuration_unavailable" }, 503);
+  }
+  let body: unknown;
+  try {
+    const bytes = await readBoundedBody(request, MAX_BROKER_REQUEST_BYTES);
+    body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+  } catch {
+    return response({ error: "invalid_request" }, 400);
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return response({ error: "invalid_request" }, 400);
+  }
+  const cursor = (body as Record<string, unknown>).cursor;
+  if (typeof cursor !== "string" || Object.keys(body as Record<string, unknown>).length !== 1) {
+    return response({ error: "invalid_request" }, 400);
+  }
+  try {
+    const result = await runSignedSetupStep(env, cursor, ctx);
+    return response({ accepted: true, setup: result }, 202);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (message === "configuration_unavailable") {
+      return response({ error: "configuration_unavailable" }, 503);
+    }
+    if (message === "setup_continuation_invalid") {
+      return response({ error: "setup_continuation_invalid" }, 403);
+    }
+    const errorCode = setupErrorCode(error);
+    console.error("github_setup_failed", {
+      delivery_id: "unavailable",
+      error_code: errorCode,
+      failure_count: 1,
+    });
+    return response({ error: "setup_unavailable", error_code: errorCode }, 503);
+  }
 }
 
 const worker = {
-  async fetch(request: Request, env: WorkerEnv): Promise<Response> {
+  async fetch(request: Request, env: WorkerEnv, ctx?: WorkerExecution): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/healthz" && request.method === "GET") {
       return response({ ok: true });
@@ -522,13 +473,19 @@ const worker = {
       }
       return sessionGrant(request, env);
     }
+    if (url.pathname === "/github/setup-continue") {
+      if (request.method !== "POST") {
+        return response({ error: "method_not_allowed" }, 405);
+      }
+      return setupContinue(request, env, ctx);
+    }
     if (url.pathname !== "/github/webhook") {
       return response({ error: "not_found" }, 404);
     }
     if (request.method !== "POST") {
       return response({ error: "method_not_allowed" }, 405);
     }
-    return webhook(request, env);
+    return webhook(request, env, ctx);
   },
 };
 

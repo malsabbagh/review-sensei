@@ -362,6 +362,9 @@ describe("setup-v4 public boundary", () => {
         "  learning: disabled\n" +
         "  # none or diagnostics\n" +
         "  artifacts: none\n" +
+        "  # enabled uses the shared operation entry. disabled keeps the previous paths.\n" +
+        "  # The measured P1 profile does not fit 60 ordinary dispatches (#267).\n" +
+        "  operation_entry: enabled\n" +
         "\n" +
         "# Optional limits and endpoint overrides.\n" +
         "advanced:\n" +

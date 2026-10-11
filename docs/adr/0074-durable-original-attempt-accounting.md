@@ -1,6 +1,6 @@
 # ADR 0074 - Durable original-attempt accounting
 
-Status: Proposed
+Status: Superseded by ADR 0076 (GitHub operation record)
 Date: 2026-10-10
 Owners/Reviewers: Maintainers
 Approved by: not applicable
@@ -96,7 +96,7 @@ Real local SQLite transactions test sticky event conflicts, immutable origin,
 debit plus same-transaction consumption and rollback, exact readback,
 cross-source root serialization, retained unknown state after database reopen,
 expiry, capacity and malformed metadata. These tests exercise the storage
-primitive, not production BrokerLedger authorization, external root ownership
+primitive. `BrokerLedger` is removed. These tests are not external root ownership
 or a useful original-64 hosted lifecycle.
 
 Required next evidence includes production broker integration, exact first
@@ -106,6 +106,9 @@ all physical dispatch categories, and actual full/reply/command acknowledgement.
 Rollback keeps the unused module unconnected. A future activated deployment
 must retain original guards and unknown transitions; rollback cannot erase them
 to obtain another allowance.
+
+The bootstrap profile and producer contract are recorded in ADR 0076. This
+record remains the storage primitive. The human-file recorder is ADR 0077.
 
 ## Sources
 

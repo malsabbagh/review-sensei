@@ -1,5 +1,23 @@
 # Architecture
 
+## Explicit human file review (local, opt-in)
+
+The proposed [human file review adapter](human-file-review.md) binds selected
+unsupported binary changes to the exact owned review/result, complete changed
+inventory, base/head Git blobs and live authorized human source. Confirmation
+defaults off and never rewrites AI coverage, eligibility, baseline or cache.
+Host-derived `coverage_only_partial` provenance uses an explicitly versioned
+content digest projection; old result digests remain unchanged when absent.
+A separate fresh assessment can satisfy only the binary coverage blocker after
+all files are confirmed. Other findings and approval facts remain in force.
+There is no cross-head carry and no automatic hosted command. An explicit
+verification may post one exact-head APPROVE when mixed coverage is the only
+remaining blocker. That post does not mark the AI result, baseline, or cache
+complete. The legacy finalizer still withholds a partial result. Broker
+composition and deployed resource qualification remain pending.
+Recording a confirmation is not approval.
+See [Proposed ADR 0077](adr/0077-explicit-human-file-review.md).
+
 For the operational flows and separate analysis, persistence, reassessment and
 approval bounds, see [Review pipelines and customization](review-pipelines.md).
 That guide is a fixed snapshot of `a598d4a` (0.6.18), not a live mirror of this

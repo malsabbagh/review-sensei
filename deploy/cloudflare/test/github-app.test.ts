@@ -107,6 +107,12 @@ class FakeGitHub {
   refCollision = false;
   collisionObserved = false;
   existingPullRequest: number | null = null;
+  sharedRace: {
+    refCreates: number;
+    pullCreates: number;
+    pullNumber: number | null;
+    branchReady: boolean;
+  } | null = null;
 
   async request(method: string, path: string, _token: string, requestBody?: Record<string, unknown>) {
     this.requests.push({ method, path, body: requestBody });
@@ -114,7 +120,7 @@ class FakeGitHub {
       return { status: 200, data: { default_branch: "main" } };
     }
     if (method === "GET" && path.includes("/branches/review-sensei%2Fsetup-v5-")) {
-      const exists = this.branchExists || this.collisionObserved;
+      const exists = this.branchExists || this.collisionObserved || this.sharedRace?.branchReady === true;
       return {
         status: exists ? 200 : 404,
         data: exists
@@ -149,9 +155,10 @@ class FakeGitHub {
       };
     }
     if (method === "GET" && path.includes("/pulls?")) {
+      const number = this.existingPullRequest ?? this.sharedRace?.pullNumber ?? null;
       return {
         status: 200,
-        data: this.existingPullRequest === null ? [] : [{ number: this.existingPullRequest }],
+        data: number === null ? [] : [{ number }],
       };
     }
     if (method === "GET" && path.includes("/contents/")) {
@@ -182,6 +189,14 @@ class FakeGitHub {
       return { status: 201, data: { sha: "d".repeat(40) } };
     }
     if (method === "POST" && path.endsWith("/git/refs")) {
+      if (this.sharedRace) {
+        this.sharedRace.refCreates += 1;
+        if (this.sharedRace.refCreates > 1) {
+          return { status: 422, data: { message: "Reference already exists" } };
+        }
+        this.sharedRace.branchReady = true;
+        return { status: 201, data: { ref: `refs/heads/${SETUP_BRANCH}` } };
+      }
       if (this.refCollision) {
         this.collisionObserved = true;
         return { status: 422, data: { message: "Reference already exists" } };
@@ -189,6 +204,14 @@ class FakeGitHub {
       return { status: 201, data: { ref: `refs/heads/${SETUP_BRANCH}` } };
     }
     if (method === "POST" && path.endsWith("/pulls")) {
+      if (this.sharedRace) {
+        this.sharedRace.pullCreates += 1;
+        if (this.sharedRace.pullCreates > 1) {
+          return { status: 422, data: { message: "Validation Failed" } };
+        }
+        this.sharedRace.pullNumber = 42;
+        return { status: 201, data: { number: 42 } };
+      }
       return { status: 201, data: { number: 42 } };
     }
     throw new Error(`unexpected GitHub request: ${method} ${path}`);
@@ -478,6 +501,22 @@ describe("setup repository reconciliation", () => {
       { repository: "acme/widgets", status: "skipped_branch_conflict" },
     ]);
     expect(mutationRequests(fake)).toEqual([]);
+  });
+
+  it("runs two concurrent deliveries and treats the GitHub 422 as done", async () => {
+    const sharedRace = { refCreates: 0, pullCreates: 0, pullNumber: null, branchReady: false };
+    const first = new FakeGitHub();
+    const second = new FakeGitHub();
+    first.sharedRace = sharedRace;
+    second.sharedRace = sharedRace;
+    const [left, right] = await Promise.all([
+      serviceWith(first).process(delivery()),
+      serviceWith(second).process(delivery()),
+    ]);
+    expect(sharedRace.refCreates).toBe(2);
+    expect(sharedRace.pullCreates).toBeGreaterThanOrEqual(1);
+    const statuses = [left[0]?.status, right[0]?.status].sort();
+    expect(statuses).toEqual(["created", "skipped_pull_request_exists"]);
   });
 
   it("does not overwrite a branch created during the create-only ref race", async () => {

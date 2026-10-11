@@ -26,6 +26,10 @@ from urllib.parse import urlsplit
 
 from .budgets import MAX_TOTAL_OUTPUT_BYTES, MAX_TOTAL_PROMPT_BYTES, ReviewWorkBudgets
 from .errors import ReviewInputError
+from .outcomes import (
+    DEFAULT_RESOURCE_BUDGET_TIMEOUT_MS,
+    RESOURCE_BUDGET_TIMEOUT_MS_CEILING,
+)
 from .provider_config import (
     DEFAULT_CLOUD_BASE_URL,
     DEFAULT_CLOUD_MODEL,
@@ -44,6 +48,7 @@ from .providers.openrouter import (
 )
 from .validation import (
     DEFAULT_TOTAL_WORK_MAX_PROVIDER_CALLS,
+    TOTAL_WORK_MAX_PROVIDER_CALLS_CEILING,
     read_bounded_utf8,
 )
 
@@ -69,6 +74,7 @@ TIMEOUT_SECONDS_CEILING = 3_600.0
 REVIEW_POLICIES = ("auto-approve", "blocking", "advisory")
 LEARNING_MODES = ("disabled", "proposals", "pull-requests")
 ARTIFACT_MODES = ("none", "diagnostics")
+OPERATION_ENTRY_MODES = ("enabled", "disabled")
 
 _KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 _INTEGER_PATTERN = re.compile(r"^-?\d+$")
@@ -90,6 +96,7 @@ GITHUB_FIELDS = (
     "mentions",
     "learning",
     "artifacts",
+    "operation_entry",
 )
 ADVANCED_FIELDS = (
     "endpoint",
@@ -112,7 +119,7 @@ SYMBOL_CONTEXT_FIELDS = (
 )
 EGRESS_FIELDS = ("allow_data_egress",)
 LARGE_CHANGE_FIELDS = ("orchestrate",)
-RESOURCE_FIELDS = ("timeout_seconds", "max_provider_calls")
+RESOURCE_FIELDS = ("timeout_seconds", "max_provider_calls", "review_deadline_seconds")
 REVIEW_WORK_FIELDS = (
     "mode",
     "batch_diff_bytes",
@@ -365,6 +372,7 @@ class GitHubSection:
     mentions: bool = True
     learning: str = "disabled"
     artifacts: str = "none"
+    operation_entry: str = "enabled"
 
 
 @dataclass(frozen=True)
@@ -407,6 +415,7 @@ class LargeChangeSection:
 class ResourceSection:
     timeout_seconds: float | None = None
     max_provider_calls: int | None = None
+    review_deadline_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1157,6 +1166,13 @@ def _build_github(
             "none",
             fail=fail,
         ),
+        operation_entry=_enum_field(
+            mapping.get("operation_entry"),
+            "github.operation_entry",
+            OPERATION_ENTRY_MODES,
+            "enabled",
+            fail=fail,
+        ),
     )
 
 
@@ -1440,12 +1456,22 @@ def _build_resources(
             mapping.get("max_provider_calls"),
             "advanced.resources.max_provider_calls",
             DEFAULT_TOTAL_WORK_MAX_PROVIDER_CALLS,
-            ceiling=DEFAULT_TOTAL_WORK_MAX_PROVIDER_CALLS,
+            ceiling=TOTAL_WORK_MAX_PROVIDER_CALLS_CEILING,
+            fail=fail,
+        )
+    review_deadline_seconds: int | None = None
+    if mapping.get("review_deadline_seconds") is not None:
+        review_deadline_seconds = _positive_int_field(
+            mapping.get("review_deadline_seconds"),
+            "advanced.resources.review_deadline_seconds",
+            DEFAULT_RESOURCE_BUDGET_TIMEOUT_MS // 1000,
+            ceiling=RESOURCE_BUDGET_TIMEOUT_MS_CEILING // 1000,
             fail=fail,
         )
     return ResourceSection(
         timeout_seconds=timeout_seconds,
         max_provider_calls=max_provider_calls,
+        review_deadline_seconds=review_deadline_seconds,
     )
 
 
@@ -2281,6 +2307,7 @@ def import_legacy_setup_configuration(content: object) -> LegacySetupImport:
                         else "disabled"
                     ),
                     "  artifacts: " + ("diagnostics" if artifacts_flag else "none"),
+                    "  operation_entry: enabled",
                 ]
             )
         if endpoint is not None:
@@ -2528,6 +2555,11 @@ def _advanced_rows(configuration: ProductConfiguration) -> list[str]:
         rows.append(
             f"resources.max_provider_calls: {advanced.resources.max_provider_calls}"
         )
+    if advanced.resources.review_deadline_seconds is not None:
+        rows.append(
+            "resources.review_deadline_seconds: "
+            f"{advanced.resources.review_deadline_seconds}"
+        )
     for field_name in REVIEW_WORK_FIELDS:
         if configuration.is_declared(f"advanced.review_work.{field_name}"):
             rows.append(
@@ -2546,6 +2578,7 @@ _DEFAULT_FIELD_VALUES: Mapping[str, Any] = {
     "github.mentions": True,
     "github.learning": "disabled",
     "github.artifacts": "none",
+    "github.operation_entry": "enabled",
     "advanced.endpoint.allow_custom_endpoint": False,
     "advanced.routing.upstream_provider": "not set",
     "advanced.context.symbol_context.enabled": False,
@@ -2556,6 +2589,9 @@ _DEFAULT_FIELD_VALUES: Mapping[str, Any] = {
     "advanced.large_changes.orchestrate": False,
     "advanced.resources.timeout_seconds": ("packaged default for the selected backend"),
     "advanced.resources.max_provider_calls": DEFAULT_TOTAL_WORK_MAX_PROVIDER_CALLS,
+    "advanced.resources.review_deadline_seconds": (
+        DEFAULT_RESOURCE_BUDGET_TIMEOUT_MS // 1000
+    ),
     **{
         f"advanced.review_work.{name}": getattr(ReviewWorkBudgets(), name)
         for name in REVIEW_WORK_FIELDS
@@ -2577,6 +2613,7 @@ def _omitted_field_lines(configuration: ProductConfiguration) -> list[str]:
 __all__ = [
     "ADVANCED_FIELDS",
     "ARTIFACT_MODES",
+    "OPERATION_ENTRY_MODES",
     "AdvancedSection",
     "BACKEND_DEFAULTS",
     "BackendDefaults",

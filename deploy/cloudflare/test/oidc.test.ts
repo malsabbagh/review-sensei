@@ -109,9 +109,17 @@ describe("GitHub Actions OIDC validation", () => {
     ["audience", { aud: "another-service" }, "oidc_audience_invalid"],
     ["expiration", { exp: NOW - 31 }, "oidc_time_invalid"],
     ["issued-at", { iat: NOW + 31 }, "oidc_time_invalid"],
+    ["issued-at age", { iat: NOW - 301 }, "oidc_time_invalid"],
   ])("rejects an invalid %s", async (_name, overrides, message) => {
     serveJwks();
     await expect(verifyOidcAssertion(await token(claims(overrides)), { now: NOW })).rejects.toThrow(message);
+  });
+
+  it("accepts an assertion issued exactly five minutes ago", async () => {
+    serveJwks();
+    await expect(verifyOidcAssertion(await token(claims({ iat: NOW - 300 })), { now: NOW })).resolves.toMatchObject({
+      repository: "acme/widgets",
+    });
   });
 
   it("rejects a token whose signature does not match the advertised key", async () => {

@@ -1,8 +1,9 @@
 """Explicit cross-runtime broker qualification, not default Python discovery.
 
 Run `python -m tests.epic238_feedback_broker_qualification -v` after installing
-the pinned Worker npm dependencies. Uses actual production policy/SQLite/OIDC.
-It qualifies the feedback protocol, never host root/witness/lifecycle authority.
+the pinned Worker npm dependencies. Uses the production signed-grant policy.
+The worker stores nothing. It qualifies the feedback protocol, never host
+root/witness/lifecycle authority.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import copy
 import hashlib
 import json
 import os
+import time
 import unittest
 from collections import Counter
 from pathlib import Path
@@ -88,15 +90,18 @@ class FeedbackBrokerQualification(unittest.TestCase):
         self.assertEqual(self.bridge.call("grant_count")["result"], 0)
         self.assertNotIn("session_issue", self.bridge.internal_dispatches()["ledger"])
 
-    def assert_consumed(self, grant):
+    def assert_signed_grant(self, grant):
+        """A signed grant verifies again because the worker does not store it."""
         client = self.bridge.client()
         self.assertEqual(
             client.verify_session_grant(grant.grant, grant.attestation),
             grant.attestation,
         )
         self.assertEqual(self.bridge.call("grant_count")["result"], 0)
-        with self.assertRaises(GitHubBrokerClientError):
-            client.verify_session_grant(grant.grant, grant.attestation)
+        self.assertEqual(
+            client.verify_session_grant(grant.grant, grant.attestation),
+            grant.attestation,
+        )
 
     def fresh_case(self):
         """Independent negative cases, not renewed allowance for one lifecycle."""
@@ -172,21 +177,12 @@ class FeedbackBrokerQualification(unittest.TestCase):
             Counter(
                 item["action"] for item in attempts if item["origin"] == "broker-ledger"
             ),
-            Counter(
-                {
-                    "admit": 1,
-                    "claim": 1,
-                    "session_enroll": 1,
-                    "session_issue": 1,
-                    "session_verify": 1,
-                }
-            ),
+            Counter(),
         )
         # The caller callback does not account Worker internals. Preserve their
         # physical count separately; this is not whole-operation64 acceptance.
         self.assertEqual(self.bridge.call("grant_count")["result"], 0)
-        with self.assertRaises(GitHubBrokerClientError):
-            client.verify_session_grant(grant.grant, grant.attestation)
+        client.verify_session_grant(grant.grant, grant.attestation)
         self.assertEqual(budget.calls, 24)
 
     def test_live_actor_source_body_deletion_and_canonical_endpoint_refuse(self):
@@ -271,7 +267,7 @@ class FeedbackBrokerQualification(unittest.TestCase):
             grant.attestation["feedback"]["sources"][0]["body_sha256"],
             hashlib.sha256(source["body"].encode()).hexdigest(),
         )
-        self.assert_consumed(grant)
+        self.assert_signed_grant(grant)
 
     def test_python_float_trigger_refuses_before_worker_issuance(self):
         request = copy.deepcopy(self.request)
@@ -357,7 +353,7 @@ class FeedbackBrokerQualification(unittest.TestCase):
         grant = self.issue(request)
         self.assertEqual(grant.attestation["actor_id"], 42)
         self.assertEqual(grant.attestation["association"], "COLLABORATOR")
-        self.assert_consumed(grant)
+        self.assert_signed_grant(grant)
 
     def test_ordered_sources_targets_and_selection_digest_are_recomputed(self):
         for path, value in (
@@ -401,13 +397,13 @@ class FeedbackBrokerQualification(unittest.TestCase):
                 changed["mutation"][key] = value
                 with self.assertRaises(GitHubBrokerClientError):
                     client.verify_session_grant(grant.grant, changed)
-                self.assertEqual(self.bridge.call("grant_count")["result"], 1)
+                self.assertEqual(self.bridge.call("grant_count")["result"], 0)
         changed = copy.deepcopy(grant.attestation)
         changed["feedback"]["target_ids"] = ["e" * 64]
         with self.assertRaises(GitHubBrokerClientError):
             client.verify_session_grant(grant.grant, changed)
-        self.assertEqual(self.bridge.call("grant_count")["result"], 1)
-        self.assert_consumed(grant)
+        self.assertEqual(self.bridge.call("grant_count")["result"], 0)
+        self.assert_signed_grant(grant)
 
     def test_original_caller_budget_refuses_before_dispatch_without_deadline_reset(
         self,
@@ -432,7 +428,9 @@ class FeedbackBrokerQualification(unittest.TestCase):
         self.assertEqual(len(self.trace.attempts()), 1)
         self.assertEqual(self.bridge.call("grant_count")["result"], 0)
 
-    def test_fresh_oidc_required_and_consumed_grant_not_reissued_by_replay(self):
+    def test_oidc_replay_inside_five_minutes_issues_again_and_an_older_one_refuses(
+        self,
+    ):
         client = self.bridge.client()
         assertion = self.oidc(client)
         grant = client.authorize_session_mutation(
@@ -442,17 +440,27 @@ class FeedbackBrokerQualification(unittest.TestCase):
             head_sha="a" * 40,
             session_attestation=self.request,
         )
-        self.assert_consumed(grant)
+        self.assert_signed_grant(grant)
+        again = client.authorize_session_mutation(
+            assertion,
+            repository_id=987654321,
+            pull_request=7,
+            head_sha="a" * 40,
+            session_attestation=self.request,
+        )
+        self.assert_signed_grant(again)
+        stale = self.bridge.call("oidc", overrides={"iat": int(time.time()) - 301})[
+            "result"
+        ]
         with self.assertRaises(GitHubBrokerClientError):
             client.authorize_session_mutation(
-                assertion,
+                stale,
                 repository_id=987654321,
                 pull_request=7,
                 head_sha="a" * 40,
                 session_attestation=self.request,
             )
         self.assertEqual(self.bridge.call("grant_count")["result"], 0)
-        self.assert_consumed(self.issue())
 
     def test_real_parent_kill_before_verification_and_after_committed_consumption(self):
         for before in (True, False):
@@ -478,12 +486,8 @@ class FeedbackBrokerQualification(unittest.TestCase):
                 self.assertNotIn("status", reply)
                 durable_attempts = self.trace.attempts()
                 self.assertEqual(
-                    sum(
-                        item["origin"] == "broker-ledger"
-                        and item["action"] == "session_verify"
-                        for item in durable_attempts
-                    ),
-                    0 if before else 1,
+                    sum(item["origin"] == "broker-ledger" for item in durable_attempts),
+                    0,
                 )
                 self.bridge.process.kill()
                 self.bridge.process.wait(timeout=5)
@@ -493,16 +497,8 @@ class FeedbackBrokerQualification(unittest.TestCase):
                 self.assertEqual(self.trace.attempts(), durable_attempts)
                 self.bridge.close()
                 self.bridge = ProductionBrokerBridge(self.directory, self.trace)
-                self.assertEqual(
-                    self.bridge.call("grant_count")["result"], 1 if before else 0
-                )
-                if before:
-                    self.assert_consumed(grant)
-                else:
-                    with self.assertRaises(GitHubBrokerClientError):
-                        self.bridge.client().verify_session_grant(
-                            grant.grant, grant.attestation
-                        )
+                self.assertEqual(self.bridge.call("grant_count")["result"], 0)
+                self.assert_signed_grant(grant)
 
     def test_consumption_does_not_supply_the_pending_host_source_fence(self):
         grant = self.issue()
@@ -510,7 +506,7 @@ class FeedbackBrokerQualification(unittest.TestCase):
             "set_source", source={"body": "@sensei Changed after issuance."}
         )
         before = self.bridge.internal_dispatches()["transport"]
-        self.assert_consumed(grant)
+        self.assert_signed_grant(grant)
         after = self.bridge.internal_dispatches()["transport"]
         self.assertTrue(
             all(

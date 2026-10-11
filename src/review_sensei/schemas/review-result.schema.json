@@ -44,6 +44,7 @@
     },
     "provider": {"type": "string", "minLength": 1},
     "persistence_status": {"const": "capacity-exceeded"},
+    "coverage_only_partial": {"type": "boolean"},
     "review_status": {
       "type": "string",
       "enum": ["complete", "partial", "incomplete", "summary-only"]

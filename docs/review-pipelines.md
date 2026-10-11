@@ -463,7 +463,7 @@ content or environment interpolation.
 | `advanced.context.symbol_context` | `enabled`, `allowed_paths`, `max_files`, `max_bytes`, `max_depth` | Parsed defaults: disabled; 16 / 131072 / 1. **Normal CLI does not consume this YAML section**; use its explicit symbol-context flags |
 | `advanced.egress` | `allow_data_egress` | Parsed default false; **normal inference does not consume this YAML field**. Explicit endpoint/profile gates still apply |
 | `advanced.large_changes` | `orchestrate` | Parsed default false; **normal CLI requires `--orchestrate-large-changes` or unified mode**, not this YAML value |
-| `advanced.resources` | `timeout_seconds`, `max_provider_calls` | Backend timeout; call ceiling 8. Direct normal/reply CLI applies the YAML call cap only in unified routes |
+| `advanced.resources` | `timeout_seconds`, `max_provider_calls`, `review_deadline_seconds` | Backend timeout; calls default 8, ceiling 32; whole-review deadline default 120, ceiling 600 seconds, planning included. Direct normal/reply CLI applies the YAML call cap only in unified routes, where it also raises the chunk cap to match; the deadline applies in every route |
 | `advanced.review_work` | `mode`, `batch_diff_bytes`, `batch_prompt_bytes`, `max_total_prompt_bytes`, `max_total_output_bytes` | `legacy`, 131072, 262144, 2097152, 1048576 |
 
 Packaged backend defaults (not this repository's explicit YAML selection):

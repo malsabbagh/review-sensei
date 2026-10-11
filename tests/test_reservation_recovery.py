@@ -111,7 +111,7 @@ class Harness:
             token="session-token",
             app_slug="sensei[bot]",
             broker=self,
-            session_grant="g" * 43,
+            session_grant="sg1.1780000000000." + "a" * 43,
             session_attestation=self.attestation,
             head_sha=LIVE_HEAD,
             actions_read_token="actions-read-token",

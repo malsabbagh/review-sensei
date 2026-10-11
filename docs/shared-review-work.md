@@ -41,10 +41,12 @@ prompt admission requires trusted library-supplied capabilities for the exact
 provider/model. This change qualifies no production model or hosted routing
 profile.
 
-The shared run envelope permits at most eight actual provider dispatches, two
+The shared run envelope defaults to eight actual provider dispatches, two
 transport retries, two structural retries and 120 seconds. Failed dispatches
-consume calls. `advanced.resources.max_provider_calls` tightens both opt-in CLI
-routes. Adapter output limits and remaining deadline are tightened per request;
+consume calls. `advanced.resources.max_provider_calls` sets the dispatch cap for
+both opt-in CLI routes, up to 32, and raises the unified chunk cap to match.
+`advanced.resources.review_deadline_seconds` sets the whole-review deadline, up
+to 600 seconds; planning counts against it. Adapter output limits and remaining deadline are tightened per request;
 adapter settings never expand. Total prompt/output accounting is separate from
 per-batch admission, GitHub transport and durable ledger capacity.
 

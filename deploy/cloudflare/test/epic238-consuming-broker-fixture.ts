@@ -1,10 +1,7 @@
-/** F fixture: production broker/ledger over actual transactional SQLite.
- * GitHub/OIDC inputs are synthetic; grant verification is never stubbed.
- * This supplies no Python host persistence or writer activation policy.
+/** Production broker over signed grants. GitHub/OIDC inputs are synthetic.
+ * Grant verification is never stubbed. The worker stores nothing.
  */
-import { DatabaseSync } from "node:sqlite";
-import { readFileSync, openSync, writeSync, fsyncSync, closeSync } from "node:fs";
-import { BrokerLedger } from "../src/broker-ledger";
+import { readFileSync } from "node:fs";
 import { TokenBroker } from "../src/token-broker";
 import { GitHubApi } from "../src/github-api";
 import type { WorkerEnv } from "../src/env";
@@ -55,65 +52,19 @@ const keyPair = crypto.subtle.generateKey(
   true, ["sign", "verify"],
 );
 
-export async function consumingBroker(filename = ":memory:", traceFile?: string) {
+export async function consumingBroker(_filename = ":memory:", traceFile?: string) {
   const keys = await keyPair;
   const pem = Buffer.from(await crypto.subtle.exportKey("pkcs8", keys.privateKey)).toString("base64");
   const jwk = { ...await crypto.subtle.exportKey("jwk", keys.publicKey), kid: "synthetic-fixture", alg: "RS256", use: "sig" };
-  const database = new DatabaseSync(filename);
   const ledgerRequests: string[] = [];
-  const sql = {
-    exec(query: string, ...args: unknown[]) {
-      // Production constructor creates several tables in one statement.
-      if (query.trim().startsWith("CREATE TABLE")) {
-        database.exec(query);
-        return [];
-      }
-      const statement = database.prepare(query);
-      return query.trim().startsWith("SELECT")
-        ? statement.all(...args as never[])
-        : (statement.run(...args as never[]), []);
-    },
-  };
-  const context = {
-    storage: {
-      sql,
-      transactionSync<T>(callback: () => T): T {
-        database.exec("BEGIN IMMEDIATE");
-        try {
-          const value = callback();
-          database.exec("COMMIT");
-          return value;
-        } catch (error) {
-          database.exec("ROLLBACK");
-          throw error;
-        }
-      },
-    },
-  } as unknown as DurableObjectState;
-  const ledger = new BrokerLedger(context, {} as WorkerEnv);
   const env = {
     PUBLIC_WORKFLOW_TAG: "v5",
     GITHUB_APP_ID: "12345",
     GITHUB_APP_PRIVATE_KEY: `-----BEGIN PRIVATE KEY-----\n${pem}\n-----END PRIVATE KEY-----`,
     GITHUB_API_URL: "https://api.github.test",
-    BROKER_LEDGER: {
-      idFromName: () => ({ name: "broker" }),
-      get: () => ({ fetch: async (url: string, init: RequestInit) => {
-        const action = JSON.parse(String(init.body)).action;
-        ledgerRequests.push(action);
-        // Observe the real binding dispatch before calling production SQLite
-        // policy. No authority, liability, grant or budget is supplied here.
-        if (traceFile) {
-          const descriptor = openSync(traceFile, "a");
-          try {
-            writeSync(descriptor, JSON.stringify({ phase: "attempt", origin: "broker-ledger", method: init.method ?? "GET", path: new URL(url).pathname, action }) + "\n");
-            fsyncSync(descriptor);
-          } finally { closeSync(descriptor); }
-        }
-        return ledger.fetch(new Request(url, init));
-      } }),
-    },
+    REVIEWSENSEI_SIGNING_KEY: "test-signing-key",
   } as unknown as WorkerEnv;
+  void traceFile;
   const githubInputs = {
     number: 7, state: "open", draft: false,
     base: "b".repeat(40),
@@ -163,11 +114,14 @@ export async function consumingBroker(filename = ":memory:", traceFile?: string)
       const source = githubInputs.source;
       body = { id: source.id, body: source.body, updated_at: source.updatedAt, user: { id: source.authorId, login: source.login, type: source.userType }, author_association: source.association, issue_url: source.url };
       status = source.status;
-    } else if (url.pathname === "/repos/acme/widgets/pulls/comments/24680") {
+    }     else if (url.pathname === "/repos/acme/widgets/pulls/comments/24680") {
       const source = githubInputs.inlineSource;
       body = { id: source.id, body: source.body, updated_at: source.updatedAt, user: { id: source.authorId, login: source.login, type: source.userType }, author_association: source.association, pull_request_url: source.url, in_reply_to_id: source.rootCommentId };
       status = source.status;
-    } else { body = { message: "Not Found" }; status = 404; }
+    } else if (url.pathname === "/app") body = { slug: "reviewsensei" };
+    else if (url.pathname === "/repos/acme/widgets/pulls/7/reviews") body = [];
+    else if (url.pathname === "/repos/acme/widgets/issues/7/comments") body = [];
+    else { body = { message: "Not Found" }; status = 404; }
     return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   };
   let assertion = 0;
@@ -181,10 +135,10 @@ export async function consumingBroker(filename = ":memory:", traceFile?: string)
     return `${content}.${signature}`;
   };
   return {
-    broker: new TokenBroker(env, new GitHubApi(env)), ledger, ledgerRequests, githubInputs, configureFeedback,
+    broker: new TokenBroker(env, new GitHubApi(env)), ledgerRequests, githubInputs, configureFeedback,
     transport, transportRequests, oidcToken,
-    grantCount: () => Number(database.prepare("SELECT COUNT(*) AS count FROM broker_session_grants").get()?.count),
-    close: () => database.close(),
+    grantCount: () => 0,
+    close: () => undefined,
   };
 }
 

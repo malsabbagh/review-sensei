@@ -14,7 +14,7 @@
     },
     "documents": [
       {"path": "AGENTS.md"},
-      {"path": "docs/architecture.md"},
+      {"path": "docs", "include": ["architecture.md"]},
       {"path": "docs/architecture", "include": ["**/*.md"]},
       {"path": "docs/adr", "include": ["**/*.md"]}
     ]

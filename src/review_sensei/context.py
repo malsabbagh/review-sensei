@@ -729,47 +729,64 @@ def admit_prompt_context(
             )
         return replace(request, lens_contexts=tuple(contexts))
 
-    # At most 65 exact formatter probes for the existing <=64-document envelope.
-    # The enclosing original run deadline also bounds planning CPU work.
-    for index in range(len(candidates) + 1):
+    def probe(count: int) -> tuple[ReviewRequest, str] | None:
         if before_probe is not None:
             before_probe()
+        omitted.clear()
+        omitted.update(candidates[:count])
         selected = selected_request()
         prompt = render(selected)
-        if fits(prompt):
-            reports = tuple(
-                (context.category_id, context.document_selection)
+        return (selected, prompt) if fits(prompt) else None
+
+    # Omitting another whole document never grows the rendered frame, so the
+    # fewest lowest-ranked omissions that fit are found by bisection: at most
+    # 9 exact formatter probes for the existing <=64-document envelope. The
+    # enclosing original run deadline also bounds planning CPU work.
+    found = probe(0)
+    if found is None and candidates:
+        low, high = 1, len(candidates)
+        found = probe(high)
+        while found is not None and low < high:
+            middle = (low + high) // 2
+            attempt = probe(middle)
+            if attempt is None:
+                low = middle + 1
+            else:
+                high, found = middle, attempt
+        if found is not None:
+            omitted.clear()
+            omitted.update(candidates[:high])
+    if found is None:
+        raise PromptContextOverflow(
+            "mandatory context and complete evidence exceed the rendered prompt budget"
+        )
+    selected, prompt = found
+    reports = tuple(
+        (context.category_id, context.document_selection)
+        for context in selected.lens_contexts
+        if context.category_id in active
+        and isinstance(context.document_selection, DocumentSelectionReport)
+    )
+    return PromptContextAdmission(
+        selected,
+        prompt,
+        tuple(original_reports),
+        tuple(
+            (category, str(report.to_prompt_dict()["inventory_sha256"]))
+            for category, report in reports
+        ),
+        not any(bool(report.to_prompt_dict()["lossy"]) for _, report in reports),
+        len(omitted),
+        tuple(original_omission_reasons),
+        len(
+            {
+                doc.path
                 for context in selected.lens_contexts
                 if context.category_id in active
-                and isinstance(context.document_selection, DocumentSelectionReport)
-            )
-            return PromptContextAdmission(
-                selected,
-                prompt,
-                tuple(original_reports),
-                tuple(
-                    (category, str(report.to_prompt_dict()["inventory_sha256"]))
-                    for category, report in reports
-                ),
-                not any(
-                    bool(report.to_prompt_dict()["lossy"]) for _, report in reports
-                ),
-                len(omitted),
-                tuple(original_omission_reasons),
-                len(
-                    {
-                        doc.path
-                        for context in selected.lens_contexts
-                        if context.category_id in active
-                        for doc in context.documents
-                    }
-                ),
-                len(mandatory),
-            )
-        if index < len(candidates):
-            omitted.add(candidates[index])
-    raise PromptContextOverflow(
-        "mandatory context and complete evidence exceed the rendered prompt budget"
+                for doc in context.documents
+            }
+        ),
+        len(mandatory),
     )
 
 

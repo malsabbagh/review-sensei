@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Allow `advanced.resources.max_provider_calls` up to 32 (unified work also
+  raises its chunk cap to match) and add `advanced.resources.review_deadline_seconds`
+  up to 600 for the whole-review deadline, planning included. Defaults stay at
+  8 calls, 8 chunks and 120 seconds. Released packages before this change
+  reject either value above the old limits.
+- Stop pinning `docs/architecture/mandatory-rules.md` in the packaged
+  architecture category. It still loads through `docs/architecture/`, but
+  admission may now trim it instead of refusing every batch.
+- Move per-batch document admission diagnostics out of the published review
+  summary into a `review-sensei: context-admission` stderr line. The model's
+  summary and response budgets no longer lose 8,192 bytes to them, and the
+  call cap no longer depends on summary space.
+- Speed up unified planning on large diffs: prompt admission bisects the
+  number of omitted documents (at most 9 renders instead of up to 65) and
+  document scoring inputs are computed once per document. Planning the PR 271
+  diff dropped from about 160 seconds to under 20.
+
 ## 0.6.19 - 2026-10-10
 
 - Cache immutable human-inventory encodings without exposing mutable authority,

@@ -6,7 +6,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
-from review_sensei.cli import main
+from review_sensei.cli import _configured_resource_budget, main
 from review_sensei.configuration import (
     BACKEND_DEFAULTS,
     MAX_CONFIG_BYTES,
@@ -22,6 +22,8 @@ from review_sensei.configuration import (
     retired_environment_settings,
 )
 from review_sensei.errors import ReviewInputError
+from review_sensei.outcomes import ResourceBudget
+from review_sensei.validation import TotalWorkBudget
 
 SOURCE = ".reviewsensei.yml"
 MINIMAL = """schema: 1
@@ -58,9 +60,18 @@ class ConfigurationDocumentTests(unittest.TestCase):
         self.assertTrue(configuration.github.mentions)
         self.assertEqual(configuration.github.learning, "disabled")
         self.assertEqual(configuration.github.artifacts, "none")
+        self.assertEqual(configuration.github.operation_entry, "enabled")
         self.assertIn("inference.backend", configuration.declared)
         self.assertEqual(configuration.line_of("inference.backend"), 4)
         self.assertFalse(configuration.is_declared("github.writes"))
+
+    def test_operation_entry_defaults_to_enabled_and_rejects_unknown_values(self):
+        self.assertEqual(parse("schema: 1\n").github.operation_entry, "enabled")
+        disabled = parse("schema: 1\ngithub:\n  operation_entry: disabled\n")
+        self.assertEqual(disabled.github.operation_entry, "disabled")
+        with self.assertRaises(ConfigurationError) as unknown:
+            parse("schema: 1\ngithub:\n  operation_entry: sometimes\n")
+        self.assertIn("github.operation_entry", str(unknown.exception))
 
     def test_schema_is_required_and_versioned(self):
         with self.assertRaises(ConfigurationError) as missing:
@@ -220,6 +231,15 @@ class ConfigurationDocumentTests(unittest.TestCase):
         self.assertEqual(advanced.resources.timeout_seconds, 120.0)
         self.assertFalse(advanced.egress.allow_data_egress)
 
+    def test_provider_calls_and_review_deadline_accept_their_ceilings(self):
+        resources = parse(
+            "schema: 1\nadvanced:\n  resources:\n"
+            "    max_provider_calls: 32\n    review_deadline_seconds: 600\n"
+        ).advanced.resources
+        self.assertEqual(resources.max_provider_calls, 32)
+        self.assertEqual(resources.review_deadline_seconds, 600)
+        self.assertIsNone(parse(MINIMAL).advanced.resources.review_deadline_seconds)
+
     def test_advanced_hard_ceilings_are_not_configurable(self):
         with self.assertRaises(ConfigurationError) as files:
             parse(
@@ -229,6 +249,16 @@ class ConfigurationDocumentTests(unittest.TestCase):
         with self.assertRaises(ConfigurationError) as timeout:
             parse("schema: 1\nadvanced:\n  resources:\n    timeout_seconds: 99999\n")
         self.assertIn("packaged ceiling", str(timeout.exception))
+        for field, value in (
+            ("max_provider_calls", 33),
+            ("review_deadline_seconds", 601),
+        ):
+            with (
+                self.subTest(field=field),
+                self.assertRaises(ConfigurationError) as raised,
+            ):
+                parse(f"schema: 1\nadvanced:\n  resources:\n    {field}: {value}\n")
+            self.assertIn("packaged ceiling", str(raised.exception))
         with self.assertRaises(ConfigurationError) as unknown:
             parse("schema: 1\nadvanced:\n  requests:\n    headers: value\n")
         self.assertIn("advanced.requests", str(unknown.exception))
@@ -976,6 +1006,41 @@ class ConfigurationScalarTests(unittest.TestCase):
         self.assertEqual(configuration.line_of("advanced.resources.timeout_seconds"), 8)
         self.assertTrue(configuration.is_declared("advanced.resources.timeout_seconds"))
         self.assertIsNone(configuration.line_of("github.mentions"))
+
+
+class RaisedResourceCeilingTests(unittest.TestCase):
+    def test_defaults_stay_at_eight_calls_eight_chunks_and_120_seconds(self):
+        budget = ResourceBudget.create()
+        self.assertEqual(budget.max_provider_calls, 8)
+        self.assertEqual(budget.timeout_ms, 120_000)
+        work = TotalWorkBudget()
+        self.assertEqual((work.max_chunks, work.max_provider_calls), (8, 8))
+
+    def test_calls_chunks_and_deadline_may_rise_to_their_ceilings_only(self):
+        ResourceBudget.create(max_provider_calls=32, timeout_ms=600_000)
+        TotalWorkBudget(max_chunks=32, max_provider_calls=32)
+        for overrides in ({"max_provider_calls": 33}, {"timeout_ms": 600_001}):
+            with self.subTest(overrides=overrides), self.assertRaises(ReviewInputError):
+                ResourceBudget.create(**overrides)
+        for overrides in ({"max_chunks": 33}, {"max_provider_calls": 33}):
+            with self.subTest(overrides=overrides), self.assertRaises(ReviewInputError):
+                TotalWorkBudget(**overrides)
+
+    def test_configured_call_cap_applies_only_to_unified_work(self):
+        for mode, expected_calls in (("unified", 32), ("legacy", 8)):
+            with self.subTest(mode=mode):
+                configuration = parse(
+                    "schema: 1\nadvanced:\n"
+                    f"  review_work:\n    mode: {mode}\n"
+                    "  resources:\n"
+                    "    max_provider_calls: 32\n    review_deadline_seconds: 600\n"
+                )
+                budget = _configured_resource_budget(
+                    ResourceBudget.create(), configuration
+                )
+                self.assertEqual(budget.max_provider_calls, expected_calls)
+                self.assertEqual(budget.timeout_ms, 600_000)
+                budget.validate_against_limits()
 
 
 if __name__ == "__main__":

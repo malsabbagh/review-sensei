@@ -23,6 +23,7 @@ ENCODING = "zlib-json-v1"
 # Storage ceilings, independent of the downward-only analysis profiles. The
 # framing reserve is charged for every object, including short final parts.
 PARTITION_ENCODING = "partitioned-json-v1"
+INLINE_ENCODING = "inline-json-v1"
 PART_ENCODING = "evidence-part-v1"
 MAX_PART_BYTES = 32_768
 PART_FRAMING_RESERVE = 512
@@ -50,6 +51,29 @@ class NonResumableActivationError(ReviewInputError):
     """Original attempted control work lacks authenticated restart accounting."""
 
     reason = "original-attempt-witness-required"
+
+
+_ATTEMPT_WITNESS = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+
+
+def _operation_attempt_binding(witness: object) -> str | None:
+    """Binding of an OperationHandle. A snapshot, digest, or grant is not one."""
+
+    from .hosting.github.operation_entry import operation_handle_witness
+
+    binding = operation_handle_witness(witness)
+    if not isinstance(binding, str) or _ATTEMPT_WITNESS.fullmatch(binding) is None:
+        return None
+    return binding
+
+
+def _operation_witness_matches(witness: object, reservation_id: str) -> bool:
+    binding = _operation_attempt_binding(witness)
+    return (
+        isinstance(reservation_id, str)
+        and binding is not None
+        and binding == reservation_id
+    )
 
 
 @dataclass(frozen=True)
@@ -304,10 +328,18 @@ class EvidenceReadBudget:
             raise ReviewInputError("partition read deadline exhausted")
         return min(remaining, PART_READ_SECONDS)
 
-    def reserve_tail(self, plan: ActivationTailPlan) -> EvidenceTailTicket:
+    def reserve_tail(
+        self,
+        plan: ActivationTailPlan,
+        *,
+        witness: object = None,
+        reservation_id: str | None = None,
+    ) -> EvidenceTailTicket:
         """Debit the complete worst-case liability before serializing authority."""
         self.check()
-        if self.restored:
+        if self.restored and not _operation_witness_matches(
+            witness, reservation_id or ""
+        ):
             raise NonResumableActivationError(
                 "activation restart requires authenticated original attempt accounting"
             )
@@ -326,12 +358,21 @@ class EvidenceReadBudget:
         return ticket
 
     def _remember_live_attempt(
-        self, scope: str, root_sha256: str, *, owner: object
+        self,
+        scope: str,
+        root_sha256: str,
+        *,
+        owner: object,
+        witness: object = None,
+        reservation_id: str | None = None,
     ) -> None:
         if (
-            self.restored
-            or scope in self._live_attempts
+            scope in self._live_attempts
             or scope in self._failed_attempts
+            or (
+                self.restored
+                and not _operation_witness_matches(witness, reservation_id or "")
+            )
         ):
             raise NonResumableActivationError(
                 "activation requires a newly owned original attempt witness"
@@ -340,17 +381,35 @@ class EvidenceReadBudget:
         self._live_attempt_owners[scope] = owner
 
     def _require_live_attempt(
-        self, scope: str, root_sha256: str, *, owner: object
+        self,
+        scope: str,
+        root_sha256: str,
+        *,
+        owner: object,
+        witness: object = None,
+        reservation_id: str | None = None,
     ) -> None:
-        if (
-            self.restored
-            or scope in self._failed_attempts
-            or self._live_attempts.get(scope) != root_sha256
-            or self._live_attempt_owners.get(scope) is not owner
+        # A raw digest or mapping never satisfies this. Only an OperationHandle
+        # whose binding is the reservation can stand in for a restored budget
+        # or a missing in-memory attempt. A conflicting live root still refuses.
+        if scope in self._failed_attempts or (
+            scope in self._live_attempts
+            and self._live_attempts.get(scope) != root_sha256
         ):
             raise NonResumableActivationError(
                 "activation restart requires authenticated original attempt accounting"
             )
+        if (
+            not self.restored
+            and self._live_attempts.get(scope) == root_sha256
+            and self._live_attempt_owners.get(scope) is owner
+        ):
+            return
+        if _operation_witness_matches(witness, reservation_id or ""):
+            return
+        raise NonResumableActivationError(
+            "activation restart requires authenticated original attempt accounting"
+        )
 
     def _advance_live_attempt(self, scope: str, root_sha256: str) -> None:
         self._live_attempts[scope] = _sha(root_sha256)
@@ -486,6 +545,68 @@ def validate_manifest(value: object) -> dict[str, object]:
     if total != value["encoded_bytes"]:
         raise ReviewInputError("partition aggregate length does not match")
     return value
+
+
+def inline_manifest(
+    value: object,
+    *,
+    binding: Mapping[str, object],
+    item_count: int,
+) -> dict[str, object] | None:
+    """Return the document inside one manifest when it fits, else None.
+
+    Callers keep the partitioned manifest for anything larger. None means the
+    document is not an object or the inline form exceeds the manifest cap.
+    """
+
+    if isinstance(item_count, bool) or not isinstance(item_count, int):
+        raise ReviewInputError("inline evidence item count is invalid")
+    if not isinstance(value, dict):
+        return None
+    try:
+        raw = canonical_bytes(value)
+    except ReviewInputError:
+        return None
+    document = json.loads(raw)
+    if not isinstance(document, dict):
+        return None
+    manifest: dict[str, object] = {
+        "encoding": INLINE_ENCODING,
+        "binding": validate_binding(dict(binding)),
+        "item_count": _integer(item_count, 4096),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "document": document,
+    }
+    if len(canonical_bytes(manifest)) > MAX_MANIFEST_BYTES:
+        return None
+    return manifest
+
+
+def read_inline_evidence(
+    value: object, *, expected_binding: Mapping[str, object]
+) -> object:
+    """Return an inline document after its digest and binding match."""
+
+    if (
+        not isinstance(value, dict)
+        or value.get("encoding") != INLINE_ENCODING
+        or set(value) != {"encoding", "binding", "item_count", "sha256", "document"}
+    ):
+        raise ReviewInputError("inline evidence manifest is unsupported")
+    binding = validate_binding(value["binding"])
+    if binding != validate_binding(dict(expected_binding)):
+        raise ReviewInputError("inline evidence binding does not match")
+    _integer(value["item_count"], 4096)
+    _sha(value["sha256"])
+    document = value["document"]
+    if not isinstance(document, dict):
+        raise ReviewInputError("inline evidence document is invalid")
+    raw = canonical_bytes(document)
+    if hashlib.sha256(raw).hexdigest() != value["sha256"]:
+        raise ReviewInputError("inline evidence digest does not match")
+    if len(canonical_bytes(value)) > MAX_MANIFEST_BYTES:
+        raise ReviewInputError("inline evidence exceeds manifest capacity")
+    return document
 
 
 def stage_partitioned_evidence(

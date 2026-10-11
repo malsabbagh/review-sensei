@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from review_sensei.budgets import ProviderCapabilities, ReviewWorkBudgets
 from review_sensei.context import (
+    PROMPT_CONTEXT_POLICY,
     IncrementalReviewPlan,
     PromptContextOverflow,
     ReviewContextCache,
@@ -19,9 +20,9 @@ from review_sensei.context import (
     finding_lifecycle_for_comment,
 )
 from review_sensei.convergence import derive_blocker_candidate
-from review_sensei.discovery_work import CONTEXT_APPENDIX_RESERVE
 from review_sensei.document_context import DocumentDecision, DocumentSelectionReport
 from review_sensei.errors import ReviewInputError
+from review_sensei.evidence import evidence_digest
 from review_sensei.hosting.github import ReviewPublisher
 from review_sensei.hosting.github.approval import (
     ReviewApprovalEligibility,
@@ -232,6 +233,27 @@ class PromptContextAdmissionTests(unittest.TestCase):
                 fits=lambda prompt: len(prompt.encode()) < 100,
             )
 
+    def test_bisection_finds_the_fewest_omissions_in_bounded_probes(self):
+        original = request(lens(size=10, count=64, omitted=0))
+        for kept in (0, 1, 17, 63, 64):
+            probes = []
+
+            def render(value):
+                probes.append(1)
+                return "d" * len(value.lens_contexts[0].documents)
+
+            with self.subTest(kept=kept):
+                admitted = admit_prompt_context(
+                    original,
+                    active_category_ids=("documents",),
+                    changed_paths=("src/app.py",),
+                    render=render,
+                    fits=lambda prompt: len(prompt) <= kept,
+                )
+                self.assertLessEqual(len(probes), 9)
+                self.assertEqual(admitted.prompt_omitted, 64 - kept)
+                self.assertEqual(len(admitted.request.lens_contexts[0].documents), kept)
+
     def test_unreported_context_is_mandatory(self):
         context = replace(lens(size=100, count=1, omitted=0), document_selection=None)
         with self.assertRaises(PromptContextOverflow):
@@ -256,11 +278,10 @@ class PromptContextAdmissionTests(unittest.TestCase):
         )
         self.assertEqual(
             provider.calls[0].max_response_bytes,
-            request().limits.max_provider_response_bytes - CONTEXT_APPENDIX_RESERVE,
+            request().limits.max_provider_response_bytes,
         )
-        diagnostics = json.loads(
-            run.result.summary.split("executed batches only):\n")[1]
-        )
+        diagnostics = run.context_admission
+        self.assertNotIn(diagnostics["policy"], run.result.summary)
         self.assertEqual(len(diagnostics["batches"]), 1)  # no singleton/packing probes
         inventory = diagnostics["original_inventories"][0]
         self.assertEqual(
@@ -289,19 +310,29 @@ class PromptContextAdmissionTests(unittest.TestCase):
         self.assertEqual(run.result.review_status, "partial")
         self.assertFalse(run.result.coverage.fully_reviewed)
         self.assertIn("mandatory-context-and-evidence-oversized", run.result.summary)
-        self.assertNotIn("executed batches only", run.result.summary)
+        self.assertIsNone(run.context_admission)
 
-    def test_summary_reserve_boundary_refuses_without_clipping_provider_prose(self):
-        for bound in (CONTEXT_APPENDIX_RESERVE - 1, CONTEXT_APPENDIX_RESERVE):
-            provider = Provider()
-            run = service(provider).run(
-                request(
-                    lens(size=10, count=1, omitted=0),
-                    limits=ReviewLimits(max_summary_bytes=bound),
-                )
+    def test_context_diagnostics_take_no_summary_or_response_budget(self):
+        provider = Provider()
+        run = service(provider).run(
+            request(
+                lens(size=10, count=1, omitted=0),
+                limits=ReviewLimits(max_summary_bytes=4096),
             )
-            self.assertFalse(provider.calls)
-            self.assertIn("host-context-output-oversized", run.result.summary)
+        )
+        self.assertEqual(len(provider.calls), 1)
+        self.assertNotIn("Host reserves", provider.calls[0].prompt)
+        self.assertEqual(
+            provider.calls[0].max_response_bytes,
+            ReviewLimits().max_provider_response_bytes,
+        )
+        self.assertNotIn(PROMPT_CONTEXT_POLICY, run.result.summary)
+        self.assertEqual(len(run.context_admission["batches"]), 1)
+        self.assertIn(
+            "Document context admission sha256: "
+            + evidence_digest(run.context_admission),
+            run.result.summary,
+        )
 
     def test_selection_is_deterministic_and_binds_source_change(self):
         runs = []

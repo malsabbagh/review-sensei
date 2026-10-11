@@ -433,7 +433,12 @@ class ProsePublicationTests(unittest.TestCase):
             identity = identifiers[finding_instance_fingerprint(comment)]
             self.assertIn(f"`{identity}`", body)
             self.assertIn(comment.body, body)
-        self.assertEqual(len(set(re.findall(r"`(RS-[A-F0-9]+)`", body))), 8)
+        found = set(re.findall(r"`(RS-[A-F0-9]+)`", body))
+        self.assertEqual(
+            found,
+            {identifiers[finding_instance_fingerprint(item)] for item in comments}
+            | {"RS-ABCDEF"},
+        )
 
 
 if __name__ == "__main__":

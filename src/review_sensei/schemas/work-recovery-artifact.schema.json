@@ -69,7 +69,7 @@
             "provider_calls": {
               "type": "integer",
               "minimum": 0,
-              "maximum": 8
+              "maximum": 32
             },
             "transport_retries": {
               "type": "integer",
@@ -95,7 +95,7 @@
         },
         "completed": {
           "type": "array",
-          "maxItems": 8,
+          "maxItems": 32,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -134,7 +134,7 @@
         },
         "request_digests": {
           "type": "object",
-          "maxProperties": 8,
+          "maxProperties": 32,
           "propertyNames": {
             "pattern": "^[a-f0-9]{64}$"
           },

@@ -1417,8 +1417,23 @@ class ReviewResult:
     evidence_policy: str = "legacy"
     transaction: ReviewTransaction | None = None
     persistence_status: str | None = None
+    # Host-derived provenance for a complete analysis whose ONLY remaining
+    # coverage obligations are unsupported binary blobs. Never model output.
+    coverage_only_partial: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.coverage_only_partial, bool):
+            raise ReviewInputError("coverage-only partial flag is invalid")
+        if self.coverage_only_partial:
+            from .human_file_review import coverage_only_binary
+
+            if (
+                self.review_status != "partial"
+                or self.persistence_status is not None
+                or not isinstance(self.coverage, CoverageManifest)
+                or not coverage_only_binary(self.coverage)
+            ):
+                raise ReviewInputError("coverage-only partial provenance is invalid")
         if self.persistence_status is not None and (
             self.persistence_status != "capacity-exceeded"
             or self.review_status != "partial"
@@ -1578,6 +1593,15 @@ class ReviewResult:
             for field in _CONTENT_DIGEST_FIELDS
             if field in serialized
         }
+        if self.coverage_only_partial:
+            # Preserve every historical v1 digest when the optional flag is
+            # absent. New host provenance uses a distinct explicit projection;
+            # an old reader cannot silently verify/drop this approval input.
+            value = {
+                "domain": "reviewsensei:review-content:human-files:v1",
+                **value,
+                "coverage_only_partial": True,
+            }
         return hashlib.sha256(_json_compact(value).encode("utf-8")).hexdigest()
 
     def to_dict(self) -> dict[str, object]:
@@ -1622,6 +1646,8 @@ class ReviewResult:
             ]
         if self.coverage is not None:
             value["coverage"] = self.coverage.to_dict()
+        if self.coverage_only_partial:
+            value["coverage_only_partial"] = True
         if self.transaction is not None:
             value["transaction"] = self.transaction.to_dict()
         return value
@@ -1813,6 +1839,7 @@ class ReviewResult:
             finding_lifecycles=tuple(parsed_lifecycles),
             coverage=coverage,
             transaction=transaction,
+            coverage_only_partial=cast(bool, value.get("coverage_only_partial", False)),
         )
 
 

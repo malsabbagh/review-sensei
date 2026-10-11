@@ -226,7 +226,7 @@ class BrokerClientTests(unittest.TestCase):
             },
         )
 
-    def test_open_session_treats_a_rate_limited_window_as_transient(self):
+    def test_open_session_rejects_a_rate_limited_state(self):
         client, _calls = self.make_client(
             (
                 b'{"token":"ghs_session","capability":"review_session",'
@@ -234,7 +234,7 @@ class BrokerClientTests(unittest.TestCase):
                 200,
             )
         )
-        with self.assertRaises(GitHubHTTPTransientError):
+        with self.assertRaises(GitHubBrokerClientError):
             client.open_session(
                 "oidc.token",
                 repository_id=987654321,
@@ -270,7 +270,7 @@ class BrokerClientTests(unittest.TestCase):
                 "token": "ghs_session",
                 "capability": "review_session",
                 "session_state": "known",
-                "session_grant": "c" * 43,
+                "session_grant": "sg1.1780000000000." + "c" * 43,
                 "session_attestation": returned_attestation,
             }
         ).encode("utf-8")
@@ -285,7 +285,7 @@ class BrokerClientTests(unittest.TestCase):
         self.assertEqual(grant.attestation["actor"], "octocat")
         self.assertEqual(grant.attestation["command_id"], 13579)
         self.assertNotIn("ghs_session", repr(grant))
-        self.assertNotIn("c" * 43, repr(grant))
+        self.assertNotIn("sg1.1780000000000." + "c" * 43, repr(grant))
         payload = json.loads(calls[0][3].decode("utf-8"))
         self.assertNotIn("actor", payload["session_attestation"])
 
@@ -298,7 +298,7 @@ class BrokerClientTests(unittest.TestCase):
                         "token": "ghs_session",
                         "capability": "review_session",
                         "session_state": "known",
-                        "session_grant": "c" * 43,
+                        "session_grant": "sg1.1780000000000." + "c" * 43,
                         "session_attestation": missing_actor,
                     }
                 ).encode("utf-8"),

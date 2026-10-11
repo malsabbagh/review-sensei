@@ -155,7 +155,7 @@ class FeedbackAttestationTests(unittest.TestCase):
             else:
                 response = {
                     "token": "synthetic-token",
-                    "session_grant": "g" * 43,
+                    "session_grant": "sg1.1780000000000." + "a" * 43,
                     "session_state": "known",
                     "session_attestation": grant,
                 }

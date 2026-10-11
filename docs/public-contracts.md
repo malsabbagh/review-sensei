@@ -552,7 +552,9 @@ order; the explanation is not repeated per finding.
 
 Per-request `ReviewLimits` are unchanged. Opt-in `--orchestrate-large-changes`
 partitions a larger change into bounded chunks under a separate
-`TotalWorkBudget` (default 8 chunks and 8 provider calls). The CLI and
+`TotalWorkBudget` (default 8 chunks and 8 provider calls, each with a ceiling
+of 32). `ResourceBudget` defaults to 8 provider calls and a 120-second run
+deadline, with ceilings of 32 calls and 600 seconds. The CLI and
 `plan_change` read ceiling widens to `TotalWorkBudget.max_total_diff_bytes`
 (8 MiB) in orchestration mode; the default single-request path remains bounded
 by `ReviewLimits.max_diff_bytes` (1 MiB). Related changed paths are named in
@@ -1096,7 +1098,11 @@ review data migration is required.
 locations against the exact diff, rereads the open non-draft same-repository PR
 head, and submits one App-authored review whose formatted summary and inline
 comments append the fixed follow-up instruction `To discuss this finding, reply
-with @reviewsensei followed by your question.` and carry the marker
+with @reviewsensei followed by your question.` and the maintainer commands
+`@reviewsensei I reviewed the media files and I approve` and
+`@reviewsensei override RS-ABCDEF acceptable risk`. After an override, comment
+`@reviewsensei verify` to apply it. An override applies to the current commit
+only. A new push needs a new override. Those bodies carry the marker
 `<!-- reviewsensei:review:v1 repo=<id> pr=<n> head=<sha> result=<sha256> -->`.
 The default evidence policy is `legacy` single-pass mode. `confirmed` publishes
 only snapshot-bound confirmed candidates; unverified comments never become
@@ -1211,6 +1217,9 @@ finalizer. It does not call the provider again.
 Setup-v5 resolves every policy from `.reviewsensei.yml`; the packaged defaults
 are `github.reviews: auto-approve`, `github.automatic_reviews: true`, and
 `github.writes: false` (see the defaults table in `docs/installation.md`).
+`github.operation_entry` defaults to `enabled`. The measured P1 profile does
+not fit 60 ordinary dispatches (#267). `disabled` keeps the previous review
+paths. Caps stay 60 ordinary dispatches, 64 total, and 60 seconds.
 Automatic approval can be disabled with `github.reviews: blocking` (publish and
 enforce, never approve) or `github.reviews: advisory` (no ReviewSensei merge
 gate). When automatic review and GitHub writes are

@@ -12,8 +12,6 @@ from .context import (
     IncrementalReviewPlan,
     PromptContextAdmission,
     PromptContextDeadline,
-    PromptContextDiagnosticOverflow,
-    PromptContextOutputOverflow,
     ReviewContextCacheKey,
     admit_prompt_context,
 )
@@ -54,13 +52,25 @@ class DiscoveryBatchOutput(_ValidatedStageOutput):
     context_requests: tuple[ContextRequest, ...] = ()
 
 
-CONTEXT_APPENDIX_RESERVE = 8192
 PENDING_APPENDIX_RESERVE = 2048
 
 
-def _context_appendix(entries: list[dict[str, object]]) -> str:
-    if not entries:
+def _context_digest_line(document: dict[str, object] | None) -> str:
+    # Fixed size, so the published summary stays bound to the executed
+    # document selection without growing with the call count.
+    if document is None:
         return ""
+    return f"\n\nDocument context admission sha256: {evidence_digest(document)}."
+
+
+CONTEXT_DIGEST_LINE_BYTES = len(_context_digest_line({}).encode("utf-8"))
+
+
+def context_admission_document(
+    entries: list[dict[str, object]],
+) -> dict[str, object] | None:
+    if not entries:
+        return None
     originals: dict[str, object] = {}
     batches = []
     for entry in entries:
@@ -80,19 +90,11 @@ def _context_appendix(entries: list[dict[str, object]]) -> str:
                 )
             }
         )
-    return (
-        "\n\nHost document context admission (executed batches only):\n"
-        + json.dumps(
-            {
-                "policy": PROMPT_CONTEXT_POLICY,
-                "original_inventories": list(originals.values()),
-                "batches": batches,
-            },
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    )
+    return {
+        "policy": PROMPT_CONTEXT_POLICY,
+        "original_inventories": list(originals.values()),
+        "batches": batches,
+    }
 
 
 def discover(
@@ -212,16 +214,7 @@ def discover(
             capabilities=service.capabilities,
             output_tokens=provider_output_tokens(stage_provider),
         )
-        reserve = CONTEXT_APPENDIX_RESERVE if context_enabled else 0
-        if reserve:
-            budgets = replace(
-                budgets,
-                batch_output_bytes=max(0, budgets.batch_output_bytes - reserve),
-                max_total_output_bytes=max(0, budgets.max_total_output_bytes - reserve),
-            )
         suffix = "\n" + CONTEXT_REQUEST_INSTRUCTION
-        if reserve:
-            suffix += f"\nHost reserves {reserve} UTF-8 summary bytes for admission diagnostics. Provider summary must fit {request.limits.max_summary_bytes - reserve} UTF-8 bytes."
         correction_bytes = len(("\n\n" + _PROVIDER_OUTPUT_CORRECTION).encode("utf-8"))
         frame_bytes = len(suffix.encode("utf-8")) + correction_bytes
         admissions: dict[str, PromptContextAdmission] = {}
@@ -245,14 +238,6 @@ def discover(
                 request, diff=batch.diff_context, orchestrate_large_changes=False
             )
             batch_analysis = analyze_diff(batch.diff_context, limits=request.limits)
-            if reserve and (
-                request.limits.max_summary_bytes <= reserve
-                or budgets.batch_output_bytes <= 0
-                or budgets.max_total_output_bytes <= 0
-            ):
-                raise PromptContextOutputOverflow(
-                    "host context diagnostics exceed the output budget"
-                )
             admission = admit_prompt_context(
                 batch_request,
                 active_category_ids=tuple(category.id for category in categories),
@@ -278,17 +263,6 @@ def discover(
                 ),
                 before_probe=check_deadline,
             )
-            if reserve:
-                # Conservative per-run bound, checked before any dispatch.
-                # Planner probes never enter the durable summary.
-                ceiling = _context_appendix(
-                    [context_diagnostic(batch, admission)]
-                    * tracker.budget.max_provider_calls
-                )
-                if len(ceiling.encode("utf-8")) > reserve - PENDING_APPENDIX_RESERVE:
-                    raise PromptContextDiagnosticOverflow(
-                        "host context diagnostic inventory exceeds its reserved bound"
-                    )
             if len(admissions) >= 8:
                 admissions.pop(next(iter(admissions)))
             admissions[batch.batch_id] = admission
@@ -419,19 +393,11 @@ def discover(
                 if admission is None:
                     render(item.batch)
                     admission = admissions[item.batch.batch_id]
-                entries = (
-                    [*context_diagnostics, context_diagnostic(item.batch, admission)]
-                    if reserve
-                    else []
-                )
-                appendix = _context_appendix(entries)
-                if len(appendix.encode("utf-8")) > reserve:
-                    return False
-                prospective_summary = (
-                    "\n\n".join([*summaries, output.summary or ""]) + appendix
-                )
+                prospective_summary = "\n\n".join([*summaries, output.summary or ""])
                 if (
-                    len(prospective_summary.encode("utf-8")) + PENDING_APPENDIX_RESERVE
+                    len(prospective_summary.encode("utf-8"))
+                    + (CONTEXT_DIGEST_LINE_BYTES if context_enabled else 0)
+                    + PENDING_APPENDIX_RESERVE
                     > request.limits.max_summary_bytes
                 ):
                     return False
@@ -450,7 +416,7 @@ def discover(
                 summaries.append(output.summary)
             comments.extend(output.comments)
             proposals.extend(output.proposals)
-            if reserve:
+            if context_enabled:
                 context_diagnostics.append(context_diagnostic(item.batch, admission))
                 context_incomplete = context_incomplete or not admission.complete
             return True
@@ -657,6 +623,7 @@ def discover(
     )
     if not comment_stage:
         status = "summary-only"
+    context_admission = context_admission_document(context_diagnostics)
     refusal_summary = (
         "\n\nRequired work pending: "
         + "; ".join(
@@ -675,7 +642,7 @@ def discover(
                 "\n\n".join(summaries)
                 or "Review work could not be completed within the configured bounds."
             )
-            + _context_appendix(context_diagnostics)
+            + _context_digest_line(context_admission)
             + refusal_summary,
             comments=tuple(comments),
             proposals=tuple(proposals),
@@ -686,6 +653,17 @@ def discover(
             source_context_coverage=service._source_context_coverage(request),
         )
         result = service._attach_coverage(result, coverage)
+        # Complete reviewable text (including an empty text set) may coexist
+        # with binary obligations. Context/stage failures never gain this flag.
+        from .human_file_review import coverage_only_binary
+
+        if (
+            not failed
+            and not context_incomplete
+            and comment_stage
+            and coverage_only_binary(coverage)
+        ):
+            result = replace(result, coverage_only_partial=True)
     except ReviewInputError:
         return service._finish_run(
             tracker=tracker,
@@ -694,6 +672,7 @@ def discover(
             diagnostic="invalid_provider_output",
             repository=request.repository,
             pull_request_number=request.pull_request_number,
+            context_admission=context_admission,
         )
     service._provider_calls = tracker.provider_calls
     return service._finish_run(
@@ -704,4 +683,5 @@ def discover(
         repository=request.repository,
         pull_request_number=request.pull_request_number,
         diagnostic="partial_coverage" if status != "complete" else None,
+        context_admission=context_admission,
     )

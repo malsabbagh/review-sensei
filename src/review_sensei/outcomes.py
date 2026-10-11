@@ -24,7 +24,12 @@ from typing import Mapping
 from .broker_diagnostics import outcome_broker_diagnostic
 from .errors import ReviewInputError
 from .schemas import validate_public_document
-from .validation import DEFAULT_REVIEW_LIMITS, ReviewLimits, utf8_size
+from .validation import (
+    DEFAULT_REVIEW_LIMITS,
+    TOTAL_WORK_MAX_PROVIDER_CALLS_CEILING,
+    ReviewLimits,
+    utf8_size,
+)
 
 RUN_STATUSES = frozenset(
     {
@@ -51,6 +56,8 @@ DEFAULT_RESOURCE_BUDGET_MAX_RETRY_ATTEMPTS = 2
 DEFAULT_RESOURCE_BUDGET_TIMEOUT_MS = 120_000
 DEFAULT_RESOURCE_BUDGET_MAX_PROMPT_BYTES = 1_048_576
 DEFAULT_RESOURCE_BUDGET_MAX_OUTPUT_BYTES = 1_048_576
+RESOURCE_BUDGET_MAX_PROVIDER_CALLS_CEILING = TOTAL_WORK_MAX_PROVIDER_CALLS_CEILING
+RESOURCE_BUDGET_TIMEOUT_MS_CEILING = 600_000
 DEFAULT_RECOVERY_TTL_SECONDS = 6 * 60 * 60
 MAX_RECOVERY_TTL_SECONDS = 24 * 60 * 60
 PUBLIC_SCHEMA_VERSION = "1.0"
@@ -283,7 +290,9 @@ class ResourceBudget:
     deadline admission is checked before and after each provider call. In-flight
     provider calls are not interrupted.
 
-    Defaults are public downward-only ceilings.  Direct construction validates
+    Defaults are public ceilings, except that ``max_provider_calls`` (default
+    8) and ``timeout_ms`` (default 120 seconds) may be raised to 32 calls and
+    600 seconds.  Direct construction validates
     field types only; ``create(limits=...)`` is the fail-closed entry point that
     enforces both the public profile and the active ``ReviewLimits`` profile.
     Published result size is governed separately by ``ReviewLimits.max_result_bytes``.
@@ -321,9 +330,9 @@ class ResourceBudget:
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ReviewInputError(f"{name} must be a non-negative integer")
         ceilings = {
-            "max_provider_calls": DEFAULT_RESOURCE_BUDGET_MAX_PROVIDER_CALLS,
+            "max_provider_calls": RESOURCE_BUDGET_MAX_PROVIDER_CALLS_CEILING,
             "max_retry_attempts": DEFAULT_RESOURCE_BUDGET_MAX_RETRY_ATTEMPTS,
-            "timeout_ms": DEFAULT_RESOURCE_BUDGET_TIMEOUT_MS,
+            "timeout_ms": RESOURCE_BUDGET_TIMEOUT_MS_CEILING,
             "max_prompt_bytes": limits.max_prompt_bytes,
             "max_output_bytes": limits.max_provider_response_bytes,
         }
