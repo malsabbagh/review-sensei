@@ -2,6 +2,7 @@
 
 Status: Proposed review recommendations, not an accepted runtime contract.
 Date: 2026-10-10 UTC. Decision owner: maintainer and Epic238 integration coordinator.
+Disposition refresh: 2026-10-11 UTC, against merged PR271 and immutable main below.
 Related issues: [#238](https://github.com/malsabbagh/review-sensei/issues/238)
 and existing #239–246. Implementation remains with their six lanes; this review
 changes no runtime code, interfaces, ownership, release, or deployment.
@@ -15,7 +16,15 @@ operation receipts. Do not introduce another evidence service, competing queue,
 or an approval shortcut. Freeze integration only after the contract decisions
 below have an owner and an executable combined acceptance case.
 
-**Not ready to close Epic238 or qualify the complete-evidence release.** Current
+**Current decision: retain the complete-evidence qualification hold.** PR271 has
+merged and selects the policy decisions below; its operation-entry configuration
+defaults to enabled. Source implementation and synthetic request reductions do
+not qualify the complete public lifecycle, elapsed deadline or deployed readers.
+The 2026-10-11 matrix supersedes earlier implementation-status descriptions.
+Historical observations remain evidence about their explicit original SHA.
+
+**Historical baseline verdict, preserved:** Not ready to close Epic238 or qualify
+the complete-evidence release. At the original audited main, current
 source implements valuable fail-closed behavior and the cross-file packing fix,
 but does not supply the complete advertised lifecycle. Shared context can prevent
 all discovery, default full-publication recovery can lose its required input,
@@ -29,9 +38,182 @@ redesigning the engine. Maintainer approval belongs in the coordinator's canonic
 ADR; this document neither registers another numbered ADR nor marks ADR 0072
 Accepted. Its implementation is merged while its recorded status remains Proposed.
 
-## Inputs and evidence status
+## Merged-source dispositions (2026-10-11)
 
-Latest inspected main is `e8fdcd18f8256b1ceaab323701a2570b208d4e75`, including
+[PR271][merged-gap-closure] merged on 2026-10-11 at
+`4c8c1cd4d7f2506c693e3885f4a6be963de56396`, from head
+`06f5ae3c7d41435f7c63511803d3fbfe25f003ef`. This independent refresh inspects
+main `a20730773aacaee793a579739af30d47ebbb1d74`, including merged PR272/273.
+It corrects the time-bound [owner status note][pr271-owner-status], which was
+written before that merge. The assessment branch is rebased onto that exact
+main source; its remaining diff changes only this report. Earlier full-suite
+measurements retain their original audit pins. Open PR274–277 are excluded
+from this source assessment.
+
+[ADR0076][merged-contract] records selected D-A/D-B/D-C/D-D decisions while its
+overall status remains Proposed. Selection, implementation and qualification
+are separate. The report does not accept that ADR, alter the enabled default,
+introduce a missing-check approval gate or close Epic238/#239–246.
+
+| Original finding | Inspected merged-source disposition | Remaining acceptance or qualification |
+| --- | --- | --- |
+| R1 shared rendered context | **Policy changed; capacity remains finite.** The packaged architecture category makes both the guide and rules supplemental, with no required document source. Explicitly pinned mandatory-rule fixtures still admit a small complete diff; the 49,152-byte boundary and one-byte-over zero-provider negative pass. [Policy/tests][merged-context-tests] and [category][merged-category] establish these distinct cases. | The default may omit the rules; keyword extraction and optional admission do not prove normative completeness. [#270][context-follow-up] remains open. Larger configured complete evidence may still refuse. The earlier 61,136-byte mandatory-guide claim is historical, not the current packaged policy. |
+| R2 missing-check policy | **Decided.** ADR0076 D3 preserves missing, failed and unpublished checks as diagnostics rather than a new approval blocker. [Current application][merged-check-policy] retains that behavior. | Approval is not merge authorization; branch protection remains administrator-controlled. This disposition does not prove protected-branch requirements satisfied. |
+| R3 lost-runner full-publication input | **Accepted-result persistence implemented.** App-owned event comments embed a small validated result; larger results use authenticated bounded result parts. [Store tests][merged-store-tests] cover new-store reload, ownership, ambiguous records and write/readback mismatch. | Accepted result bytes and replay are not an end-to-end artifacts-none public restart with all original admission/publication inputs. Pre-commit interrupted admission is refused, not reconstructed. Full-publication mutation reconciliation remains part of the combined public proof. |
+| R4 root/latest-authority scan pressure | **Request reduction implemented.** [Session activation][merged-session-ledger] reuses listed parts and fences with `since`; adaptive page sizes are 100/20/5. Operation-comment listing separately uses at most ten pages of 100 and requires a short EOF page. | History lookups still list again; exact-cap and oversized-conversation refusal remain possible. The synthetic small/300-comment tests do not qualify every joint root/history/eligibility scan. |
+| R5 deadline/read-budget composition | **Synthetic count fits; elapsed/public composition unqualified.** The P1 fixture charges 25 for two checkpoints (19 GitHub + 6 broker), then 30 including accepted readback and replay. Original control caps remain 60 ordinary / 64 total / 60 seconds. [P1 tests][merged-p1-tests] passed locally. | [#267][profile-follow-up] is open. The fixture composes fake HTTP/broker/domain seams. Operation adapters pass a fixed `now=lambda: started`; that cannot prove elapsed deadline enforcement. Separate service limits up to 32 calls/600 seconds are not qualification of the original control budget. |
+| R6 targeting/fairness/complete feedback | **Primitives merged; selected verify contract incomplete.** D-C selects current-inventory reassessment with at most one provider request followed by the approval finalizer. The inspected [command branch][merged-application] instead executes/replays `apply_session_command(...)[1]`; it does not implement that selected reassessment/finalizer sequence. | Qualify actual public target/continuation and complete-feedback routes, current role/source fences and original allowance. A stored override or replayed verify command is not a fresh validated assessment or approval. |
+| R7 atomic evidence and scope handoff | **Primitive progress preserved.** Coalesced complete-evidence fixtures and accepted-packet persistence cover their tested seams. | Whole supported joint feedback must reach a validated decision or name its next supported operation. No new public handoff or aggregate resolution proof follows merely from those storage fixtures. |
+| R8 unchanged source and route contexts | **Exact-source record implemented.** [Unchanged-source tests][merged-unchanged-tests] bind repository/PR/base/head/path/mode, both blob SHAs, range, content digest and length; absent/truncated/foreign/nonregular/excluded evidence refuses. | A caller must actually use that record. Normal, broader, custom-lens and hosted route composition still need their own qualification; absence of diff hunks is not source evidence. |
+| R9 ack/replay and lost response accounting | **Accepted-result replay demonstrated in synthetic stores.** P1 executes once and reloads accepted result bytes; ownership/readback negatives remain tested. | No public OS-kill, sandbox restart or source-acknowledgement journey is qualified here. Local source process-fault fixtures and accepted-result reload are narrower than no repeated inference or duplicate remote publication across the complete public lifecycle. |
+| R10 artifact/readers/rollout | **Later publication records exist; rich lifecycle remains open.** Main records releases 0.6.20/0.6.21 and adds an isolated published-CLI qualification harness in PR273. [Release record][merged-release-record] supersedes the old blanket assertion that published main excludes these changes. | This refresh did not independently execute that published-CLI matrix or identify installed/deployed bytes. [#269][artifact-follow-up] still requires combined rich lifecycle, joint history, active/delayed readers and deployed Worker identity. A release record or harness is not that proof. |
+| R11 original grant/generation/tail composition | **Storage decision changed; public authority qualification incomplete.** D2 selects delegated execution assurance; the dormant SQL journal is removed and App-authored GitHub operation comments hold charges/results. The worker is stateless under D-D. [Operation adapter][merged-operation-entry] supplies the host request/proof fields; it internally marks the proof authenticated and uses synthetic inventory/root digests. | The selected D2 declaration is not independently established by those placeholder fields. Preserve bootstrap liabilities, stable original event binding, unknown effects and original deadline across actual adapters. [#268][bootstrap-follow-up] is closed by the supported pre-commit refusal disposition, not a new interrupted-admission recovery guarantee. |
+| R12 cumulative retention capacity | **Small inline receipts reduce requests.** Larger documents, including 250-finding baselines, still use parts. Earlier indexed-history measurements remain scoped to their immutable sources. | Combined 250 concerns across eight runs, baseline/inventory/prose/feedback/queue/tombstones/orphans and every reader remain unqualified under joint byte/scan/control limits. #269 stays open; no eviction or allowance reset is authorized. |
+
+The independently rerun selection on main `a207307` passed **128 tests**:
+`test_p1_public_profile`, `test_pr253_context_policy`, `test_operation_entry`,
+`test_github_operation_store`, `test_github_human_file_review`,
+`test_human_file_review`, `test_mixed_coverage`, `test_unchanged_source`,
+`test_operation_host` and `test_activation_tail` (including unittest-discovered
+imported fixture classes). These are credential-free source tests, not installed
+artifact, elapsed-time, live provider or deployed observations. The historical
+2,714-test/83.02% evidence below remains assigned to its original source.
+
+After rebasing this docs branch onto that same main source, clean complete
+coverage and ordinary suites each passed **3,218 tests**, with **82.84%** branch
+coverage above the unchanged 80% CI gate. Action pins, JSON/public schemas,
+Ruff, mypy (96 source files), compile, evaluation/site checks, local
+`--no-isolation` build, sdist contract and diff checks pass. The 120 immutable
+blob/line references and 19 relative paths resolve; all five diagrams remain
+byte-identical to their retained sources. These results do not identify installed
+or deployed bytes or turn local process-fault fixtures into a public journey.
+
+The media adapter's exact-head mixed APPROVE test passes while AI coverage stays
+partial, with unrelated blockers still withholding. That narrower tested adapter
+behavior does not establish D-C's general verify finalizer. No supported override
+can convert a pending qualification into implemented or measured evidence.
+
+The [request-reduction record][merged-request-reduction] retains earlier
+44-checkpoint/60-dispatch exhaustion and subsequent 49/36/30-dispatch stages.
+ADR0076 still quotes the earlier exhaustion trace; this assessment reports the
+later source-pinned synthetic result without rewriting coordinator-owned ADRs.
+Public elapsed-time work precedes legacy-route removal (Phase 7). This refresh
+performs no live provider inference, package publication, deployment or activation.
+
+## Historical pending integration and finding dispositions (2026-10-10)
+
+The following snapshot, component index and next-decision text describe the
+2026-10-10 pending heads only. They are retained as historical evidence and are
+superseded for current implementation status by the merged-source matrix above.
+
+This refresh inspects [PR257][pending-integration] at
+`6338e57c485132632cff3090a651eeb7f8cdda18` and its stacked
+[PR265][pending-provider-guards] at
+`a9cdcd49c64bd4ad21eafa9f4585823562c8e76a`. PR265's runtime/test files are
+byte-identical to independently reviewed `c1ec28676ffb8f85a73d84ec8d1807266a31efe2`;
+its final commit only links Proposed ADR0075 to the draft. PR253 was synchronized
+to main `1acd1f20efa0c27b49090041b0232d5d57ef86b4` before this docs-only refresh.
+That synchronization did not incorporate pending runtime changes into main or
+make the old assessment a review of them.
+
+The inspected integration source, [current status][integration-status],
+[live Epic ledger][live-epic] and the bounded independent handoffs underpin the
+dispositions below. **Implemented pending** means inspected code and scoped
+tests in an unmerged draft. **Partial** means a mechanism is implemented but the
+original user journey or whole resource/authority proof remains open. None means
+enabled, deployed, universally supported or approved for release. All partition
+and indexed-history writers and v4 finalization remain disabled; the default
+public mention still uses the legacy 4 KiB source route. No row closes an issue.
+
+| Original finding | Disposition at the pinned pending source | Remaining acceptance or authority gate |
+| --- | --- | --- |
+| R1 shared rendered context | **Partial fix.** PR257 serializes each shared document once, preserves mandatory guidance and carries optional-selection digests/omissions into partial results. [Context tests][integration-context-tests] cover admission and coverage. | The complete PR231 mandatory architecture document is 61,136 UTF-8 bytes before framing versus 49,152 unqualified prompt bytes. Deduplication/optional selection does not solve that mandatory bound. Reviewed trusted-policy correction, qualification of a finite provider capability, or a separate complete-guidance design and meaningful actual review remain required. |
+| R2 missing-check policy | **Unchanged product-policy disposition pending.** Existing documented diagnostic-only check publication behavior is preserved in PR257/265. | Reconcile the epic's unconditional missing-check negative with the existing policy explicitly. This report does not choose a new approval gate or assert branch-protection satisfaction. |
+| R3 lost-runner full-publication input | **Public gap remains.** Complete authenticated baseline readers and receipt-first private diagnostic recovery are implemented; they do not reconstruct all original full-publication payload/admission inputs on the default lost-runner route. [Integration status][integration-status] separates those authorities. | Prove the public artifacts-none full-review restart with exact original payload/context and reconciled publication. Optional diagnostics and a stored digest are not the missing payload. |
+| R4 root/latest-authority scan pressure | **Partial fix.** Authenticated bounded part readers, adaptive acquisition and current-root/direct-child association are implemented. [History association][integration-history-proof] authenticates the complete direct-child inventory and exact selected reference. | Joint root/history/eligibility scans, every retained child and bootstrap must fit the original budget. Sparse child lookup and successful codec reads alone do not qualify discovery/activation of the whole graph. |
+| R5 deadline/read-budget composition | **Partial fix.** Live operations prepay bounded activation tails; absolute original accounting is retained. Structural fixtures use an explicit acquisition clock and retain an exact-60-second refusal negative. | No useful public original 64-dispatch/60-second journey is qualified. Include provider elapsed time, source/head/root fences, broker-internal calls, retries, finalization and acknowledgement without resets or invented restored proof. |
+| R6 targeting/fairness/complete feedback | **Implemented pending primitives; public wiring incomplete.** Complete instance identities, explicit targets, fair queues and authenticated ordered full-feedback helpers exist in PR257. [Queue tests][integration-queue-tests] and [feedback tests][integration-feedback-tests] exercise their seams. | Expose and qualify the actual public selection/continuation/factory workflow, fresh source/role fences and original allowance. The legacy public mention is still 4 KiB; prose naming does not confer target authority. |
+| R7 atomic evidence and scope handoff | **Partial fix.** Exhaustive materialization, complete feedback preflight, factored history and explicit coalesced admission/dispatch are implemented behind their reviewed seams. | Complete supported joint evidence must reach a validated decision through the public workflow; unsupported groups remain pending. No independently accepted fragments, model summary or undocumented disabled expansion supplies aggregate resolution authority. |
+| R8 unchanged source and route contexts | **Precise supported refusal; context fixes partial.** Exact changed-file acquisition/path handling is implemented; missing unchanged-path evidence remains a safe refusal. Shared/optional context coverage is explicit. | Qualify normal, broader, custom-lens and hosted invocation semantics. Do not infer a new exact unchanged-source lookup/citation authority from exhaustive changed-file acquisition. |
+| R9 ack/replay and lost response accounting | **Partial fix.** Durable checkpoint/diagnostic receipts, pre-dispatch output reservation and actual process-fault fixtures cover original charges, accepted decisions and unknown outcomes. [Recovery tests][integration-recovery-tests] retain their scope. | Public source acknowledgement before refreshed COMMENT remains an open restart boundary. Accepted authority must be durable/read back before ack, with no repeated inference or duplicate committed mutation. Private cache reuse and synthetic checkpoint kills are not that public proof. |
+| R10 artifact/readers/rollout | **Source and installed-candidate evidence delivered; activation qualification remains.** Exact PR257/265 CI and candidate installed-package evidence are separate from the historical 2,714-test record below. | Final combined public lifecycle, compatible active/delayed readers, reader-first drain and separately authorized published/deployed rich-feature observations remain required. Published merged-main 0.6.19/v5 excludes these pending features. |
+| R11 original grant/generation/tail composition | **Live tail defect corrected; durable authority partial.** PR257 prepays same-live-ledger tails, validates evolving root/grant references and includes a dormant sticky SQLite original-attempt journal. [ADR0074][integration-attempt-adr] is Proposed; clock/callback-key corrections are independently verified. | The journal has no production construction, public authorizer/endpoint or restore authority. Trusted first-admission derivation, server-origin/bootstrap liability, same-storage consumption and exact current owned-root proof remain required. New grants/root references cannot manufacture an original witness. |
+| R12 cumulative retention capacity | **Structural progress demonstrated; whole lifecycle unqualified.** Indexed/coalesced synthetic 250 history retains 64 sources and all original receipts in 129 pieces / 3,029,999 framed bytes. Bounds remain 32 active operations, 256 retained sources, 2 MiB current decoded documents, 256 pieces / 8 MiB physical retention. | Combine baseline/inventory/prose/feedback/evidence/current queue/tombstones and all child validation with root/scan/control budgets. Structural timing or queue-only bytes do not prove hosted 250 throughput; no eviction/reset may erase obligations or renew an event's allowance. |
+
+PR265 additionally closes the independently reproduced **provider guard gaps**
+under I1/I11: unsafe present completion/termination/usage metadata is refused even
+when review JSON parses; strict library construction requires complete metadata,
+exact model and a finite cap. Qualified capabilities bind exact endpoint and
+`bounded-complete-text-v1`. Dispatch rechecks after the durable callback, wrappers
+read current identity, and malformed current caps refuse before transport.
+Independent original probes now make zero transport calls: a callback conflict
+retains one charged call, the unknown output reservation and accounting checkpoint.
+The bounded independent selection passed 80 tests. [Guard implementation/tests][provider-guard-tests]
+and [Proposed ADR0075][provider-guard-adr] delimit the contract. Legacy absent
+metadata remains accepted in its unqualified mode; no CLI/factory adopts strict
+mode or a larger capability. Hosted tokenizer/template mapping and installed
+producer authority are separate unresolved qualifications, not facts inferred
+from this adapter declaration. The finite capability candidate remains false.
+
+### Pending component head index and inspection limits
+
+These are the verified remote component heads at this refresh. The reviewed
+composition is PR257's selected source, plus PR265's guard delta; this index does
+**not** assert a fresh independent full-suite review of every standalone branch.
+Some selected commits were cherry-picked or followed by owned amendments, so an
+open component head is not automatically the integration's ancestor or exact tree.
+The older PR250 `ba89418` and A `0ca0f8e` measurements below remain historical.
+
+| Pending PR / responsibility | Verified immutable component head |
+| --- | --- |
+| [248](https://github.com/malsabbagh/review-sensei/pull/248), F packing/process faults | `09b4256ede082bc9a87c65c547c65f4f466eb90b` |
+| [249](https://github.com/malsabbagh/review-sensei/pull/249), D authenticated feedback | `3749b14d5df9b017785e5ea9a18e38db5020ca51` |
+| [250](https://github.com/malsabbagh/review-sensei/pull/250), A complete baseline/parts | `f364de1d67a13e86879385a13b10684caec312bb` |
+| [251](https://github.com/malsabbagh/review-sensei/pull/251), B identity/inventory | `647a2db3a17e0e01e7c3017e5cecde9cc7a1ec10` |
+| [252](https://github.com/malsabbagh/review-sensei/pull/252), E exact evidence/context | `b24461ab86a380e4165cb13cf6a5807636d302fa` |
+| [254](https://github.com/malsabbagh/review-sensei/pull/254), B feedback/prose staging | `955e95140478b28d7341551579c67d64a04afccb` |
+| [255](https://github.com/malsabbagh/review-sensei/pull/255), C durable queue | `09b7c86f85f55c9a7a99e411f2a4905b776c4ccb` |
+| [256](https://github.com/malsabbagh/review-sensei/pull/256), C feedback/coalescing | `c54ea6e170629d2f6b792b90105a26afa0e7ac7a` |
+| [258](https://github.com/malsabbagh/review-sensei/pull/258), D source integration helpers | `724407696a70f1d28ee05016e87d32b930a1f27f` |
+| [259](https://github.com/malsabbagh/review-sensei/pull/259), C factored history/host seam | `d60e4b88c97c13a837813070e07f41a49ee3023c` |
+| [260](https://github.com/malsabbagh/review-sensei/pull/260), A tails/direct-child ownership | `325e2d1920991130647d4bc40559f884dbe7b314` |
+| [261](https://github.com/malsabbagh/review-sensei/pull/261), C indexed receipts | `c425739851989bda81649eefe2d917dd70b522fc` |
+| [262](https://github.com/malsabbagh/review-sensei/pull/262), C combined admission/dispatch | `1de80b17771ac71f44b17640dfa2fb86d4daf73d` |
+| [263](https://github.com/malsabbagh/review-sensei/pull/263), C restore-before-render | `752ac2651240afd2d5d40a66af45866288d9308b` |
+| [264](https://github.com/malsabbagh/review-sensei/pull/264), C structural acquisition clock | `5f027d8d37c423194c1a6e86a1b7eba2fdbd59ee` |
+
+### Exact-source evidence and next decision
+
+GitHub independently reports both pinned CI runs completed successfully, with all
+15 actual jobs including Required checks: [PR257 CI 38022774364][integration-ci]
+and [PR265 CI 38027024046][provider-guard-ci]. Auxiliary ReviewSensei trigger
+success is a separate observation. PR257's owner records 3,023 tests / 83.52%
+coverage, exact exported wheel/sdist and outside-checkout installed 21 distribution-safe,
+11 downstream and 28 graph/recovery tests. PR265 records 3,043 tests / 83.57%,
+exact build/installed 21 distribution-safe, 11 downstream and 20 guard regressions.
+Those retained owner records and independently checked CI must not be relabeled
+this docs branch's test counts or public deployment evidence.
+
+The next architecture decision remains **trusted first-admission derivation**:
+workflow/run/tag OIDC establishes the approved caller, but does not independently
+derive rendered prompt semantics or identify installed Python dependency bytes.
+An explicit producer-delegation decision and independently validated complete
+root/source/inventory/budget/liability document, or a reviewed shared derivation
+mechanism, must precede public original-attempt authority. This refresh chooses
+neither option. No parallel authorizer, queue or storage service is introduced.
+
+Before Epic done, require combined full review → findings → fix/explain →
+reassessment → exact-head decision through the actual public route, including
+crash/concurrency/refusal branches under the original complete physical budget.
+Then qualify exact installed/published artifacts and active/delayed consumers in
+the authorized reader-first sequence. Current positive source/primitive evidence
+and honest pending outcomes are useful progress, not complete lifecycle support.
+The existing proposed sequence diagram below remains a target contract; its
+staging/activation/publication arrows are not a diagram of enabled PR257 behavior.
+
+## Historical inputs and evidence status
+
+Original inspected main is `e8fdcd18f8256b1ceaab323701a2570b208d4e75`, including
 PR231. The runtime audit and synthetic probes pin its unchanged runtime ancestor
 `70305207647c22595660e5ebb9e4a33991489ffe`; local ancestry checks include merged
 PRs #235/#236/#237/#247. PR231 changes the release workflow/helper/tests/docs,
@@ -71,7 +253,11 @@ operations from eight to **32**; this addresses the minimum-run count, but is no
 a measured 250-finding lifecycle guarantee under the 2 MiB receipt aggregate.
 Neither prototype is merged by this review.
 
-## Claim-to-code-and-test matrix
+## Historical claim-to-code-and-test matrix
+
+This table retains the original pinned-main observations. Consult the merged-source
+dispositions above for current status; “current” within these original rows refers
+to the original `7030520`/`e8fdcd1` audit, not the later integration source.
 
 | Claim or handoff | Current source evidence and test oracle | Status / consequence |
 | --- | --- | --- |
@@ -104,9 +290,9 @@ Neither prototype is merged by this review.
 
 ## Invariants and contract handoffs
 
-The following diagram is a **proposed integration contract**, not a new claim
-about current storage or universal completion. Existing gates are preserved;
-durable payload/queue/source wiring is qualification work.
+The following diagram is a **historical proposed integration contract**, not a
+claim about the merged-source routes or universal completion. The current
+qualification gaps are recorded above; these arrows remain a target journey.
 
 ```mermaid
 sequenceDiagram
@@ -161,7 +347,7 @@ sequenceDiagram
 | I13 Readers and privacy | Every authority reader supports active schema; rollback retains required readers and obligations. Defaults do not require raw diagnostics. | Immutable old readers fail closed; exact installed/current/deployed consumers qualify; no new secret or raw-response store. |
 | I14 Grant and generation composition | One-attempt hosted mutation authority is separate from operation allowance and immutable inventory identity. Each authorized mutation retains fresh head/role checks without replaying a consumed grant. | Broker-backed multi-batch checkpoint/restart exercises every charge, acceptance, queue and publication root write; no fake unlimited grant, generation-driven allowance reset or unguarded part write. |
 
-## Prioritized corrections and owners
+## Historical prioritized corrections and owners
 
 | Priority / ID | Classification and concrete gap | Existing owner / minimum disposition |
 | --- | --- | --- |
@@ -254,8 +440,9 @@ Evidence: workspace `activation_tail_probe.py` SHA256
 
 ## Executable journey and failure coverage
 
-Existing passing suites establish current behavior; the acceptance column
-describes required **combined** evidence, not a claim that proposals passed it.
+The historical suites below establish behavior at their original audit pins;
+the acceptance column describes required **combined** evidence, not a claim
+that the merged-source routes passed it.
 
 | Journey / branch | Current oracle | Required combined qualification |
 | --- | --- | --- |
@@ -277,7 +464,7 @@ describes required **combined** evidence, not a claim that proposals passed it.
 | Finalizer negatives and already-resolved retry | `test_github_approval`, `test_gate_and_default_approval`, `test_human_assessment` | Exact selected policy; remaining required/human/coverage/qualification/capability/PR/thread blockers; no inference for finalization-only retry. |
 | Wheel/sdist, five native targets, six npm packages, v5 readers | distribution and immutable reader harnesses | Install actual built bytes outside checkout; official registry bytes/SRI/checksums/attestations only after authorized publication; actual caller/workflow/broker and delayed readers separately verified. |
 
-## Limit composition at the inspected source
+## Historical limit composition at the inspected source
 
 KiB/MiB mean 1,024/1,048,576 bytes. Serialized counts include JSON escaping and
 framing; they are not token estimates. Limits below intersect at each real
@@ -312,7 +499,7 @@ contract][outcomes], [models][models], [stage loader][stage-loader],
 [baseline][baseline], [session][session], [human][human], [conversation][conversation],
 [HTTP][http], [acquisition][acquisition], [publication][publication], [recovery][recovery].
 
-## Measured boundaries and validation record
+## Historical measured boundaries and validation record
 
 Credential-free synthetic probes against the pinned main, using existing public
 test fixtures, produced:
@@ -437,3 +624,35 @@ actions, never infinite capacity or a zero-regression promise.
 [a-staging-budget]: https://github.com/malsabbagh/review-sensei/blob/0ca0f8e82e6f94e026cfcb027b43ff684ef00a54/src/review_sensei/bounded_evidence.py#L332
 [check-installation]: https://github.com/malsabbagh/review-sensei/blob/70305207647c22595660e5ebb9e4a33991489ffe/docs/installation.md#L70
 [check-registration]: https://github.com/malsabbagh/review-sensei/blob/70305207647c22595660e5ebb9e4a33991489ffe/docs/github-app-registration.md#L60
+[pending-integration]: https://github.com/malsabbagh/review-sensei/pull/257
+[pending-provider-guards]: https://github.com/malsabbagh/review-sensei/pull/265
+[integration-status]: https://github.com/malsabbagh/review-sensei/blob/6338e57c485132632cff3090a651eeb7f8cdda18/docs/epic238-integration-status.md
+[live-epic]: https://github.com/malsabbagh/review-sensei/issues/238
+[integration-context-tests]: https://github.com/malsabbagh/review-sensei/blob/6338e57c485132632cff3090a651eeb7f8cdda18/tests/test_prompt_context_admission.py
+[integration-history-proof]: https://github.com/malsabbagh/review-sensei/blob/6338e57c485132632cff3090a651eeb7f8cdda18/src/review_sensei/history_association.py
+[integration-queue-tests]: https://github.com/malsabbagh/review-sensei/blob/6338e57c485132632cff3090a651eeb7f8cdda18/tests/test_assessment_queue.py
+[integration-feedback-tests]: https://github.com/malsabbagh/review-sensei/blob/6338e57c485132632cff3090a651eeb7f8cdda18/tests/test_complete_feedback_assessment.py
+[integration-recovery-tests]: https://github.com/malsabbagh/review-sensei/blob/6338e57c485132632cff3090a651eeb7f8cdda18/tests/test_work_recovery.py
+[integration-attempt-adr]: https://github.com/malsabbagh/review-sensei/blob/6338e57c485132632cff3090a651eeb7f8cdda18/docs/adr/0074-durable-original-attempt-accounting.md
+[provider-guard-tests]: https://github.com/malsabbagh/review-sensei/blob/a9cdcd49c64bd4ad21eafa9f4585823562c8e76a/tests/test_provider_completion_guards.py
+[provider-guard-adr]: https://github.com/malsabbagh/review-sensei/blob/a9cdcd49c64bd4ad21eafa9f4585823562c8e76a/docs/adr/0075-complete-provider-response-contract.md
+[integration-ci]: https://github.com/malsabbagh/review-sensei/actions/runs/38022774364
+[provider-guard-ci]: https://github.com/malsabbagh/review-sensei/actions/runs/38027024046
+[merged-gap-closure]: https://github.com/malsabbagh/review-sensei/pull/271
+[pr271-owner-status]: https://github.com/malsabbagh/review-sensei/pull/253#issuecomment-6105641012
+[merged-contract]: https://github.com/malsabbagh/review-sensei/blob/a20730773aacaee793a579739af30d47ebbb1d74/docs/adr/0076-pr253-gap-closure-contracts.md
+[merged-context-tests]: https://github.com/malsabbagh/review-sensei/blob/a20730773aacaee793a579739af30d47ebbb1d74/tests/test_pr253_context_policy.py
+[merged-category]: https://github.com/malsabbagh/review-sensei/blob/a20730773aacaee793a579739af30d47ebbb1d74/src/review_sensei/default_categories/03-architecture.json
+[merged-application]: https://github.com/malsabbagh/review-sensei/blob/a20730773aacaee793a579739af30d47ebbb1d74/src/review_sensei/hosting/github/application.py#L1395
+[merged-check-policy]: https://github.com/malsabbagh/review-sensei/blob/a20730773aacaee793a579739af30d47ebbb1d74/src/review_sensei/hosting/github/application.py#L1443
+[merged-store-tests]: https://github.com/malsabbagh/review-sensei/blob/a20730773aacaee793a579739af30d47ebbb1d74/tests/test_github_operation_store.py
+[merged-p1-tests]: https://github.com/malsabbagh/review-sensei/blob/a20730773aacaee793a579739af30d47ebbb1d74/tests/test_p1_public_profile.py
+[merged-unchanged-tests]: https://github.com/malsabbagh/review-sensei/blob/a20730773aacaee793a579739af30d47ebbb1d74/tests/test_unchanged_source.py
+[merged-release-record]: https://github.com/malsabbagh/review-sensei/blob/a20730773aacaee793a579739af30d47ebbb1d74/CHANGELOG.md
+[merged-operation-entry]: https://github.com/malsabbagh/review-sensei/blob/a20730773aacaee793a579739af30d47ebbb1d74/src/review_sensei/hosting/github/operation_entry.py#L192
+[merged-session-ledger]: https://github.com/malsabbagh/review-sensei/blob/a20730773aacaee793a579739af30d47ebbb1d74/src/review_sensei/hosting/github/session_ledger.py
+[merged-request-reduction]: https://github.com/malsabbagh/review-sensei/blob/a20730773aacaee793a579739af30d47ebbb1d74/docs/proposals/pr271-request-reduction.md
+[context-follow-up]: https://github.com/malsabbagh/review-sensei/issues/270
+[profile-follow-up]: https://github.com/malsabbagh/review-sensei/issues/267
+[artifact-follow-up]: https://github.com/malsabbagh/review-sensei/issues/269
+[bootstrap-follow-up]: https://github.com/malsabbagh/review-sensei/issues/268
