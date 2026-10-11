@@ -25,11 +25,41 @@ from qualify_published_cli import (
     download_command,
     exact_version,
     propagation_download,
+    require_installed_distribution,
+    require_wheel_digest,
     validate_receipt,
 )
 
 
 class BootstrapContracts(unittest.TestCase):
+    def test_origin_must_be_inside_the_new_environment_not_a_source_checkout(self):
+        environment = Path("/isolated/environment")
+        valid = {
+            "version": "0.6.21",
+            "origin": str(
+                environment / "lib/python3.14/site-packages/review_sensei/__init__.py"
+            ),
+        }
+        require_installed_distribution(valid, "0.6.21", environment)
+        for origin in [
+            "/source/review_sensei/__init__.py",
+            "/source/site-packages/review_sensei/__init__.py",
+            "/isolated/environment-other/lib/site-packages/review_sensei/__init__.py",
+            "/isolated/environment/not-site-packages/review_sensei/__init__.py",
+        ]:
+            with self.subTest(origin=origin), self.assertRaises(ValueError):
+                require_installed_distribution(
+                    {**valid, "origin": origin}, "0.6.21", environment
+                )
+        with self.assertRaises(ValueError):
+            require_installed_distribution(valid, "0.6.20", environment)
+
+    def test_expected_release_digest_is_optional_but_exact_when_supplied(self):
+        require_wheel_digest("a" * 64, None)
+        require_wheel_digest("a" * 64, "a" * 64)
+        with self.assertRaises(ValueError):
+            require_wheel_digest("a" * 64, "b" * 64)
+
     def test_exact_version_never_accepts_latest_or_ranges_or_shell_text(self):
         for value in [
             "latest",

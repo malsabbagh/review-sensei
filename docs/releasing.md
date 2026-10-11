@@ -13,6 +13,11 @@ follow [the runtime rollout plan](review-runtime-rollout.md). Its next-version
 candidate must be rechecked against all registries before preparation; `v5`
 promotion follows verified package publication rather than a floating install.
 
+After a separately authorized signed major-channel move, follow
+[major-channel validation](major-tag-validation.md). The validator binds the
+exact tag object/source and attested published wheel, reuses the installed CLI
+harness, and documents the default-branch dispatch needed for historical targets.
+
 ## GitHub Release draft and publication
 
 For future tags containing this workflow, successful Python, native/npm and

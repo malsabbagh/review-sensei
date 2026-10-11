@@ -15,6 +15,31 @@ from pathlib import Path
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:rc[0-9]+)?\Z")
 
 
+def wheel_sha256(value):
+    if not re.fullmatch(r"[a-f0-9]{64}", value):
+        raise argparse.ArgumentTypeError("an exact lowercase wheel SHA-256 is required")
+    return value
+
+
+def require_wheel_digest(actual, expected):
+    if expected is not None and actual != expected:
+        raise ValueError(
+            "downloaded PyPI wheel differs from the verified release digest"
+        )
+
+
+def require_installed_distribution(identity, version, environment):
+    origin = Path(identity.get("origin", "")).resolve()
+    if (
+        identity.get("version") != version
+        or "site-packages" not in origin.parts
+        or not origin.is_relative_to(environment.resolve())
+    ):
+        raise ValueError(
+            "installed version/origin differs from the isolated distribution"
+        )
+
+
 def exact_version(value):
     if not VERSION.fullmatch(value):
         raise argparse.ArgumentTypeError(
@@ -118,6 +143,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True, type=exact_version)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--expected-wheel-sha256", type=wheel_sha256)
     args = parser.parse_args()
     root = args.output.resolve()
     if root.exists():
@@ -164,6 +190,8 @@ def main():
             "name": wheel.name,
             "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
         }
+        require_wheel_digest(report["wheel"]["sha256"], args.expected_wheel_sha256)
+        report["expected_wheel_sha256"] = args.expected_wheel_sha256
         command = [
             str(python),
             "-I",
@@ -192,13 +220,7 @@ def main():
             [str(python), "-I", "-c", inspect], cwd=root, env=env, text=True, timeout=15
         )
         report["installed"] = json.loads(identity)
-        if (
-            report["installed"]["version"] != args.version
-            or "site-packages" not in report["installed"]["origin"]
-        ):
-            raise RuntimeError(
-                "installed version/origin differs from the requested distribution"
-            )
+        require_installed_distribution(report["installed"], args.version, environment)
         scripts = Path(__file__).resolve().parents[1] / "tests/published_cli"
         for name in (
             "qualify",
