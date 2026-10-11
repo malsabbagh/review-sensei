@@ -170,7 +170,7 @@ class CloudflarePackageTests(unittest.TestCase):
             '"  learning: disabled\\n"',
             '"  # none or diagnostics\\n"',
             '"  artifacts: none\\n"',
-            '"  operation_entry: disabled\\n"',
+            '"  operation_entry: enabled\\n"',
             '"# Optional limits and endpoint overrides.\\n"',
             '"    # Required to send requests to a custom API root\\n"',
             '"    allow_custom_endpoint: false\\n"',
@@ -223,7 +223,7 @@ class CloudflarePackageTests(unittest.TestCase):
             "  artifacts: none\n"
             "  # enabled uses the shared operation entry. disabled keeps the previous paths.\n"
             "  # The measured P1 profile does not fit 60 ordinary dispatches (#267).\n"
-            "  operation_entry: disabled\n"
+            "  operation_entry: enabled\n"
             "\n"
             "# Optional limits and endpoint overrides.\n"
             "advanced:\n"

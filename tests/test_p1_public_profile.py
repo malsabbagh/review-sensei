@@ -2,8 +2,9 @@
 
 One pull request, four pending instances, one provider request, and two GitHub
 checkpoint activations, then operation-comment acceptance. Ordinary dispatches
-stop at 60. This trace exhausts that allowance before accepted readback, so
-``github.operation_entry`` stays disabled. Caps are not raised.
+stop at 60. This trace exhausts that allowance before accepted readback.
+The product default stays ``enabled``. ``disabled`` is the rollback. Caps are
+not raised.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ class P1PublicProfileTests(unittest.TestCase):
     def test_two_checkpoints_then_acceptance_exhaust_ordinary_dispatches(self):
         self.assertEqual(MAX_PART_READS, 64)
         self.assertEqual(PART_READ_SECONDS, 60.0)
-        self.assertEqual(GitHubSection().operation_entry, "disabled")
+        self.assertEqual(GitHubSection().operation_entry, "enabled")
 
         case = HostedTailTests()
         state, broker, ledger = case.setup_host()

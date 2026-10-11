@@ -156,7 +156,8 @@ snapshot or a fresh consuming grant is still not an original-attempt witness.
    synthetic trace of one pull request, four pending instances, one provider
    request and two GitHub checkpoint activations spends 44 dispatches, then
    operation-comment acceptance exhausts the 60 ordinary dispatches before
-   accepted readback (#267). `github.operation_entry` defaults to disabled.
+   accepted readback (#267). `github.operation_entry` still defaults to enabled.
+   `disabled` is the rollback.
    Caps stay 60 ordinary, 64 total, and 60 seconds. Refusal
    must preserve previous authority and unknown outcomes without replenishment.
 4. Joint baseline, human inventory, feedback, evidence, visible prose, current

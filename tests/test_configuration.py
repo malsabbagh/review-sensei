@@ -58,15 +58,15 @@ class ConfigurationDocumentTests(unittest.TestCase):
         self.assertTrue(configuration.github.mentions)
         self.assertEqual(configuration.github.learning, "disabled")
         self.assertEqual(configuration.github.artifacts, "none")
-        self.assertEqual(configuration.github.operation_entry, "disabled")
+        self.assertEqual(configuration.github.operation_entry, "enabled")
         self.assertIn("inference.backend", configuration.declared)
         self.assertEqual(configuration.line_of("inference.backend"), 4)
         self.assertFalse(configuration.is_declared("github.writes"))
 
-    def test_operation_entry_defaults_to_disabled_and_rejects_unknown_values(self):
-        self.assertEqual(parse("schema: 1\n").github.operation_entry, "disabled")
-        enabled = parse("schema: 1\ngithub:\n  operation_entry: enabled\n")
-        self.assertEqual(enabled.github.operation_entry, "enabled")
+    def test_operation_entry_defaults_to_enabled_and_rejects_unknown_values(self):
+        self.assertEqual(parse("schema: 1\n").github.operation_entry, "enabled")
+        disabled = parse("schema: 1\ngithub:\n  operation_entry: disabled\n")
+        self.assertEqual(disabled.github.operation_entry, "disabled")
         with self.assertRaises(ConfigurationError) as unknown:
             parse("schema: 1\ngithub:\n  operation_entry: sometimes\n")
         self.assertIn("github.operation_entry", str(unknown.exception))

@@ -59,12 +59,11 @@ bounded part pattern. The result is published on that pull request anyway, so
 nothing leaves the repository. A rerun after a crash publishes from those
 parts and makes no second provider call.
 
-**D-B. Default for the new route.** Phase 6 measured the P1 profile and it does
-not fit, so the default is `disabled`. `enabled` still opts into
-`run_review_trigger`. The trusted policy switch `github.operation_entry:
-enabled|disabled` stays as the rollback lever. The caps are never raised. A
-trigger that would exceed the budget fails closed as `unavailable`. #267 stays
-open. Phase 7 does not run.
+**D-B. Default for the new route.** The default stays `enabled`. Phase 6
+measured the P1 profile and it does not fit 60 ordinary dispatches. That
+measurement does not turn the route off. `disabled` remains the rollback.
+The caps are never raised. A trigger that would exceed the budget fails closed
+as `unavailable`. #267 stays open. Phase 7 does not run.
 
 **D-C. What verify does.** Decided: verify is the existing-inventory
 reassessment contract on the current head. It makes at most one provider
@@ -362,8 +361,8 @@ uses the remaining ordinary dispatches and stops at 60, before the result-part
 readback. Four fence slots remain and cannot pay for that ordinary GET. The
 provider ran once. Accepted readback and replay did not run. Elapsed synthetic
 time was under a second; the dispatch count is the failure. No sandbox trace
-was run, because the synthetic count already decides the branch. The default
-is `disabled`. Caps stay 60 ordinary, 64 total, and 60 seconds. #267 stays
+was run. The product decision keeps the default `enabled`. `disabled` remains
+the rollback. Caps stay 60 ordinary, 64 total, and 60 seconds. #267 stays
 open. Phase 7 does not run.
 
 ## Phase 7: remove the legacy paths (after Phase 6 passes)

@@ -1215,9 +1215,9 @@ finalizer. It does not call the provider again.
 Setup-v5 resolves every policy from `.reviewsensei.yml`; the packaged defaults
 are `github.reviews: auto-approve`, `github.automatic_reviews: true`, and
 `github.writes: false` (see the defaults table in `docs/installation.md`).
-`github.operation_entry` defaults to `disabled`. The measured P1 profile does
-not fit 60 ordinary dispatches (#267). `enabled` opts into the shared operation
-entry. Caps stay 60 ordinary dispatches, 64 total, and 60 seconds.
+`github.operation_entry` defaults to `enabled`. The measured P1 profile does
+not fit 60 ordinary dispatches (#267). `disabled` keeps the previous review
+paths. Caps stay 60 ordinary dispatches, 64 total, and 60 seconds.
 Automatic approval can be disabled with `github.reviews: blocking` (publish and
 enforce, never approve) or `github.reviews: advisory` (no ReviewSensei merge
 gate). When automatic review and GitHub writes are
