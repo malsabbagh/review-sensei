@@ -647,7 +647,14 @@ profile's adapter and allowed models.
 
 The adapter's default endpoint allowlist contains only `https://api.openai.com`.
 An operator who intentionally owns a different HTTPS-compatible service must
-construct the adapter with `allow_custom_endpoint=True`; this explicit opt-in
+construct the adapter with `allow_custom_endpoint=True`, use an unprofiled
+`--allow-custom-endpoint` invocation, or declare `advanced.endpoint.base_url`
+and `advanced.endpoint.allow_custom_endpoint: true` in the selected canonical
+configuration. YAML permission applies only to that endpoint; a different
+`--base-url` requires its own CLI opt-in. Named profiles keep their fixed
+endpoint policy. The reusable workflow exports permission from the frozen
+trusted policy commit into both review and reply commands; pull-request head
+configuration and workflow caller inputs cannot grant it. This explicit opt-in
 acknowledges that review data and the supplied bearer credential leave the
 machine. The default opener rejects redirects and reuses a verified TLS context
 from the system CA store (or a regular file named by `SSL_CERT_FILE`). Injected
@@ -666,7 +673,7 @@ The command is `review-sensei`. Supported flags are:
 | `--profile` | none | Named provider profile (`local-private`, `fast-triage`, `deep-verification`, `openrouter-sonnet`, `openrouter-gpt`). A profile selects its own provider, model, endpoint, credential, and timeout, so `--profile` alone is a complete invocation; an explicit `--provider` is optional and must match it when supplied |
 | `--provider` | `REVIEWSENSEI_PROVIDER` | Canonical backend: `local-ollama`, `cloud-ollama`, `openai-compatible`, `openrouter`, or `fixture` |
 | `--base-url` | none | Explicit endpoint override. A non-allowlisted hosted endpoint additionally requires `--allow-custom-endpoint`; no environment variable can move a hosted endpoint |
-| `--allow-custom-endpoint` | none | Allow an `openai-compatible` base URL outside `api.openai.com`; this opt-in is only valid on the command line and never with `--profile` |
+| `--allow-custom-endpoint` | none | Allow an `openai-compatible` base URL outside `api.openai.com`; CLI opt-in authorizes the invocation URL; YAML permission authorizes only its declared `base_url`. Never valid with `--profile` |
 | `--model` | `REVIEWSENSEI_MODEL` | Explicit model override validated against the selected backend |
 | `--api-key-env` | none | Name of environment variable holding the API key |
 | `--timeout-seconds` | none | Finite positive provider timeout; defaults to the selected backend's documented timeout. NaN/infinity are rejected before dispatch. The 3,600-second YAML ceiling does not add a new CLI override ceiling; existing request/run budget bounds still apply |

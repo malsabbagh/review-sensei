@@ -360,10 +360,13 @@ def _apply_provider_defaults(args: argparse.Namespace, arguments: list[str]) -> 
             _assign_if_present(args, "api_key_env", None)
 
 
-def _add_allow_custom_endpoint_argument(parser: argparse.ArgumentParser) -> None:
+def _add_allow_custom_endpoint_argument(
+    parser: argparse.ArgumentParser, *, default: object = False
+) -> None:
     parser.add_argument(
         "--allow-custom-endpoint",
         action="store_true",
+        default=default,
         help=(
             "Allow an openai-compatible base URL outside api.openai.com; "
             "required for an explicit --base-url that is not allowlisted"
@@ -656,6 +659,11 @@ def resolve_review_inference(
     args.base_url = (
         cli_base_url if isinstance(cli_base_url, str) else None
     ) or resolved.base_url
+    # File authority is bound to its endpoint; overriding the URL does not
+    # silently authorize a different service to receive the selected key.
+    args.allow_custom_endpoint = bool(
+        getattr(args, "allow_custom_endpoint", False)
+    ) or (resolved.authorizes_custom_endpoint(args.base_url))
     args.api_key_env = (
         cli_api_key_env if isinstance(cli_api_key_env, str) else None
     ) or resolved.credential_env
@@ -1409,6 +1417,7 @@ def _doctor_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile")
     parser.add_argument("--provider")
     parser.add_argument("--base-url")
+    _add_allow_custom_endpoint_argument(parser)
     parser.add_argument("--model")
     parser.add_argument("--api-key-env")
     parser.add_argument("--compatibility-manifest", type=Path)
@@ -1493,6 +1502,7 @@ def _plan_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile")
     parser.add_argument("--provider")
     parser.add_argument("--base-url")
+    _add_allow_custom_endpoint_argument(parser)
     parser.add_argument("--model")
     parser.add_argument("--api-key-env")
     parser.add_argument("--provider-mode")
@@ -1980,6 +1990,7 @@ def _github_parser() -> argparse.ArgumentParser:
         "--provider", default=os.getenv("REVIEWSENSEI_PROVIDER", "ollama")
     )
     reply.add_argument("--base-url", default=_default_ollama_base_url())
+    _add_allow_custom_endpoint_argument(reply, default=argparse.SUPPRESS)
     reply.add_argument("--model", default=_default_ollama_model())
     reply.add_argument("--api-key-env", default="OLLAMA_API_KEY")
     reply.add_argument(
@@ -2842,6 +2853,7 @@ def _run_doctor_command(arguments: list[str]) -> int:
             profile=args.profile,
             provider=args.provider,
             base_url=args.base_url,
+            allow_custom_endpoint=args.allow_custom_endpoint,
             model=args.model,
             api_key_env=args.api_key_env,
             compatibility_manifest=args.compatibility_manifest,
@@ -2915,6 +2927,7 @@ def _run_plan_command(arguments: list[str]) -> int:
             profile=args.profile,
             provider=args.provider,
             base_url=args.base_url,
+            allow_custom_endpoint=args.allow_custom_endpoint,
             model=args.model,
             api_key_env=args.api_key_env,
             provider_mode=args.provider_mode,

@@ -68,6 +68,7 @@ class HostedPlan:
     backend: str
     model: str
     base_url: str
+    allow_custom_endpoint: bool
     credential_env: str | None
     credential_required: bool
     credential_present: bool
@@ -87,6 +88,7 @@ class HostedPlan:
             "backend": self.backend,
             "model": self.model,
             "base_url": self.base_url,
+            "allow_custom_endpoint": self.allow_custom_endpoint,
             "credential_env": self.credential_env,
             "credential_required": self.credential_required,
             "credential_present": self.credential_present,
@@ -161,6 +163,7 @@ def _plan_from(
         backend=resolved.backend,
         model=resolved.model,
         base_url=resolved.base_url,
+        allow_custom_endpoint=resolved.allow_custom_endpoint,
         credential_env=resolved.credential_env,
         credential_required=resolved.credential_required,
         credential_present=resolved.credential_present,
@@ -188,6 +191,7 @@ def hosted_plan_outputs(plan: HostedPlan) -> tuple[tuple[str, str], ...]:
         ("backend", plan.backend),
         ("model", plan.model),
         ("base_url", plan.base_url),
+        ("allow_custom_endpoint", flag(plan.allow_custom_endpoint)),
         ("runner_kind", plan.runner_kind),
         ("credential_env", plan.credential_env or ""),
         ("credential_required", flag(plan.credential_required)),
@@ -251,6 +255,7 @@ def render_hosted_plan(plan: HostedPlan, *, as_json: bool) -> str:
         f"backend: {plan.backend} ({plan.source_of('backend').detail})",
         f"model: {plan.model} ({plan.source_of('model').detail})",
         f"endpoint: {plan.base_url} ({plan.source_of('base_url').detail})",
+        f"custom endpoint permission: {_flag(plan.allow_custom_endpoint)}",
         f"runner requirement: {plan.runner_kind}",
         f"credential: {credential}",
     ]

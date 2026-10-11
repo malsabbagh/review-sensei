@@ -140,7 +140,7 @@
       ],
       "limitations": [
         "Named profiles are immutable presets; custom endpoints require unprofiled openai-compatible use.",
-        "Not enabled by the reusable workflow; requires OPENAI_API_KEY and --profile fast-triage or equivalent settings.",
+        "The reusable workflow supports canonical openai-compatible settings with OPENAI_API_KEY; custom HTTPS endpoints require permission from the frozen trusted policy commit.",
         "The npx launcher forwards argv to the Python CLI; reaching openai-compatible still requires explicit --profile fast-triage (or unprofiled flags) plus OPENAI_API_KEY."
       ]
     },

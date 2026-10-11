@@ -172,7 +172,10 @@ provider-facing review payload to `https://api.openai.com/v1` using a bearer
 token from the caller-supplied `OPENAI_API_KEY` value. The adapter rejects
 redirects, requires HTTPS, and does not fall back to Ollama. Custom hosts
 require an explicit `allow_custom_endpoint` opt-in at the Python boundary and
-are rejected for named profiles. Review the current OpenAI retention, training,
+are rejected for named profiles. The unprofiled CLI accepts an explicit flag or
+YAML permission bound to the declared endpoint. Hosted review and reply consume
+only the frozen trusted policy commit, so PR head configuration cannot redirect
+the provider credential. Review the current OpenAI retention, training,
 residency, and deletion terms before selecting this profile.
 
 ## Bounded transfer and failure contract

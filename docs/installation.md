@@ -180,18 +180,24 @@ The default configuration is local-first and leaves `OLLAMA_API_KEY` empty.
 Cloud egress is explicit opt-in: select `cloud-ollama` and provide
 `OLLAMA_API_KEY`. A custom gateway is declared in `.reviewsensei.yml` under
 `advanced.endpoint` with `allow_custom_endpoint: true`, the gateway `base_url`,
-and the name of the environment variable that holds its credential. The model
+and the name of the environment variable that holds its credential. YAML-only
+permission reaches the adapter for that endpoint. A different CLI `--base-url`
+requires `--allow-custom-endpoint`; named profiles retain their fixed endpoints.
+Hosted review and reply resolve permission from the frozen trusted default-branch
+policy commit. Hosted credential references remain restricted to the workflow
+secrets `OLLAMA_API_KEY`, `OPENROUTER_API_KEY`, and `OPENAI_API_KEY`; use
+`OPENAI_API_KEY` for a hosted OpenAI-compatible gateway. The model
 slug must match the selected backend shape (Ollama slugs for local/cloud,
 `vendor/model` slugs for OpenRouter); a cross-backend value fails closed before
 any provider call.
 
-Backend selection differs between the two surfaces: the local CLI reads
-`REVIEWSENSEI_PROVIDER` (or `--provider`), while an installed GitHub workflow
-selects its backend with the single `REVIEWSENSEI_PROVIDER_MODE` variable
-documented below. `REVIEWSENSEI_MODEL` and `REVIEWSENSEI_REVIEW_MODE` are read
-by both.
+Both local and hosted execution resolve `inference.backend` and
+`inference.model` from canonical YAML, with `REVIEWSENSEI_PROVIDER` and
+`REVIEWSENSEI_MODEL` overrides. Explicit local CLI flags take precedence.
+`REVIEWSENSEI_PROVIDER_MODE` is retired and cannot select a backend.
 
-Endpoint, timeout, and credential selection come from the command line flags
+Endpoint, timeout, and credential selection come from the selected canonical
+configuration, command line flags
 (`--base-url`, `--allow-custom-endpoint`, `--timeout-seconds`, `--api-key-env`)
 or the selected backend's documented defaults; no other environment variable
 moves a review's endpoint or timeout. A backend that requires no credential
