@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from hashlib import sha256
@@ -23,12 +24,17 @@ from ...coverage import coverage_approval_state
 from ...diff import analyze_diff
 from ...disposition import MaintainerCommand
 from ...errors import ReviewInputError
-from ...human_assessment import HumanAssessmentReply, HumanAssessmentService
-from ...models import ReviewResult, ReviewTransaction
+from ...human_assessment import (
+    HumanAssessmentDecision,
+    HumanAssessmentReply,
+    HumanAssessmentService,
+)
+from ...models import ConversationReply, ReviewResult, ReviewTransaction
 from ...outcomes import RecoveryArtifact, ResourceBudget, ResourceBudgetTracker
 from ...planning import related_paths_for_change
 from ...providers.base import ReviewProvider
-from ...reassessment_work import reassess
+from ...reassessment_work import HumanAssessmentWork, reassess
+from ...scope import ContextRequest
 
 if TYPE_CHECKING:
     from ...service import ReviewService
@@ -106,6 +112,122 @@ class GitHubWriteOptions:
         if self.reviews_policy not in REVIEW_POLICY_MODES:
             raise GitHubPublicationError("review policy mode is invalid")
         return self.reviews_policy
+
+
+def _conversation_bytes(value: object) -> bytes:
+    if not isinstance(value, ConversationReply):
+        return b""
+    return json.dumps(value.to_dict(), sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+
+
+def _conversation_from_bytes(payload: bytes) -> ConversationReply:
+    loaded = json.loads(payload)
+    if not isinstance(loaded, dict):
+        raise ReviewInputError("operation entry refused: result_missing")
+    return ConversationReply.from_dict(loaded)
+
+
+def _assessment_bytes(value: object) -> bytes:
+    reply = value.reply if isinstance(value, HumanAssessmentWork) else value
+    if not isinstance(reply, HumanAssessmentReply):
+        return b""
+    body = {
+        "body": reply.body,
+        "decisions": [item.to_dict() for item in reply.decisions],
+        "context_requests": [item.to_dict() for item in reply.context_requests],
+    }
+    return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _assessment_from_bytes(payload: bytes) -> HumanAssessmentReply:
+    loaded = json.loads(payload)
+    if not isinstance(loaded, dict):
+        raise ReviewInputError("operation entry refused: result_missing")
+    decisions = loaded.get("decisions")
+    requests = loaded.get("context_requests")
+    if not isinstance(decisions, list) or not isinstance(requests, list):
+        raise ReviewInputError("operation entry refused: result_missing")
+    return HumanAssessmentReply(
+        str(loaded.get("body", "")),
+        tuple(
+            HumanAssessmentDecision(
+                str(item["fingerprint"]),
+                str(item["decision"]),
+                str(item["rationale"]),
+                str(item["human_evidence"]),
+                str(item["diff_evidence"]),
+                tuple(
+                    (str(pair["path"]), str(pair["excerpt"]))
+                    for pair in item.get("related_diff_evidence", ())
+                ),
+            )
+            for item in decisions
+            if isinstance(item, dict)
+        ),
+        tuple(
+            ContextRequest(
+                str(item["reference"]),
+                str(item["kind"]),
+                tuple(str(path) for path in item["required_paths"]),
+                str(item["reason"]),
+            )
+            for item in requests
+            if isinstance(item, dict) and isinstance(item.get("required_paths"), list)
+        ),
+    )
+
+
+def _approval_bytes(value: object) -> bytes:
+    approved = bool(getattr(getattr(value, "approval", None), "approved", False))
+    return json.dumps({"approved": approved}, separators=(",", ":")).encode("utf-8")
+
+
+def _approval_from_bytes(payload: bytes) -> object:
+    loaded = json.loads(payload)
+    approved = isinstance(loaded, dict) and loaded.get("approved") is True
+
+    class _Approval:
+        def __init__(self) -> None:
+            self.approved = approved
+
+    class _Assessment:
+        def __init__(self) -> None:
+            self.approval = _Approval()
+
+    return _Assessment()
+
+
+def _command_bytes(value: object) -> bytes:
+    from ...disposition import MaintainerCommandResult
+
+    if not isinstance(value, MaintainerCommandResult):
+        return b""
+    return json.dumps(
+        {
+            "action": value.action,
+            "applied": value.applied,
+            "operator_paused": value.operator_paused,
+            "summary": value.summary,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _command_from_bytes(payload: bytes) -> object:
+    from ...disposition import MaintainerCommandResult
+
+    loaded = json.loads(payload)
+    if not isinstance(loaded, dict):
+        raise ReviewInputError("operation entry refused: result_missing")
+    return MaintainerCommandResult(
+        action=str(loaded.get("action", "")),
+        applied=loaded.get("applied") is True,
+        operator_paused=loaded.get("operator_paused") is True,
+        summary=str(loaded.get("summary", "")),
+    )
 
 
 class GitHubApplication:
@@ -958,6 +1080,12 @@ class GitHubApplication:
         media_publisher: object | None = None,
         review_result: object | None = None,
         request_comment_id: int | None = None,
+        operation_entry: str = "disabled",
+        app_id: int | None = None,
+        run_id: str | None = None,
+        run_attempt: str = "1",
+        operation_store: object | None = None,
+        operation_parts: object | None = None,
     ):
         """Apply a maintainer command through its applicable authority boundary.
 
@@ -1089,6 +1217,77 @@ class GitHubApplication:
                     operator_paused=False,
                     summary="unauthorized",
                 )
+        if (
+            command.action == "approve-media"
+            and operation_entry == "enabled"
+            and operation_store is not None
+        ):
+            confirmer = getattr(media_publisher, "confirm", None)
+            finalizer = getattr(media_publisher, "publish_mixed_approval", None)
+            if (
+                not callable(confirmer)
+                or not callable(finalizer)
+                or review_result is None
+                or not isinstance(request_comment_id, int)
+                or isinstance(source_comment_id, bool)
+                or not isinstance(source_comment_id, int)
+            ):
+                return MaintainerCommandResult(
+                    action="approve-media",
+                    applied=False,
+                    operator_paused=False,
+                    summary="media approval requires the current review result",
+                )
+            media_digest = sha256(
+                f"{repository_id}:{pull_request}:{head_sha}".encode()
+            ).hexdigest()
+
+            def approve_media() -> object:
+                confirmer(
+                    request_comment_id=request_comment_id,
+                    source_comment_id=source_comment_id,
+                    result=review_result,
+                )
+                return finalizer(
+                    request_comment_id=request_comment_id,
+                    result=review_result,
+                )
+
+            assessment = self._through_operation(
+                operation_entry=operation_entry,
+                operation_store=operation_store,
+                operation_parts=operation_parts,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                app_id=app_id,
+                run_id=run_id,
+                run_attempt=run_attempt,
+                trigger="verify",
+                reservation_id=(
+                    f"media:{repository_id}:{pull_request}:{source_comment_id}"
+                ),
+                attestation_digest=media_digest,
+                repository=repository,
+                oidc_token=oidc_token,
+                delivery_id=f"media:{source_comment_id}",
+                grant=f"media:{source_comment_id}",
+                execute=approve_media,
+                encode=_approval_bytes,
+                decode=_approval_from_bytes,
+            )
+            approved = bool(
+                getattr(getattr(assessment, "approval", None), "approved", False)
+            )
+            return MaintainerCommandResult(
+                action="approve-media",
+                applied=approved,
+                operator_paused=False,
+                summary=(
+                    "media files approved for this head"
+                    if approved
+                    else "media approval withheld"
+                ),
+            )
         if command.action == "approve-media":
             approver = getattr(media_publisher, "approve_reviewed_media", None)
             if (
@@ -1193,6 +1392,39 @@ class GitHubApplication:
             raise GitHubPublicationError(
                 "hosted maintainer mutations require atomic session initialization"
             )
+        if (
+            command.action == "verify"
+            and operation_entry == "enabled"
+            and operation_store is not None
+        ):
+            produced = self._through_operation(
+                operation_entry=operation_entry,
+                operation_store=operation_store,
+                operation_parts=operation_parts,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                app_id=app_id,
+                run_id=run_id,
+                run_attempt=run_attempt,
+                trigger="verify",
+                delivery_id=f"verify:{source_comment_id or 0}:{head_sha}",
+                grant=f"verify:{source_comment_id or 0}:{head_sha}",
+                reservation_id=f"verify:{repository_id}:{pull_request}:{head_sha}",
+                attestation_digest=sha256(
+                    f"{repository_id}:{pull_request}:{head_sha}".encode()
+                ).hexdigest(),
+                repository=repository,
+                oidc_token=oidc_token,
+                execute=lambda: apply_session_command(
+                    ledger,
+                    identity,
+                    command,
+                    finding_fingerprints=finding_fingerprints,
+                )[1],
+                encode=_command_bytes,
+                decode=_command_from_bytes,
+            )
+            return produced
         _record, result = apply_session_command(
             ledger,
             identity,
@@ -1478,6 +1710,121 @@ class GitHubApplication:
             source_kind=source_kind,
         )
 
+    def _through_operation(
+        self,
+        *,
+        operation_entry: str,
+        operation_store: object | None,
+        operation_parts: object | None,
+        repository_id: int | None,
+        pull_request: int,
+        app_id: int | None,
+        run_id: str | None,
+        run_attempt: str,
+        trigger: str,
+        delivery_id: str,
+        grant: str,
+        reservation_id: str,
+        attestation_digest: str,
+        execute: Callable[[], object],
+        encode: Callable[[object], bytes],
+        decode: Callable[[bytes], object],
+        repository: str | None = None,
+        oidc_token: str | None = None,
+    ) -> object:
+        """Use the shared entry when this call has a store or Actions identity.
+
+        A call without either keeps the previous function. ``disabled`` always
+        keeps that function.
+        """
+
+        if operation_entry != "enabled":
+            return execute()
+        from .operation_comments import ResultPartStore
+        from .operation_entry import call_operation_trigger
+        from .operation_host import GitHubCommentOperationStore, InMemoryOperationStore
+
+        store = operation_store
+        parts = (
+            operation_parts if isinstance(operation_parts, ResultPartStore) else None
+        )
+        if store is None and isinstance(self.http, GitHubHttp):
+            ready = (
+                isinstance(repository, str)
+                and repository
+                and isinstance(repository_id, int)
+                and not isinstance(repository_id, bool)
+                and repository_id > 0
+                and isinstance(app_id, int)
+                and not isinstance(app_id, bool)
+                and app_id > 0
+                and isinstance(run_id, str)
+                and run_id.strip()
+            )
+            if (
+                not ready
+                or not isinstance(repository, str)
+                or not isinstance(repository_id, int)
+                or isinstance(repository_id, bool)
+            ):
+                return execute()
+            token = self.broker.exchange(
+                oidc_token or self.broker.request_oidc_token(),
+                capability="review_session",
+            )
+            status, body = self.http.request("GET", "/user", token=token)
+            user_id = body.get("id") if isinstance(body, dict) else None
+            if (
+                status != 200
+                or not isinstance(body, dict)
+                or body.get("type") != "Bot"
+                or isinstance(user_id, bool)
+                or not isinstance(user_id, int)
+                or user_id <= 0
+            ):
+                raise ReviewInputError("operation entry refused: unavailable")
+            from .operation_comments import GitHubIssueCommentOperationPort
+
+            port = GitHubIssueCommentOperationPort(
+                self.http,
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                app_user_id=user_id,
+            )
+            store = GitHubCommentOperationStore(port, app_user_id=user_id)
+            parts = ResultPartStore(port, app_user_id=user_id)
+        if not isinstance(store, InMemoryOperationStore):
+            return execute()
+        if (
+            not isinstance(repository_id, int)
+            or isinstance(repository_id, bool)
+            or repository_id <= 0
+            or not isinstance(app_id, int)
+            or isinstance(app_id, bool)
+            or app_id <= 0
+            or not isinstance(run_id, str)
+            or not run_id.strip()
+        ):
+            raise ReviewInputError("operation entry refused: invalid")
+        return call_operation_trigger(
+            store,
+            trigger=trigger,
+            repository_id=repository_id,
+            pull_request=pull_request,
+            attestation_digest=attestation_digest,
+            run_id=run_id.strip(),
+            run_attempt=run_attempt.strip() or "1",
+            app_id=app_id,
+            reservation_id=reservation_id,
+            delivery_id=delivery_id,
+            grant=grant,
+            execute=execute,
+            encode=encode,
+            decode=decode,
+            parts=parts,
+        )
+
     def generate_and_publish_reply(
         self,
         *,
@@ -1498,6 +1845,13 @@ class GitHubApplication:
         budget: ResourceBudget | None = None,
         work_recovery: WorkRecoveryStore | None = None,
         broader_service: ReviewService | None = None,
+        operation_entry: str = "disabled",
+        repository_id: int | None = None,
+        app_id: int | None = None,
+        run_id: str | None = None,
+        run_attempt: str = "1",
+        operation_store: object | None = None,
+        operation_parts: object | None = None,
     ) -> ReplyResult:
         """Authorize, generate, validate, and publish one mention reply."""
 
@@ -1565,27 +1919,104 @@ class GitHubApplication:
                             decisions=(),
                         )
                     elif inventory.pending and human.evidence_bundle is not None:
-                        work_assessment = reassess(
-                            provider=reply_provider,
-                            pending=inventory,
-                            bundle=human.evidence_bundle,
-                            source_body=human.source_body,
-                            authority_digest=human.authority_digest,
-                            work_budgets=work_budgets or ReviewWorkBudgets(),
-                            model=model,
-                            tracker=work_tracker,
-                            recovery=work_recovery,
-                            broader_service=broader_service,
+                        evidence_bundle = human.evidence_bundle
+                        produced = self._through_operation(
+                            operation_entry=operation_entry,
+                            operation_store=operation_store,
+                            operation_parts=operation_parts,
+                            repository_id=repository_id,
+                            pull_request=pull_request,
+                            app_id=app_id,
+                            run_id=run_id,
+                            run_attempt=run_attempt,
+                            trigger="reassessment",
+                            delivery_id=(
+                                f"reassessment:{prepared.source_comment_id}:"
+                                f"{prepared.source_updated_at}"
+                            ),
+                            grant=(
+                                f"reassessment:{prepared.source_comment_id}:"
+                                f"{prepared.source_updated_at}"
+                            ),
+                            reservation_id=(
+                                f"reassessment:{repository_id}:{pull_request}:"
+                                f"{prepared.source_comment_id}"
+                            ),
+                            attestation_digest=sha256(
+                                f"{repository_id}:{pull_request}:{prepared.head_sha}".encode()
+                            ).hexdigest(),
+                            repository=repository,
+                            oidc_token=oidc_token,
+                            execute=lambda: reassess(
+                                provider=reply_provider,
+                                pending=inventory,
+                                bundle=evidence_bundle,
+                                source_body=human.source_body,
+                                authority_digest=human.authority_digest,
+                                work_budgets=work_budgets or ReviewWorkBudgets(),
+                                model=model,
+                                tracker=work_tracker,
+                                recovery=work_recovery,
+                                broader_service=broader_service,
+                            ),
+                            encode=_assessment_bytes,
+                            decode=_assessment_from_bytes,
                         )
-                        assessment = work_assessment.reply
+                        if isinstance(produced, HumanAssessmentWork):
+                            work_assessment = produced
+                            assessment = produced.reply
+                        elif isinstance(produced, HumanAssessmentReply):
+                            work_assessment = None
+                            assessment = produced
+                        else:
+                            raise ReviewInputError(
+                                "operation entry refused: result_missing"
+                            )
                     elif inventory.pending:
-                        assessment = HumanAssessmentService(reply_provider).reply(
-                            context=human.conversation.context,
-                            pending=inventory,
-                            source_body=human.source_body,
-                            model=model,
-                            tracker=work_tracker,
+                        produced_reply = self._through_operation(
+                            operation_entry=operation_entry,
+                            operation_store=operation_store,
+                            operation_parts=operation_parts,
+                            repository_id=repository_id,
+                            pull_request=pull_request,
+                            app_id=app_id,
+                            run_id=run_id,
+                            run_attempt=run_attempt,
+                            trigger="reassessment",
+                            delivery_id=(
+                                f"reassessment-reply:{prepared.source_comment_id}:"
+                                f"{prepared.source_updated_at}"
+                            ),
+                            grant=(
+                                f"reassessment-reply:{prepared.source_comment_id}:"
+                                f"{prepared.source_updated_at}"
+                            ),
+                            reservation_id=(
+                                f"reassessment-reply:{repository_id}:{pull_request}:"
+                                f"{prepared.source_comment_id}"
+                            ),
+                            attestation_digest=sha256(
+                                f"{repository_id}:{pull_request}:{prepared.head_sha}".encode()
+                            ).hexdigest(),
+                            repository=repository,
+                            oidc_token=oidc_token,
+                            execute=lambda: HumanAssessmentService(
+                                reply_provider
+                            ).reply(
+                                context=human.conversation.context,
+                                pending=inventory,
+                                source_body=human.source_body,
+                                model=model,
+                                tracker=work_tracker,
+                            ),
+                            encode=_assessment_bytes,
+                            decode=_assessment_from_bytes,
                         )
+                        if not isinstance(produced_reply, HumanAssessmentReply):
+                            raise ReviewInputError(
+                                "operation entry refused: result_missing"
+                            )
+                        assessment = produced_reply
                     else:
                         assessment = HumanAssessmentReply(
                             body="Retrying approval finalization for previously reassessed findings; all approval requirements still apply.",
@@ -1704,10 +2135,39 @@ class GitHubApplication:
                             assessment_diagnostic=publication.diagnostic,
                         )
                     return reply_outcome
-            reply = ConversationService(reply_provider).reply(
-                prepared.context,
-                model=model,
+            reply = self._through_operation(
+                operation_entry=operation_entry,
+                operation_store=operation_store,
+                operation_parts=operation_parts,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                app_id=app_id,
+                run_id=run_id,
+                run_attempt=run_attempt,
+                trigger="reply",
+                delivery_id=(
+                    f"reply:{prepared.source_comment_id}:{prepared.source_updated_at}"
+                ),
+                grant=(
+                    f"reply:{prepared.source_comment_id}:{prepared.source_updated_at}"
+                ),
+                reservation_id=(
+                    f"reply:{repository_id}:{pull_request}:{prepared.source_comment_id}"
+                ),
+                attestation_digest=sha256(
+                    f"{repository_id}:{pull_request}:{prepared.head_sha}".encode()
+                ).hexdigest(),
+                repository=repository,
+                oidc_token=oidc_token,
+                execute=lambda: ConversationService(reply_provider).reply(
+                    prepared.context,
+                    model=model,
+                ),
+                encode=_conversation_bytes,
+                decode=_conversation_from_bytes,
             )
+            if not isinstance(reply, ConversationReply):
+                raise ReviewInputError("operation entry refused: result_missing")
             return self.replier.publish(
                 token=capability_token,
                 repository=repository,

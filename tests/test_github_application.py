@@ -20,6 +20,8 @@ from review_sensei.hosting.github import (
     ReplyResult,
 )
 from review_sensei.hosting.github.application import _command_from_broker_attestation
+from review_sensei.hosting.github.operation_comments import ResultPartStore
+from review_sensei.hosting.github.operation_host import GitHubCommentOperationStore
 from review_sensei.models import (
     ConversationContext,
     ConversationMessage,
@@ -30,6 +32,7 @@ from review_sensei.models import (
 )
 from review_sensei.outcomes import RecoveryArtifact
 from review_sensei.session import InMemorySessionLedger, SessionIdentity
+from tests.test_operation_entry import MemoryComments
 
 
 class RecordingBroker:
@@ -1378,6 +1381,161 @@ class GitHubApplicationTests(unittest.TestCase):
             ["add", "remove"],
         )
         self.assertEqual(self.replier.calls, [])
+
+    def _operation_parts(self):
+        comments = MemoryComments()
+        store = GitHubCommentOperationStore(comments, app_user_id=42)
+        parts = ResultPartStore(comments, app_user_id=42)
+        return store, parts
+
+    def test_reply_reassessment_verify_and_media_use_one_entry(self):
+        store, parts = self._operation_parts()
+        calls = {"n": 0}
+
+        class CountingProvider(RecordingProvider):
+            def complete(self, request):
+                calls["n"] += 1
+                return super().complete(request)
+
+        common = dict(
+            operation_entry="enabled",
+            repository_id=7,
+            app_id=99,
+            run_id="100",
+            run_attempt="1",
+            operation_store=store,
+            operation_parts=parts,
+        )
+        first = self.application.generate_and_publish_reply(
+            options=GitHubWriteOptions(github_writes=True, mention_replies=True),
+            oidc_token="provided-oidc",
+            read_token="read-token",
+            repository="owner/repo",
+            pull_request=11,
+            source_comment_id=10,
+            source_updated_at="updated",
+            expected_head_sha=None,
+            reply_provider=CountingProvider(),
+            model="fixture-model",
+            app_slug="review-sensei[bot]",
+            root_comment_id=10,
+            source_kind="issue",
+            **common,
+        )
+        second = self.application.generate_and_publish_reply(
+            options=GitHubWriteOptions(github_writes=True, mention_replies=True),
+            oidc_token="provided-oidc",
+            read_token="read-token",
+            repository="owner/repo",
+            pull_request=11,
+            source_comment_id=10,
+            source_updated_at="updated",
+            expected_head_sha=None,
+            reply_provider=CountingProvider(),
+            model="fixture-model",
+            app_slug="review-sensei[bot]",
+            root_comment_id=10,
+            source_kind="issue",
+            **common,
+        )
+        self.assertEqual(first.status, "replied")
+        self.assertEqual(second.status, "replied")
+        self.assertEqual(calls["n"], 1)
+
+        self.application.session_ledger = InMemorySessionLedger()
+        verify_store, verify_parts = self._operation_parts()
+        verify_common = dict(common)
+        verify_common["operation_store"] = verify_store
+        verify_common["operation_parts"] = verify_parts
+        with patch(
+            "review_sensei.disposition.apply_session_command",
+            wraps=apply_session_command,
+        ) as verify_calls:
+            verify = self.application.apply_maintainer_command(
+                options=GitHubWriteOptions(github_writes=True),
+                oidc_token=None,
+                repository="owner/repo",
+                pull_request=11,
+                head_sha="a" * 40,
+                body="@reviewsensei verify",
+                actor_login="alice",
+                association="OWNER",
+                app_slug="reviewsensei[bot]",
+                source_comment_id=10,
+                **verify_common,
+            )
+            again = self.application.apply_maintainer_command(
+                options=GitHubWriteOptions(github_writes=True),
+                oidc_token=None,
+                repository="owner/repo",
+                pull_request=11,
+                head_sha="a" * 40,
+                body="@reviewsensei verify",
+                actor_login="alice",
+                association="OWNER",
+                app_slug="reviewsensei[bot]",
+                source_comment_id=10,
+                **verify_common,
+            )
+        self.assertEqual(verify_calls.call_count, 1)
+        self.assertEqual(again.summary, verify.summary)
+
+        class Media:
+            def __init__(self):
+                self.calls = []
+
+            def confirm(self, **kwargs):
+                self.calls.append("confirm")
+                return kwargs
+
+            def publish_mixed_approval(self, **kwargs):
+                self.calls.append("publish")
+                return type(
+                    "Assessment",
+                    (),
+                    {"approval": type("Approval", (), {"approved": True})()},
+                )()
+
+        media = Media()
+        media_store, media_parts = self._operation_parts()
+        media_common = dict(common)
+        media_common["operation_store"] = media_store
+        media_common["operation_parts"] = media_parts
+        approved = self.application.apply_maintainer_command(
+            options=GitHubWriteOptions(github_writes=True),
+            oidc_token=None,
+            repository="owner/repo",
+            pull_request=11,
+            head_sha="a" * 40,
+            body="@reviewsensei I reviewed the media files and I approve",
+            actor_login="alice",
+            association="OWNER",
+            app_slug="reviewsensei[bot]",
+            source_comment_id=10,
+            media_publisher=media,
+            review_result=object(),
+            request_comment_id=4,
+            **media_common,
+        )
+        replayed = self.application.apply_maintainer_command(
+            options=GitHubWriteOptions(github_writes=True),
+            oidc_token=None,
+            repository="owner/repo",
+            pull_request=11,
+            head_sha="a" * 40,
+            body="@reviewsensei I reviewed the media files and I approve",
+            actor_login="alice",
+            association="OWNER",
+            app_slug="reviewsensei[bot]",
+            source_comment_id=10,
+            media_publisher=media,
+            review_result=object(),
+            request_comment_id=4,
+            **media_common,
+        )
+        self.assertEqual(media.calls, ["confirm", "publish"])
+        self.assertTrue(approved.applied)
+        self.assertTrue(replayed.applied)
 
 
 if __name__ == "__main__":

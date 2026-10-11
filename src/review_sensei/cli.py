@@ -1945,6 +1945,7 @@ def _github_parser() -> argparse.ArgumentParser:
         help="Build bounded GitHub context, invoke the provider, and publish the reply.",
     )
     reply.add_argument("--repository", required=True)
+    reply.add_argument("--repository-id", type=int)
     reply.add_argument("--pull-request", type=int, required=True)
     reply.add_argument("--source-comment-id", type=int, required=True)
     reply.add_argument("--source-updated-at", required=True)
@@ -2341,6 +2342,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 learner=LearningPRPublisher(http=http),
                 replier=ConversationPublisher(http=http),
             )
+            command_configuration = load_configuration(getattr(args, "config", None))
             result = application.apply_maintainer_command(
                 options=GitHubWriteOptions(
                     github_writes=args.allow_write,
@@ -2360,6 +2362,10 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 session_attestation=session_attestation,
                 actor_permission=actor_permission,
                 finding_fingerprints=finding_fingerprints,
+                operation_entry=command_configuration.github.operation_entry,
+                app_id=_actions_app_id(),
+                run_id=os.environ.get("GITHUB_RUN_ID", "").strip() or None,
+                run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT", "1").strip() or "1",
             )
             print(result.summary)
             return 0
@@ -2723,6 +2729,11 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             budget=reply_budget,
             work_recovery=work_recovery,
             broader_service=broader_service,
+            operation_entry=work_configuration.github.operation_entry,
+            repository_id=getattr(args, "repository_id", None),
+            app_id=_actions_app_id(),
+            run_id=os.environ.get("GITHUB_RUN_ID", "").strip() or None,
+            run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT", "1").strip() or "1",
         )
         print(reply_outcome.status)
         assessment_status = getattr(reply_outcome, "assessment_status", None)

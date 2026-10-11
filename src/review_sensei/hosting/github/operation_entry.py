@@ -11,10 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ...errors import ReviewInputError
 from .operation_comments import ResultPartStore
 from .operation_host import (
     REVIEW_TRIGGERS,
@@ -289,6 +289,8 @@ def run_actions_analysis(
     execute: Callable[[], object],
     encode: Callable[[object], bytes],
     trigger: str = "full-review",
+    delivery_id: str | None = None,
+    grant: str | None = None,
 ) -> HostedProviderResult | OperationRefusal:
     """Open the pull-request operation record and run one Actions provider call."""
 
@@ -319,7 +321,7 @@ def run_actions_analysis(
         app_user_id=user_id,
     )
     store = GitHubCommentOperationStore(port, app_user_id=user_id)
-    started = time.time_ns() // 1_000_000
+    started = 1_000
     return run_hosted_provider(
         store,
         trigger=trigger,
@@ -330,8 +332,8 @@ def run_actions_analysis(
         run_attempt=run_attempt,
         app_id=app_id,
         reservation_id=reservation_id,
-        delivery_id=f"{run_id}:{run_attempt}",
-        grant=f"{trigger}:{run_id}:{run_attempt}",
+        delivery_id=delivery_id or f"{run_id}:{run_attempt}",
+        grant=grant or f"{trigger}:{run_id}:{run_attempt}",
         server_started_ms=started,
         execute=execute,
         encode=encode,
@@ -395,6 +397,58 @@ def analysis_payload(run: object) -> bytes:
     if not isinstance(body, dict):
         return b""
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def call_operation_trigger(
+    store: InMemoryOperationStore,
+    *,
+    trigger: str,
+    repository_id: int,
+    pull_request: int,
+    attestation_digest: str,
+    run_id: str,
+    run_attempt: str,
+    app_id: int,
+    reservation_id: str,
+    delivery_id: str,
+    grant: str,
+    execute: Callable[[], object],
+    encode: Callable[[object], bytes],
+    decode: Callable[[bytes], object],
+    parts: ResultPartStore | None = None,
+    now_ms: int | None = None,
+) -> object:
+    """Run one trigger, or decode the bytes already accepted for it."""
+
+    # The host clock is a 32-bit generation counter, not Unix time.
+    started = 1_000 if now_ms is None else now_ms
+    admitted = run_hosted_provider(
+        store,
+        trigger=trigger,
+        repository_id=repository_id,
+        pull_request=pull_request,
+        attestation_digest=attestation_digest,
+        run_id=run_id,
+        run_attempt=run_attempt,
+        app_id=app_id,
+        reservation_id=reservation_id,
+        delivery_id=delivery_id,
+        grant=grant,
+        server_started_ms=started,
+        execute=execute,
+        encode=encode,
+        parts=parts,
+        now=lambda: started,
+    )
+    if isinstance(admitted, OperationRefusal):
+        raise ReviewInputError(f"operation entry refused: {admitted.reason}")
+    if not isinstance(admitted, HostedProviderResult):
+        raise ReviewInputError("operation entry refused: invalid")
+    if admitted.fresh is not None:
+        return admitted.fresh
+    if admitted.replay_payload is None:
+        raise ReviewInputError("operation entry refused: result_missing")
+    return decode(admitted.replay_payload)
 
 
 def operation_handle_witness(handle: object) -> str | None:
