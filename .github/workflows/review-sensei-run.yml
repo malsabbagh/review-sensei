@@ -1042,6 +1042,8 @@ jobs:
       - name: Publish or promote validated review through the broker
         if: success() && !cancelled() && inputs.operation == 'review' && steps.publish-admission.outputs.status == 'current' && steps.provider-review.outputs.result_ready == 'true'
         env:
+          # Read trusted operation receipts with the existing metadata token.
+          GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
@@ -1492,6 +1494,8 @@ jobs:
       - name: Publish or promote validated local review and learnings
         if: success() && !cancelled() && inputs.operation == 'review' && steps.publish-admission.outputs.status == 'current' && steps.provider-review.outputs.result_ready == 'true'
         env:
+          # Read trusted operation receipts with the existing metadata token.
+          GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}

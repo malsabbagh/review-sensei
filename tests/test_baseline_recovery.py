@@ -669,8 +669,10 @@ class BaselineRecoveryTests(unittest.TestCase):
         self.assertEqual(self.run_cli()[0], 0)
         before = self.record()
         self.provider.error = KeyboardInterrupt()
-        with self.assertRaises(KeyboardInterrupt):
-            self.run_cli(base="c", head="d")
+        code, stderr, _ = self.run_cli(base="c", head="d")
+        self.assertEqual(code, 130)
+        self.assertTrue(stderr.endswith("review-sensei: cancelled\n"))
+        self.assertNotIn("Traceback", stderr)
         after = self.record()
         self.assertEqual(after.convergence_history, before.convergence_history)
         self.assertEqual(after.failed_attempts, 0)
