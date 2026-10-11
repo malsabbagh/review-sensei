@@ -1,0 +1,86 @@
+name: Qualify published CLI
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact published PyPI version (never latest)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publication:
+    name: Require exact successful PyPI publication
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.gate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - id: gate
+        name: Bind publication attempt and exact manifest version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_VERSION: ${{ inputs.version }}
+        run: python scripts/published_cli_release_gate.py --version "$MANUAL_VERSION" --report "$RUNNER_TEMP/publication-gate.json"
+      - name: Retain publication gate receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: published-cli-publication-gate
+          path: ${{ runner.temp }}/publication-gate.json
+          if-no-files-found: error
+
+  qualify:
+    name: PyPI ${{ needs.publication.outputs.version }} / ${{ matrix.os }} / Python ${{ matrix.python }}
+    needs: publication
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Test installer and publication gate contracts
+        run: python -m unittest discover -s tests/published_cli -p 'test_bootstrap.py'
+      - name: Install exact PyPI wheel in a fresh environment and qualify it
+        env:
+          PUBLISHED_VERSION: ${{ needs.publication.outputs.version }}
+        run: python scripts/qualify_published_cli.py --version "$PUBLISHED_VERSION" --output "$RUNNER_TEMP/published-cli"
+      - name: Retain sanitized qualification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: published-cli-${{ matrix.os }}-py${{ matrix.python }}
+          path: |
+            ${{ runner.temp }}/published-cli/summary.json
+            ${{ runner.temp }}/published-cli/*.txt
+            ${{ runner.temp }}/published-cli/qualify/results.json
+            ${{ runner.temp }}/published-cli/qualify/matrix.csv
+            ${{ runner.temp }}/published-cli/transports/results.json
+            ${{ runner.temp }}/published-cli/seam_boundaries/results.json
+            ${{ runner.temp }}/published-cli/operations/results.json
+            ${{ runner.temp }}/published-cli/operation_state/results.json
+          if-no-files-found: error
+          retention-days: 30
