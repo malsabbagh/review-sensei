@@ -52,6 +52,29 @@ class NonResumableActivationError(ReviewInputError):
     reason = "original-attempt-witness-required"
 
 
+_ATTEMPT_WITNESS = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+
+
+def _operation_attempt_binding(witness: object) -> str | None:
+    """Binding of an OperationHandle. A snapshot, digest, or grant is not one."""
+
+    from .hosting.github.operation_entry import operation_handle_witness
+
+    binding = operation_handle_witness(witness)
+    if not isinstance(binding, str) or _ATTEMPT_WITNESS.fullmatch(binding) is None:
+        return None
+    return binding
+
+
+def _operation_witness_matches(witness: object, reservation_id: str) -> bool:
+    binding = _operation_attempt_binding(witness)
+    return (
+        isinstance(reservation_id, str)
+        and binding is not None
+        and binding == reservation_id
+    )
+
+
 @dataclass(frozen=True)
 class TailDispatch:
     label: str
@@ -304,10 +327,18 @@ class EvidenceReadBudget:
             raise ReviewInputError("partition read deadline exhausted")
         return min(remaining, PART_READ_SECONDS)
 
-    def reserve_tail(self, plan: ActivationTailPlan) -> EvidenceTailTicket:
+    def reserve_tail(
+        self,
+        plan: ActivationTailPlan,
+        *,
+        witness: object = None,
+        reservation_id: str | None = None,
+    ) -> EvidenceTailTicket:
         """Debit the complete worst-case liability before serializing authority."""
         self.check()
-        if self.restored:
+        if self.restored and not _operation_witness_matches(
+            witness, reservation_id or ""
+        ):
             raise NonResumableActivationError(
                 "activation restart requires authenticated original attempt accounting"
             )
@@ -326,12 +357,21 @@ class EvidenceReadBudget:
         return ticket
 
     def _remember_live_attempt(
-        self, scope: str, root_sha256: str, *, owner: object
+        self,
+        scope: str,
+        root_sha256: str,
+        *,
+        owner: object,
+        witness: object = None,
+        reservation_id: str | None = None,
     ) -> None:
         if (
-            self.restored
-            or scope in self._live_attempts
+            scope in self._live_attempts
             or scope in self._failed_attempts
+            or (
+                self.restored
+                and not _operation_witness_matches(witness, reservation_id or "")
+            )
         ):
             raise NonResumableActivationError(
                 "activation requires a newly owned original attempt witness"
@@ -340,17 +380,35 @@ class EvidenceReadBudget:
         self._live_attempt_owners[scope] = owner
 
     def _require_live_attempt(
-        self, scope: str, root_sha256: str, *, owner: object
+        self,
+        scope: str,
+        root_sha256: str,
+        *,
+        owner: object,
+        witness: object = None,
+        reservation_id: str | None = None,
     ) -> None:
-        if (
-            self.restored
-            or scope in self._failed_attempts
-            or self._live_attempts.get(scope) != root_sha256
-            or self._live_attempt_owners.get(scope) is not owner
+        # A raw digest or mapping never satisfies this. Only an OperationHandle
+        # whose binding is the reservation can stand in for a restored budget
+        # or a missing in-memory attempt. A conflicting live root still refuses.
+        if scope in self._failed_attempts or (
+            scope in self._live_attempts
+            and self._live_attempts.get(scope) != root_sha256
         ):
             raise NonResumableActivationError(
                 "activation restart requires authenticated original attempt accounting"
             )
+        if (
+            not self.restored
+            and self._live_attempts.get(scope) == root_sha256
+            and self._live_attempt_owners.get(scope) is owner
+        ):
+            return
+        if _operation_witness_matches(witness, reservation_id or ""):
+            return
+        raise NonResumableActivationError(
+            "activation restart requires authenticated original attempt accounting"
+        )
 
     def _advance_live_attempt(self, scope: str, root_sha256: str) -> None:
         self._live_attempts[scope] = _sha(root_sha256)

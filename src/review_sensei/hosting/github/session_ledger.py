@@ -34,6 +34,7 @@ from ...bounded_evidence import (
     EvidenceTailTicket,
     NonResumableActivationError,
     TailDispatch,
+    _operation_witness_matches,
     canonical_bytes,
     partition_evidence,
     read_partitioned_evidence,
@@ -1115,6 +1116,7 @@ class GitHubIssueCommentSessionLedger:
         max_scan_pages: int,
         head_sha: str | None = None,
         now: datetime | None = None,
+        witness: object = None,
     ) -> SessionRecord:
         if not self.enable_partition_writes or self.evidence_budget is None:
             raise ReviewInputError(
@@ -1123,10 +1125,11 @@ class GitHubIssueCommentSessionLedger:
         self._validate_tail_scan_pages(max_scan_pages)
         budget = self.evidence_budget
         scope = _tail_attempt_scope(identity, reservation_id, operation_binding)
+        witnessed = _operation_witness_matches(witness, reservation_id)
         if (
-            budget.restored
-            or scope in budget._live_attempts
+            scope in budget._live_attempts
             or scope in budget._failed_attempts
+            or (budget.restored and not witnessed)
         ):
             raise NonResumableActivationError(
                 "original activation attempt cannot be restarted"
@@ -1162,7 +1165,13 @@ class GitHubIssueCommentSessionLedger:
         self._tail_authorizing, self._tail_scan_pages = True, max_scan_pages
         try:
             reserved = self.replace(identity, admit, now=now)
-            budget._remember_live_attempt(scope, reserved.record_sha256, owner=self)
+            budget._remember_live_attempt(
+                scope,
+                reserved.record_sha256,
+                owner=self,
+                witness=witness,
+                reservation_id=reservation_id,
+            )
             return reserved
         except BaseException:
             budget._burn_live_attempt(scope)
@@ -1239,6 +1248,7 @@ class GitHubIssueCommentSessionLedger:
         attempt_reservation_id: str,
         max_scan_pages: int,
         now: datetime | None = None,
+        witness: object = None,
     ) -> None:
         """Install a fresh one-attempt grant on the original live ledger only.
 
@@ -1246,6 +1256,8 @@ class GitHubIssueCommentSessionLedger:
         mutation verifies it through the actual consuming BrokerClient. Current
         v1 grant claims bind hosted command scope; they do not prove durable
         original operation accounting or permit crash/restart continuation.
+        An OperationHandle whose binding is the attempt reservation satisfies
+        a restored budget or a missing in-memory owner. A snapshot does not.
         """
         budget = self.evidence_budget
         if not self.enable_partition_writes or budget is None:
@@ -1255,10 +1267,10 @@ class GitHubIssueCommentSessionLedger:
         self._validate_tail_scan_pages(max_scan_pages)
         operation = _tail_operation_binding(operation_binding)
         scope = _tail_attempt_scope(identity, attempt_reservation_id, operation)
-        if (
-            budget.restored
-            or budget._live_attempt_owners.get(scope) is not self
-            or scope in budget._failed_attempts
+        witnessed = _operation_witness_matches(witness, attempt_reservation_id)
+        if scope in budget._failed_attempts or (
+            not witnessed
+            and (budget.restored or budget._live_attempt_owners.get(scope) is not self)
         ):
             raise NonResumableActivationError(
                 "original live ledger proof is unavailable"
@@ -1316,7 +1328,13 @@ class GitHubIssueCommentSessionLedger:
                 or current.reservation_id != attempt_reservation_id
             ):
                 raise ReviewInputError("current activation reservation is unavailable")
-            budget._require_live_attempt(scope, current.record_sha256, owner=self)
+            budget._require_live_attempt(
+                scope,
+                current.record_sha256,
+                owner=self,
+                witness=witness,
+                reservation_id=attempt_reservation_id,
+            )
             self._validate_feedback_tail_attestation(
                 attestation,
                 current,
@@ -1358,6 +1376,7 @@ class GitHubIssueCommentSessionLedger:
         seal_accounting: Callable[[SessionRecord, Mapping[str, int]], SessionRecord],
         max_scan_pages: int,
         now: datetime | None = None,
+        witness: object = None,
     ) -> SessionRecord:
         """Each checkpoint consumes a fresh grant; prepay all sealed root work."""
         if not self.enable_partition_writes or self.evidence_budget is None:
@@ -1368,11 +1387,14 @@ class GitHubIssueCommentSessionLedger:
         budget = self.evidence_budget
         operation = _tail_operation_binding(operation_binding)
         scope = _tail_attempt_scope(identity, attempt_reservation_id, operation)
-        if (
-            budget.restored
-            or scope not in budget._live_attempts
-            or budget._live_attempt_owners.get(scope) is not self
-            or scope in budget._failed_attempts
+        witnessed = _operation_witness_matches(witness, attempt_reservation_id)
+        if scope in budget._failed_attempts or (
+            not witnessed
+            and (
+                budget.restored
+                or scope not in budget._live_attempts
+                or budget._live_attempt_owners.get(scope) is not self
+            )
         ):
             raise NonResumableActivationError(
                 "original activation attempt witness is unavailable"
@@ -1386,7 +1408,13 @@ class GitHubIssueCommentSessionLedger:
                 raise ReviewInputError(
                     "prepaid activation current authority is unavailable"
                 )
-            budget._require_live_attempt(scope, before.record_sha256, owner=self)
+            budget._require_live_attempt(
+                scope,
+                before.record_sha256,
+                owner=self,
+                witness=witness,
+                reservation_id=attempt_reservation_id,
+            )
             if self._session_attestation is not None:
                 self._validate_feedback_tail_attestation(
                     self._session_attestation,
@@ -1485,7 +1513,13 @@ class GitHubIssueCommentSessionLedger:
                 + part_steps(draft)
             )
             plan = ActivationTailPlan("github", plan_scope(draft), steps)
-            ticket = budget.reserve_tail(plan)
+            ticket = (
+                budget.reserve_tail(plan)
+                if witness is None
+                else budget.reserve_tail(
+                    plan, witness=witness, reservation_id=attempt_reservation_id
+                )
+            )
             sealed = _seal_tail_accounting(draft, seal_accounting, budget)
             _validate_queue_retention(before, sealed)
             patch_body: dict[str, object] = {
