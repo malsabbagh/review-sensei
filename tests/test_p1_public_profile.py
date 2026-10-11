@@ -26,7 +26,6 @@ from review_sensei.hosting.github.operation_entry import run_actions_analysis
 from review_sensei.outcomes import ResourceBudget, ResourceBudgetTracker
 from tests import test_review_transaction as review_fixture
 from tests.fake_github_http import json_response
-from tests.test_activation_tail import HostedTailTests
 from tests.test_assessment_queue import DocumentStore, fixture
 from tests.test_coalesced_admission import CoalescedAdmissionTests
 from tests.test_review_work import AssessingProvider
@@ -37,6 +36,8 @@ class P1PublicProfileTests(unittest.TestCase):
         self.assertEqual(MAX_PART_READS, 64)
         self.assertEqual(PART_READ_SECONDS, 60.0)
         self.assertEqual(GitHubSection().operation_entry, "enabled")
+
+        from tests.test_activation_tail import HostedTailTests
 
         case = HostedTailTests()
         state, broker, ledger = case.setup_host()
@@ -132,6 +133,8 @@ class P1PublicProfileTests(unittest.TestCase):
         self.assertEqual(budget.calls, 30)
 
     def _checkpoints(self, comments):
+        from tests.test_activation_tail import HostedTailTests
+
         case = HostedTailTests()
         state, broker, ledger = case.setup_host()
         repository = review_fixture.IDENTITY.repository

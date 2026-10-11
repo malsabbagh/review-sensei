@@ -16,7 +16,6 @@ from tests import test_review_transaction as fixture
 from tests.test_activation_tail import (
     OPERATION,
     RESERVATION,
-    HostedTailTests,
     prepare_queue,
     seal_accounting,
 )
@@ -196,6 +195,7 @@ class GitHubLedgerWitnessTests(unittest.TestCase):
         from review_sensei.hosting.github.session_ledger import (
             GitHubIssueCommentSessionLedger,
         )
+        from tests.test_activation_tail import HostedTailTests
 
         host = HostedTailTests()
         state, broker, ledger = host.setup_host()

@@ -61,6 +61,10 @@ class FakeHttp:
                 "user": {"id": 42, "type": "Bot"},
             }
             self.created.append(stored)
+            # A mismatched echo is not a read-back. The port then GETs, and
+            # that GET returns the same mismatched body.
+            if self.readback_body is not None:
+                return 201, {**stored, "body": self.readback_body}
             return 201, stored
         if method == "GET":
             comment_id = int(path.rstrip("/").rsplit("/", 1)[1])
