@@ -496,19 +496,14 @@ never creates, reads, or rewrites a repository variable.
 
 ## Session state: upgrade, rollback, and in-flight runs
 
-Review state persists in three places, and every transition below respects all
-three: the session ledger record carried by the broker-attested comment (or the
-local session file), the repository learnings under
-`.github/review-sensei/learnings`, and the Worker's Durable Object namespaces
-(`DeliveryLedger`, `BrokerLedger`, and the enrollment witness). No upgrade or
-rollback deletes any of them - learnings, review evidence, and the Durable
-Object migration history are part of the compatibility contract - and the
-Worker procedure in
+Review state persists in the session ledger record carried by the
+broker-attested comment (or the local session file) and the repository
+learnings under `.github/review-sensei/learnings`. `DeliveryLedger` and
+`BrokerLedger` are removed. The Worker stores nothing. No upgrade or rollback
+deletes learnings or review evidence. The Worker procedure in
 [`deploy/cloudflare/README.md`](../deploy/cloudflare/README.md) redeploys a
-known commit with the same Wrangler configuration and migration history instead
-of resetting a namespace. Multi-repository continuation and alarm recovery are
-preserved as deployed: each alarm reconciles one repository, and the recovery
-state lives in Durable Object storage that no engine transition rewrites.
+known commit. Multi-repository setup uses a signed cursor and stops if a
+continuation request is lost; redeliver the webhook to run setup again.
 
 ### Upgrading a running installation
 

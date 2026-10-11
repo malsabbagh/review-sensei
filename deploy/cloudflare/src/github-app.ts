@@ -355,6 +355,7 @@ function looksLikeManagedV5Setup(path: string, content: string): boolean {
     }
     try {
       return (
+        content === buildTaggedV4SetupFiles(publicWorkflowTag)[0].content ||
         content === resolveTriggerV5WorkflowTemplate(publicWorkflowTag) ||
         content === historicalV5WorkflowTemplate(publicWorkflowTag) ||
         content === senseiOnlyV5WorkflowTemplate(publicWorkflowTag)

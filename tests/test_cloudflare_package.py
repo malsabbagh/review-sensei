@@ -15,11 +15,10 @@ class CloudflarePackageTests(unittest.TestCase):
             CLOUDFLARE / "tsconfig.json",
             CLOUDFLARE / "wrangler.jsonc",
             CLOUDFLARE / "src" / "worker.ts",
-            CLOUDFLARE / "src" / "delivery-ledger.ts",
             CLOUDFLARE / "src" / "github-app.ts",
             CLOUDFLARE / "src" / "setup-content.ts",
-            CLOUDFLARE / "src" / "broker-ledger.ts",
             CLOUDFLARE / "src" / "token-broker.ts",
+            CLOUDFLARE / "src" / "signed-mac.ts",
         )
         for path in required:
             with self.subTest(path=path):
@@ -39,18 +38,14 @@ class CloudflarePackageTests(unittest.TestCase):
         config = json.loads((CLOUDFLARE / "wrangler.jsonc").read_text())
         self.assertEqual(config["main"], "src/worker.ts")
         self.assertNotIn("containers", config)
+        self.assertNotIn("durable_objects", config)
+        self.assertNotIn("kv_namespaces", config)
+        self.assertNotIn("d1_databases", config)
+        self.assertNotIn("r2_buckets", config)
+        self.assertNotIn("ratelimits", config)
         self.assertEqual(
-            config["durable_objects"]["bindings"],
-            [
-                {"name": "DELIVERY_LEDGER", "class_name": "DeliveryLedger"},
-                {"name": "BROKER_LEDGER", "class_name": "BrokerLedger"},
-            ],
-        )
-        self.assertEqual(
-            config["migrations"][0]["new_sqlite_classes"], ["DeliveryLedger"]
-        )
-        self.assertEqual(
-            config["migrations"][1]["new_sqlite_classes"], ["BrokerLedger"]
+            config["migrations"][2]["deleted_classes"],
+            ["DeliveryLedger", "BrokerLedger"],
         )
         self.assertEqual(
             config["vars"],
@@ -61,16 +56,15 @@ class CloudflarePackageTests(unittest.TestCase):
 
     def test_package_does_not_embed_secrets_or_payload_storage(self):
         worker = (CLOUDFLARE / "src" / "worker.ts").read_text()
-        ledger = (CLOUDFLARE / "src" / "delivery-ledger.ts").read_text()
         github_app = (CLOUDFLARE / "src" / "github-app.ts").read_text()
         setup_content = (CLOUDFLARE / "src" / "setup-content.ts").read_text()
         readme = (CLOUDFLARE / "README.md").read_text()
-        for content in (worker, ledger, github_app, setup_content):
+        for content in (worker, github_app, setup_content):
             self.assertNotIn("BEGIN RSA PRIVATE KEY", content)
             self.assertNotIn("ghs_", content)
         self.assertNotIn("BEGIN RSA PRIVATE KEY", readme)
         self.assertIn("REPLACE_WITH_LOCAL_PEM_VALUE", readme)
-        self.assertIn("never written to SQLite", ledger)
+        self.assertIn("The Worker stores nothing", readme)
         self.assertNotIn("@cloudflare/containers", worker)
         self.assertIn("RSASSA-PKCS1-v1_5", github_app)
         self.assertIn("review-sensei/setup", github_app)
@@ -84,15 +78,14 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertIn("contents/", github_app)
 
     def test_delivery_retention_and_setup_idempotency_are_documented(self):
-        ledger = (CLOUDFLARE / "src" / "delivery-ledger.ts").read_text()
         readme = (CLOUDFLARE / "README.md").read_text()
         adr = (
             ROOT / "docs" / "adr" / "0020-cloudflare-github-app-package.md"
         ).read_text()
-        self.assertIn("const RETENTION_MS = 60 * 60 * 1000;", ledger)
-        self.assertIn("retained as accepted for one hour", readme)
+        self.assertIn("`DeliveryLedger` and `BrokerLedger` are removed", readme)
         self.assertIn("existing setup branch and pull request", readme)
-        self.assertIn("accepted identities for one hour", adr)
+        self.assertIn("The Worker stores nothing", readme)
+        self.assertIn("`DeliveryLedger` and `BrokerLedger` are removed", adr)
         self.assertNotIn("30 days", readme)
         self.assertNotIn("30 days", adr)
 

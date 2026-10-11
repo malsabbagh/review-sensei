@@ -1,6 +1,7 @@
 import type { WorkerEnv } from "./env";
 import { GitHubApi, type PublicWorkflowRuntimeShas } from "./github-api";
 import { type OidcClaims, verifyOidcAssertion } from "./oidc";
+import { issueSessionGrant, sessionGrantAuthentic } from "./signed-mac";
 import { authorizeFeedback, canonicalFeedback, FEEDBACK_GRANT_KEYS, parseFeedbackAttestation, type FeedbackAttestationRequest, type FeedbackAttestation } from "./feedback-attestation";
 import {
   PUBLIC_REPOSITORY,
@@ -211,87 +212,27 @@ function authorizeWorkflowRuntimeSha(
   }
 }
 
-async function claimLedger(
-  env: WorkerEnv,
-  action: "claim" | "admit",
-  jti: string,
-  scope: string,
-): Promise<"accepted" | "replay" | "rate_limited"> {
-  const id = env.BROKER_LEDGER.idFromName("reviewsensei-broker");
-  const stub = env.BROKER_LEDGER.get(id);
-  const response = await stub.fetch("https://broker/claim", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action, jti, scope }),
-  });
-  if (!response.ok) {
-    throw new Error("broker_ledger_unavailable");
-  }
-  const value = (await response.json()) as { state?: unknown };
-  if (value.state === "accepted" || value.state === "replay" || value.state === "rate_limited") {
-    return value.state;
-  }
-  throw new Error("broker_ledger_invalid");
-}
-
 async function enrollSession(
-  env: WorkerEnv,
-  scope: string,
+  github: GitHubApi,
+  repository: string,
+  scope: SessionScope,
+  token: string,
 ): Promise<SessionState> {
-  const id = env.BROKER_LEDGER.idFromName("reviewsensei-broker");
-  const stub = env.BROKER_LEDGER.get(id);
-  const response = await stub.fetch("https://broker/session", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action: "session_enroll", scope }),
-  });
-  if (!response.ok) {
-    throw new Error("broker_ledger_unavailable");
-  }
-  const value = (await response.json()) as { state?: unknown };
-  if (value.state === "enrolled" || value.state === "known") {
-    return value.state;
-  }
-  throw new Error("broker_ledger_invalid");
+  const known = await github.sessionAlreadyKnown(
+    repository,
+    scope.pull_request,
+    scope.head_sha,
+    token,
+  );
+  return known ? "known" : "enrolled";
 }
 
-async function sessionGrantLedger(
-  env: WorkerEnv,
-  action: "session_issue" | "session_verify",
-  values: {
-    grant: string;
-    scope: string;
-    attestationDigest: string;
-    runId?: string;
-  },
-): Promise<"issued" | "verified" | "replay" | "invalid"> {
-  const id = env.BROKER_LEDGER.idFromName("reviewsensei-broker");
-  const stub = env.BROKER_LEDGER.get(id);
-  const response = await stub.fetch("https://broker/session-grant", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      action,
-      grant: values.grant,
-      scope: values.scope,
-      attestation_digest: values.attestationDigest,
-      audience: SESSION_GRANT_AUDIENCE,
-      ...(action === "session_issue" ? { run_id: values.runId } : {}),
-    }),
-  });
-  if (!response.ok) {
-    throw new Error("broker_ledger_unavailable");
+function signingKey(env: WorkerEnv): string {
+  const secret = env.REVIEWSENSEI_SIGNING_KEY ?? "";
+  if (!secret.trim()) {
+    throw new Error("configuration_unavailable");
   }
-  const value = (await response.json()) as { state?: unknown };
-  if (
-    value.state === "issued" ||
-    value.state === "verified" ||
-    value.state === "replay" ||
-    value.state === "invalid"
-  ) {
-    return value.state;
-  }
-  throw new Error("broker_ledger_invalid");
+  return secret;
 }
 
 async function digest(value: string): Promise<string> {
@@ -299,10 +240,6 @@ async function digest(value: string): Promise<string> {
   return [...new Uint8Array(bytes)]
     .map((part) => part.toString(16).padStart(2, "0"))
     .join("");
-}
-
-function clientScope(value: string | undefined): string {
-  return value && /^[0-9A-Fa-f:.]{1,64}$/.test(value) ? value : "unknown";
 }
 
 function sessionScope(value: unknown, repositoryId: number): SessionScope {
@@ -547,14 +484,6 @@ function sessionAttestationForVerification(
   };
 }
 
-function newSessionGrant(): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-}
-
 function recognizedCommand(value: string): boolean {
   const match = RECOGNIZED_COMMAND.exec(value);
   if (match === null) return false;
@@ -598,7 +527,7 @@ export class TokenBroker {
 
   async exchange(
     body: BrokerBody,
-    sourceAddress?: string,
+    _sourceAddress?: string,
   ): Promise<{
     token: string;
     capability: Capability;
@@ -614,15 +543,6 @@ export class TokenBroker {
     if (requested !== "review_session" && body.session !== undefined) {
       throw new Error("broker_session_invalid");
     }
-    const admissionState = await claimLedger(
-      this.env,
-      "admit",
-      `preauth:${await digest(body.oidc_token)}:${requested}`,
-      `preauth:${clientScope(sourceAddress)}`,
-    );
-    if (admissionState === "rate_limited") {
-      throw new Error("broker_rate_limited");
-    }
     const claims = await verifyOidcAssertion(body.oidc_token, {
       audience: "sts.reviewsensei.dev",
       issuer: "https://token.actions.githubusercontent.com",
@@ -634,20 +554,6 @@ export class TokenBroker {
     );
     const runtime = await this.github.publicWorkflowRuntimeShas(observedTag);
     this.authorizeClaims(claims, observedTag, runtime);
-    // Reject replay/rate abuse immediately after cryptographic and local
-    // policy validation, before consuming shared GitHub App API capacity.
-    const ledgerState = await claimLedger(
-      this.env,
-      "claim",
-      `${claims.jti}:${requested}`,
-      `${claims.repository_id}:${claims.actor_id}:${claims.job_workflow_sha}:${requested}`,
-    );
-    if (ledgerState === "replay") {
-      throw new Error("broker_replay");
-    }
-    if (ledgerState === "rate_limited") {
-      throw new Error("broker_rate_limited");
-    }
     const installationId = await this.github.installationFor(claims.repository);
     if (installationId === null) {
       throw new Error("broker_installation_unavailable");
@@ -704,20 +610,19 @@ export class TokenBroker {
           token,
         );
       const enrollment = await enrollSession(
-        this.env,
-        `${requestedSession.repository_id}:${requestedSession.pull_request}:${requestedSession.head_sha}`,
+        this.github,
+        claims.repository,
+        requestedSession,
+        token,
       );
       if (attestation !== undefined) {
-        const grant = newSessionGrant();
-        const state = await sessionGrantLedger(this.env, "session_issue", {
-          grant,
-          scope: `${requestedSession.repository_id}:${requestedSession.pull_request}:${requestedSession.head_sha}`,
+        const scope = `${requestedSession.repository_id}:${requestedSession.pull_request}:${requestedSession.head_sha}`;
+        const grant = await issueSessionGrant(signingKey(this.env), {
+          scope,
           attestationDigest: await digest(canonicalAttestation(attestation)),
+          audience: SESSION_GRANT_AUDIENCE,
           runId: attestation.run_id,
         });
-        if (state !== "issued") {
-          throw new Error("broker_session_grant_rejected");
-        }
         return {
           token,
           capability: requested,
@@ -739,7 +644,7 @@ export class TokenBroker {
     grant: unknown,
     attestation: unknown,
   ): Promise<SessionAttestation> {
-    if (typeof grant !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(grant)) {
+    if (typeof grant !== "string" || !/^sg1\.[1-9][0-9]{10,15}\.[A-Za-z0-9_-]{43}$/.test(grant)) {
       throw new Error("broker_session_grant_invalid");
     }
     if (!isObject(attestation) || !hasExactKeys(attestation, attestation.version === 2 ? FEEDBACK_GRANT_KEYS : SESSION_ATTESTATION_GRANT_KEYS)) {
@@ -762,12 +667,13 @@ export class TokenBroker {
     const observedTag = authorizeObservedWorkflowTag(configuredTag, value.job_workflow_ref);
     const runtime = await this.github.publicWorkflowRuntimeShas(observedTag);
     const parsed = sessionAttestationForVerification(value, scope, runtime);
-    const state = await sessionGrantLedger(this.env, "session_verify", {
-      grant,
+    const authentic = await sessionGrantAuthentic(signingKey(this.env), grant, {
       scope: `${scope.repository_id}:${scope.pull_request}:${scope.head_sha}`,
       attestationDigest: await digest(canonicalAttestation(parsed)),
+      audience: SESSION_GRANT_AUDIENCE,
+      runId: parsed.run_id,
     });
-    if (state !== "verified") {
+    if (!authentic) {
       throw new Error("broker_session_grant_invalid");
     }
     return parsed;

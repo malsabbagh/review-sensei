@@ -119,11 +119,11 @@ describe("session-grant verification route", () => {
     expect(broker.verifySessionGrant).not.toHaveBeenCalled();
   });
 
-  it("maps a broker-ledger outage to a retryable response", async () => {
-    broker.verifySessionGrant.mockRejectedValue(new Error("broker_ledger_unavailable"));
+  it("maps a missing signing key to configuration_unavailable", async () => {
+    broker.verifySessionGrant.mockRejectedValue(new Error("configuration_unavailable"));
     const result = await worker.fetch(grantRequest(), env);
     expect(result.status).toBe(503);
-    expect(await result.json()).toMatchObject({ error: "session_grant_not_verified" });
+    expect(await result.json()).toMatchObject({ error: "configuration_unavailable" });
   });
 
   it("rejects non-POST session-grant requests", async () => {
@@ -205,13 +205,12 @@ describe("token route response security", () => {
   });
 
   it.each([
-    ["broker_rate_limited", 429],
-    ["broker_ledger_unavailable", 503],
+    ["configuration_unavailable", 503],
   ])("maps %s without exposing it", async (message, status) => {
     broker.exchange.mockRejectedValue(new Error(message));
     const result = await worker.fetch(request(), env);
     expect(result.status).toBe(status);
-    expect(await result.json()).toMatchObject({ error: "capability_not_issued" });
+    expect(await result.json()).toMatchObject({ error: "configuration_unavailable" });
   });
 
   it("applies no-store to method and malformed-body failures", async () => {
@@ -272,8 +271,8 @@ describe("failure diagnostics", () => {
 describe("broker diagnostic response contract", () => {
   it.each([
     ["broker_workflow_rejected", 403],
-    ["broker_rate_limited", 429],
-    ["broker_ledger_unavailable", 503],
+    ["broker_rate_limited", 403],
+    ["broker_ledger_unavailable", 403],
     ["github_capability_issue_failed_500", 403],
     ["broker_ghs_sensitive_token", 403],
   ])("emits safe facts and retains token HTTP classification for %s", async (message, status) => {

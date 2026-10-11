@@ -424,7 +424,7 @@ class ConsumingBroker:
                 attestation["actor_id"] = 42
             else:
                 attestation.update(command_id=123, command_digest="b" * 64)
-            grant = f"{len(self.issued) + 1:043d}"
+            grant = f"sg1.1780000000000.{len(self.issued) + 1:043d}"
             self.issued[grant] = attestation
             return json_response(
                 {

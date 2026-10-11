@@ -96,7 +96,7 @@ Real local SQLite transactions test sticky event conflicts, immutable origin,
 debit plus same-transaction consumption and rollback, exact readback,
 cross-source root serialization, retained unknown state after database reopen,
 expiry, capacity and malformed metadata. These tests exercise the storage
-primitive, not production BrokerLedger authorization, external root ownership
+primitive. `BrokerLedger` is removed. These tests are not external root ownership
 or a useful original-64 hosted lifecycle.
 
 Required next evidence includes production broker integration, exact first

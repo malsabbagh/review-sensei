@@ -62,31 +62,10 @@ function commandAttestation(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function harness(
-  ledgerState: "accepted" | "replay" | "rate_limited" = "accepted",
-  publicWorkflowTag: string = TAG,
-) {
-  const ledgerFetch = vi.fn(async (_url: string, init?: RequestInit) => {
-    const request = JSON.parse(String(init?.body)) as { action?: string };
-    const state = request.action === "admit"
-      ? "accepted"
-      : request.action === "session_enroll"
-        ? "enrolled"
-        : request.action === "session_issue"
-          ? "issued"
-          : request.action === "session_verify"
-            ? "verified"
-        : ledgerState;
-    return new Response(JSON.stringify({ state }), {
-      headers: { "content-type": "application/json" },
-    });
-  });
+function harness(publicWorkflowTag: string = TAG) {
   const env = {
     PUBLIC_WORKFLOW_TAG: publicWorkflowTag,
-    BROKER_LEDGER: {
-      idFromName: vi.fn(() => ({ name: "broker" })),
-      get: vi.fn(() => ({ fetch: ledgerFetch })),
-    },
+    REVIEWSENSEI_SIGNING_KEY: "test-signing-key",
   } as unknown as WorkerEnv;
   const github = {
     publicWorkflowRuntimeShas: vi.fn(async () => ({
@@ -110,9 +89,10 @@ function harness(
       permissions: { metadata: "read" },
     })),
     capabilityToken: vi.fn(async () => "ghs_scoped_token"),
+    sessionAlreadyKnown: vi.fn(async () => false),
   };
   const broker = new TokenBroker(env, github as never);
-  return { broker, github, ledgerFetch, env };
+  return { broker, github, env };
 }
 
 beforeEach(() => {
@@ -122,7 +102,7 @@ beforeEach(() => {
 
 describe("token broker authorization", () => {
   it("binds a full Unicode feedback selection to live canonical sources and OIDC numeric actor", async () => {
-    const { broker, github, ledgerFetch } = harness();
+    const { broker, github } = harness();
     const live = feedbackFixture.selection.sources;
     Object.assign(github, {
       feedbackPullRequest: vi.fn(async () => ({ base_sha: "c".repeat(40), head_sha: SHA })),
@@ -136,12 +116,12 @@ describe("token broker authorization", () => {
     expect(await feedbackDigest(feedbackFixture.selection)).toBe(request.feedback.selection_digest);
     const verified = await broker.verifySessionGrant(result.session_grant, result.session_attestation);
     expect(verified).toEqual(result.session_attestation);
-    expect(ledgerFetch.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).action)).toContain("session_verify");
+    await expect(broker.verifySessionGrant(result.session_grant, result.session_attestation)).resolves.toEqual(verified);
   });
 
   it("refuses changed feedback actors, source bodies and missing trigger mentions before issuing a grant", async () => {
     for (const mutation of ["numeric-actor", "body", "missing", "snapshot"]) {
-      const { broker, github, ledgerFetch } = harness();
+      const { broker, github } = harness();
       const sources = structuredClone(feedbackFixture.selection.sources);
       Object.assign(github, {
         feedbackPullRequest: vi.fn(async () => ({ base_sha: mutation === "snapshot" ? "e".repeat(40) : "c".repeat(40), head_sha: SHA })),
@@ -153,7 +133,7 @@ describe("token broker authorization", () => {
       oidc.verify.mockResolvedValue(claims({ event_name: "issue_comment", actor_id: mutation === "numeric-actor" ? 999 : 12345678 }));
       const request = { ...feedbackFixture.request, issued_at: Math.floor(Date.now() / 1000) };
       await expect(broker.exchange({ oidc_token: "feedback-assertion", capability: "review_session", session: { repository_id: request.repository_id, pull_request: 7, head_sha: SHA }, session_attestation: request })).rejects.toThrow();
-      expect(ledgerFetch.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).action)).not.toContain("session_issue");
+      expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
     }
   });
 
@@ -202,7 +182,7 @@ describe("token broker authorization", () => {
   });
 
   it("refuses a coerced mutation reason before live authorization can issue a grant", async () => {
-    const { broker, github, ledgerFetch } = harness();
+    const { broker, github } = harness();
     const live = feedbackFixture.selection.sources;
     Object.assign(github, {
       feedbackPullRequest: vi.fn(async () => ({ base_sha: "c".repeat(40), head_sha: SHA })),
@@ -211,7 +191,7 @@ describe("token broker authorization", () => {
     oidc.verify.mockResolvedValue(claims({ event_name: "issue_comment" }));
     const request = { ...feedbackFixture.request, issued_at: Math.floor(Date.now() / 1000), mutation: { ...feedbackFixture.request.mutation, reason: ["dispatch"] } };
     await expect(broker.exchange({ oidc_token: "feedback-assertion", capability: "review_session", session: { repository_id: request.repository_id, pull_request: 7, head_sha: SHA }, session_attestation: request })).rejects.toThrow("broker_feedback_attestation_invalid");
-    expect(ledgerFetch.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).action)).not.toContain("session_issue");
+    expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
   });
   it("issues recovery evidence authority with Actions read only", async () => {
     const { broker, github } = harness();
@@ -221,7 +201,7 @@ describe("token broker authorization", () => {
   });
 
   it("exchanges check_publish through the real GitHub adapter with exact Checks write scope", async () => {
-    const { env, ledgerFetch } = harness();
+    const { env } = harness();
     const github = new GitHubApi({
       ...env,
       GITHUB_APP_ID: "12345",
@@ -281,8 +261,6 @@ describe("token broker authorization", () => {
         audience: "sts.reviewsensei.dev",
         issuer: "https://token.actions.githubusercontent.com",
       });
-      expect(ledgerFetch.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).action))
-        .toEqual(["admit", "claim"]);
       expect(fetchMock).toHaveBeenCalledTimes(5);
     } finally {
       fetchMock.mockRestore();
@@ -318,7 +296,7 @@ describe("token broker authorization", () => {
   });
 
   it("issues a session capability only for the authenticated repository and current PR head", async () => {
-    const { broker, github, ledgerFetch } = harness();
+    const { broker, github } = harness();
 
     const result = await broker.exchange({
       oidc_token: "signed-jwt",
@@ -347,15 +325,16 @@ describe("token broker authorization", () => {
       { pull_requests: "write" },
       false,
     );
-    const enrollment = ledgerFetch.mock.calls[2][1] as RequestInit;
-    expect(JSON.parse(enrollment.body as string)).toEqual({
-      action: "session_enroll",
-      scope: `987654321:7:${SHA}`,
-    });
+    expect(github.sessionAlreadyKnown).toHaveBeenCalledWith(
+      "acme/widgets",
+      7,
+      SHA,
+      "ghs_scoped_token",
+    );
   });
 
   it("refuses a stale session head before recording a new enrollment witness", async () => {
-    const { broker, github, ledgerFetch } = harness();
+    const { broker, github } = harness();
     github.pullRequestHead.mockResolvedValue("c".repeat(40));
 
     let rejection: unknown;
@@ -379,15 +358,11 @@ describe("token broker authorization", () => {
     // the enroll endpoint at all: the head check is what makes recording the
     // witness safe.
     expect((rejection as Error).message).not.toContain("ghs_");
-    expect(ledgerFetch).toHaveBeenCalledTimes(2);
-    const actions = ledgerFetch.mock.calls.map(
-      (call) => (JSON.parse(String((call[1] as RequestInit).body)) as { action?: string }).action,
-    );
-    expect(actions).not.toContain("session_enroll");
+    expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
   });
 
   it("issues an opaque grant only after deriving command actor authority from a live comment", async () => {
-    const { broker, github, ledgerFetch } = harness();
+    const { broker, github } = harness();
     const attestation = {
       version: 1,
       repository: "acme/widgets",
@@ -414,7 +389,7 @@ describe("token broker authorization", () => {
       session_attestation: attestation,
     });
 
-    expect(result.session_grant).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(result.session_grant).toMatch(/^sg1\.[0-9]+\.[A-Za-z0-9_-]{43}$/);
     expect(result.session_attestation).toMatchObject({
       ...attestation,
       actor: "octocat",
@@ -426,22 +401,13 @@ describe("token broker authorization", () => {
     expect(github.issueComment).toHaveBeenCalledWith(
       "acme/widgets", 7, 13579, "ghs_scoped_token",
     );
-    const issue = ledgerFetch.mock.calls[3][1] as RequestInit;
-    expect(JSON.parse(issue.body as string)).toMatchObject({
-      action: "session_issue",
-      run_id: "10000000001",
-      scope: `987654321:7:${SHA}`,
-    });
 
     await expect(
       broker.verifySessionGrant(result.session_grant, result.session_attestation),
     ).resolves.toMatchObject({ actor: "octocat", association: "OWNER" });
-    const verifyRequests = ledgerFetch.mock.calls.filter(
-      (call) =>
-        (JSON.parse(String((call[1] as RequestInit).body)) as { action?: string }).action ===
-        "session_verify",
-    );
-    expect(verifyRequests).toHaveLength(1);
+    await expect(
+      broker.verifySessionGrant(result.session_grant, result.session_attestation),
+    ).resolves.toMatchObject({ actor: "octocat" });
   });
 
   it.each([
@@ -488,7 +454,7 @@ describe("token broker authorization", () => {
     });
     if (accepted) {
       await expect(exchange).resolves.toMatchObject({
-        session_grant: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+        session_grant: expect.stringMatching(/^sg1\.[0-9]+\.[A-Za-z0-9_-]{43}$/),
       });
     } else {
       await expect(exchange).rejects.toThrow("broker_session_actor_rejected");
@@ -527,7 +493,7 @@ describe("token broker authorization", () => {
       });
       if (accepted) {
         await expect(exchange).resolves.toMatchObject({
-          session_grant: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+          session_grant: expect.stringMatching(/^sg1\.[0-9]+\.[A-Za-z0-9_-]{43}$/),
         });
       } else {
         await expect(exchange).rejects.toThrow("broker_session_actor_rejected");
@@ -536,7 +502,7 @@ describe("token broker authorization", () => {
   );
 
   it("binds grant verification to the attestation operation", async () => {
-    const { broker, ledgerFetch } = harness();
+    const { broker } = harness();
     const commandAttestation = {
       version: 1,
       repository: "acme/widgets",
@@ -558,26 +524,6 @@ describe("token broker authorization", () => {
       session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
       session_attestation: commandAttestation,
     });
-    const issueRequest = JSON.parse(
-      String((ledgerFetch.mock.calls[3][1] as RequestInit).body),
-    ) as { attestation_digest: string };
-
-    ledgerFetch.mockImplementation(async (_url: string, init?: RequestInit) => {
-      const request = JSON.parse(String(init?.body)) as {
-        action?: string;
-        attestation_digest?: string;
-      };
-      const state = request.action === "session_verify"
-        ? request.attestation_digest === issueRequest.attestation_digest
-          ? "verified"
-          : "invalid"
-        : request.action === "session_issue"
-          ? "issued"
-          : "accepted";
-      return new Response(JSON.stringify({ state }), {
-        headers: { "content-type": "application/json" },
-      });
-    });
 
     const mismatchedOperation = {
       ...result.session_attestation!,
@@ -595,7 +541,7 @@ describe("token broker authorization", () => {
   });
 
   it("rejects a grant attestation whose workflow ref is not an accepted public workflow", async () => {
-    const { broker, ledgerFetch } = harness();
+    const { broker } = harness();
     const result = await broker.exchange({
       oidc_token: "signed-jwt",
       capability: "review_session",
@@ -624,14 +570,10 @@ describe("token broker authorization", () => {
     await expect(
       broker.verifySessionGrant(result.session_grant, forgedAttestation),
     ).rejects.toThrow("broker_workflow_rejected");
-    const actions = ledgerFetch.mock.calls.map(
-      (call) => (JSON.parse(String((call[1] as RequestInit).body)) as { action?: string }).action,
-    );
-    expect(actions).not.toContain("session_verify");
   });
 
   it("revalidates the attested workflow SHA before consuming a grant", async () => {
-    const { broker, github, ledgerFetch } = harness();
+    const { broker, github } = harness();
     const result = await broker.exchange({
       oidc_token: "signed-jwt",
       capability: "review_session",
@@ -646,14 +588,10 @@ describe("token broker authorization", () => {
     await expect(
       broker.verifySessionGrant(result.session_grant, result.session_attestation),
     ).rejects.toThrow("broker_workflow_rejected");
-    const actions = ledgerFetch.mock.calls.map(
-      (call) => (JSON.parse(String((call[1] as RequestInit).body)) as { action?: string }).action,
-    );
-    expect(actions).not.toContain("session_verify");
   });
 
   it("rejects an expired attestation before consuming a grant", async () => {
-    const { broker, ledgerFetch } = harness();
+    const { broker } = harness();
     const result = await broker.exchange({
       oidc_token: "signed-jwt",
       capability: "review_session",
@@ -668,10 +606,6 @@ describe("token broker authorization", () => {
     await expect(
       broker.verifySessionGrant(result.session_grant, expired),
     ).rejects.toThrow("broker_session_attestation_invalid");
-    const actions = ledgerFetch.mock.calls.map(
-      (call) => (JSON.parse(String((call[1] as RequestInit).body)) as { action?: string }).action,
-    );
-    expect(actions).not.toContain("session_verify");
   });
 
   it.each([
@@ -701,7 +635,7 @@ describe("token broker authorization", () => {
       }),
     ],
   ])("rejects malformed session-grant attestation: %s", async (_label, mutate) => {
-    const { broker, ledgerFetch } = harness();
+    const { broker } = harness();
     const result = await broker.exchange({
       oidc_token: "signed-jwt",
       capability: "review_session",
@@ -725,10 +659,6 @@ describe("token broker authorization", () => {
     await expect(
       broker.verifySessionGrant(result.session_grant, attestation),
     ).rejects.toThrow(/broker_session_(?:attestation_invalid|grant_invalid)/);
-    const actions = ledgerFetch.mock.calls.map(
-      (call) => (JSON.parse(String((call[1] as RequestInit).body)) as { action?: string }).action,
-    );
-    expect(actions).not.toContain("session_verify");
   });
 
   it("refuses command authority when the current GitHub comment actor is not the OIDC actor", async () => {
@@ -805,7 +735,7 @@ describe("token broker authorization", () => {
           job_workflow_ref: `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/${observedTag}`,
         }),
       );
-      const { broker, github } = harness("accepted", configuredTag);
+      const { broker, github } = harness(configuredTag);
       await expect(broker.exchange({ oidc_token: "signed-jwt" })).resolves.toMatchObject({
         capability: "review_publish",
       });
@@ -910,44 +840,31 @@ describe("token broker authorization", () => {
     expect(github.capabilityToken).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ["replay", "broker_replay"],
-    ["rate_limited", "broker_rate_limited"],
-  ] as const)("rejects a ledger %s decision before token issuance", async (state, message) => {
-    const { broker, github } = harness(state);
-    await expect(broker.exchange({ oidc_token: "signed-jwt" })).rejects.toThrow(message);
-    expect(github.repositoryInfo).not.toHaveBeenCalled();
-    expect(github.installationFor).not.toHaveBeenCalled();
-    expect(github.installationToken).not.toHaveBeenCalled();
-    expect(github.capabilityToken).not.toHaveBeenCalled();
+  it("exchanges the same assertion again within the token age window", async () => {
+    const { broker } = harness();
+    const first = await broker.exchange({ oidc_token: "signed-jwt", capability: "issue_reply" });
+    const second = await broker.exchange({ oidc_token: "signed-jwt", capability: "issue_reply" });
+    expect(first.token).toBe("ghs_scoped_token");
+    expect(second.capability).toBe("issue_reply");
   });
 
-  it("binds the replay scope to repository, exact workflow ref, and capability", async () => {
-    const { broker, ledgerFetch } = harness();
-    await broker.exchange({ oidc_token: "signed-jwt", capability: "issue_reply" });
-    const request = ledgerFetch.mock.calls[1][1] as RequestInit;
-    expect(JSON.parse(request.body as string)).toEqual({
-      action: "claim",
-      jti: "assertion-1:issue_reply",
-      scope: `987654321:12345678:${SHA}:issue_reply`,
-    });
+  it("refuses a session grant when the signing key is missing", async () => {
+    const { broker, env } = harness();
+    env.REVIEWSENSEI_SIGNING_KEY = "";
+    await expect(broker.exchange({
+      oidc_token: "signed-jwt",
+      capability: "review_session",
+      session: { repository_id: 987654321, pull_request: 7, head_sha: SHA },
+      session_attestation: commandAttestation(),
+    })).rejects.toThrow("configuration_unavailable");
   });
 
-  it("rate-limits unauthenticated admission before OIDC or GitHub work", async () => {
-    const { broker, github, ledgerFetch } = harness();
-    ledgerFetch.mockResolvedValueOnce(
-      new Response(JSON.stringify({ state: "rate_limited" })),
-    );
-
-    await expect(
-      broker.exchange({ oidc_token: "forged-jwt" }, "203.0.113.7"),
-    ).rejects.toThrow("broker_rate_limited");
-    expect(oidc.verify).not.toHaveBeenCalled();
-    expect(github.repositoryInfo).not.toHaveBeenCalled();
-    const request = ledgerFetch.mock.calls[0][1] as RequestInit;
-    expect(JSON.parse(request.body as string)).toMatchObject({
-      action: "admit",
-      scope: "preauth:203.0.113.7",
+  it("does not rate-limit before OIDC verification", async () => {
+    const { broker, github } = harness();
+    await expect(broker.exchange({ oidc_token: "forged-jwt" }, "203.0.113.7")).resolves.toMatchObject({
+      capability: "review_publish",
     });
+    expect(oidc.verify).toHaveBeenCalled();
+    expect(github.repositoryInfo).toHaveBeenCalled();
   });
 });

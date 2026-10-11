@@ -236,14 +236,19 @@ branch rather than the PR head.
 
 The issue-64 setup-v4 path keeps review execution in the customer repository.
 The Worker receives only bounded webhook metadata and a short-lived Actions
-OIDC assertion for capability issuance. Its Durable Object stores hashed `jti`
-and scope identities plus bounded replay/rate counters. Pre-auth admission uses
-only a hashed assertion digest and a sanitized source-address scope; public JWKS
-keys are cached briefly in Worker memory. The signed assertion is claimed
-before repository or installation API reads. The Worker never stores source,
-diffs, prompts, results, replies, provider credentials, assertions, or
-installation-token values. Worker responses are `no-store`, the token route
-does not support CORS, and errors are sanitized.
+OIDC assertion for capability issuance. `DeliveryLedger` and `BrokerLedger`
+are removed. The Worker stores nothing: no replay set, no rate counter, no
+webhook deduplication row, and no setup cursor. Public JWKS keys are cached
+briefly in Worker memory. An assertion older than five minutes is refused.
+Session grants are HMAC-signed and expire after ten minutes; one-use is
+recorded on GitHub, not in the Worker. A Cloudflare WAF rate-limiting rule on
+`/github/token` and `/github/session-grant` is configured in the Cloudflare
+dashboard, outside this repository. The Worker does not depend on that rule
+to be correct. The Worker never stores source, diffs, prompts, results,
+replies, provider credentials, assertions, or installation-token values.
+Worker responses are `no-store`, the token route does not support CORS, and
+errors are sanitized. Setup failure logs contain only a delivery id, an error
+code, and a failure count.
 
 The generated workflow may reference the existing customer-owned secret by
 name only (`secrets.OLLAMA_API_KEY`) when invoking the tagged public reusable

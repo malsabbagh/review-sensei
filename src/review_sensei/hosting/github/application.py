@@ -1236,7 +1236,7 @@ class GitHubApplication:
 
         if self.http is None:
             raise GitHubPublicationError("GitHub session ledger requires HTTP")
-        return GitHubIssueCommentSessionLedger(
+        ledger = GitHubIssueCommentSessionLedger(
             self.http,
             token=token,
             app_slug=app_slug,
@@ -1246,6 +1246,25 @@ class GitHubApplication:
             head_sha=head_sha,
             actions_token_provider=actions_token_provider,
         )
+        if session_grant is not None:
+            self._bind_consumed_grant(ledger)
+        return ledger
+
+    def _bind_consumed_grant(self, ledger: Any) -> None:
+        """Record a consumed grant digest while the legacy session path can still run."""
+
+        from .operation_entry import consume_recorded_grant
+        from .operation_host import InMemoryOperationStore
+
+        store = getattr(self, "_consumed_grant_store", None)
+        if not isinstance(store, InMemoryOperationStore):
+            store = InMemoryOperationStore()
+            self._consumed_grant_store = store
+
+        def remember(grant: str) -> bool:
+            return consume_recorded_grant(store, grant)
+
+        ledger._remember_consumed_grant = remember
 
     @staticmethod
     def _abort_held_session_reservation(

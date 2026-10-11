@@ -195,6 +195,11 @@ source, diff, provider, assertion, token, or review data. `PUBLIC_WORKFLOW_TAG`
 is the setup-v4 workflow channel: setup validates that the tag exists and the
 broker resolves that tag at exchange time, requiring its runtime SHA to match.
 
+## Amendment - BrokerLedger and DeliveryLedger removed
+
+`DeliveryLedger` and `BrokerLedger` are removed. The Worker stores nothing.
+Migration `v3` deletes those classes.
+
 ## Amendment - public channel `v5`
 
 The default Worker write channel is `PUBLIC_WORKFLOW_TAG=v5`. Generated
