@@ -219,7 +219,7 @@ class GeneratedCallerContractTests(unittest.TestCase):
         workflow = files[WORKFLOW_PATH]
         config = files[CONFIG_PATH]
         uninstall = files[UNINSTALL_WORKFLOW_PATH]
-        self.assertIn("# ReviewSensei setup version: 5", workflow)
+        self.assertIn("# ReviewSensei setup version: 6", workflow)
         self.assertIn("review-sensei-run.yml@v5", workflow)
         self.assertIn("schema: 1", config)
         self.assertIn("inference:", config)

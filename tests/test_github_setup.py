@@ -268,7 +268,7 @@ class SetupPlanTests(unittest.TestCase):
         workflow = dict((f.path, f.content) for f in plan.files)[
             ".github/workflows/review-sensei-review.yml"
         ]
-        self.assertIn("# ReviewSensei setup version: 5", workflow)
+        self.assertIn("# ReviewSensei setup version: 6", workflow)
         self.assertIn(
             "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@" + "v5",
             workflow,
@@ -355,7 +355,7 @@ class SetupPlanTests(unittest.TestCase):
         self.assertEqual(workflow.count("review-sensei-run.yml@stable"), 1)
         self.assertNotIn("vars.", workflow)
         self.assertNotIn("default: main", workflow)
-        self.assertIn("# ReviewSensei setup version: 5", workflow)
+        self.assertIn("# ReviewSensei setup version: 6", workflow)
         self.assertEqual(workflow, _tagged_workflow("stable"))
         self.assertEqual(
             workflow,
@@ -941,7 +941,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         current = _tagged_workflow(tag)
         self.assertEqual(current, setup_module._resolve_trigger_workflow(tag))
         reverted = current.replace(
-            "# ReviewSensei setup version: 5",
+            "# ReviewSensei setup version: 6",
             "# ReviewSensei setup version: 4",
             1,
         )

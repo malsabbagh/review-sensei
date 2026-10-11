@@ -98,7 +98,7 @@ class CloudflarePackageTests(unittest.TestCase):
 
     def test_setup_content_is_tagged_and_secret_free(self):
         source = (CLOUDFLARE / "src" / "setup-content.ts").read_text()
-        self.assertIn("SETUP_VERSION = 5", source)
+        self.assertIn("SETUP_VERSION = 6", source)
         self.assertIn("ReviewSensei setup version: 5", source)
         self.assertIn("PUBLIC_WORKFLOW_TAG", source)
         self.assertNotIn("PUBLIC_WORKFLOW_SHA=", source)
@@ -118,7 +118,7 @@ class CloudflarePackageTests(unittest.TestCase):
         # The current caller is the same thin bootstrap the Python package
         # emits: event-shape-only routing, read-only plus OIDC permissions, and
         # no configuration read of any kind.
-        caller = source.split("function resolveTriggerWorkflowTemplate", 1)[1]
+        caller = source.split("function resolveTriggerV5WorkflowTemplate", 1)[1]
         caller = caller.split("\n}\n", 1)[0]
         self.assertIn("github.event.comment.author_association == 'OWNER'", caller)
         self.assertIn("github.event.comment.user.type != 'Bot'", caller)
@@ -154,7 +154,7 @@ class CloudflarePackageTests(unittest.TestCase):
         # The Worker builder concatenates the same literal fragments the Python
         # builder emits, so a change to either side breaks this test.
         fragments = (
-            "`# ReviewSensei setup version: ${SETUP_VERSION}\\n`",
+            '"# ReviewSensei setup version: 5\\n"',
             '"# Configuration version. Leave this at 1.\\n"',
             '"schema: 1\\n"',
             '"# Backend and model used for review.\\n"',
@@ -461,7 +461,18 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertNotIn("source_comment_id || head_sha", setup)
         self.assertNotIn("head_sha || head_ref || run_id", setup)
         self.assertNotRegex(example, r"(?m)^concurrency:")
-        self.assertNotIn("group:", example)
+        group_lines = [
+            line.strip()
+            for line in example.splitlines()
+            if line.strip().startswith("group:")
+        ]
+        self.assertEqual(
+            group_lines,
+            [
+                "group: reviewsensei-provider-review-${{ github.repository }}-${{ needs.resolve-trigger.outputs.pull_request_number || github.event.pull_request.number || github.run_id }}",
+            ],
+        )
+        self.assertNotIn("sha", group_lines[0])
         self.assertIn(
             "uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
             example,

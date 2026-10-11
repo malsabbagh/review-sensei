@@ -36,7 +36,7 @@ const LEGACY_V3_UNINSTALL_BODY =
   "Remove the ReviewSensei workflow, cleanup workflow, and generated configuration. " +
   "ReviewSensei learnings and repository secrets are left untouched.";
 
-export const SETUP_VERSION = 5;
+export const SETUP_VERSION = 6;
 export const SETUP_VERSION_MARKER = `ReviewSensei setup version: ${SETUP_VERSION}`;
 export const DEFAULT_PUBLIC_WORKFLOW_TAG = "v5";
 export const PUBLIC_REPOSITORY = "malsabbagh/review-sensei";
@@ -811,7 +811,7 @@ export function senseiOnlyV5WorkflowTemplate(publicWorkflowTag: string): string 
  * repository variables and carries no policy expression.
  */
 
-function resolveTriggerWorkflowTemplate(publicWorkflowTag: string): string {
+export function resolveTriggerV5WorkflowTemplate(publicWorkflowTag: string): string {
   const tag = validatePublicWorkflowTag(publicWorkflowTag);
   return String.raw`# ReviewSensei setup version: 5
 name: ReviewSensei review
@@ -1098,6 +1098,36 @@ jobs:
     .replaceAll(GITHUB_EXPRESSION, "$");
 }
 
+function resolveTriggerWorkflowTemplate(publicWorkflowTag: string): string {
+  const previous = resolveTriggerV5WorkflowTemplate(publicWorkflowTag);
+  const current = previous.replace(
+    "# ReviewSensei setup version: 5\n",
+    "# ReviewSensei setup version: 6\n",
+  );
+  const needle =
+    "    needs: resolve-trigger\n" +
+    "    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@";
+  const replacement =
+    "    needs: resolve-trigger\n" +
+    "    concurrency:\n" +
+    "      # Review, reply, and command write one pull request's record.\n" +
+    "      group: reviewsensei-provider-review-${{ github.repository }}-${{ needs.resolve-trigger.outputs.pull_request_number || github.event.pull_request.number || github.run_id }}\n" +
+    "      cancel-in-progress: false\n" +
+    "    uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@";
+  if (!current.includes("# ReviewSensei setup version: 6\n") || !current.includes(needle)) {
+    throw new Error("live caller did not advance to setup version 6");
+  }
+  const next = current.replace(needle, replacement);
+  if (
+    next === previous ||
+    !next.includes("reviewsensei-provider-review-") ||
+    next.includes("--result")
+  ) {
+    throw new Error("live caller did not keep the writer concurrency group");
+  }
+  return next;
+}
+
 const FROZEN_RUN_WORKFLOW_TAG_REFERENCE =
   /malsabbagh\/review-sensei\/\.github\/workflows\/review-sensei-run\.yml@([A-Za-z0-9][A-Za-z0-9._-]{0,127})/g;
 
@@ -1270,7 +1300,7 @@ function historicalV3UninstallWorkflowTemplate(): string {
 export function historicalV5UninstallWorkflow(): string {
   return uninstallWorkflowTemplate().replace(
     "# ReviewSensei setup version: 3",
-    `# ReviewSensei setup version: ${SETUP_VERSION}`,
+    "# ReviewSensei setup version: 5",
   );
 }
 
@@ -1329,7 +1359,7 @@ function configFile(version: number, packageVersion?: string): string {
 /** Released setup-v5 config that named only the backend. */
 export function previousMinimalV5Config(): string {
   return (
-    `# ReviewSensei setup version: ${SETUP_VERSION}\n` +
+    "# ReviewSensei setup version: 5\n" +
     "schema: 1\n" +
     "\n" +
     "inference:\n" +
@@ -1346,7 +1376,7 @@ export function previousMinimalV5Config(): string {
  */
 export function currentConfigFile(): string {
   return (
-    `# ReviewSensei setup version: ${SETUP_VERSION}\n` +
+    "# ReviewSensei setup version: 5\n" +
     "# Configuration version. Leave this at 1.\n" +
     "schema: 1\n" +
     "\n" +
@@ -1779,7 +1809,7 @@ export function importLegacySetupConfiguration(
   let body: string[];
   if (carried.length === 0) {
     lines = [
-      `# ReviewSensei setup version: ${SETUP_VERSION}`,
+      "# ReviewSensei setup version: 5",
       "# The retired .github/review-sensei/config.yml is no longer read, and",
       "# this import did not translate anything from it. Review the retired",
       "# file, then delete it after merging.",
@@ -1787,7 +1817,7 @@ export function importLegacySetupConfiguration(
     body = ["schema: 1", "", "inference:", "  backend: local-ollama"];
   } else {
     lines = [
-      `# ReviewSensei setup version: ${SETUP_VERSION}`,
+      "# ReviewSensei setup version: 5",
       "# One-time import of the retired .github/review-sensei/config.yml,",
       "# which nothing reads any more. The settings below are this file's",
       "# policies now; review this diff, then delete the retired file",

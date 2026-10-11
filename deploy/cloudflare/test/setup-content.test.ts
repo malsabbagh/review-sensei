@@ -129,7 +129,7 @@ describe("setup-v4 public boundary", () => {
   it("generates the thin caller at the supplied public workflow tag", () => {
     const tag = "stable";
     const workflow = buildSetupFiles(tag)[0].content;
-    expect(SETUP_VERSION).toBe(5);
+    expect(SETUP_VERSION).toBe(6);
     expect(workflow).toContain("opened, reopened, synchronize, ready_for_review");
     expect(workflow).toContain(
       `malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@${tag}`,
@@ -315,7 +315,10 @@ describe("setup-v4 public boundary", () => {
     const workflow = files[0].content;
     const workflowPattern = new RegExp(`review-sensei-run\\.yml@${tag}`, "g");
     expect(workflow.match(workflowPattern)).toHaveLength(1);
-    expect(workflow).toContain("# ReviewSensei setup version: 5");
+    expect(workflow).toContain("# ReviewSensei setup version: 6");
+    expect(workflow).toContain(
+      "group: reviewsensei-provider-review-${{ github.repository }}-${{ needs.resolve-trigger.outputs.pull_request_number || github.event.pull_request.number || github.run_id }}",
+    );
     // Read-only plus OIDC: the run is authorized through the broker, and the
     // reusable workflow can never exceed what this caller grants.
     expect(workflow).toContain(

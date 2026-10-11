@@ -41,7 +41,7 @@ SETUP_COMMIT_MESSAGE = "Add ReviewSensei review setup files"
 SETUP_BRANCH_PREFIX = "review-sensei/setup-v5"
 SETUP_APP_LOGIN = "reviewsensei[bot]"
 REQUIRED_SETUP_PERMISSIONS = frozenset({"contents", "pull_requests", "workflows"})
-SETUP_VERSION = 5
+SETUP_VERSION = 6
 SETUP_VERSION_MARKER = f"ReviewSensei setup version: {SETUP_VERSION}"
 WORKFLOW_PATH = ".github/workflows/review-sensei-review.yml"
 UNINSTALL_WORKFLOW_PATH = ".github/workflows/review-sensei-uninstall.yml"
@@ -175,7 +175,7 @@ def _looks_like_current_setup(
     *,
     public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG,
 ) -> bool:
-    """Recognize only the exact current tag-following setup-v5 artifact."""
+    """Recognize only the exact current tag-following setup artifact."""
 
     expected = {
         WORKFLOW_PATH: _tagged_workflow(public_workflow_tag),
@@ -308,6 +308,7 @@ def _looks_like_managed_v5_setup(path: str, content: str) -> bool:
         try:
             return content in {
                 _tagged_workflow(tag_matches[0]),
+                _resolve_trigger_v5_workflow(tag_matches[0]),
                 _historical_v5_workflow(tag_matches[0]),
                 _sensei_only_v5_workflow(tag_matches[0]),
             }
@@ -373,6 +374,23 @@ def _classify_setup_files(
                 elif _looks_like_managed_v5_setup(path, content):
                     has_managed = True
                 elif _looks_like_managed_v4_setup(path, content):
+                    has_managed = True
+                else:
+                    return "unknown"
+                continue
+            if marker == 5:
+                # Installed setup-v5 files stay recognized after the live
+                # caller moves to version 6. The current configuration and
+                # uninstall still carry marker 5, so an exact current match
+                # is current; every other marker-5 artifact must be a frozen
+                # managed v5 file or the repository is left untouched.
+                if _looks_like_current_setup(
+                    path,
+                    content,
+                    public_workflow_tag=public_workflow_tag,
+                ):
+                    has_current = True
+                elif _looks_like_managed_v5_setup(path, content):
                     has_managed = True
                 else:
                     return "unknown"
@@ -1229,16 +1247,12 @@ jobs:
 """.replace("__PUBLIC_WORKFLOW_TAG__", tag)
 
 
-def _resolve_trigger_workflow(public_workflow_tag: str) -> str:
-    """Return the current setup-v5 caller.
+def _resolve_trigger_v5_workflow(public_workflow_tag: str) -> str:
+    """Return the frozen setup-v5 resolve-trigger caller.
 
-    The caller is invocation-only: it resolves the event into the reusable
-    workflow's declared inputs, states the read-only permissions and the
-    optional OIDC scope that workflow needs, and names the three optional
-    provider secrets. Backend, model, endpoint, credential, and every
-    ``github.*`` policy decision are resolved by the package from
-    ``.reviewsensei.yml`` on the trusted policy commit, so this file reads no
-    repository variables and carries no policy expression.
+    These are the bytes installed before setup version 6. Do not edit this
+    text when the live caller changes: recognition of those repositories
+    depends on it. The live caller is ``_resolve_trigger_workflow``.
     """
 
     tag = _validate_public_workflow_tag(public_workflow_tag)
@@ -1525,8 +1539,59 @@ jobs:
 """.replace("__PUBLIC_WORKFLOW_TAG__", tag)
 
 
+def _resolve_trigger_workflow(public_workflow_tag: str) -> str:
+    """Return the current setup caller.
+
+    The caller is invocation-only: it resolves the event into the reusable
+    workflow's declared inputs, states the read-only permissions and the
+    optional OIDC scope that workflow needs, and names the three optional
+    provider secrets. Backend, model, endpoint, credential, and every
+    ``github.*`` policy decision are resolved by the package from
+    ``.reviewsensei.yml`` on the trusted policy commit, so this file reads no
+    repository variables and carries no policy expression.
+
+    Review, reply, and command all write the operation record, so the job
+    that runs them stays in ``reviewsensei-provider-review-<repository>-<pull
+    request>``. ``cancel-in-progress`` stays false: the same group is already
+    used by the reusable workflow's writer jobs, and cancelling would drop an
+    in-progress writer. The command operation reads the review result and the
+    request comment id from GitHub and takes no caller-supplied result file.
+    """
+
+    previous = _resolve_trigger_v5_workflow(public_workflow_tag)
+    current = previous.replace(
+        "# ReviewSensei setup version: 5\n",
+        "# ReviewSensei setup version: 6\n",
+        1,
+    )
+    needle = (
+        "    needs: resolve-trigger\n"
+        "    uses: malsabbagh/review-sensei/.github/workflows/"
+        "review-sensei-run.yml@"
+    )
+    replacement = (
+        "    needs: resolve-trigger\n"
+        "    concurrency:\n"
+        "      # Review, reply, and command write one pull request's record.\n"
+        "      group: reviewsensei-provider-review-${{ github.repository }}-${{ needs.resolve-trigger.outputs.pull_request_number || github.event.pull_request.number || github.run_id }}\n"
+        "      cancel-in-progress: false\n"
+        "    uses: malsabbagh/review-sensei/.github/workflows/"
+        "review-sensei-run.yml@"
+    )
+    if current.count("# ReviewSensei setup version: 6\n") != 1 or needle not in current:
+        raise GitHubSetupError("live caller did not advance to setup version 6")
+    current = current.replace(needle, replacement, 1)
+    if (
+        current == previous
+        or "reviewsensei-provider-review-" not in current
+        or "--result" in current
+    ):
+        raise GitHubSetupError("live caller did not keep the writer concurrency group")
+    return current
+
+
 def _tagged_workflow(public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> str:
-    """Return the current setup-v5 caller following the public git tag."""
+    """Return the current setup caller following the public git tag."""
 
     return _resolve_trigger_workflow(public_workflow_tag)
 

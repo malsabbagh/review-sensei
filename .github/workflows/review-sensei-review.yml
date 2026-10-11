@@ -1,4 +1,4 @@
-# ReviewSensei setup version: 5
+# ReviewSensei setup version: 6
 name: ReviewSensei review
 run-name: "ReviewSensei ${{ github.event.pull_request && format('PR #{0}', github.event.pull_request.number) || 'manual' }}"
 
@@ -254,6 +254,10 @@ jobs:
     # only guard: the reusable workflow decides eligibility, authorization,
     # and whether anything is published.
     needs: resolve-trigger
+    concurrency:
+      # Review, reply, and command write one pull request's record.
+      group: reviewsensei-provider-review-${{ github.repository }}-${{ needs.resolve-trigger.outputs.pull_request_number || github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: false
     uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5
     with:
       mode: ${{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
