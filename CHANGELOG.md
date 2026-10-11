@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.6.21 - 2026-10-11
+
+Changes since [v0.6.20](https://github.com/malsabbagh/review-sensei/releases/tag/v0.6.20), from [37e2d0c121fda31af4e48911ab29a0fc3bd0b4dc](https://github.com/malsabbagh/review-sensei/commit/37e2d0c121fda31af4e48911ab29a0fc3bd0b4dc) through [0b06914f9c934dccd03ffd2287441f5f1d54f73c](https://github.com/malsabbagh/review-sensei/commit/0b06914f9c934dccd03ffd2287441f5f1d54f73c).
+
+Previous annotated tag object: `080be34b0a9c5267fa37166eca55364b2a1d9806`.
+
+- docs: record released v0.6.20 ([2032a10b3e9afb70b61754735f43bf8007475262](https://github.com/malsabbagh/review-sensei/commit/2032a10b3e9afb70b61754735f43bf8007475262)).
+- Fix CLI qualification defects and publication receipt checks \(\#272\) ([bf0d522775b8a4cc7f907ff34cf6aeccdc4a3941](https://github.com/malsabbagh/review-sensei/commit/bf0d522775b8a4cc7f907ff34cf6aeccdc4a3941)).
+- test: qualify exact published CLI in isolated environments \(\#273\) ([0b06914f9c934dccd03ffd2287441f5f1d54f73c](https://github.com/malsabbagh/review-sensei/commit/0b06914f9c934dccd03ffd2287441f5f1d54f73c)).
+
 ## 0.6.20 - 2026-10-11
 
 - Allow `advanced.resources.max_provider_calls` up to 32 (unified work also
