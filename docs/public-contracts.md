@@ -669,7 +669,7 @@ The command is `review-sensei`. Supported flags are:
 | `--allow-custom-endpoint` | none | Allow an `openai-compatible` base URL outside `api.openai.com`; this opt-in is only valid on the command line and never with `--profile` |
 | `--model` | `REVIEWSENSEI_MODEL` | Explicit model override validated against the selected backend |
 | `--api-key-env` | none | Name of environment variable holding the API key |
-| `--timeout-seconds` | none | Provider request timeout; defaults to the selected backend's documented timeout |
+| `--timeout-seconds` | none | Finite positive provider timeout; defaults to the selected backend's documented timeout. NaN/infinity are rejected before dispatch. The 3,600-second YAML ceiling does not add a new CLI override ceiling; existing request/run budget bounds still apply |
 | `--format` | none | Review output format: `text` (default, readable terminal text), `markdown`, or `json` (the versioned `review-result` document) |
 | `--exit-semantics` | none | `review` (default) selects the 0/1/2 review exit contract; `operational` keeps the host/launcher 0/1 contract |
 | `--local-session` | none | Run one explicit persistent-local session: opt into the identity-bound transaction and store its ledger in the platform per-user state directory |
@@ -741,6 +741,12 @@ instead of paying for a second inference call. Exits `1` and `2` add one
 `review-sensei: reason=<token>` line on stderr, and the exit is unchanged by
 the selected format. `--exit-semantics operational` keeps the host/launcher
 `0`/`1` contract for callers that select a lane from it.
+
+Ctrl+C is a separate cancellation outcome: all Python and native CLI entry
+points return `130` after command-specific cleanup, with one
+`review-sensei: cancelled` stderr line and no traceback or PyInstaller failure
+banner. Cancellation does not authorize approval, complete coverage, or a
+fresh durable budget.
 
 A local review needs no GitHub identity, OIDC token endpoint, broker, or hosted
 state. `--local-session` is the one explicit persistent-local-session

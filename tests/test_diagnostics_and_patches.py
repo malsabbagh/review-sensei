@@ -193,9 +193,11 @@ class DiagnosticsTests(unittest.TestCase):
             build_plan(stages=("same", "same"))
         with self.assertRaises(ReviewInputError):
             build_plan(provider_mode="invalid")
+        expected_backend = build_plan()["provider_configuration"]["backend"]
         with patch.dict("os.environ", {"REVIEWSENSEI_PROVIDER_MODE": "invalid"}):
-            with self.assertRaises(ReviewInputError):
-                build_plan()
+            self.assertEqual(
+                build_plan()["provider_configuration"]["backend"], expected_backend
+            )
         with self.assertRaisesRegex(ReviewInputError, "diff must be a string"):
             build_plan(diff=b"not-a-string")  # type: ignore[arg-type]
 

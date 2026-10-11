@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import re
 import sys
@@ -934,8 +935,8 @@ def _positive_float(value: str) -> float:
         parsed = float(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("must be a number") from exc
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be greater than zero")
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a finite number greater than zero")
     return parsed
 
 
@@ -1278,7 +1279,8 @@ def _resolve_hosted_openrouter_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--version",
-        action="store_true",
+        action="version",
+        version=_package_version(),
         help="Print the installed ReviewSensei version and exit",
     )
     return parser
@@ -1392,6 +1394,9 @@ def _doctor_parser() -> argparse.ArgumentParser:
         prog="review-sensei doctor",
         description="Run bounded, read-only installation diagnostics.",
     )
+    parser.add_argument(
+        "--config", type=Path, help="Canonical .reviewsensei.yml configuration file"
+    )
     parser.add_argument("--stages-dir", type=Path)
     parser.add_argument("--categories-dir", type=Path)
     parser.add_argument("--context-root", type=Path)
@@ -1469,6 +1474,9 @@ def _plan_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="review-sensei plan",
         description="Preview a review execution plan without provider or GitHub calls.",
+    )
+    parser.add_argument(
+        "--config", type=Path, help="Canonical .reviewsensei.yml configuration file"
     )
     parser.add_argument("--diff", type=Path)
     parser.add_argument(
@@ -2818,11 +2826,11 @@ def _run_doctor_command(arguments: list[str]) -> int:
         )
 
         report = run_doctor(
+            config=args.config,
             stages_dir=args.stages_dir,
             categories_dir=args.categories_dir,
             context_root=args.context_root,
             include_network=args.network,
-            provider_mode=os.getenv("REVIEWSENSEI_PROVIDER_MODE"),
             review_mode=args.review_mode,
             repository=args.repository,
             profile=args.profile,
@@ -2892,6 +2900,7 @@ def _run_plan_command(arguments: list[str]) -> int:
             else None
         )
         report = build_plan(
+            config=args.config,
             diff=diff,
             repository=args.repository,
             pull_request=args.pull_request,
@@ -3505,6 +3514,15 @@ def _run_review_provider(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Normalize cancellation after command-specific cleanup has unwound."""
+    try:
+        return _main(argv)
+    except KeyboardInterrupt:
+        print("review-sensei: cancelled", file=sys.stderr)
+        return 130
+
+
+def _main(argv: list[str] | None = None) -> int:
     _configure_standard_streams()
     args_list = list(argv) if argv is not None else sys.argv[1:]
     # The default review command is flag-based, so optional commands cannot be
@@ -3529,9 +3547,6 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     if args_list and args_list[0] == "resolve-hosted-openrouter":
         args = _resolve_hosted_openrouter_parser().parse_args(args_list[1:])
-        if args.version:
-            print(_package_version())
-            return 0
         from .hosting.openrouter_workflow import emit_hosted_openrouter_resolution
 
         return emit_hosted_openrouter_resolution(args.action)

@@ -21,6 +21,11 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from .baseline import VerificationScope, preview_verification_scope
+from .configuration import (
+    IGNORED_PROVIDER_ENVIRONMENT_SETTINGS,
+    load_configuration,
+    resolve_inference,
+)
 from .convergence import (
     OPERATOR_REVIEW_MODES,
     ReviewConvergencePolicy,
@@ -64,6 +69,87 @@ _SAFE_REPOSITORY_RE = re.compile(
 )
 MAX_PROBE_BYTES = 8192
 PROBE_TIMEOUT_SECONDS = 2.0
+
+
+def _diagnostic_provider_configuration(
+    *,
+    config: Path | None,
+    profile: str | None,
+    provider: str | None,
+    base_url: str | None,
+    model: str | None,
+    api_key_env: str | None,
+    provider_mode: str | None,
+) -> tuple[str, dict[str, Any]]:
+    for name, value in (
+        ("provider", provider),
+        ("model", model),
+        ("base-url", base_url),
+        ("api-key-env", api_key_env),
+    ):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ReviewInputError(f"--{name} requires a non-empty value")
+    configuration_file = load_configuration(config)
+    # Explicit legacy mode is a display-only compatibility seam. The normal
+    # CLI path shares review's canonical file/environment/default resolution.
+    if profile is not None or provider_mode is not None:
+        mode = provider_mode_default(provider_mode or "local")
+        configuration = resolve_effective_provider_configuration(
+            profile=profile,
+            provider=(
+                "ollama" if provider in {"local-ollama", "cloud-ollama"} else provider
+            ),
+            base_url=base_url,
+            model=model,
+            api_key_env=api_key_env,
+            provider_mode=mode,
+        )
+        return mode, configuration
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in IGNORED_PROVIDER_ENVIRONMENT_SETTINGS
+    }
+    resolved = resolve_inference(
+        configuration_file,
+        cli_provider=provider,
+        cli_model=model,
+        environ=environment,
+    )
+    endpoint = base_url if base_url is not None else resolved.base_url
+    credential_env = api_key_env if api_key_env is not None else resolved.credential_env
+    mode = "local" if resolved.inference_location == "local" else "cloud"
+    return mode, {
+        "profile": None,
+        "backend": resolved.backend,
+        "provider": "ollama"
+        if resolved.backend.endswith("-ollama")
+        else resolved.backend,
+        "model": resolved.model,
+        "base_url": endpoint,
+        "execution_location": "local",
+        "inference_location": (
+            "local"
+            if resolved.backend == "fixture" or _is_loopback_url(endpoint)
+            else "remote"
+        ),
+        "credential_env": credential_env,
+        "credential_required": resolved.credential_required,
+        "credential_present": bool(
+            credential_env and environment.get(credential_env, "").strip()
+        ),
+        "openrouter_policy": (
+            {"upstream_provider": resolved.upstream_provider}
+            if resolved.backend == "openrouter"
+            else None
+        ),
+        "timeout_seconds": resolved.timeout_seconds,
+        "qualification_status": "unknown",
+        "provenance": {
+            key: {"source": value.source, "detail": value.detail}
+            for key, value in resolved.provenance.items()
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -488,6 +574,7 @@ def probe_repository_metadata(
 
 def run_doctor(
     *,
+    config: Path | None = None,
     stages_dir: Path | None = None,
     categories_dir: Path | None = None,
     context_root: Path | None = None,
@@ -518,9 +605,9 @@ def run_doctor(
     Stages that declare ``category_ids`` therefore require ``--categories-dir``,
     matching the review runner.
 
-    ``provider_mode`` reports operator configuration only.  When omitted, doctor
-    reads ``REVIEWSENSEI_PROVIDER_MODE`` as a diagnostic default; this is not a
-    review-time trust boundary and does not authorize provider calls.
+    When ``provider_mode`` and ``profile`` are omitted, provider diagnostics
+    share canonical review configuration and ignore retired provider variables.
+    An explicit ``provider_mode`` remains a display-only compatibility override.
 
     ``review_mode`` reports the issue #136 review-convergence policy.  When
     omitted, doctor reads ``REVIEWSENSEI_REVIEW_MODE`` and defaults to
@@ -581,14 +668,14 @@ def run_doctor(
         )
     )
     try:
-        mode = provider_mode_default(provider_mode)
-        provider_configuration = resolve_effective_provider_configuration(
+        mode, provider_configuration = _diagnostic_provider_configuration(
+            config=config,
             profile=profile,
             provider=provider,
             base_url=base_url,
             model=model,
             api_key_env=api_key_env,
-            provider_mode=mode,
+            provider_mode=provider_mode,
         )
         checks.append(
             DiagnosticCheck("provider-mode", "pass", f"{mode} (offline check)")
@@ -896,6 +983,7 @@ def run_doctor(
 
 def build_plan(
     *,
+    config: Path | None = None,
     diff: str | None = None,
     repository: str | None = None,
     pull_request: int | None = None,
@@ -962,14 +1050,14 @@ def build_plan(
         raise ReviewInputError("stages must contain non-empty strings")
     if len(selected_stages) != len(set(selected_stages)):
         raise ReviewInputError("stages must be unique")
-    mode = provider_mode_default(provider_mode)
-    provider_configuration = resolve_effective_provider_configuration(
+    mode, provider_configuration = _diagnostic_provider_configuration(
+        config=config,
         profile=profile,
         provider=provider,
         base_url=base_url,
         model=model,
         api_key_env=api_key_env,
-        provider_mode=mode,
+        provider_mode=provider_mode,
     )
     if categories_dir is None:
         categories = [category.id for category in DEFAULT_CATEGORY_CATALOG.categories]

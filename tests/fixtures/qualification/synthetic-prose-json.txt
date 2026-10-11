@@ -1,0 +1,4 @@
+Synthetic reasoning draft. This is constructed test data, not a captured provider response.
+{"summary":"Draft interpretation.","comments":[]}
+Synthetic reconsideration before another document.
+{"summary":"Different final interpretation.","comments":[]}
