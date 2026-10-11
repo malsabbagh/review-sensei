@@ -23,11 +23,15 @@ class ReplyPublicationHttp(GitHubHttp):
     """
 
     def __init__(self, transport: GitHubHttp) -> None:
-        super().__init__(api_url=transport.api_url, timeout=transport.timeout)
         self.transport = transport
         self.requests = 0
         self.writes = 0
         self.deadline = time.monotonic() + MAX_REPLY_PUBLICATION_SECONDS
+
+    def __getattr__(self, name: str) -> Any:
+        # Keep transport configuration and mutable caches on their original
+        # owner. Inherited pagination still calls this adapter's request gate.
+        return getattr(self.transport, name)
 
     def request(
         self,
@@ -66,6 +70,8 @@ class ReplyPublicationHttp(GitHubHttp):
 def reply_publication_budget(*owners):
     """Share one wrapper across the publisher, its reader and its finalizer."""
     original = [owner.http for owner in owners]
+    if not original or any(http is not original[0] for http in original):
+        raise GitHubConversationError("pending reply transports must be shared")
     wrapped = original[0]
     if not isinstance(wrapped, ReplyPublicationHttp):
         wrapped = ReplyPublicationHttp(wrapped)

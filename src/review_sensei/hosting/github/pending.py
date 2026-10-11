@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import string
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -17,17 +18,18 @@ MAX_PENDING_PAGES = 16
 
 def _display(value: str, maximum: int = 160) -> str:
     # A short reason/location is presentation only; never shorten an identity.
-    text = (
-        " ".join(value.split())
-        .replace("`", "\\`")
-        .replace("@", "\\@")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
-    raw = text.encode("utf-8")
-    if len(raw) <= maximum:
-        return text
-    return raw[: maximum - 3].decode("utf-8", errors="ignore") + "..."
+    # Entities render punctuation literally in Markdown, including backticks
+    # and links. Never truncate inside an entity or a UTF-8 codepoint.
+    pieces: list[str] = []
+    used = 0
+    for character in " ".join(value.split()):
+        piece = f"&#{ord(character)};" if character in string.punctuation else character
+        size = len(piece.encode("utf-8"))
+        if used + size > maximum - 3:
+            return "".join(pieces) + "..."
+        pieces.append(piece)
+        used += size
+    return "".join(pieces)
 
 
 @dataclass(frozen=True)
@@ -118,7 +120,7 @@ def pending_reply_pages(
                 )
             lines.append(
                 f"- **{identifier}** (`{item.fingerprint}`), "
-                f"`{_display(item.path)}`: {reason} "
+                f"{_display(item.path)}: {reason} "
                 "Next: provide current-head code and human evidence for this ID "
                 "in a new authorized mention."
             )

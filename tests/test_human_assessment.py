@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import traceback
@@ -698,12 +699,21 @@ class HumanAssessmentTests(unittest.TestCase):
             state.eligibility.facts,
         )
         replay_provider = Provider({})
+        before_replay = state.reply_count
         replay, _ = state.application_reply(replay_provider)
         self.assertEqual(replay.status, "replied")
+        self.assertEqual(state.reply_count, before_replay + 1)
+        receipt = state.replies[-1]["body"]
+        self.assertIn("No pending human-assessment findings in this inventory", receipt)
+        self.assertIn(f"Reviewed head: `{HEAD}`", receipt)
+        content, marker = receipt.rsplit("\n\n<!-- reviewsensei:", 1)
+        self.assertIn(f"content={hashlib.sha256(content.encode()).hexdigest()}", marker)
         self.assertFalse(replay_provider.calls)
         self.assertEqual(state.events(), ["COMMENT", "COMMENT", "APPROVE"])
         again, _ = state.application_reply(replay_provider)
         self.assertEqual(again.status, "already_replied")
+        self.assertEqual(state.reply_count, before_replay + 1)
+        self.assertEqual(state.replies[-1]["body"], receipt)
         self.assertFalse(replay_provider.calls)
 
     def test_retry_after_durable_reassessment_resumes_approval_without_inference(self):

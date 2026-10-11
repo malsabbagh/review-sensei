@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import re
 import unittest
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from review_sensei.errors import ReviewInputError
@@ -15,12 +17,16 @@ from review_sensei.hosting.github.conversation import (
     ConversationPublisher,
 )
 from review_sensei.hosting.github.errors import GitHubConversationError
+from review_sensei.hosting.github.http import GitHubHttp
 from review_sensei.hosting.github.human_assessment import HumanAssessmentPublisher
 from review_sensei.hosting.github.pending import (
     MAX_PENDING_PAGE_BYTES,
     pending_reply_pages,
 )
-from review_sensei.hosting.github.reply_budget import ReplyPublicationHttp
+from review_sensei.hosting.github.reply_budget import (
+    ReplyPublicationHttp,
+    reply_publication_budget,
+)
 from review_sensei.human_assessment import (
     MAX_HUMAN_SOURCE_BYTES,
     HumanAssessmentDecision,
@@ -132,6 +138,31 @@ class ReplyIngressTests(unittest.TestCase):
 
 
 class PendingPresentationTests(unittest.TestCase):
+    def test_untrusted_locations_and_reasons_cannot_format_authority(self):
+        path = "src/[APPROVED](https:evil)`*_file.py"
+        reason = "[APPROVED](https://evil) **cleared** `done` @admin <b>x</b> \\"
+        finding = HumanReviewFinding("a" * 64, path, "Concern")
+        current = replace(prior(), human_review=PendingHumanReview(BASE, (finding,)))
+        text = pending_reply_pages(
+            body="Discussion.",
+            head_sha=HEAD,
+            eligibility=current,
+            decision_reasons={finding.fingerprint: reason},
+        )[0].body
+        location = text.split(f"(`{finding.fingerprint}`), ", 1)[1].split(
+            ": Validated reassessment reason: ", 1
+        )[0]
+        rationale = text.split("Validated reassessment reason: ", 1)[1].split(
+            " Next: ", 1
+        )[0]
+        self.assertEqual(html.unescape(location), path)
+        self.assertEqual(html.unescape(rationale), reason)
+        for fragment in (location, rationale):
+            for control in "`*_[\\]()<>@":
+                self.assertNotIn(control, fragment)
+        self.assertIn("does not grant approval", text)
+        self.assertEqual(text.count(finding.fingerprint), 1)
+
     def test_maximum_inventory_worst_paths_reasons_and_collisions_fit_complete_delivery(
         self,
     ):
@@ -344,6 +375,49 @@ class PendingPresentationTests(unittest.TestCase):
             self.assertNotEqual(one[0].report_digest, other[0].report_digest)
 
 
+class ReplyTransportTests(unittest.TestCase):
+    def test_adapter_retains_transport_configuration_and_primed_cache(self):
+        transport = GitHubHttp(api_url="https://example.test", timeout=7)
+        transport.primed_issue_comments["/cached"] = [{"id": 1}]
+        transport.custom_configuration = object()
+        with patch.object(transport, "request", return_value=(200, [])) as request:
+            wrapped = ReplyPublicationHttp(transport)
+            self.assertIs(
+                wrapped.primed_issue_comments, transport.primed_issue_comments
+            )
+            self.assertIs(wrapped.custom_configuration, transport.custom_configuration)
+            wrapped.request("GET", "/cached", token="synthetic")
+            self.assertEqual(wrapped.requests, 1)
+            request.assert_called_once()
+            self.assertLessEqual(request.call_args.kwargs["timeout_seconds"], 60)
+
+    def test_distinct_transports_fail_before_rerouting_or_writing(self):
+        first = SimpleNamespace(http=GitHubHttp(api_url="https://one.test"))
+        second = SimpleNamespace(http=GitHubHttp(api_url="https://two.test"))
+        originals = (first.http, second.http)
+        with self.assertRaises(GitHubConversationError):
+            with reply_publication_budget(first, second):
+                self.fail("different transports must not enter publication")
+        self.assertIs(first.http, originals[0])
+        self.assertIs(second.http, originals[1])
+
+    def test_nested_budget_shares_counters_and_restores_after_failure(self):
+        transport = GitHubHttp()
+        owner = SimpleNamespace(http=transport)
+        with patch.object(transport, "request", return_value=(200, [])):
+            with reply_publication_budget(owner):
+                wrapped = owner.http
+                wrapped.request("GET", "/one", token="synthetic")
+                with self.assertRaises(RuntimeError):
+                    with reply_publication_budget(owner):
+                        self.assertIs(owner.http, wrapped)
+                        owner.http.request("POST", "/two", token="synthetic")
+                        raise RuntimeError("interrupted")
+                self.assertIs(owner.http, wrapped)
+                self.assertEqual((wrapped.requests, wrapped.writes), (2, 1))
+        self.assertIs(owner.http, transport)
+
+
 class PendingDeliveryTests(unittest.TestCase):
     def publish(self, state, *, body="Discussion.", fence=lambda: None):
         return ConversationPublisher(http=state.http).publish_pending(
@@ -404,6 +478,11 @@ class PendingDeliveryTests(unittest.TestCase):
             "content=" + hashlib.sha256(content.encode()).hexdigest(),
             changed,
         )
+        modified_content, marker = state.replies[0]["body"].rsplit(
+            "\n\n<!-- reviewsensei:", 1
+        )
+        self.assertEqual(modified_content, content)
+        self.assertIn(f"content={hashlib.sha256(content.encode()).hexdigest()}", marker)
         with self.assertRaises(GitHubConversationError):
             self.publish(state)
         self.assertEqual(state.events(), [])
