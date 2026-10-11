@@ -1512,7 +1512,12 @@ class ResolvedInference:
         return self.provenance[field_name]
 
     def authorizes_custom_endpoint(self, base_url: str) -> bool:
-        """File permission applies only to the endpoint resolved from that file."""
+        """Bind file permission by exact URL text, ignoring trailing slashes.
+
+        Do not equate host case, explicit default ports, or other URL changes:
+        those overrides need their own opt-in. Endpoint safety is validated
+        separately before provider dispatch.
+        """
 
         return self.allow_custom_endpoint and (
             base_url.rstrip("/") == self.base_url.rstrip("/")

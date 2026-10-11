@@ -354,6 +354,7 @@ class ReplyInferenceTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             environment={"OPENAI_API_KEY": "synthetic-key"},
         )
         self.assertEqual(status, 0, stderr)
+        self.assertEqual(settings[0].base_url, "https://gateway.example/v1")
         self.assertTrue(settings[0].allow_custom_endpoint)
 
     def test_provider_failure_does_not_publish_and_reply_failure_exits_one(self):

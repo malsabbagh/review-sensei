@@ -32,11 +32,24 @@ def main():
     assert importlib.metadata.version("review-sensei") == args.expected_version
     matched = 0
     with zipfile.ZipFile(args.wheel) as wheel:
-        for name in wheel.namelist():
-            if name.startswith("review_sensei/") and not name.endswith("/"):
-                installed = package.parent / name
-                assert installed.read_bytes() == wheel.read(name), name
-                matched += 1
+        wheel_files = {
+            name
+            for name in wheel.namelist()
+            if name.startswith("review_sensei/") and not name.endswith("/")
+        }
+        installed_files = {
+            path.relative_to(package.parent).as_posix()
+            for path in package.rglob("*")
+            if path.is_file() and "__pycache__" not in path.relative_to(package).parts
+        }
+        assert installed_files == wheel_files, {
+            "extra": sorted(installed_files - wheel_files),
+            "missing": sorted(wheel_files - installed_files),
+        }
+        for name in wheel_files:
+            installed = package.parent / name
+            assert installed.read_bytes() == wheel.read(name), name
+            matched += 1
     assert matched > 0
     console = Path(sys.executable).parent / "review-sensei"
     version = subprocess.run(

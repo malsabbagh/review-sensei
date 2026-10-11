@@ -320,8 +320,10 @@ class OpenAIConfigurationTests(IsolatedWorkingDirectoryMixin, unittest.TestCase)
         for command in ("doctor", "plan", "host-plan"):
             with self.subTest(command=command):
                 status, output, error = self.invoke([command, "--json"])
-                self.assertIn(
-                    status, (0, 2, 3) if command == "doctor" else (0, 3), error
+                # This offline fixture has no automation ledger or diff.
+                # Doctor needs action; plan is incomplete; host-plan is valid.
+                self.assertEqual(
+                    status, {"doctor": 2, "plan": 3, "host-plan": 0}[command], error
                 )
                 report = json.loads(output)
                 effective = (
@@ -341,7 +343,7 @@ class OpenAIConfigurationTests(IsolatedWorkingDirectoryMixin, unittest.TestCase)
             status, output, error = self.invoke(
                 [command, "--base-url", OTHER, "--allow-custom-endpoint", "--json"]
             )
-            self.assertIn(status, (0, 2, 3) if command == "doctor" else (0, 3), error)
+            self.assertEqual(status, {"doctor": 2, "plan": 3}[command], error)
             self.assertEqual(
                 json.loads(output)["provider_configuration"]["base_url"], OTHER
             )
