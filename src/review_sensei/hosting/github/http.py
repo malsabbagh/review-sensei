@@ -204,7 +204,9 @@ class GitHubHttp:
         Callers that handle large, untrusted list entries may provide strictly
         descending page sizes where each smaller size evenly divides the prior
         size. If a page exceeds the response budget, the same item offset is
-        retried with the next smaller size.
+        retried with the next smaller size. After a smaller page succeeds, the
+        next aligned offset uses the largest page size that divides it, so one
+        oversized page does not pin the rest of the list at the smaller size.
         """
 
         if not page_sizes or any(
@@ -319,6 +321,11 @@ class GitHubHttp:
                 if expected_items is not None and len(collected) != expected_items:
                     raise GitHubHTTPError("GitHub pagination inventory count changed")
                 return collected
+            page_size_index = next(
+                index
+                for index, size in enumerate(page_sizes)
+                if len(collected) % size == 0
+            )
         raise GitHubHTTPPaginationLimitError(
             "GitHub pagination exceeded configured page limit"
         )

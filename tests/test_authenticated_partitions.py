@@ -7,6 +7,7 @@ import random
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -283,7 +284,15 @@ class GitHubState:
         self.calls = []
         self.fail_part_get = False
         self.fail_root_patch = False
+        self.updated_tick = 0
         self.http = GitHubHttp(api_url="https://api.github.test", opener=self.open)
+
+    def touch(self, item):
+        self.updated_tick += 1
+        item["updated_at"] = (
+            datetime(2020, 1, 1, tzinfo=timezone.utc)
+            + timedelta(seconds=self.updated_tick)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def open(self, request, timeout):
         self.calls.append((request.method, request.full_url))
@@ -295,6 +304,14 @@ class GitHubState:
                 per_page = int(query["per_page"][0])
                 page = int(query["page"][0])
                 items = list(self.comments.values())
+                since = query.get("since", [None])[0]
+                if since:
+                    items = [
+                        item
+                        for item in items
+                        if not isinstance(item.get("updated_at"), str)
+                        or item["updated_at"] >= since
+                    ]
                 return json_response(items[(page - 1) * per_page : page * per_page])
             body = json.loads(request.data)["body"]
             identity = len(self.comments) + 1000
@@ -304,6 +321,7 @@ class GitHubState:
                 "user": {"id": 55, "type": "Bot", "login": "sensei[bot]"},
                 "issue_url": f"https://api.github.test/repos/{fixture.IDENTITY.repository}/issues/{fixture.IDENTITY.pull_request}",
             }
+            self.touch(item)
             self.comments[identity] = item
             return json_response(item, 201)
         if "/issues/comments/" in path:
@@ -318,6 +336,7 @@ class GitHubState:
             if self.fail_root_patch:
                 return json_response({}, 503)
             item["body"] = json.loads(request.data)["body"]
+            self.touch(item)
             return json_response(item)
         raise AssertionError((request.method, request.full_url))
 

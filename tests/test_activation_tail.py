@@ -602,8 +602,8 @@ class HostedTailTests(unittest.TestCase):
             self.fresh(broker, ledger)
             second = self.activate(ledger, phase=1)
         self.assertEqual(len(broker.used), 3)
-        self.assertEqual([len(ticket.plan.steps) for ticket in tickets], [6, 7])
-        self.assertEqual([ticket.dispatched for ticket in tickets], [6, 7])
+        self.assertEqual([len(ticket.plan.steps) for ticket in tickets], [4, 4])
+        self.assertEqual([ticket.dispatched for ticket in tickets], [4, 4])
         self.assertEqual(
             ledger.evidence_budget.calls, len(state.calls) + len(broker.calls)
         )
@@ -626,12 +626,12 @@ class HostedTailTests(unittest.TestCase):
             broker.request = request
             self.fresh(broker, ledger)
             current = self.activate(ledger, phase=phase)
-        self.assertEqual(ledger.evidence_budget.calls, 44)
+        self.assertEqual(ledger.evidence_budget.calls, 31)
         self.assertEqual(
             ledger.evidence_budget.calls, len(state.calls) + len(broker.calls)
         )
         self.assertEqual(
-            current.assessment_queue["active_operation"]["read_accounting"]["calls"], 44
+            current.assessment_queue["active_operation"]["read_accounting"]["calls"], 31
         )
         self.assertEqual(len(broker.used), 3)
 
@@ -715,27 +715,27 @@ class HostedTailTests(unittest.TestCase):
             state.ledger().load(fixture.IDENTITY, now=fixture.NOW).record.generation, 0
         )
 
-    def test_third_minimal_checkpoint_refuses_original_cap_before_ack(self):
+    def test_checkpoint_past_the_original_cap_refuses_before_ack(self):
         state, broker, ledger = self.setup_host()
         self.reserve(ledger)
-        self.assertEqual(ledger.evidence_budget.calls, 8)
-        for phase, expected in ((0, 24), (1, 44)):
+        self.assertEqual(ledger.evidence_budget.calls, 7)
+        for phase, expected in ((0, 19), (1, 31), (2, 43), (3, 55)):
             self.fresh(broker, ledger)
             saved = self.activate(ledger, phase=phase)
             self.assertEqual(ledger.evidence_budget.calls, expected)
         self.fresh(broker, ledger)
-        self.assertEqual(ledger.evidence_budget.calls, 48)
-        with self.assertRaisesRegex(ReviewInputError, "liability"):
-            self.activate(ledger, phase=2)
-        # Third staging is charged and retained; no root activation or source ack.
-        self.assertEqual(ledger.evidence_budget.calls, 57)
-        self.assertEqual(len(state.calls), 49)
-        self.assertEqual(len(broker.calls), 8)
+        self.assertEqual(ledger.evidence_budget.calls, 58)
+        with self.assertRaisesRegex(ReviewInputError, "budget"):
+            self.activate(ledger, phase=4)
+        # Staging past the original cap is charged and retained; the root is not patched.
+        self.assertEqual(ledger.evidence_budget.calls, 60)
+        self.assertEqual(len(state.calls), 48)
+        self.assertEqual(len(broker.calls), 12)
         reader = state.ledger()
         self.assertEqual(reader.load(fixture.IDENTITY, now=fixture.NOW).record, saved)
         calls = ledger.evidence_budget.calls
         with self.assertRaises(NonResumableActivationError):
-            self.activate(ledger, phase=2)
+            self.activate(ledger, phase=4)
         self.assertEqual(ledger.evidence_budget.calls, calls)
 
     def test_reused_grant_cannot_supply_second_checkpoint(self):
@@ -914,8 +914,8 @@ class HostedTailTests(unittest.TestCase):
         with patch.object(ledger.evidence_budget, "reserve_tail", side_effect=capture):
             saved = self.activate(ledger, pages=2)
         ticket = captured[0]
-        self.assertEqual(len(ticket.plan.steps), 8)
-        self.assertEqual(ticket.dispatched, 6)
+        self.assertEqual(len(ticket.plan.steps), 6)
+        self.assertEqual(ticket.dispatched, 4)
         self.assertEqual(
             ledger.evidence_budget.calls, len(state.calls) + len(broker.calls) + 2
         )
@@ -924,9 +924,9 @@ class HostedTailTests(unittest.TestCase):
             ledger.evidence_budget.calls,
         )
         self.fresh(broker, ledger, pages=2)
-        # One root plus three retained parts reaches a full page after one new
-        # part. Declared one-page acquisition cannot prove termination.
-        for index in range(3):
+        # More comments than one inventory read can prove. The next checkpoint
+        # refuses while listing them, before it posts another part.
+        for index in range(1000):
             state.comments[2000 + index] = {"id": 2000 + index, "body": "human comment"}
         posts = len([call for call in state.calls if call[0] == "POST"])
         with self.assertRaises(ReviewInputError):

@@ -204,6 +204,15 @@ to about **30**. On a busy pull request the gain is larger. At 200 ordinary
 comments, the list reads drop from about 656 requests to about 8: one full read
 of 2 or 3 pages plus about 5 `since` reads.
 
+Measured: the two checkpoints charge **31** (25 GitHub and 6 broker). The
+complete profile, including accepted read-back and replay, charges **36**.
+A grant is still refused before it is installed when the head is stale, so
+that head read stays. History scans do not reuse this cache: each lookup reads
+the list again, and a declared page bound that cannot see the end of the list
+still refuses. 25 comments, 300 ordinary comments, and 300 comments with a run
+of maximum-size bot comments all finish inside 60. The oversized run falls to
+pages of 5 and the following page returns to 100.
+
 Exit: the activation tail tests stay green, including stale head, stale root,
 conflicting writer, and lost patch response. The P1 test asserts the new count.
 More P1 cases also fit inside 60 ordinary requests: 25 comments, 300 ordinary

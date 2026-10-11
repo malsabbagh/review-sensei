@@ -17,11 +17,13 @@ retried with a newly issued grant rather than replaying the old one.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Mapping, cast
+from urllib.parse import quote
 
 from ...bounded_evidence import (
     MAX_PART_BYTES,
@@ -75,11 +77,28 @@ from .errors import (
     GitHubBrokerClientError,
     GitHubHTTPError,
     GitHubHTTPPaginationLimitError,
+    GitHubHTTPResponseTooLargeError,
     GitHubHTTPTransientError,
     GitHubPublicationError,
     GitHubPublicationTransientError,
 )
-from .http import GitHubHttp
+from .http import MAX_PAGINATION_ITEMS, GitHubHttp
+
+_COMMENT_PAGE_SIZES = (100, 20, 5)
+_FENCE_PAGE_SIZE = 100
+_SINCE_MARGIN = timedelta(seconds=2)
+_UPDATED_AT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+_PART_PREFIX = "ReviewSensei immutable evidence part v1\n"
+
+
+def _since_margin(value: str) -> str | None:
+    """Server timestamp of a read, moved back so a same-second write is included."""
+
+    if _UPDATED_AT.fullmatch(value) is None:
+        return None
+    parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    return (parsed - _SINCE_MARGIN).strftime("%Y-%m-%dT%H:%M:%SZ")
+
 
 SESSION_MARKER_PREFIX = "<!-- reviewsensei:session:v1"
 SESSION_MARKER_RE = re.compile(
@@ -319,6 +338,15 @@ class GitHubIssueCommentSessionLedger:
         self._bound_tail_grants: set[str] = set()
         self._observed_consumed_grants: set[str] = set()
         self._accepted_consumed_grant: str | None = None
+        self._comments_by_id: dict[int, dict[str, Any]] = {}
+        self._comment_order: list[int] = []
+        self._inventory_complete = False
+        self._list_refresh = True
+        self._list_anchor: str | None = None
+        self._fence_anchor: str | None = None
+        self._verified_parts: dict[str, AuthenticatedPart] = {}
+        self._part_digests: dict[str, str] = {}
+        self._reuse_listed_parts = False
         if session_grant is not None:
             self._bound_tail_grants.add(
                 hashlib.sha256(session_grant.encode()).hexdigest()
@@ -428,26 +456,31 @@ class GitHubIssueCommentSessionLedger:
             )
         return item
 
-    def _read_part(
-        self, identity: SessionIdentity, storage_id: str
+    def _part_is_listed(self, storage_id: str) -> bool:
+        if not storage_id.isdigit():
+            return False
+        item = self._comments_by_id.get(int(storage_id))
+        body = item.get("body") if isinstance(item, dict) else None
+        return isinstance(body, str) and body.startswith(_PART_PREFIX)
+
+    def _remember_part(
+        self, storage_id: str, part: AuthenticatedPart
     ) -> AuthenticatedPart:
-        if (
-            self._activation_ticket is not None
-            and identity != self._activation_identity
-        ):
-            raise ReviewInputError("activation part identity changed")
-        if not re.fullmatch(r"[1-9][0-9]{0,18}", storage_id):
-            raise ReviewInputError("GitHub partition identity is invalid")
-        path = self.http.repository_path(
-            identity.repository, f"/issues/comments/{storage_id}"
-        )
-        status, payload = self._request("GET", path)
-        if status != 200:
-            raise ReviewInputError("GitHub partition is missing")
-        item = self._part_owner(payload, identity)
-        if type(item.get("id")) is not int or item.get("id") != int(storage_id):
+        digest = hashlib.sha256(canonical_bytes(part.document)).hexdigest()
+        previous = self._part_digests.get(storage_id)
+        if previous is not None and previous != digest:
+            raise ReviewInputError("GitHub partition changed")
+        self._part_digests[storage_id] = digest
+        self._verified_parts[storage_id] = part
+        return part
+
+    def _part_from_item(
+        self, item: dict[str, Any], identity: SessionIdentity, storage_id: str
+    ) -> AuthenticatedPart:
+        owned = self._part_owner(item, identity)
+        if type(owned.get("id")) is not int or owned.get("id") != int(storage_id):
             raise ReviewInputError("GitHub partition identity does not match")
-        body = item.get("body")
+        body = owned.get("body")
         if (
             not isinstance(body, str)
             or len(body.encode()) > MAX_PART_BYTES
@@ -462,7 +495,37 @@ class GitHubIssueCommentSessionLedger:
                 raise ValueError("noncanonical part")
         except (ValueError, UnicodeError) as exc:
             raise ReviewInputError("GitHub partition JSON is invalid") from exc
-        return AuthenticatedPart(document, self.evidence_producer())
+        return self._remember_part(
+            storage_id, AuthenticatedPart(document, self.evidence_producer())
+        )
+
+    def _read_part(
+        self, identity: SessionIdentity, storage_id: str
+    ) -> AuthenticatedPart:
+        if (
+            self._activation_ticket is not None
+            and identity != self._activation_identity
+        ):
+            raise ReviewInputError("activation part identity changed")
+        if not re.fullmatch(r"[1-9][0-9]{0,18}", storage_id):
+            raise ReviewInputError("GitHub partition identity is invalid")
+        # One activation verifies a part once. Later reads in that activation
+        # reuse the verified body. A later call fetches again, so a part that
+        # disappeared or changed owner is still refused.
+        if self._reuse_listed_parts or self._activation_ticket is not None:
+            cached = self._verified_parts.get(storage_id)
+            if cached is not None:
+                return cached
+            if self._part_is_listed(storage_id):
+                listed = self._comments_by_id[int(storage_id)]
+                return self._part_from_item(listed, identity, storage_id)
+        path = self.http.repository_path(
+            identity.repository, f"/issues/comments/{storage_id}"
+        )
+        status, payload = self._request("GET", path)
+        if status != 200 or not isinstance(payload, dict):
+            raise ReviewInputError("GitHub partition is missing")
+        return self._part_from_item(payload, identity, storage_id)
 
     def read_evidence(
         self,
@@ -548,10 +611,7 @@ class GitHubIssueCommentSessionLedger:
             for part in prospective_parts
         ]
         missing_bodies = [body for body in prospective_bodies if body not in existing]
-        if (
-            self._tail_scan_pages is not None
-            and len(items) + len(missing_bodies) >= 5 * self._tail_scan_pages
-        ):
+        if self._tail_scan_pages is not None and not self._inventory_complete:
             raise ReviewInputError(
                 "activation future metadata exceeds sealed page bound"
             )
@@ -614,21 +674,216 @@ class GitHubIssueCommentSessionLedger:
             else None,
         )
 
+    def _cached_comments(self) -> list[Any]:
+        return [self._comments_by_id[comment_id] for comment_id in self._comment_order]
+
+    def _snapshot_comment(self, item: object) -> dict[str, Any] | None:
+        if (
+            not isinstance(item, dict)
+            or isinstance(item.get("id"), bool)
+            or not isinstance(item.get("id"), int)
+        ):
+            return None
+        return copy.deepcopy(item)
+
+    def _store_comment(self, item: dict[str, Any]) -> None:
+        comment_id = item["id"]
+        previous = self._comments_by_id.get(comment_id)
+        if (
+            previous is not None
+            and previous.get("body") != item.get("body")
+            and str(comment_id) in self._verified_parts
+        ):
+            raise ReviewInputError("GitHub partition changed")
+        self._comments_by_id[comment_id] = item
+        if comment_id not in self._comment_order:
+            self._comment_order.append(comment_id)
+
+    def _replace_inventory(self, items: list[Any]) -> None:
+        self._comments_by_id = {}
+        self._comment_order = []
+        self._merge_comments(items)
+
+    def _merge_comments(self, items: list[Any]) -> None:
+        for item in items:
+            copied = self._snapshot_comment(item)
+            if copied is not None:
+                self._store_comment(copied)
+
+    def _note_anchor(self, items: list[Any]) -> None:
+        stamps = [
+            item.get("updated_at")
+            for item in items
+            if isinstance(item, dict) and isinstance(item.get("updated_at"), str)
+        ]
+        if not stamps:
+            return
+        earlier = _since_margin(max(stamps))
+        if earlier is not None and (
+            self._list_anchor is None or earlier > self._list_anchor
+        ):
+            self._list_anchor = earlier
+
+    def _take_primed_comments(self, identity: SessionIdentity) -> list[Any] | None:
+        primed = getattr(self.http, "primed_issue_comments", None)
+        if not isinstance(primed, dict):
+            return None
+        shared = primed.pop(self._comments_path(identity), None)
+        if not isinstance(shared, list):
+            return None
+        return shared
+
+    def _fence_path(self, identity: SessionIdentity, page: int) -> str:
+        path = (
+            f"{self._comments_path(identity)}?per_page={_FENCE_PAGE_SIZE}&page={page}"
+        )
+        anchor = self._fence_anchor
+        if isinstance(anchor, str) and anchor:
+            path += f"&since={quote(anchor, safe='')}"
+        return path
+
+    def _fencing(self) -> bool:
+        return self._activation_ticket is not None and self._tail_phase in {
+            "reload",
+            "readback",
+        }
+
+    def _fetch_pages(
+        self, identity: SessionIdentity, *, since: str | None
+    ) -> list[Any]:
+        """Read a comment list with falling page sizes that step back up."""
+
+        collected: list[Any] = []
+        page_size_index = 0
+        while len(collected) <= MAX_PAGINATION_ITEMS:
+            page_size = _COMMENT_PAGE_SIZES[page_size_index]
+            if len(collected) % page_size:
+                raise ReviewInputError("partition metadata enumeration is unavailable")
+            page = len(collected) // page_size + 1
+            path = f"{self._comments_path(identity)}?per_page={page_size}&page={page}"
+            if since is not None:
+                path += f"&since={quote(since, safe='')}"
+            try:
+                status, payload = self._request("GET", path)
+            except GitHubHTTPResponseTooLargeError:
+                if page_size_index + 1 >= len(_COMMENT_PAGE_SIZES):
+                    raise ReviewInputError(
+                        "partition metadata enumeration is unavailable"
+                    ) from None
+                page_size_index += 1
+                continue
+            if (
+                status != 200
+                or not isinstance(payload, list)
+                or len(payload) > page_size
+            ):
+                raise ReviewInputError("partition metadata enumeration is unavailable")
+            collected.extend(payload)
+            if len(payload) < page_size:
+                return collected
+            if len(collected) >= MAX_PAGINATION_ITEMS:
+                raise ReviewInputError(
+                    "partition metadata enumeration exceeds item bound"
+                )
+            page_size_index = next(
+                index
+                for index, size in enumerate(_COMMENT_PAGE_SIZES)
+                if len(collected) % size == 0
+            )
+        raise ReviewInputError("partition metadata enumeration exceeds item bound")
+
+    def _fence_scan(self, identity: SessionIdentity) -> list[Any]:
+        pages = self._tail_scan_pages if self._tail_scan_pages is not None else 1
+        collected: list[Any] = []
+        for page in range(1, pages + 1):
+            status, payload = self._request("GET", self._fence_path(identity, page))
+            if (
+                status != 200
+                or not isinstance(payload, list)
+                or len(payload) > _FENCE_PAGE_SIZE
+            ):
+                raise ReviewInputError("partition metadata enumeration is unavailable")
+            collected.extend(payload)
+            if len(payload) < _FENCE_PAGE_SIZE:
+                self._merge_comments(collected)
+                self._note_anchor(collected)
+                return self._cached_comments()
+        raise ReviewInputError("partition metadata enumeration exceeds item bound")
+
+    def _history_pages(self, identity: SessionIdentity) -> list[Any]:
+        """Read only as far as the declared history scan, and do not cache it.
+
+        A history lookup repeats this read so a root edited while a child was
+        fetched is still visible. A full last page means the list continues
+        past the declared bound, which refuses rather than scanning further.
+        """
+
+        limit = self._tail_scan_pages if self._tail_scan_pages is not None else 1
+        collected: list[Any] = []
+        page_size_index = 0
+        used = 0
+        while used < limit and len(collected) < MAX_PAGINATION_ITEMS:
+            page_size = _COMMENT_PAGE_SIZES[page_size_index]
+            if len(collected) % page_size:
+                raise ReviewInputError("partition metadata enumeration is unavailable")
+            page = len(collected) // page_size + 1
+            path = f"{self._comments_path(identity)}?per_page={page_size}&page={page}"
+            used += 1
+            try:
+                status, payload = self._request("GET", path)
+            except GitHubHTTPResponseTooLargeError:
+                if page_size_index + 1 >= len(_COMMENT_PAGE_SIZES):
+                    raise ReviewInputError(
+                        "partition metadata enumeration is unavailable"
+                    ) from None
+                page_size_index += 1
+                continue
+            if (
+                status != 200
+                or not isinstance(payload, list)
+                or len(payload) > page_size
+            ):
+                raise ReviewInputError("partition metadata enumeration is unavailable")
+            collected.extend(payload)
+            if len(payload) < page_size:
+                return collected
+            if used >= limit or len(collected) >= MAX_PAGINATION_ITEMS:
+                raise ReviewInputError(
+                    "partition metadata enumeration exceeds item bound"
+                )
+            page_size_index = next(
+                index
+                for index, size in enumerate(_COMMENT_PAGE_SIZES)
+                if len(collected) % size == 0
+            )
+        raise ReviewInputError("partition metadata enumeration exceeds item bound")
+
     def _bounded_comments(self, identity: SessionIdentity) -> list[Any]:
         assert self.evidence_budget is not None
-        items: list[Any] = []
-        # Five maximum-size comments fit the retained 512 KiB transport bound.
-        page_limit = self._tail_scan_pages if self._tail_scan_pages is not None else 200
-        for page in range(1, page_limit + 1):
-            status, payload = self._request(
-                "GET", f"{self._comments_path(identity)}?per_page=5&page={page}"
-            )
-            if status != 200 or not isinstance(payload, list) or len(payload) > 5:
-                raise ReviewInputError("partition metadata enumeration is unavailable")
-            items.extend(payload)
-            if len(payload) < 5:
-                return items
-        raise ReviewInputError("partition metadata enumeration exceeds item bound")
+        if self._history_reading:
+            return self._history_pages(identity)
+        if self._fencing():
+            return self._fence_scan(identity)
+        if self._inventory_complete and not self._list_refresh:
+            return self._cached_comments()
+        if self._list_refresh and self._inventory_complete and self._list_anchor:
+            self._list_refresh = False
+            changed = self._fetch_pages(identity, since=self._list_anchor)
+            self._merge_comments(changed)
+            self._note_anchor(changed)
+            return self._cached_comments()
+        self._list_refresh = False
+        primed = self._take_primed_comments(identity)
+        if primed is not None:
+            self._replace_inventory(primed)
+            self._inventory_complete = True
+            self._note_anchor(primed)
+            return self._cached_comments()
+        items = self._fetch_pages(identity, since=None)
+        self._replace_inventory(items)
+        self._inventory_complete = True
+        self._note_anchor(items)
+        return self._cached_comments()
 
     def _require_identity(self, identity: SessionIdentity) -> int:
         if identity.repository_id is None:
@@ -759,8 +1014,7 @@ class GitHubIssueCommentSessionLedger:
                         )
                     fence = method == "PATCH" or (
                         self._tail_phase in {"reload", "readback"}
-                        and path
-                        == f"{self._comments_path(self._activation_identity)}?per_page=5&page=1"
+                        and path == self._fence_path(self._activation_identity, 1)
                     )
                     remaining = self._activation_ticket.consume(
                         f"{method} {path}", fence=fence
@@ -777,6 +1031,8 @@ class GitHubIssueCommentSessionLedger:
             raise GitHubPublicationTransientError(
                 "session ledger request failed"
             ) from exc
+        except GitHubHTTPResponseTooLargeError:
+            raise
         except GitHubHTTPError as exc:
             raise GitHubPublicationError("session ledger request failed") from exc
 
@@ -949,6 +1205,7 @@ class GitHubIssueCommentSessionLedger:
     def load(
         self, identity: SessionIdentity, *, now: datetime | None = None
     ) -> SessionLoadResult:
+        self._list_refresh = True
         try:
             _comment_id, record = self._discover(identity, now=now)
         except SessionLoadError as exc:
@@ -1027,6 +1284,7 @@ class GitHubIssueCommentSessionLedger:
         ambiguous = status in {202, 409, 422, 429} or status >= 500
         if not (200 <= status < 300 or ambiguous):
             raise GitHubPublicationError("session comment create failed")
+        self._list_refresh = True
         verified_id, verified_record = self._discover(identity, now=now)
         if verified_id is None or verified_record is None:
             if ambiguous:
@@ -1061,6 +1319,7 @@ class GitHubIssueCommentSessionLedger:
         now: datetime | None = None,
     ) -> SessionRecord:
         self._verify_mutation_grant(identity)
+        self._list_refresh = True
         comment_id, record = self._discover(identity, now=now)
         if comment_id is None or record is None:
             raise ReviewInputError("session record is missing")
@@ -1086,6 +1345,7 @@ class GitHubIssueCommentSessionLedger:
         finally:
             self._mutation_active = False
         if self.evidence_budget is not None:
+            self._list_refresh = True
             preactivation_id, preactivation = self._discover(identity, now=now)
             if (
                 preactivation_id != comment_id
@@ -1130,6 +1390,7 @@ class GitHubIssueCommentSessionLedger:
         # that request. Re-read the marker so a concurrent writer that landed
         # immediately after the PATCH is surfaced instead of being silently
         # treated as our committed generation.
+        self._list_refresh = True
         readback_id, readback = self._discover(identity, now=now)
         if (
             readback_id != comment_id
@@ -1355,6 +1616,10 @@ class GitHubIssueCommentSessionLedger:
                     "activation grant was reused or registry exhausted"
                 )
             self._tail_authorizing, self._tail_scan_pages = True, max_scan_pages
+            self._list_refresh = True
+            self._reuse_listed_parts = True
+            self._verified_parts = {}
+            self._part_digests = {}
             comment_id, current = self._discover(identity, now=now)
             if (
                 comment_id is None
@@ -1400,6 +1665,7 @@ class GitHubIssueCommentSessionLedger:
             raise
         finally:
             self._tail_authorizing, self._tail_scan_pages = False, None
+            self._reuse_listed_parts = False
 
     def replace_with_tail(
         self,
@@ -1436,6 +1702,10 @@ class GitHubIssueCommentSessionLedger:
             )
         ticket: EvidenceTailTicket | None = None
         self._tail_authorizing, self._tail_scan_pages = True, max_scan_pages
+        self._list_refresh = True
+        self._reuse_listed_parts = True
+        self._verified_parts = {}
+        self._part_digests = {}
         try:
             self._verify_mutation_grant(identity)
             comment_id, before = self._discover(identity, now=now)
@@ -1507,6 +1777,9 @@ class GitHubIssueCommentSessionLedger:
                 )
 
             def part_steps(record: SessionRecord) -> tuple[TailDispatch, ...]:
+                # Parts already verified, or present on the comment page just
+                # read, are not fetched again. The plan charges only the reads
+                # this activation will still make.
                 return tuple(
                     TailDispatch(
                         f"GET {self.http.repository_path(identity.repository, f'/issues/comments/{part_id}')}"
@@ -1518,12 +1791,16 @@ class GitHubIssueCommentSessionLedger:
                         or record.record_sha256 != before.record_sha256
                         else old_ids,
                     )
+                    if part_id not in self._verified_parts
+                    and not self._part_is_listed(part_id)
                 )
+
+            self._fence_anchor = self._list_anchor
 
             def scan_steps() -> tuple[TailDispatch, ...]:
                 return tuple(
                     TailDispatch(
-                        f"GET {self._comments_path(identity)}?per_page=5&page={page}",
+                        f"GET {self._fence_path(identity, page)}",
                         fence=page == 1,
                         optional=page > 1,
                     )
@@ -1623,6 +1900,7 @@ class GitHubIssueCommentSessionLedger:
                 False
             )
             self._tail_scan_pages, self._tail_phase = None, ""
+            self._reuse_listed_parts = False
 
     def reenroll(
         self,
@@ -1698,6 +1976,7 @@ class GitHubIssueCommentSessionLedger:
         # As with a reservation CAS, the PATCH response only proves what
         # GitHub returned for that request. Re-read the marker so a concurrent
         # writer is surfaced rather than treated as this enrollment.
+        self._list_refresh = True
         readback_id, readback = self._discover(identity, now=now)
         if (
             readback_id != comment_id

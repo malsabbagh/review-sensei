@@ -2,9 +2,9 @@
 
 One pull request, four pending instances, one provider request, and two GitHub
 checkpoint activations, then operation-comment acceptance and replay. The
-operation record is one create and one packet update, so this trace charges
-49 requests. Ordinary dispatches stay at most 60. The product default stays
-``enabled``. ``disabled`` is the rollback. Caps are not raised.
+comment list is read once and later checks are fenced, so this trace stays
+inside 60 ordinary requests. The product default stays ``enabled``.
+``disabled`` is the rollback. Caps are not raised.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from review_sensei.hosting.github import GitHubHttp
 from review_sensei.hosting.github.application import _assessment_bytes
 from review_sensei.hosting.github.operation_entry import run_actions_analysis
 from review_sensei.outcomes import ResourceBudget, ResourceBudgetTracker
+from tests import test_review_transaction as review_fixture
 from tests.fake_github_http import json_response
 from tests.test_activation_tail import HostedTailTests
 from tests.test_assessment_queue import DocumentStore, fixture
@@ -42,12 +43,12 @@ class P1PublicProfileTests(unittest.TestCase):
         budget = ledger.evidence_budget
         self.assertIsInstance(budget, EvidenceReadBudget)
         case.reserve(ledger)
-        self.assertEqual(budget.calls, 8)
+        self.assertEqual(budget.calls, 7)
         for phase in (0, 1):
             case.fresh(broker, ledger)
             case.activate(ledger, phase=phase)
-        self.assertEqual(budget.calls, 44)
-        self.assertEqual(len(state.calls), 38)
+        self.assertEqual(budget.calls, 31)
+        self.assertEqual(len(state.calls), 25)
         self.assertEqual(len(broker.calls), 6)
 
         pending, bundle, queue = fixture(4)
@@ -128,4 +129,51 @@ class P1PublicProfileTests(unittest.TestCase):
         self.assertIsNotNone(getattr(second, "replay_payload", None))
         self.assertEqual(executes["n"], 1)
         self.assertLessEqual(budget.calls, 60)
-        self.assertEqual(budget.calls, 49)
+        self.assertEqual(budget.calls, 36)
+
+    def _checkpoints(self, comments):
+        case = HostedTailTests()
+        state, broker, ledger = case.setup_host()
+        repository = review_fixture.IDENTITY.repository
+        pull_request = review_fixture.IDENTITY.pull_request
+        for comment_id, body, bot in comments:
+            state.comments[comment_id] = {
+                "id": comment_id,
+                "body": body,
+                "user": {
+                    "id": 55 if bot else 7,
+                    "type": "Bot" if bot else "User",
+                    "login": "sensei[bot]" if bot else "dev",
+                },
+                "updated_at": "2019-01-01T00:00:00Z",
+                "issue_url": (
+                    f"https://api.github.test/repos/{repository}/issues/{pull_request}"
+                ),
+            }
+        case.reserve(ledger)
+        for phase in (0, 1):
+            case.fresh(broker, ledger)
+            case.activate(ledger, phase=phase)
+        return ledger.evidence_budget.calls, state.calls
+
+    def test_ordinary_comment_threads_stay_inside_the_cap(self):
+        for count in (25, 300):
+            with self.subTest(count=count):
+                calls, _http = self._checkpoints(
+                    [(3000 + index, "note", False) for index in range(count)]
+                )
+                self.assertLessEqual(calls, 60)
+
+    def test_a_run_of_maximum_size_comments_steps_back_to_large_pages(self):
+        comments = []
+        for index in range(300):
+            huge = 100 <= index < 120
+            comments.append((3000 + index, "m" * 60_000 if huge else "note", huge))
+        calls, http = self._checkpoints(comments)
+        self.assertLessEqual(calls, 60)
+        sizes = []
+        for method, url in http:
+            if method == "GET" and "per_page=" in url:
+                sizes.append(int(url.split("per_page=", 1)[1].split("&", 1)[0]))
+        smaller = next(index for index, size in enumerate(sizes) if size == 5)
+        self.assertTrue(any(size == 100 for size in sizes[smaller + 1 :]))

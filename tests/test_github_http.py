@@ -147,7 +147,7 @@ class GitHubHttpTests(unittest.TestCase):
             page_size = int(query["per_page"][0])
             page = int(query["page"][0])
             calls.append((page_size, page))
-            if page_size > 10:
+            if page_size > 10 and page == 1:
                 return FakeResponse(b"x" * (MAX_GITHUB_RESPONSE_BYTES + 1))
             start = (page - 1) * page_size
             body = json.dumps(
@@ -164,7 +164,7 @@ class GitHubHttpTests(unittest.TestCase):
         )
 
         self.assertEqual([value["id"] for value in values], list(range(25)))
-        self.assertEqual(calls, [(20, 1), (10, 1), (10, 2), (10, 3)])
+        self.assertEqual(calls, [(20, 1), (10, 1), (10, 2), (20, 2)])
 
     def test_paginate_recomputes_the_page_after_a_later_size_fallback(self):
         calls = []
@@ -193,7 +193,7 @@ class GitHubHttpTests(unittest.TestCase):
         self.assertEqual([value["id"] for value in values], list(range(23)))
         self.assertEqual(
             calls,
-            [(20, 1), (10, 1), (10, 2), (5, 3), (5, 4), (5, 5)],
+            [(20, 1), (10, 1), (10, 2), (5, 3), (5, 4), (20, 2), (10, 3)],
         )
 
     def test_paginate_resumes_after_a_full_larger_page(self):
