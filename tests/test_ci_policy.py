@@ -745,7 +745,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         inputs = text.split("jobs:", 1)[0]
         self.assertNotRegex(inputs, r"(?m)^      (allow_custom_endpoint|base_url):")
         self.assertIn(
-            "allow_custom_endpoint: ${{ steps.plan.outputs.allow_custom_endpoint }}",
+            "allow_custom_endpoint: ${{ steps.plan.outputs.allow_custom_endpoint || 'false' }}",
             text,
         )
         self.assertEqual(text.count("plan custom endpoint permission is invalid"), 2)

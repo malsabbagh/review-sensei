@@ -672,7 +672,7 @@ The command is `review-sensei`. Supported flags are:
 | `--diff` | none | Required unified diff file path |
 | `--profile` | none | Named provider profile (`local-private`, `fast-triage`, `deep-verification`, `openrouter-sonnet`, `openrouter-gpt`). A profile selects its own provider, model, endpoint, credential, and timeout, so `--profile` alone is a complete invocation; an explicit `--provider` is optional and must match it when supplied |
 | `--provider` | `REVIEWSENSEI_PROVIDER` | Canonical backend: `local-ollama`, `cloud-ollama`, `openai-compatible`, `openrouter`, or `fixture` |
-| `--base-url` | none | Explicit endpoint override. A non-allowlisted hosted endpoint additionally requires `--allow-custom-endpoint`; no environment variable can move a hosted endpoint |
+| `--base-url` | none | Explicit endpoint override. A non-allowlisted OpenAI-compatible endpoint requires an explicit CLI opt-in or permission bound to the same URL in YAML; no environment variable can move a review endpoint |
 | `--allow-custom-endpoint` | none | Allow an `openai-compatible` base URL outside `api.openai.com`; CLI opt-in authorizes the invocation URL; YAML permission authorizes only its declared `base_url`. Never valid with `--profile` |
 | `--model` | `REVIEWSENSEI_MODEL` | Explicit model override validated against the selected backend |
 | `--api-key-env` | none | Name of environment variable holding the API key |

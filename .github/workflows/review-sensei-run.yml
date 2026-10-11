@@ -140,7 +140,8 @@ jobs:
       backend: ${{ steps.plan.outputs.backend }}
       model: ${{ steps.plan.outputs.model }}
       base_url: ${{ steps.plan.outputs.base_url }}
-      allow_custom_endpoint: ${{ steps.plan.outputs.allow_custom_endpoint }}
+      # Older exact-version packages emit no permission output: absence denies.
+      allow_custom_endpoint: ${{ steps.plan.outputs.allow_custom_endpoint || 'false' }}
       runner_kind: ${{ steps.plan.outputs.runner_kind }}
       credential_env: ${{ steps.plan.outputs.credential_env }}
       credential_required: ${{ steps.plan.outputs.credential_required }}
