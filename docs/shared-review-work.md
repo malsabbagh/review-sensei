@@ -51,13 +51,40 @@ adapter settings never expand. Total prompt/output accounting is separate from
 per-batch admission, GitHub transport and durable ledger capacity.
 
 Discovery prefers complete file records and may split oversized files into
-exhaustive authoritative hunks. One oversized hunk stays unprocessed.
+exhaustive authoritative hunks. An oversized hunk can be subdivided between
+whole unified-diff lines using the exact rendered request admission check.
+No-newline markers stay with their source line; old/new line ranges are
+recomputed without changing any body bytes. Every segment binds the canonical
+source file, original hunk, source-body byte range, base/head and body digest.
+The ordered segments must account for every original body byte before dispatch.
+One shared allowance permits at most 127 bisections across all hunks and stages
+in a discovery run. The original planning deadline applies before each probe.
+An indivisible giant line, exhausted allowance or remaining context overflow
+stays represented as unprocessed evidence; it is never shortened or summarized
+into coverage. A hunk is reviewed only when all its segment requirements succeed.
+
+Segment identities are deterministic. The existing authenticated work store
+retains them and cumulative calls, bytes and deadline; replay does not spend
+fresh calls for already accepted segments. The subdivision policy is part of
+the work/cache identity, so a receipt from the previous policy is not reused as
+a new-policy result. Ordinary evidence records keep their previous identities.
+
 Reassessment requires complete current file patches for every finding path and
 does not select guessed hunk fragments. Patch counts, syntax, conflicts and
 enumeration are checked. The GitHub loader retains its 512 KiB response and
 1,000-item bounds, tries pages of 100/50/25/5/1 entries, and permits no more than
 64 HTTP reads, including snapshot fences, within 60 seconds and the remaining work deadline. A missing, truncated,
 oversized or failed requirement remains pending.
+
+The existing broader-discovery reply path uses this same subdivision mechanism
+through `broader_service`. Segment observations do not constitute a complete
+canonical-file reassessment decision and cannot clear an old finding. A complete
+required file group that still cannot fit remains pending; the smallest safe
+next step is a trusted qualified capacity contract or a separately specified
+and validated aggregate assessment protocol. Increasing reply-source ingress
+does not increase per-call context, total work or provider capability. Optional
+document omissions still make the result partial even when every diff segment
+was reviewed, and incomplete coverage never gains approval authority.
 
 Aggregate reply evidence stays outside the 16 KiB conversation field. Each
 accepted batch and finding is mapped to immutable exact-snapshot evidence;

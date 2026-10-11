@@ -272,10 +272,12 @@ class ReviewService:
         if self.work_budgets.mode != "unified":
             return None
         from .evidence import evidence_digest
+        from .hunk_subdivision import HUNK_SUBDIVISION_POLICY
 
         return evidence_digest(
             {
                 "mechanism": "unified:v1",
+                "hunk_subdivision_policy": HUNK_SUBDIVISION_POLICY,
                 "shared_document_prompt_format": SHARED_DOCUMENT_PROMPT_FORMAT,
                 "prompt_context_policy": PROMPT_CONTEXT_POLICY,
                 "budgets": asdict(self.work_budgets),
