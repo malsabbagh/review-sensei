@@ -93,8 +93,18 @@ class GitHubIssueCommentOperationPort:
         self._repository = repository
         self._app_user_id = app_user_id
         self.requests = 0
+        self._primed: list[object] | None = None
+
+    def prime(self, comments: list[object]) -> None:
+        """Use one comment list already read, instead of reading it again."""
+
+        self._primed = comments
 
     def list_comments(self) -> tuple[OperationComment, ...]:
+        primed = self._primed
+        if primed is not None:
+            self._primed = None
+            return tuple(_view(item) for item in primed)
         collected: list[OperationComment] = []
         for page in range(1, 11):
             status, payload = self._request(
@@ -110,6 +120,9 @@ class GitHubIssueCommentOperationPort:
     def create(self, body: str) -> OperationComment:
         bounded_comment(body)
         status, payload = self._request("POST", self._list_path, body={"body": body})
+        accepted = self._accepted_write(status, payload, body, created=True)
+        if accepted is not None:
+            return accepted
         comment_id = _created_id(status, payload)
         if comment_id is None:
             raise OperationWriteUnconfirmed(
@@ -125,14 +138,39 @@ class GitHubIssueCommentOperationPort:
             or comment_id <= 0
         ):
             raise ValueError("invalid operation comment id")
-        status, _payload = self._request(
+        status, payload = self._request(
             "PATCH", self._comment_path(comment_id), body={"body": body}
         )
+        accepted = self._accepted_write(status, payload, body, created=False)
+        if accepted is not None:
+            return accepted
         if status != 200:
             raise OperationWriteUnconfirmed(
                 "operation comment update was not confirmed"
             )
         return self._readback(comment_id, body)
+
+    def _accepted_write(
+        self,
+        status: int,
+        payload: object,
+        body: str,
+        *,
+        created: bool,
+    ) -> OperationComment | None:
+        """Use GitHub's write response as the read-back when it echoes the body."""
+
+        if status != (201 if created else 200) or not isinstance(payload, dict):
+            return None
+        try:
+            viewed = _view(payload)
+        except ValueError:
+            return None
+        if comment_payload(viewed.body) != comment_payload(body):
+            return None
+        if viewed.user_id != self._app_user_id or viewed.user_type != "Bot":
+            return None
+        return viewed
 
     def _readback(self, comment_id: int, body: str) -> OperationComment:
         status, payload = self._request("GET", self._comment_path(comment_id))

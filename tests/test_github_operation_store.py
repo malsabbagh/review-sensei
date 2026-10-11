@@ -94,8 +94,6 @@ class MemoryComments:
         self.comments[comment_id] = comment
         if self.lose_post:
             raise OperationWriteUnconfirmed("lost")
-        self.requests += 1
-        self.methods.append("GET")
         if self.mismatch:
             return OperationComment(
                 comment_id,
@@ -110,8 +108,6 @@ class MemoryComments:
         self.methods.append("PATCH")
         comment = OperationComment(comment_id, body, self.app_user_id, "Bot")
         self.comments[comment_id] = comment
-        self.requests += 1
-        self.methods.append("GET")
         return comment
 
 
@@ -156,7 +152,7 @@ class GitHubOperationStoreTests(unittest.TestCase):
 
         self.assertEqual(calls["n"], 4)
         bodies = [comment.body for comment in comments.comments.values()]
-        self.assertEqual(len(bodies), 5)
+        self.assertEqual(len(bodies), 4)
         joined = "\n".join(bodies)
         self.assertNotIn("known-output", joined)
         for trigger in REVIEW_TRIGGERS:
@@ -181,7 +177,7 @@ class GitHubOperationStoreTests(unittest.TestCase):
         assert isinstance(replay, ExecutionResult)
         self.assertEqual(replay.status, "accepted")
         self.assertEqual(calls["n"], 4)
-        self.assertEqual(len(comments.comments), 5)
+        self.assertEqual(len(comments.comments), 4)
 
     def test_a_refused_trigger_does_not_write_a_comment(self):
         comments = MemoryComments()
@@ -203,7 +199,7 @@ class GitHubOperationStoreTests(unittest.TestCase):
         self.assertEqual(comments.comments, {})
         self.assertEqual(comments.methods, ["GET"])
 
-    def test_one_trigger_writes_the_event_and_the_index(self):
+    def test_one_trigger_writes_one_event_then_the_packet(self):
         comments = MemoryComments()
         host = OperationHost(
             GitHubCommentOperationStore(comments, app_user_id=42), now=lambda: 1_000
@@ -220,25 +216,9 @@ class GitHubOperationStoreTests(unittest.TestCase):
             server_started_ms=1_000,
         )
         self.assertIsInstance(result, ExecutionResult)
-        # list, create event, read it back, create index, read it back,
-        # then patch+readback for consume, charge, and the accepted packet.
-        self.assertEqual(
-            comments.methods,
-            [
-                "GET",
-                "POST",
-                "GET",
-                "POST",
-                "GET",
-                "PATCH",
-                "GET",
-                "PATCH",
-                "GET",
-                "PATCH",
-                "GET",
-            ],
-        )
-        self.assertEqual(comments.requests, 11)
+        # One list, one create for admission and charge, one patch for the packet.
+        self.assertEqual(comments.methods, ["GET", "POST", "PATCH"])
+        self.assertEqual(comments.requests, 3)
 
     def test_a_foreign_marker_is_ignored(self):
         comments = MemoryComments()

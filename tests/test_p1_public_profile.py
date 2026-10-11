@@ -1,10 +1,10 @@
 """Synthetic HTTP trace for the public P1 profile.
 
 One pull request, four pending instances, one provider request, and two GitHub
-checkpoint activations, then operation-comment acceptance. Ordinary dispatches
-stop at 60. This trace exhausts that allowance before accepted readback.
-The product default stays ``enabled``. ``disabled`` is the rollback. Caps are
-not raised.
+checkpoint activations, then operation-comment acceptance and replay. The
+operation record is one create and one packet update, so this trace charges
+49 requests. Ordinary dispatches stay at most 60. The product default stays
+``enabled``. ``disabled`` is the rollback. Caps are not raised.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from review_sensei.bounded_evidence import (
 )
 from review_sensei.budgets import ReviewWorkBudgets
 from review_sensei.configuration import GitHubSection
-from review_sensei.errors import ReviewInputError
 from review_sensei.hosting.github import GitHubHttp
 from review_sensei.hosting.github.application import _assessment_bytes
 from review_sensei.hosting.github.operation_entry import run_actions_analysis
@@ -33,7 +32,7 @@ from tests.test_review_work import AssessingProvider
 
 
 class P1PublicProfileTests(unittest.TestCase):
-    def test_two_checkpoints_then_acceptance_exhaust_ordinary_dispatches(self):
+    def test_p1_profile_stays_within_ordinary_dispatches(self):
         self.assertEqual(MAX_PART_READS, 64)
         self.assertEqual(PART_READ_SECONDS, 60.0)
         self.assertEqual(GitHubSection().operation_entry, "enabled")
@@ -105,32 +104,28 @@ class P1PublicProfileTests(unittest.TestCase):
             executes["n"] += 1
             return work
 
-        with self.assertRaisesRegex(
-            ReviewInputError, "partition shared request budget exhausted"
-        ):
-            run_actions_analysis(
-                http=GitHubHttp(api_url="https://api.github.test", opener=opener),
-                token="synthetic-token",
-                repository="owner/repo",
-                repository_id=7,
-                pull_request=11,
-                run_id="100",
-                run_attempt="1",
-                app_id=99,
-                reservation_id="reservation-p1",
-                attestation_digest="ab" * 32,
-                execute=execute,
-                encode=_assessment_bytes,
-                trigger="reassessment",
-                delivery_id="p1-delivery",
-                grant="grant-p1",
-            )
-        self.assertEqual(budget.calls, 60)
+        values = dict(
+            http=GitHubHttp(api_url="https://api.github.test", opener=opener),
+            token="synthetic-token",
+            repository="owner/repo",
+            repository_id=7,
+            pull_request=11,
+            run_id="100",
+            run_attempt="1",
+            app_id=99,
+            reservation_id="reservation-p1",
+            attestation_digest="ab" * 32,
+            execute=execute,
+            encode=_assessment_bytes,
+            trigger="reassessment",
+            delivery_id="p1-delivery",
+            grant="grant-p1",
+        )
+        first = run_actions_analysis(**values)
+        second = run_actions_analysis(**values)
+        self.assertIsNotNone(getattr(first, "fresh", None))
+        self.assertIsNone(getattr(second, "fresh", None))
+        self.assertIsNotNone(getattr(second, "replay_payload", None))
         self.assertEqual(executes["n"], 1)
-        for _ in range(4):
-            budget.consume(fence=True)
-        self.assertEqual(budget.calls, 64)
-        with self.assertRaisesRegex(
-            ReviewInputError, "partition shared request budget exhausted"
-        ):
-            budget.consume(fence=True)
+        self.assertLessEqual(budget.calls, 60)
+        self.assertEqual(budget.calls, 49)

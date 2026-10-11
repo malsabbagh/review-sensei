@@ -260,6 +260,17 @@ def run_hosted_provider(
         return OperationRefusal(admitted.reason or "provider_unknown")
     payload_digest = admitted.packet.payload_digest
     event_key = _event_key_text((proof.scope_digest, event))
+    embedded = getattr(store, "embedded_result", None)
+    stored = embedded((proof.scope_digest, event)) if callable(embedded) else None
+    if (
+        isinstance(stored, bytes)
+        and hashlib.sha256(stored).hexdigest() == payload_digest
+    ):
+        return HostedProviderResult(
+            captured.get("value"),
+            None if "value" in captured else stored,
+            payload_digest,
+        )
     if "value" in captured:
         payload = encode(captured["value"])
         if parts is not None and isinstance(payload, bytes) and payload:
@@ -272,6 +283,57 @@ def run_hosted_provider(
         parts.read(event_key=event_key, payload_digest=payload_digest),
         payload_digest,
     )
+
+
+def _issue_comments(
+    http: object, token: str, repository: str, pull_request: int
+) -> list[object] | None:
+    from .http import GitHubHttp
+
+    if not isinstance(http, GitHubHttp):
+        return None
+    path = http.repository_path(repository, f"/issues/{pull_request}/comments")
+    collected: list[object] = []
+    for page in range(1, 11):
+        status, payload = http.request(
+            "GET", f"{path}?per_page=100&page={page}", token=token
+        )
+        if status != 200 or not isinstance(payload, list) or len(payload) > 100:
+            return None
+        collected.extend(payload)
+        if len(payload) < 100:
+            return collected
+    return None
+
+
+def _bot_user_id(comments: list[object]) -> int | None:
+    """The App user id is the author of a session or operation comment."""
+
+    from .operation_host import OPERATION_COMMENT_MARKER, RESULT_COMMENT_MARKER
+
+    markers = (
+        "<!-- reviewsensei:session:",
+        OPERATION_COMMENT_MARKER,
+        RESULT_COMMENT_MARKER,
+    )
+    for item in comments:
+        if not isinstance(item, dict):
+            continue
+        user = item.get("user")
+        body = item.get("body")
+        if not isinstance(user, dict) or not isinstance(body, str):
+            continue
+        user_id = user.get("id")
+        if (
+            user.get("type") != "Bot"
+            or isinstance(user_id, bool)
+            or not isinstance(user_id, int)
+            or user_id <= 0
+        ):
+            continue
+        if any(marker in body for marker in markers):
+            return user_id
+    return None
 
 
 def run_actions_analysis(
@@ -302,17 +364,23 @@ def run_actions_analysis(
 
     if not isinstance(http, GitHubHttp):
         return OperationRefusal("unavailable")
-    status, body = http.request("GET", "/user", token=token)
-    if status != 200 or not isinstance(body, dict):
+    listed = _issue_comments(http, token, repository, pull_request)
+    if listed is None:
         return OperationRefusal("unavailable")
-    user_id = body.get("id")
-    if (
-        body.get("type") != "Bot"
-        or isinstance(user_id, bool)
-        or not isinstance(user_id, int)
-        or user_id <= 0
-    ):
-        return OperationRefusal("unavailable")
+    user_id = _bot_user_id(listed)
+    if user_id is None:
+        status, body = http.request("GET", "/user", token=token)
+        if status != 200 or not isinstance(body, dict):
+            return OperationRefusal("unavailable")
+        found = body.get("id")
+        if (
+            body.get("type") != "Bot"
+            or isinstance(found, bool)
+            or not isinstance(found, int)
+            or found <= 0
+        ):
+            return OperationRefusal("unavailable")
+        user_id = found
     port = GitHubIssueCommentOperationPort(
         http,
         token=token,
@@ -320,6 +388,7 @@ def run_actions_analysis(
         pull_request=pull_request,
         app_user_id=user_id,
     )
+    port.prime(listed)
     store = GitHubCommentOperationStore(port, app_user_id=user_id)
     started = 1_000
     return run_hosted_provider(

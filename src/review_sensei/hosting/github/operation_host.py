@@ -5,10 +5,11 @@ and verify. Callers that opt in must present a server-authenticated admission
 proof. A fresh budget, a raw snapshot, or a consumed grant cannot restore an
 operation or mint another allowance.
 
-The public record is App-owned GitHub issue comments: one index comment for
-the scope cursor and event keys, and one comment per event for that event's
-transitions and accepted packet. Validated result bytes live in separate
-result-part comments. None of these hold prompts or model transcripts.
+The public record is App-owned GitHub issue comments. One comment per event
+holds that event, its transitions, its accepted packet, the scope cursor, the
+consumed grant digests, and a validated result when the result fits. An older
+index comment is still read. A result that does not fit stays in result-part
+comments. None of these hold prompts or model transcripts.
 The worker authenticates the App so it can write those comments. It does not
 store the review. ``InMemoryOperationStore`` is the transactional stand-in
 inside one process. ``GitHubCommentOperationStore`` reloads the record from
@@ -24,6 +25,7 @@ The public 64/60 GitHub application profile is not measured here.
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -801,6 +803,9 @@ class OperationHost:
             return ExecutionResult("refused", None, "expired")
         if not self._charge_provider(handle, str(held["attempt_id"])):
             return ExecutionResult("unknown", None, "provider_unknown")
+        flush = getattr(self.store, "flush_writes", None)
+        if callable(flush):
+            flush()
         try:
             output = provider_call()
         except Exception:
@@ -814,6 +819,9 @@ class OperationHost:
             return ExecutionResult("unknown", None, "provider_unknown")
         if valid is not True:
             return ExecutionResult("unknown", None, "provider_unknown")
+        stage = getattr(self.store, "stage_result", None)
+        if callable(stage):
+            stage((handle.scope_digest, handle.event_id), output.output)
         try:
             accepted = AcceptedPacket(
                 decisions_digest=output.decisions_digest,
@@ -1320,12 +1328,74 @@ class GitHubCommentOperationStore(InMemoryOperationStore):
         self._index_id: int | None = None
         self._event_comment_ids: dict[tuple[str, str], int] = {}
         self._index_needs_rewrite = False
+        self._results: dict[tuple[str, str], bytes] = {}
+        self._defer = False
+        self._dirty = False
+        self._write_failed = False
+        self._persisted: dict[str, dict[object, object]] = {
+            "events": {},
+            "transitions": {},
+            "grants": {},
+            "scopes": {},
+        }
         self._load()
+        self._persisted = copy.deepcopy(self._committed)
+
+    @contextmanager
+    def defer_writes(self):
+        """Hold comment writes until the charge is durable, then until return.
+
+        Begin, the trigger note, the debit and the provider charge become one
+        comment write. The accepted packet is a second write. A failure before
+        the first flush leaves the last durable comment unchanged.
+        """
+
+        if self._defer:
+            raise RuntimeError("operation writes are already deferred")
+        self._defer = True
+        try:
+            yield None
+        finally:
+            self._defer = False
+            self.flush_writes()
+
+    def flush_writes(self) -> None:
+        """Publish the committed record. A matching write response is the read-back."""
+
+        if not self._dirty or self._write_failed:
+            return
+        try:
+            self._write(self._persisted, self._committed)
+        except Exception:
+            self._write_failed = True
+            raise
+        self._persisted = copy.deepcopy(self._committed)
+        self._dirty = False
+
+    def stage_result(self, key: tuple[str, str], payload: bytes) -> None:
+        """Keep a validated result for the packet write when the caller asks."""
+
+        if isinstance(key, tuple) and len(key) == 2 and isinstance(payload, bytes):
+            if payload:
+                self._results[key] = payload
+            else:
+                self._results.pop(key, None)
+
+    def embedded_result(self, key: tuple[str, str]) -> bytes | None:
+        value = self._results.get(key)
+        return value if isinstance(value, bytes) and value else None
 
     def _publish(self) -> None:
         assert self._txn is not None
-        self._write(self._committed, self._txn)
+        pending = self._txn
+        if self._defer:
+            super()._publish()
+            self._dirty = True
+            return
+        self._write(self._persisted, pending)
         super()._publish()
+        self._persisted = copy.deepcopy(self._committed)
+        self._dirty = False
 
     def _load(self) -> None:
         owned: list[tuple[OperationComment, dict[str, object]]] = []
@@ -1360,12 +1430,21 @@ class GitHubCommentOperationStore(InMemoryOperationStore):
             raise ValueError("ambiguous operation index")
         decoded_events: dict[tuple[str, str], dict[str, object]] = {}
         transitions: dict[object, object] = {}
+        embedded_grants: dict[object, object] = {}
+        embedded_scopes: dict[str, dict[str, object]] = {}
         for comment, payload in events:
-            key, event, event_transitions = _decode_event(payload)
+            key, event, event_transitions, event_grants, scope, result = _decode_event(
+                payload
+            )
             if key in decoded_events:
                 raise ValueError("ambiguous operation event")
             decoded_events[key] = event
             transitions.update(event_transitions)
+            embedded_grants.update(event_grants)
+            if scope is not None:
+                embedded_scopes[key[0]] = scope
+            if result is not None:
+                self._results[key] = result
             self._event_comment_ids[key] = comment.comment_id
         listed: set[tuple[str, str]] = set()
         scopes: dict[object, object] = {}
@@ -1374,6 +1453,13 @@ class GitHubCommentOperationStore(InMemoryOperationStore):
             comment, payload = indexes[0]
             self._index_id = comment.comment_id
             scopes, grants, listed = _decode_index(payload)
+        grants.update(embedded_grants)
+        for scope_key, scope in embedded_scopes.items():
+            current = scopes.get(scope_key)
+            if current is None or _as_int(scope["root_generation"]) >= _as_int(
+                current["root_generation"]
+            ):
+                scopes[scope_key] = scope
         missing = listed - set(decoded_events)
         if missing:
             raise ValueError("operation event comment is missing")
@@ -1423,21 +1509,18 @@ class GitHubCommentOperationStore(InMemoryOperationStore):
             typed = (str(key[0]), str(key[1]))
             if _event_slice(previous, typed) != _event_slice(pending, typed):
                 self._write_event(typed, pending)
-        index_changed = (
-            previous["scopes"] != pending["scopes"]
-            or previous["grants"] != pending["grants"]
-            or previous_keys != pending_keys
-            or self._index_id is None
-            or self._index_needs_rewrite
-        )
-        if index_changed and (pending_keys or pending["scopes"] or pending["grants"]):
-            self._write_index(pending)
-            self._index_needs_rewrite = False
 
     def _write_event(
         self, key: tuple[str, str], pending: dict[str, dict[object, object]]
     ) -> None:
-        body = encode_event_comment(key, pending)
+        result = self._results.get(key)
+        try:
+            body = encode_event_comment(key, pending, result=result)
+        except ValueError:
+            if result is None:
+                raise
+            self._results.pop(key, None)
+            body = encode_event_comment(key, pending, result=None)
         comment_id = self._event_comment_ids.get(key)
         echoed = (
             self._port.update(comment_id, body)
@@ -1459,6 +1542,50 @@ class GitHubCommentOperationStore(InMemoryOperationStore):
 
 
 def run_review_trigger(
+    host: OperationHost,
+    *,
+    trigger: str,
+    proof: AdmissionProof,
+    request: OperationRequest,
+    plan: TransitionPlan,
+    provider_call: Callable[[], ProviderOutput],
+    validator: Callable[[ProviderOutput, int], bool],
+    consume_grant: Callable[[], bool],
+    server_started_ms: int,
+    bootstrap_dispatches: int = 1,
+) -> ExecutionResult | OperationRefusal:
+    """Admit one trigger. Comment writes collapse around the provider call."""
+
+    defer = getattr(host.store, "defer_writes", None)
+    if not callable(defer):
+        return _run_review_trigger(
+            host,
+            trigger=trigger,
+            proof=proof,
+            request=request,
+            plan=plan,
+            provider_call=provider_call,
+            validator=validator,
+            consume_grant=consume_grant,
+            server_started_ms=server_started_ms,
+            bootstrap_dispatches=bootstrap_dispatches,
+        )
+    with defer():
+        return _run_review_trigger(
+            host,
+            trigger=trigger,
+            proof=proof,
+            request=request,
+            plan=plan,
+            provider_call=provider_call,
+            validator=validator,
+            consume_grant=consume_grant,
+            server_started_ms=server_started_ms,
+            bootstrap_dispatches=bootstrap_dispatches,
+        )
+
+
+def _run_review_trigger(
     host: OperationHost,
     *,
     trigger: str,
@@ -1546,7 +1673,10 @@ def comment_payload(body: str) -> str:
 
 
 def encode_event_comment(
-    key: tuple[str, str], pending: dict[str, dict[object, object]]
+    key: tuple[str, str],
+    pending: dict[str, dict[object, object]],
+    *,
+    result: bytes | None = None,
 ) -> str:
     event = pending["events"].get(key)
     if not isinstance(event, dict):
@@ -1559,12 +1689,24 @@ def encode_event_comment(
         and (str(item_key[0]), str(item_key[1])) == key
         and isinstance(item, dict)
     }
-    payload = {
+    payload: dict[str, object] = {
         "event": _public_event(event),
         "key": _event_key_text(key),
         "kind": "event",
         "transitions": transitions,
     }
+    grants = {
+        str(item_key): True
+        for item_key, item in pending["grants"].items()
+        if isinstance(item_key, str) and item is True
+    }
+    if grants:
+        payload["grants"] = grants
+    scope = pending["scopes"].get(key[0])
+    if isinstance(scope, dict):
+        payload["scope"] = _public_scope(scope)
+    if result:
+        payload["result"] = base64.b64encode(result).decode("ascii")
     return bounded_comment(render_marked_comment(OPERATION_COMMENT_MARKER, payload))
 
 
@@ -1777,8 +1919,16 @@ def _decode_index(
 
 def _decode_event(
     payload: dict[str, object],
-) -> tuple[tuple[str, str], dict[str, object], dict[object, object]]:
-    if set(payload) != {"kind", "key", "event", "transitions"}:
+) -> tuple[
+    tuple[str, str],
+    dict[str, object],
+    dict[object, object],
+    dict[object, object],
+    dict[str, object] | None,
+    bytes | None,
+]:
+    allowed = {"kind", "key", "event", "transitions"}
+    if not allowed <= set(payload) <= allowed | {"grants", "scope", "result"}:
         raise ValueError("operation record field is not allowed")
     key = _parse_event_key(payload["key"])
     raw_event = payload["event"]
@@ -1803,7 +1953,39 @@ def _decode_event(
         ):
             raise ValueError("operation record key is invalid")
         transitions[(key[0], key[1], attempt)] = transition
-    return key, event, transitions
+    grants: dict[object, object] = {}
+    if "grants" in payload:
+        raw_grants = payload["grants"]
+        if not isinstance(raw_grants, dict):
+            raise ValueError("operation grant is invalid")
+        for item_key, item in raw_grants.items():
+            if (
+                not isinstance(item_key, str)
+                or _GRANT.fullmatch(item_key) is None
+                or item is not True
+            ):
+                raise ValueError("operation grant is invalid")
+            grants[item_key] = True
+    scope = None
+    if "scope" in payload:
+        raw_scope = payload["scope"]
+        if not isinstance(raw_scope, dict):
+            raise ValueError("operation scope is invalid")
+        scope = _public_scope(raw_scope)
+    result = _result_bytes(payload["result"]) if "result" in payload else None
+    return key, event, transitions, grants, scope, result
+
+
+def _result_bytes(value: object) -> bytes:
+    if not isinstance(value, str) or not value:
+        raise ValueError("operation result is invalid")
+    try:
+        decoded = base64.b64decode(value.encode("ascii"), validate=True)
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError("operation result is invalid") from exc
+    if not decoded or len(decoded) > 1_048_576:
+        raise ValueError("operation result is invalid")
+    return decoded
 
 
 def _import_event(value: dict[str, object]) -> dict[str, object]:
