@@ -486,6 +486,12 @@ def main():
                 else type(error).__name__
             ),
         }
+        if os.environ.get("GITHUB_OUTPUT"):
+            try:
+                with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
+                    stream.write("eligible=false\n")
+            except (OSError, ValueError):
+                print("workflow refusal output could not be written", file=sys.stderr)
     if owned_output:
         (args.output / "gate.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps(receipt, indent=2))

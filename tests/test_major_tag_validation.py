@@ -777,6 +777,7 @@ class GateProcessTests(unittest.TestCase):
                 prior.write_bytes(original)
                 event_file = root / "event.json"
                 event_file.write_text(json.dumps(event()))
+                workflow_output = root / "outputs.txt"
                 args = ["gate", "--output", str(output)]
                 if recheck:
                     args.extend(["--recheck", str(prior)])
@@ -784,6 +785,7 @@ class GateProcessTests(unittest.TestCase):
                     **context(),
                     "GITHUB_EVENT_NAME": "push",
                     "GITHUB_EVENT_PATH": str(event_file),
+                    "GITHUB_OUTPUT": str(workflow_output),
                 }
                 with (
                     patch.dict(os.environ, env, clear=True),
@@ -797,6 +799,7 @@ class GateProcessTests(unittest.TestCase):
                     result = gate.main()
                 self.assertEqual(prior.read_bytes(), original)
                 self.assertTrue(result)
+                self.assertEqual(workflow_output.read_text(), "eligible=false\n")
                 qualify.assert_not_called()
                 current.assert_not_called()
 
@@ -827,10 +830,36 @@ class GateProcessTests(unittest.TestCase):
                 redirect_stdout(io.StringIO()),
             ):
                 self.assertTrue(gate.main())
-            self.assertFalse(output.exists())
+            self.assertEqual(output.read_text(), "eligible=false\n")
             self.assertEqual(
                 json.loads((root / "report/gate.json").read_text())["status"], "ERROR"
             )
+
+    def test_unwritable_failure_output_preserves_original_error_and_exit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / "receipt"
+            output.mkdir()
+            prior = output / "gate.json"
+            original = b'{"status":"PASS"}\n'
+            prior.write_bytes(original)
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with (
+                patch.dict(os.environ, {"GITHUB_OUTPUT": str(root)}, clear=True),
+                patch.object(sys, "argv", ["gate", "--output", str(output)]),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                self.assertTrue(gate.main())
+            self.assertEqual(prior.read_bytes(), original)
+            receipt = json.loads(stdout.getvalue())
+            self.assertEqual(receipt["status"], "ERROR")
+            self.assertEqual(
+                receipt["error"],
+                "output must be a new directory; existing evidence left unchanged",
+            )
+            self.assertNotIn(str(root), stdout.getvalue() + stderr.getvalue())
+            self.assertNotIn("Traceback", stderr.getvalue())
 
     def test_workflow_outputs_reject_newlines_before_any_eligible_output(self):
         receipt = {
