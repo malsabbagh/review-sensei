@@ -43,9 +43,11 @@ The pinned `docs/architecture.md` alone is 61,136 UTF-8 bytes, digest
 It remains a genuine zero-call mandatory refusal under the unqualified cap.
 Optional selection and lossless deduplication cannot remove that obligation.
 The packaged architecture category now keeps that long guide supplemental.
-`docs/architecture/mandatory-rules.md` is the required contract: its governing
+`docs/architecture/mandatory-rules.md` is a direct file source. When a
+repository contains it, selection pins that file and cannot omit it. A
+repository that does not contain it can still be reviewed. Its governing
 rules are copied verbatim from `docs/architecture.md`, and the guide, the rest
-of `docs/architecture/`, and `docs/adr/` stay available as non-required sources.
+of `docs/architecture/`, and `docs/adr/` stay supplemental.
 `tests/test_pr253_context_policy.py` proves that this required file, unchanged,
 plus a one-file complete diff, admits through the unqualified complete-frame
 ceiling of 49,152 UTF-8 bytes, including the reserved structural correction. A

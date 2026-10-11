@@ -14,7 +14,7 @@
     },
     "documents": [
       {"path": "AGENTS.md"},
-      {"path": "docs/architecture/mandatory-rules.md", "required": true},
+      {"path": "docs/architecture/mandatory-rules.md"},
       {"path": "docs", "include": ["architecture.md"]},
       {"path": "docs/architecture", "include": ["**/*.md"]},
       {"path": "docs/adr", "include": ["**/*.md"]}

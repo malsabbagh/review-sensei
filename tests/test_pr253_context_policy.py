@@ -359,7 +359,13 @@ class Pr253ContextPolicyTests(unittest.TestCase):
                     for source in category.document_sources
                     if source.required
                 ]
-                self.assertEqual(required, [RULES_DOCUMENT])
+                self.assertEqual(required, [])
+                self.assertTrue(
+                    any(
+                        source.path == RULES_DOCUMENT and not source.required
+                        for source in category.document_sources
+                    )
+                )
                 self.assertFalse(
                     any(
                         source.path == GUIDE_DOCUMENT and source.required
