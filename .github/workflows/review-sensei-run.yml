@@ -622,6 +622,9 @@ jobs:
 
       - name: Apply broker-attested maintainer command
         env:
+          # Metadata reads use the existing read-only token. Session writes
+          # still require the separate OIDC broker grant below.
+          GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
           PULL_REQUEST: ${{ inputs.pull_request_number }}

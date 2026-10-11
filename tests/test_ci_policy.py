@@ -1073,6 +1073,26 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn('"$OPERATION" != "command"', preflight)
         self.assertIn("needs: bootstrap", preflight)
 
+    def test_command_metadata_token_is_scoped_to_application_step(self):
+        command = _job_section(_reusable_workflow_text(), "command")
+        permissions = re.search(
+            r"(?m)^    permissions:\n((?:      [^\n]+\n)+)", command
+        )
+        self.assertIsNotNone(permissions)
+        self.assertEqual(
+            permissions.group(1),
+            "      contents: read\n      pull-requests: read\n      id-token: write\n",
+        )
+        step = command.split(
+            "      - name: Apply broker-attested maintainer command\n", 1
+        )[1]
+        self.assertIn("          GITHUB_TOKEN: ${{ github.token }}\n", step)
+        self.assertEqual(command.count("GITHUB_TOKEN:"), 1)
+        self.assertNotIn("GH_TOKEN:", command)
+        self.assertNotIn("GITHUB_TOKEN:", command.split("    steps:\n", 1)[0])
+        self.assertIn('--oidc-token "$oidc_token" --allow-write', step)
+        self.assertNotIn('--oidc-token "$GITHUB_TOKEN"', step)
+
     def test_hosted_review_invocations_supply_the_broker_attested_session_ledger(
         self,
     ):
