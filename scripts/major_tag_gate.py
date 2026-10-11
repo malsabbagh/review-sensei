@@ -193,8 +193,10 @@ def release_binding(release, version, tag_object, source):
 def published_assets(release_id, binding):
     # Five requested entries suffice to prove or reject this exact four-item
     # inventory. A fifth item fails before any later page can be fetched.
-    assets = docs.api(f"releases/{release_id}/assets?per_page=5&page=1")
-    if not isinstance(assets, list) or len(assets) > 4:
+    assets, has_next = docs.api_first_page(
+        f"releases/{release_id}/assets?per_page=5&page=1"
+    )
+    if has_next or not isinstance(assets, list) or len(assets) > 4:
         raise ValueError(
             "published release asset inventory exceeds the exact four-item bound"
         )
@@ -320,10 +322,11 @@ def assert_current(receipt):
     published_assets(fresh["id"], binding)
 
 
-def qualify(selection, output):
+def qualify(selection, output, *, reserved=False):
     from major_tag_surface import validate_surface
 
-    output.mkdir(parents=True, exist_ok=False)
+    if not reserved:
+        output.mkdir(parents=True, exist_ok=False)
     selected = bind_event(selection, *signed_major(selection["channel"]))
     source = selected["source_sha"]
     snapshot = output / "source-data"
@@ -437,7 +440,12 @@ def main():
     parser.add_argument("--recheck", type=Path)
     args = parser.parse_args()
     receipt = {"status": "ERROR"}
+    owned_output = False
     try:
+        # Reserve a fresh namespace before any reads. Never replace prior evidence,
+        # including when the input is invalid or a recheck fails.
+        args.output.mkdir(parents=True, exist_ok=False)
+        owned_output = True
         if args.recheck:
             receipt = json.loads(args.recheck.read_text())
             if receipt.get("status") != "PASS":
@@ -455,7 +463,7 @@ def main():
                 event, os.environ["GITHUB_EVENT_NAME"], os.environ
             )
             receipt = (
-                qualify(selected, args.output)
+                qualify(selected, args.output, reserved=True)
                 if selected
                 else {
                     "status": "IGNORED",
@@ -470,12 +478,16 @@ def main():
         # subprocess diagnostics can include authentication details: never copy them.
         receipt = {
             "status": "ERROR",
-            "error": str(error)
-            if isinstance(error, ValueError)
-            else type(error).__name__,
+            "error": (
+                "output must be a new directory; existing evidence left unchanged"
+                if isinstance(error, FileExistsError) and not owned_output
+                else str(error)
+                if isinstance(error, ValueError)
+                else type(error).__name__
+            ),
         }
-    args.output.mkdir(parents=True, exist_ok=True)
-    (args.output / "gate.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    if owned_output:
+        (args.output / "gate.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps(receipt, indent=2))
     return receipt["status"] not in {"PASS", "IGNORED"}
 

@@ -107,6 +107,44 @@ def api(path: str) -> Any:
     return json.loads(result.stdout)
 
 
+def api_first_page(path: str) -> tuple[Any, bool]:
+    """Read one bounded inventory page and expose advertised continuation."""
+    result = gh_run(
+        [
+            "gh",
+            "api",
+            f"repos/{REPOSITORY}/{path}",
+            "--hostname",
+            "github.com",
+            "--include",
+        ],
+        "GitHub asset inventory read",
+        text=True,
+    )
+    raw = result.stdout
+    if not isinstance(raw, str) or len(raw.encode("utf-8")) > 512 * 1024:
+        raise ValueError("GitHub asset inventory response exceeds its bound")
+    headers, separator, body = raw.replace("\r\n", "\n").partition("\n\n")
+    lines = headers.splitlines()
+    if (
+        not separator
+        or not lines
+        or not re.fullmatch(r"HTTP/\S+ 200(?: .*)?", lines[0])
+    ):
+        raise ValueError("GitHub asset inventory response headers are unavailable")
+    links = []
+    for line in lines[1:]:
+        name, colon, value = line.partition(":")
+        if not colon:
+            raise ValueError("GitHub asset inventory response headers are malformed")
+        if name.lower() == "link":
+            links.append(value)
+    # Do not follow artifact- or server-provided URLs. Any continuation refuses
+    # eligibility; this inventory must be complete in one bounded response.
+    has_next = any(re.search(r'\brel\s*=\s*"?next\b', value, re.I) for value in links)
+    return json.loads(body), has_next
+
+
 def api_pages(path: str, key: str | None = None) -> list[dict[str, Any]]:
     result = []
     # Fail closed rather than silently making a decision from truncated history.

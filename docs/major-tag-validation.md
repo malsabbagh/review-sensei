@@ -19,8 +19,9 @@ manifests, published GitHub release, authoritative release binding, asset
 digests and successful source-bound Release run must agree. Channel numbers
 are independent of package versions: `v5` can select `0.6.21`.
 
-The asset inventory is an exact four-item set: one five-item API page suffices,
-and a fifth asset fails before further reads. GitHub API, attestation and
+The asset inventory is an exact four-item set: one bounded five-item API page
+must contain no fifth asset and advertise no next page. Missing/malformed headers
+or an oversized response fail closed. GitHub API, attestation and
 dispatch calls fix the authority to `github.com`, ignoring ambient `GH_HOST`.
 Subprocess failures report a stage and exit code or timeout without raw
 stdout/stderr; debug logging is disabled for these calls.
@@ -52,6 +53,8 @@ five suites exercise config precedence, machine output, exit status, limits,
 error paths, fixture/loopback transport/cancellation and mocked operation safety.
 Zero/inconsistent receipts, timeouts, nonzero exit and failed cases fail jobs.
 Sanitized artifacts are retained on failure; environments and binaries are not.
+Every gate or recheck requires a fresh output directory. An existing evidence
+directory is rejected before reads and its receipt is left unchanged.
 
 All lanes freeze validation code to one protected default-branch checkout SHA.
 Same-channel concurrency cancels older runs. The final job requires every CLI

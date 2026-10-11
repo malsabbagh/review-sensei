@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import fnmatch
 import hashlib
 import io
 import json
@@ -13,7 +14,7 @@ import tempfile
 import tomllib
 import unittest
 import zipfile
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -184,6 +185,47 @@ class MajorEventTests(unittest.TestCase):
 
 
 class MajorIntegrityTests(unittest.TestCase):
+    def test_first_page_parser_rejects_missing_malformed_and_oversized_headers(self):
+        for raw in [
+            "[]",
+            "HTTP/2.0 403 Forbidden\n\n[]",
+            "HTTP/2.0 200 OK\nbad\n\n[]",
+            "x" * (512 * 1024 + 1),
+        ]:
+            with (
+                patch.object(
+                    gate.docs,
+                    "gh_run",
+                    return_value=subprocess.CompletedProcess([], 0, raw, ""),
+                ),
+                self.assertRaises(ValueError),
+            ):
+                gate.docs.api_first_page("releases/17/assets?per_page=5&page=1")
+
+    def test_asset_inventory_refuses_advertised_next_page_even_with_four_items(self):
+        with (
+            patch.object(
+                gate.docs, "api_first_page", return_value=(assets(), True)
+            ) as read,
+            self.assertRaises(ValueError),
+        ):
+            gate.published_assets(17, binding())
+        read.assert_called_once()
+
+    def test_first_page_parser_requires_headers_and_reports_next_link(self):
+        response = (
+            'HTTP/2.0 200 OK\r\nLink: <https://github.com/next>; rel="next"\r\n\r\n[]'
+        )
+        with patch.object(
+            gate.docs,
+            "gh_run",
+            return_value=subprocess.CompletedProcess([], 0, response, ""),
+        ):
+            self.assertEqual(
+                gate.docs.api_first_page("releases/17/assets?per_page=5&page=1"),
+                ([], True),
+            )
+
     def test_metadata_budget_edges_and_duplicate_or_invalid_archive(self):
         prefix = f"Name: review-sensei\nVersion: {VERSION}\n\n".encode()
         for size in [gate.MAX_WHEEL_METADATA - 1, gate.MAX_WHEEL_METADATA]:
@@ -261,7 +303,7 @@ class MajorIntegrityTests(unittest.TestCase):
 
     def test_asset_inventory_refuses_fifth_item_after_one_request(self):
         with patch.object(
-            gate.docs, "api", return_value=assets() + [assets()[0]]
+            gate.docs, "api_first_page", return_value=(assets() + [assets()[0]], False)
         ) as api:
             with self.assertRaises(ValueError):
                 gate.published_assets(17, binding())
@@ -437,7 +479,7 @@ class MajorIntegrityTests(unittest.TestCase):
                 )
 
     def test_missing_duplicate_or_changed_asset_digest_fails_closed(self):
-        with patch.object(gate.docs, "api", return_value=assets()):
+        with patch.object(gate.docs, "api_first_page", return_value=(assets(), False)):
             self.assertEqual(len(gate.published_assets(17, binding())), 4)
         for bad in [
             assets()[:-1],
@@ -446,7 +488,7 @@ class MajorIntegrityTests(unittest.TestCase):
             [{**a, "state": "new"} for a in assets()],
         ]:
             with (
-                patch.object(gate.docs, "api", return_value=bad),
+                patch.object(gate.docs, "api_first_page", return_value=(bad, False)),
                 self.assertRaises(ValueError),
             ):
                 gate.published_assets(17, binding())
@@ -506,10 +548,13 @@ class MajorIntegrityTests(unittest.TestCase):
             patch.object(
                 gate.docs,
                 "api",
-                side_effect=lambda path: assets() if "assets?" in path else release(),
+                return_value=release(),
             ),
         ):
-            gate.assert_current(receipt)
+            with patch.object(
+                gate.docs, "api_first_page", return_value=(assets(), False)
+            ):
+                gate.assert_current(receipt)
             with (
                 patch.object(gate, "signed_major", return_value=("d" * 40, SOURCE)),
                 self.assertRaises(ValueError),
@@ -518,10 +563,8 @@ class MajorIntegrityTests(unittest.TestCase):
             with (
                 patch.object(
                     gate.docs,
-                    "api",
-                    side_effect=lambda path: (
-                        assets()[:-1] if "assets?" in path else release()
-                    ),
+                    "api_first_page",
+                    return_value=(assets()[:-1], False),
                 ),
                 self.assertRaises(ValueError),
             ):
@@ -670,6 +713,13 @@ class SurfaceTests(unittest.TestCase):
         self.assertNotIn("github.token", text)
         self.assertIn("if: always()", text)
         self.assertEqual(surface.check_workflow_text(text), [])
+        for trigger in ["push", "pull_request"]:
+            self.assertTrue(
+                any(
+                    fnmatch.fnmatchcase("scripts/major_tag_gate.py", pattern)
+                    for pattern in data["on"][trigger]["paths"]
+                )
+            )
 
     def test_workflows_and_ci_use_the_same_yaml_requirement(self):
         self.assertEqual(
@@ -686,6 +736,70 @@ class SurfaceTests(unittest.TestCase):
 
 
 class GateProcessTests(unittest.TestCase):
+    def test_dispatch_failure_reports_stage_and_exit_without_private_diagnostics(self):
+        args = [
+            "dispatch",
+            "--channel",
+            "v5",
+            "--tag-object",
+            OBJECT,
+            "--source-sha",
+            SOURCE,
+            "--dispatch",
+        ]
+        stderr = io.StringIO()
+        with (
+            patch.object(sys, "argv", args),
+            patch.object(dispatch, "signed_major", return_value=(OBJECT, SOURCE)),
+            patch.object(
+                gate.docs.subprocess,
+                "run",
+                side_effect=subprocess.CalledProcessError(
+                    4, ["gh"], stderr="synthetic-secret-token"
+                ),
+            ),
+            redirect_stderr(stderr),
+        ):
+            self.assertEqual(dispatch.main(), 1)
+        self.assertIn(
+            "GitHub major validation dispatch failed (exit 4)", stderr.getvalue()
+        )
+        self.assertNotIn("synthetic-secret-token", stderr.getvalue())
+
+    def test_existing_output_receipt_cannot_be_overwritten_in_either_mode(self):
+        for recheck in [False, True]:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                output = root / "receipt"
+                output.mkdir()
+                prior = output / "gate.json"
+                original = b'{"status":"PASS","immutable_previous_evidence":true}\n'
+                prior.write_bytes(original)
+                event_file = root / "event.json"
+                event_file.write_text(json.dumps(event()))
+                args = ["gate", "--output", str(output)]
+                if recheck:
+                    args.extend(["--recheck", str(prior)])
+                env = {
+                    **context(),
+                    "GITHUB_EVENT_NAME": "push",
+                    "GITHUB_EVENT_PATH": str(event_file),
+                }
+                with (
+                    patch.dict(os.environ, env, clear=True),
+                    patch.object(sys, "argv", args),
+                    patch.object(
+                        gate, "qualify", return_value={"status": "PASS"}
+                    ) as qualify,
+                    patch.object(gate, "assert_current") as current,
+                    redirect_stdout(io.StringIO()),
+                ):
+                    result = gate.main()
+                self.assertEqual(prior.read_bytes(), original)
+                self.assertTrue(result)
+                qualify.assert_not_called()
+                current.assert_not_called()
+
     def test_invalid_output_main_writes_no_partial_eligible_true(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -836,6 +950,9 @@ class FullGateTests(unittest.TestCase):
             for name in gate.docs.REQUIRED_JOBS
         ]
         self.enterContext(patch.object(gate.docs, "api", side_effect=self.api))
+        self.enterContext(
+            patch.object(gate.docs, "api_first_page", return_value=(assets(), False))
+        )
         self.enterContext(patch.object(gate.docs, "api_pages", side_effect=self.pages))
         self.enterContext(
             patch.object(gate, "signed_major", return_value=(OBJECT, SOURCE))
@@ -860,8 +977,6 @@ class FullGateTests(unittest.TestCase):
                 "size": len(raw),
                 "content": base64.b64encode(raw).decode(),
             }
-        if path == "releases/17/assets?per_page=5&page=1":
-            return assets()
         if path == "releases/tags/v" + VERSION:
             return release()
         if path == "actions/runs/123":
