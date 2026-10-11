@@ -2,7 +2,7 @@
   "name": "@reviewsensei/cloudflare-github-app",
   "version": "0.1.0",
   "private": true,
-  "description": "Cloudflare Worker and SQLite Durable Object package for ReviewSensei GitHub App setup.",
+  "description": "Cloudflare Worker package for ReviewSensei GitHub App setup. The Worker stores nothing.",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",

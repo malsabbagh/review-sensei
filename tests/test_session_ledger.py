@@ -1534,7 +1534,7 @@ class GitHubSessionLedgerTests(unittest.TestCase):
             http,
             token="token",
             broker=verifier,
-            session_grant="g" * 43,
+            session_grant="sg1.1780000000000." + "a" * 43,
             session_attestation=attestation,
             head_sha="a" * 40,
         )
@@ -1573,7 +1573,9 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         )
 
         self.assertEqual(updated, reserved)
-        self.assertEqual(verifier.calls, [("g" * 43, attestation)])
+        self.assertEqual(
+            verifier.calls, [("sg1.1780000000000." + "a" * 43, attestation)]
+        )
         self.assertEqual(
             [method for method, _url, _data in calls],
             ["GET", "GET", "GET", "PATCH", "GET"],
@@ -1608,7 +1610,9 @@ class GitHubSessionLedgerTests(unittest.TestCase):
 
         self.assertEqual(record, paused)
         self.assertTrue(result.applied)
-        self.assertEqual(verifier.calls, [("g" * 43, attestation)])
+        self.assertEqual(
+            verifier.calls, [("sg1.1780000000000." + "a" * 43, attestation)]
+        )
         self.assertEqual(
             [method for method, _url, _data in calls],
             ["GET", "GET", "GET", "POST", "GET"],
@@ -1657,7 +1661,9 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         self.assertEqual(record, persisted)
         self.assertTrue(result.applied)
         self.assertEqual(result.disposition.action, "dismiss")
-        self.assertEqual(verifier.calls, [("g" * 43, attestation)])
+        self.assertEqual(
+            verifier.calls, [("sg1.1780000000000." + "a" * 43, attestation)]
+        )
         self.assertEqual(
             [method for method, _url, _data in calls],
             ["GET", "GET", "GET", "POST", "GET"],
@@ -1714,7 +1720,9 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewInputError, "head is stale"):
             ledger.initialize(IDENTITY, now=FIXED_NOW)
 
-        self.assertEqual(verifier.calls, [("g" * 43, attestation)])
+        self.assertEqual(
+            verifier.calls, [("sg1.1780000000000." + "a" * 43, attestation)]
+        )
         self.assertEqual([method for method, _url, _data in calls], ["GET", "GET"])
 
     def test_grant_bound_replace_rejects_a_stale_live_head_before_patch(self):
@@ -1740,7 +1748,9 @@ class GitHubSessionLedgerTests(unittest.TestCase):
                 now=FIXED_NOW,
             )
 
-        self.assertEqual(verifier.calls, [("g" * 43, attestation)])
+        self.assertEqual(
+            verifier.calls, [("sg1.1780000000000." + "a" * 43, attestation)]
+        )
         self.assertEqual(
             [method for method, _url, _data in calls], ["GET", "GET", "GET"]
         )
@@ -2158,7 +2168,9 @@ class GitHubSessionLedgerTests(unittest.TestCase):
 
         self.assertEqual(record, replacement)
         self.assertTrue(result.applied)
-        self.assertEqual(verifier.calls, [("g" * 43, attestation)])
+        self.assertEqual(
+            verifier.calls, [("sg1.1780000000000." + "a" * 43, attestation)]
+        )
         self.assertEqual(
             [method for method, _url, _data in calls],
             ["GET", "GET", "GET", "GET", "PATCH", "GET"],

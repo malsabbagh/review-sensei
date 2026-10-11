@@ -34,6 +34,7 @@ from ...bounded_evidence import (
     EvidenceTailTicket,
     NonResumableActivationError,
     TailDispatch,
+    _operation_witness_matches,
     canonical_bytes,
     partition_evidence,
     read_partitioned_evidence,
@@ -69,7 +70,7 @@ from ...session import (
     read_session_assessment_queue,
     read_session_baseline,
 )
-from .broker_client import BrokerClient, BrokerSessionGrant
+from .broker_client import SESSION_GRANT_PATTERN, BrokerClient, BrokerSessionGrant
 from .errors import (
     GitHubBrokerClientError,
     GitHubHTTPError,
@@ -95,6 +96,9 @@ _JSON_FENCE_RE = re.compile(
     re.DOTALL,
 )
 _SESSION_INTRO = "ReviewSensei session ledger (round counters only; no source)."
+_CONSUMED_GRANT_LINE = re.compile(
+    r"(?m)^<!-- reviewsensei:consumed-grant:v1 sha256=([a-f0-9]{64}) -->$"
+)
 
 
 def _within_session_comment_limit(body: str) -> bool:
@@ -134,11 +138,19 @@ def session_marker(
 
 
 def render_session_comment(
-    *, repository_id: int, pull_request: int, record: SessionRecord
+    *,
+    repository_id: int,
+    pull_request: int,
+    record: SessionRecord,
+    consumed_grants: tuple[str, ...] = (),
 ) -> str:
     document = json.dumps(record.to_dict(), sort_keys=True, separators=(",", ":"))
+    grant_lines = "".join(
+        f"<!-- reviewsensei:consumed-grant:v1 sha256={digest} -->\n"
+        for digest in consumed_grants
+    )
     body = (
-        f"{_SESSION_INTRO}\n\n```json\n{document}\n```\n\n"
+        f"{grant_lines}{_SESSION_INTRO}\n\n```json\n{document}\n```\n\n"
         f"{session_marker(repository_id=repository_id, pull_request=pull_request, record=record)}"
     )
     if len(body.encode("utf-8")) > MAX_SESSION_COMMENT_BYTES:
@@ -265,8 +277,9 @@ class GitHubIssueCommentSessionLedger:
                 raise ReviewInputError(
                     "GitHub session ledger grant verifier is invalid"
                 )
-            if not isinstance(session_grant, str) or not re.fullmatch(
-                r"[A-Za-z0-9_-]{43}", session_grant
+            if (
+                not isinstance(session_grant, str)
+                or SESSION_GRANT_PATTERN.fullmatch(session_grant) is None
             ):
                 raise ReviewInputError("GitHub session ledger grant is invalid")
             if not isinstance(session_attestation, Mapping):
@@ -304,6 +317,8 @@ class GitHubIssueCommentSessionLedger:
         self._activation_patch_bytes: bytes | None = None
         self._tail_phase = ""
         self._bound_tail_grants: set[str] = set()
+        self._observed_consumed_grants: set[str] = set()
+        self._accepted_consumed_grant: str | None = None
         if session_grant is not None:
             self._bound_tail_grants.add(
                 hashlib.sha256(session_grant.encode()).hexdigest()
@@ -684,6 +699,12 @@ class GitHubIssueCommentSessionLedger:
             raise ReviewInputError("session grant verification failed") from exc
         if not isinstance(verified, Mapping) or dict(verified) != attestation:
             raise ReviewInputError("session grant verification failed")
+        remember = getattr(self, "_remember_consumed_grant", None)
+        if callable(remember) and remember(self._session_grant) is not True:
+            raise ReviewInputError("session grant was already used")
+        self._accepted_consumed_grant = hashlib.sha256(
+            self._session_grant.encode()
+        ).hexdigest()
         if self._tail_authorizing and self.evidence_budget is not None:
             self.evidence_budget.check()
 
@@ -759,9 +780,26 @@ class GitHubIssueCommentSessionLedger:
         except GitHubHTTPError as exc:
             raise GitHubPublicationError("session ledger request failed") from exc
 
+    def _render_comment(
+        self, *, repository_id: int, pull_request: int, record: SessionRecord
+    ) -> str:
+        accepted = self._accepted_consumed_grant
+        if accepted is not None and accepted in self._observed_consumed_grants:
+            raise ReviewInputError("session grant was already used")
+        digests = set(self._observed_consumed_grants)
+        if accepted is not None:
+            digests.add(accepted)
+        return render_session_comment(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            record=record,
+            consumed_grants=tuple(sorted(digests)),
+        )
+
     def _discover(
         self, identity: SessionIdentity, *, now: datetime | None = None
     ) -> tuple[int | None, SessionRecord | None]:
+        self._observed_consumed_grants = set()
         repository_id = self._require_identity(identity)
         try:
             items = (
@@ -808,6 +846,7 @@ class GitHubIssueCommentSessionLedger:
             body = item.get("body")
             if not isinstance(body, str) or not _marker_shaped(body):
                 continue
+            self._observed_consumed_grants = set(_CONSUMED_GRANT_LINE.findall(body))
             if not _within_session_comment_limit(body):
                 # An unreadable newer writer's authority is established state,
                 # not a missing ledger. Never initialize a second session.
@@ -978,7 +1017,7 @@ class GitHubIssueCommentSessionLedger:
             "POST",
             self._comments_path(identity),
             body={
-                "body": render_session_comment(
+                "body": self._render_comment(
                     repository_id=repository_id,
                     pull_request=identity.pull_request,
                     record=record,
@@ -1064,7 +1103,7 @@ class GitHubIssueCommentSessionLedger:
             "PATCH",
             path,
             body={
-                "body": render_session_comment(
+                "body": self._render_comment(
                     repository_id=repository_id,
                     pull_request=identity.pull_request,
                     record=updated,
@@ -1112,6 +1151,7 @@ class GitHubIssueCommentSessionLedger:
         max_scan_pages: int,
         head_sha: str | None = None,
         now: datetime | None = None,
+        witness: object = None,
     ) -> SessionRecord:
         if not self.enable_partition_writes or self.evidence_budget is None:
             raise ReviewInputError(
@@ -1120,10 +1160,11 @@ class GitHubIssueCommentSessionLedger:
         self._validate_tail_scan_pages(max_scan_pages)
         budget = self.evidence_budget
         scope = _tail_attempt_scope(identity, reservation_id, operation_binding)
+        witnessed = _operation_witness_matches(witness, reservation_id)
         if (
-            budget.restored
-            or scope in budget._live_attempts
+            scope in budget._live_attempts
             or scope in budget._failed_attempts
+            or (budget.restored and not witnessed)
         ):
             raise NonResumableActivationError(
                 "original activation attempt cannot be restarted"
@@ -1159,7 +1200,13 @@ class GitHubIssueCommentSessionLedger:
         self._tail_authorizing, self._tail_scan_pages = True, max_scan_pages
         try:
             reserved = self.replace(identity, admit, now=now)
-            budget._remember_live_attempt(scope, reserved.record_sha256, owner=self)
+            budget._remember_live_attempt(
+                scope,
+                reserved.record_sha256,
+                owner=self,
+                witness=witness,
+                reservation_id=reservation_id,
+            )
             return reserved
         except BaseException:
             budget._burn_live_attempt(scope)
@@ -1236,6 +1283,7 @@ class GitHubIssueCommentSessionLedger:
         attempt_reservation_id: str,
         max_scan_pages: int,
         now: datetime | None = None,
+        witness: object = None,
     ) -> None:
         """Install a fresh one-attempt grant on the original live ledger only.
 
@@ -1243,6 +1291,8 @@ class GitHubIssueCommentSessionLedger:
         mutation verifies it through the actual consuming BrokerClient. Current
         v1 grant claims bind hosted command scope; they do not prove durable
         original operation accounting or permit crash/restart continuation.
+        An OperationHandle whose binding is the attempt reservation satisfies
+        a restored budget or a missing in-memory owner. A snapshot does not.
         """
         budget = self.evidence_budget
         if not self.enable_partition_writes or budget is None:
@@ -1252,10 +1302,10 @@ class GitHubIssueCommentSessionLedger:
         self._validate_tail_scan_pages(max_scan_pages)
         operation = _tail_operation_binding(operation_binding)
         scope = _tail_attempt_scope(identity, attempt_reservation_id, operation)
-        if (
-            budget.restored
-            or budget._live_attempt_owners.get(scope) is not self
-            or scope in budget._failed_attempts
+        witnessed = _operation_witness_matches(witness, attempt_reservation_id)
+        if scope in budget._failed_attempts or (
+            not witnessed
+            and (budget.restored or budget._live_attempt_owners.get(scope) is not self)
         ):
             raise NonResumableActivationError(
                 "original live ledger proof is unavailable"
@@ -1296,7 +1346,7 @@ class GitHubIssueCommentSessionLedger:
                 or not isinstance(grant.token, str)
                 or not grant.token.strip()
                 or not isinstance(grant.grant, str)
-                or re.fullmatch(r"[A-Za-z0-9_-]{43}", grant.grant) is None
+                or SESSION_GRANT_PATTERN.fullmatch(grant.grant) is None
             ):
                 raise ReviewInputError("fresh activation grant scope differs")
             digest = hashlib.sha256(grant.grant.encode()).hexdigest()
@@ -1313,7 +1363,13 @@ class GitHubIssueCommentSessionLedger:
                 or current.reservation_id != attempt_reservation_id
             ):
                 raise ReviewInputError("current activation reservation is unavailable")
-            budget._require_live_attempt(scope, current.record_sha256, owner=self)
+            budget._require_live_attempt(
+                scope,
+                current.record_sha256,
+                owner=self,
+                witness=witness,
+                reservation_id=attempt_reservation_id,
+            )
             self._validate_feedback_tail_attestation(
                 attestation,
                 current,
@@ -1355,6 +1411,7 @@ class GitHubIssueCommentSessionLedger:
         seal_accounting: Callable[[SessionRecord, Mapping[str, int]], SessionRecord],
         max_scan_pages: int,
         now: datetime | None = None,
+        witness: object = None,
     ) -> SessionRecord:
         """Each checkpoint consumes a fresh grant; prepay all sealed root work."""
         if not self.enable_partition_writes or self.evidence_budget is None:
@@ -1365,11 +1422,14 @@ class GitHubIssueCommentSessionLedger:
         budget = self.evidence_budget
         operation = _tail_operation_binding(operation_binding)
         scope = _tail_attempt_scope(identity, attempt_reservation_id, operation)
-        if (
-            budget.restored
-            or scope not in budget._live_attempts
-            or budget._live_attempt_owners.get(scope) is not self
-            or scope in budget._failed_attempts
+        witnessed = _operation_witness_matches(witness, attempt_reservation_id)
+        if scope in budget._failed_attempts or (
+            not witnessed
+            and (
+                budget.restored
+                or scope not in budget._live_attempts
+                or budget._live_attempt_owners.get(scope) is not self
+            )
         ):
             raise NonResumableActivationError(
                 "original activation attempt witness is unavailable"
@@ -1383,7 +1443,13 @@ class GitHubIssueCommentSessionLedger:
                 raise ReviewInputError(
                     "prepaid activation current authority is unavailable"
                 )
-            budget._require_live_attempt(scope, before.record_sha256, owner=self)
+            budget._require_live_attempt(
+                scope,
+                before.record_sha256,
+                owner=self,
+                witness=witness,
+                reservation_id=attempt_reservation_id,
+            )
             if self._session_attestation is not None:
                 self._validate_feedback_tail_attestation(
                     self._session_attestation,
@@ -1482,11 +1548,17 @@ class GitHubIssueCommentSessionLedger:
                 + part_steps(draft)
             )
             plan = ActivationTailPlan("github", plan_scope(draft), steps)
-            ticket = budget.reserve_tail(plan)
+            ticket = (
+                budget.reserve_tail(plan)
+                if witness is None
+                else budget.reserve_tail(
+                    plan, witness=witness, reservation_id=attempt_reservation_id
+                )
+            )
             sealed = _seal_tail_accounting(draft, seal_accounting, budget)
             _validate_queue_retention(before, sealed)
             patch_body: dict[str, object] = {
-                "body": render_session_comment(
+                "body": self._render_comment(
                     repository_id=self._require_identity(identity),
                     pull_request=identity.pull_request,
                     record=sealed,
@@ -1600,7 +1672,7 @@ class GitHubIssueCommentSessionLedger:
             "PATCH",
             path,
             body={
-                "body": render_session_comment(
+                "body": self._render_comment(
                     repository_id=repository_id,
                     pull_request=identity.pull_request,
                     record=replacement,

@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import TypeVar
 
-from .bounded_evidence import canonical_bytes
+from .bounded_evidence import _operation_attempt_binding, canonical_bytes
 from .budgets import EffectiveWorkBudget
 from .errors import ReviewInputError
 from .evidence import EvidenceSnapshot, evidence_digest
@@ -1092,6 +1092,17 @@ class FactoredAssessmentJournal(AssessmentJournal):
         )
 
 
+def _resolved_attempt_witness(witness: object) -> str | None:
+    """Reservation id, or an operation-handle binding. Snapshots are absent."""
+
+    binding = _operation_attempt_binding(witness)
+    if binding is not None:
+        return binding
+    if isinstance(witness, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", witness):
+        return witness
+    return None
+
+
 @dataclass(frozen=True)
 class QueueHostState:
     """Result of the host's latest authenticated, source/head-fenced read.
@@ -1099,14 +1110,15 @@ class QueueHostState:
     This type does not authenticate itself. The host supplies proven absence as
     envelope=None, manifest item_count=0; otherwise it verifies the owned queue
     manifest and returns its exact immutable binding/count. attempt_witness is
-    the independently authenticated original reservation, never a new grant.
+    the original reservation, or an OperationHandle whose binding is that
+    reservation. A continuation grant or a snapshot is not a witness.
     """
 
     envelope: object | None
     root_generation: int
     binding: Mapping[str, object]
     item_count: int
-    attempt_witness: str | None
+    attempt_witness: object
 
 
 @dataclass(frozen=True)
@@ -1134,7 +1146,8 @@ class AssessmentQueueHostAdapter:
     """Closed opt-in bridge from A's authenticated root to C checkpointing.
 
     read and activate are required trusted host callbacks. activate must refuse
-    without an authenticated original-attempt witness; issue a fresh exact
+    without an authenticated original-attempt witness (an OperationHandle
+    binding or the same reservation id); issue a fresh exact
     consuming grant per mutation; source/head/root fence; charge/seal the whole
     activation tail under the original control allowance; and reconcile/read
     back ambiguous writes. The adapter validates their returned shape/binding,
@@ -1192,7 +1205,8 @@ class AssessmentQueueHostAdapter:
             or not isinstance(state.item_count, int)
             or (
                 state.attempt_witness is not None
-                and state.attempt_witness != self.attempt_reservation_id
+                and _resolved_attempt_witness(state.attempt_witness)
+                != self.attempt_reservation_id
             )
         ):
             raise ReviewInputError("assessment host read binding is invalid")
@@ -1268,7 +1282,8 @@ class AssessmentQueueHostAdapter:
             self._state is None
             or self._journal is None
             or mutation.root_generation != self._state.root_generation
-            or self._state.attempt_witness != self.attempt_reservation_id
+            or _resolved_attempt_witness(self._state.attempt_witness)
+            != self.attempt_reservation_id
         ):
             raise ReviewInputError(
                 "assessment host mutation requires original attempt witness"
@@ -1313,7 +1328,8 @@ class AssessmentQueueHostAdapter:
         if (
             state.root_generation <= request.expected_generation
             or canonical_bytes(state.envelope) != canonical_bytes(envelope)
-            or state.attempt_witness != self.attempt_reservation_id
+            or _resolved_attempt_witness(state.attempt_witness)
+            != self.attempt_reservation_id
         ):
             raise ReviewInputError("assessment host activation readback is ambiguous")
         self._state, self._journal = (

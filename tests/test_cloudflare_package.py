@@ -15,11 +15,10 @@ class CloudflarePackageTests(unittest.TestCase):
             CLOUDFLARE / "tsconfig.json",
             CLOUDFLARE / "wrangler.jsonc",
             CLOUDFLARE / "src" / "worker.ts",
-            CLOUDFLARE / "src" / "delivery-ledger.ts",
             CLOUDFLARE / "src" / "github-app.ts",
             CLOUDFLARE / "src" / "setup-content.ts",
-            CLOUDFLARE / "src" / "broker-ledger.ts",
             CLOUDFLARE / "src" / "token-broker.ts",
+            CLOUDFLARE / "src" / "signed-mac.ts",
         )
         for path in required:
             with self.subTest(path=path):
@@ -39,18 +38,14 @@ class CloudflarePackageTests(unittest.TestCase):
         config = json.loads((CLOUDFLARE / "wrangler.jsonc").read_text())
         self.assertEqual(config["main"], "src/worker.ts")
         self.assertNotIn("containers", config)
+        self.assertNotIn("durable_objects", config)
+        self.assertNotIn("kv_namespaces", config)
+        self.assertNotIn("d1_databases", config)
+        self.assertNotIn("r2_buckets", config)
+        self.assertNotIn("ratelimits", config)
         self.assertEqual(
-            config["durable_objects"]["bindings"],
-            [
-                {"name": "DELIVERY_LEDGER", "class_name": "DeliveryLedger"},
-                {"name": "BROKER_LEDGER", "class_name": "BrokerLedger"},
-            ],
-        )
-        self.assertEqual(
-            config["migrations"][0]["new_sqlite_classes"], ["DeliveryLedger"]
-        )
-        self.assertEqual(
-            config["migrations"][1]["new_sqlite_classes"], ["BrokerLedger"]
+            config["migrations"][2]["deleted_classes"],
+            ["DeliveryLedger", "BrokerLedger"],
         )
         self.assertEqual(
             config["vars"],
@@ -61,16 +56,15 @@ class CloudflarePackageTests(unittest.TestCase):
 
     def test_package_does_not_embed_secrets_or_payload_storage(self):
         worker = (CLOUDFLARE / "src" / "worker.ts").read_text()
-        ledger = (CLOUDFLARE / "src" / "delivery-ledger.ts").read_text()
         github_app = (CLOUDFLARE / "src" / "github-app.ts").read_text()
         setup_content = (CLOUDFLARE / "src" / "setup-content.ts").read_text()
         readme = (CLOUDFLARE / "README.md").read_text()
-        for content in (worker, ledger, github_app, setup_content):
+        for content in (worker, github_app, setup_content):
             self.assertNotIn("BEGIN RSA PRIVATE KEY", content)
             self.assertNotIn("ghs_", content)
         self.assertNotIn("BEGIN RSA PRIVATE KEY", readme)
         self.assertIn("REPLACE_WITH_LOCAL_PEM_VALUE", readme)
-        self.assertIn("never written to SQLite", ledger)
+        self.assertIn("The Worker stores nothing", readme)
         self.assertNotIn("@cloudflare/containers", worker)
         self.assertIn("RSASSA-PKCS1-v1_5", github_app)
         self.assertIn("review-sensei/setup", github_app)
@@ -84,21 +78,20 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertIn("contents/", github_app)
 
     def test_delivery_retention_and_setup_idempotency_are_documented(self):
-        ledger = (CLOUDFLARE / "src" / "delivery-ledger.ts").read_text()
         readme = (CLOUDFLARE / "README.md").read_text()
         adr = (
             ROOT / "docs" / "adr" / "0020-cloudflare-github-app-package.md"
         ).read_text()
-        self.assertIn("const RETENTION_MS = 60 * 60 * 1000;", ledger)
-        self.assertIn("retained as accepted for one hour", readme)
+        self.assertIn("`DeliveryLedger` and `BrokerLedger` are removed", readme)
         self.assertIn("existing setup branch and pull request", readme)
-        self.assertIn("accepted identities for one hour", adr)
+        self.assertIn("The Worker stores nothing", readme)
+        self.assertIn("`DeliveryLedger` and `BrokerLedger` are removed", adr)
         self.assertNotIn("30 days", readme)
         self.assertNotIn("30 days", adr)
 
     def test_setup_content_is_tagged_and_secret_free(self):
         source = (CLOUDFLARE / "src" / "setup-content.ts").read_text()
-        self.assertIn("SETUP_VERSION = 5", source)
+        self.assertIn("SETUP_VERSION = 6", source)
         self.assertIn("ReviewSensei setup version: 5", source)
         self.assertIn("PUBLIC_WORKFLOW_TAG", source)
         self.assertNotIn("PUBLIC_WORKFLOW_SHA=", source)
@@ -118,7 +111,7 @@ class CloudflarePackageTests(unittest.TestCase):
         # The current caller is the same thin bootstrap the Python package
         # emits: event-shape-only routing, read-only plus OIDC permissions, and
         # no configuration read of any kind.
-        caller = source.split("function resolveTriggerWorkflowTemplate", 1)[1]
+        caller = source.split("function resolveTriggerV5WorkflowTemplate", 1)[1]
         caller = caller.split("\n}\n", 1)[0]
         self.assertIn("github.event.comment.author_association == 'OWNER'", caller)
         self.assertIn("github.event.comment.user.type != 'Bot'", caller)
@@ -154,7 +147,7 @@ class CloudflarePackageTests(unittest.TestCase):
         # The Worker builder concatenates the same literal fragments the Python
         # builder emits, so a change to either side breaks this test.
         fragments = (
-            "`# ReviewSensei setup version: ${SETUP_VERSION}\\n`",
+            '"# ReviewSensei setup version: 5\\n"',
             '"# Configuration version. Leave this at 1.\\n"',
             '"schema: 1\\n"',
             '"# Backend and model used for review.\\n"',
@@ -177,6 +170,7 @@ class CloudflarePackageTests(unittest.TestCase):
             '"  learning: disabled\\n"',
             '"  # none or diagnostics\\n"',
             '"  artifacts: none\\n"',
+            '"  operation_entry: enabled\\n"',
             '"# Optional limits and endpoint overrides.\\n"',
             '"    # Required to send requests to a custom API root\\n"',
             '"    allow_custom_endpoint: false\\n"',
@@ -227,6 +221,9 @@ class CloudflarePackageTests(unittest.TestCase):
             "  learning: disabled\n"
             "  # none or diagnostics\n"
             "  artifacts: none\n"
+            "  # enabled uses the shared operation entry. disabled keeps the previous paths.\n"
+            "  # The measured P1 profile does not fit 60 ordinary dispatches (#267).\n"
+            "  operation_entry: enabled\n"
             "\n"
             "# Optional limits and endpoint overrides.\n"
             "advanced:\n"
@@ -457,7 +454,18 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertNotIn("source_comment_id || head_sha", setup)
         self.assertNotIn("head_sha || head_ref || run_id", setup)
         self.assertNotRegex(example, r"(?m)^concurrency:")
-        self.assertNotIn("group:", example)
+        group_lines = [
+            line.strip()
+            for line in example.splitlines()
+            if line.strip().startswith("group:")
+        ]
+        self.assertEqual(
+            group_lines,
+            [
+                "group: reviewsensei-provider-review-${{ github.repository }}-${{ needs.resolve-trigger.outputs.pull_request_number || github.event.pull_request.number || github.run_id }}",
+            ],
+        )
+        self.assertNotIn("sha", group_lines[0])
         self.assertIn(
             "uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
             example,

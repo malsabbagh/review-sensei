@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/unchanged-source-citation.schema.json",
+  "title": "ReviewSensei unchanged-source citation v1",
+  "description": "Exact snapshot citation for one regular file that is unchanged between base and head. kind unchanged-source-v1 is distinct from a diff hunk. An absent diff is not evidence. Runtime rejects unequal blob SHAs, non-regular modes, secret and excluded paths, escaped paths, truncated ranges, foreign objects, and the same blob cited from another path. The validator does not fetch URLs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "repository",
+    "pull_request",
+    "base_sha",
+    "head_sha",
+    "path",
+    "mode",
+    "base_blob_sha",
+    "head_blob_sha",
+    "range_start",
+    "range_end",
+    "content_sha256",
+    "content_bytes"
+  ],
+  "properties": {
+    "kind": {
+      "const": "unchanged-source-v1"
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+      "maxLength": 256
+    },
+    "pull_request": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "base_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "head_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "description": "Structural bounds only. parse_unchanged_source enforces a canonical repository-relative path and refuses escaped, secret, and excluded paths."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["100644", "100755"]
+    },
+    "base_blob_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "head_blob_sha": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "range_start": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65536
+    },
+    "range_end": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65536
+    },
+    "content_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "content_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65536
+    }
+  }
+}

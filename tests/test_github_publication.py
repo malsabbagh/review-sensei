@@ -897,6 +897,30 @@ class ReviewPublisherTests(unittest.TestCase):
             "To discuss this finding, reply with @reviewsensei followed by your question.",
             body["comments"][0]["body"],
         )
+        self.assertIn(
+            "@reviewsensei I reviewed the media files and I approve",
+            body["body"],
+        )
+        self.assertIn(
+            "After an override, comment `@reviewsensei verify` to apply it.",
+            body["body"],
+        )
+        self.assertIn(
+            "An override applies to the current commit only. A new push needs a new override.",
+            body["body"],
+        )
+        self.assertIn(
+            "@reviewsensei override RS-ABCDEF acceptable risk",
+            body["comments"][0]["body"],
+        )
+        self.assertIn(
+            "After an override, comment `@reviewsensei verify` to apply it.",
+            body["comments"][0]["body"],
+        )
+        self.assertIn(
+            "An override applies to the current commit only. A new push needs a new override.",
+            body["comments"][0]["body"],
+        )
 
     def test_existing_fingerprint_is_not_republished_across_heads(self):
         from review_sensei.context import finding_lifecycle_for_comment

@@ -1164,6 +1164,22 @@ class ConversationPublisherTests(unittest.TestCase):
         self.assertEqual(outcome.comment_id, 12)
         post_body = __import__("json").loads(calls[-1][2].decode("utf-8"))
         self.assertIn("<!-- reviewsensei:reply:v1", post_body["body"])
+        self.assertIn(
+            "@reviewsensei I reviewed the media files and I approve",
+            post_body["body"],
+        )
+        self.assertIn(
+            "@reviewsensei override RS-ABCDEF acceptable risk",
+            post_body["body"],
+        )
+        self.assertIn(
+            "After an override, comment `@reviewsensei verify` to apply it.",
+            post_body["body"],
+        )
+        self.assertIn(
+            "An override applies to the current commit only. A new push needs a new override.",
+            post_body["body"],
+        )
         self.assertEqual(set(post_body), {"body"})
         self.assertTrue(calls[-1][1].endswith("/pulls/1/comments/10/replies"))
 

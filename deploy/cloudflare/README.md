@@ -2,8 +2,8 @@
 
 This package deploys the optional ReviewSensei GitHub App installation
 bootstrap without a Cloudflare Container. The Worker handles webhook
-validation, GitHub App authentication, and setup pull requests directly. A
-SQLite-backed Durable Object stores only bounded delivery metadata.
+validation, GitHub App authentication, and setup pull requests directly.
+The Worker stores nothing. `DeliveryLedger` and `BrokerLedger` are removed.
 
 It is not a hosted review engine: customer repositories still run the review
 workflow and provider compute in their own GitHub Actions setup. The Worker
@@ -17,40 +17,38 @@ Hosted PR-scoped latest-wins admission is owned by the reusable workflow
 GitHub App webhook
     -> Worker /github/webhook
        -> bounded HMAC gate and payload validation
-       -> DeliveryLedger (SQLite Durable Object)
        -> Web Crypto RS256 GitHub App JWT
        -> installation token and idempotent setup pull request
+       -> signed setup cursor, self service binding, /github/setup-continue
 
 GitHub Actions OIDC
     -> Worker /github/token
        -> exact reusable-workflow claims and server-side installation lookup
-       -> BrokerLedger (hashed replay/rate identities only)
        -> one capability-scoped installation token
+       -> HMAC session grant when a mutation is requested
 ```
 
 The Worker never stores raw webhook bodies, installation tokens, private keys,
-diffs, provider output, or GitHub API response bodies. The one-hour ledger
-retention window suppresses near-term redelivery; the existing setup branch and pull request
-provide longer-lived setup idempotency.
+diffs, provider output, or GitHub API response bodies. It has no Durable
+Object, KV, D1, or R2 binding. The existing setup branch and pull request
+provide setup idempotency: GitHub returns 422 when the branch or pull request
+already exists, and that response is treated as done.
 
 ## Free-tier requirements
 
 The Worker-only package is compatible with the Cloudflare Workers Free plan.
-It does not declare `@cloudflare/containers`, a Container image, or a Container
-Durable Object binding. No Docker installation or Workers Paid plan is needed
-for this package.
+It does not declare `@cloudflare/containers`, a Container image, or a Durable
+Object binding. No Docker installation or Workers Paid plan is needed for this
+package.
 
 Cloudflare's current Free limits are documented in the official pricing pages:
 
 - [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/)
-- [Durable Objects pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/)
 
-The relevant limits are 100,000 Worker requests/day, 100,000 Durable Object
-requests/day, 13,000 Durable Object GB-s/day, 5 million SQLite row reads/day,
-100,000 row writes/day, and 5 GB of SQLite data. Limits reset at 00:00 UTC;
+The relevant Worker limit is 100,000 requests/day. Limits reset at 00:00 UTC;
 exceeding a Free quota makes that operation fail instead of creating an
-overage charge. The Worker, ledger, and GitHub API calls are still subject to
-GitHub rate limits and the configured App permissions.
+overage charge. GitHub API calls are still subject to GitHub rate limits and
+the configured App permissions.
 
 ## Prerequisites
 
@@ -86,8 +84,19 @@ npx wrangler login
 npx wrangler secret put GITHUB_APP_ID
 npx wrangler secret put GITHUB_APP_PRIVATE_KEY
 npx wrangler secret put GITHUB_APP_WEBHOOK_SECRET
+npx wrangler secret put REVIEWSENSEI_SIGNING_KEY
 npx wrangler deploy
 ```
+
+`REVIEWSENSEI_SIGNING_KEY` is the HMAC root for session grants and setup
+cursors. Separate keys are derived with HKDF labels `session-grant-v1` and
+`setup-cursor-v1`. A missing key refuses with `configuration_unavailable`.
+
+After deploy, add a Cloudflare WAF rate-limiting rule on `POST /github/token`
+and `POST /github/session-grant` in the Cloudflare dashboard. That rule is a
+deploy step outside this repository. The Worker does not declare a
+`ratelimits` binding and does not depend on the rule to be correct. GitHub's
+own App installation limits still apply.
 
 `GITHUB_APP_ID` is the numeric App id. `GITHUB_APP_PRIVATE_KEY` is the PEM key
 issued by GitHub; paste it exactly as provided. `GITHUB_APP_WEBHOOK_SECRET`
@@ -142,16 +151,27 @@ Then run:
 npm run dev
 ```
 
-Wrangler emulates the Worker and Durable Object locally. Do not commit a real
+Wrangler emulates the Worker locally. Do not commit a real
 private key or webhook secret, and do not place credentials in generated setup
 files or logs.
 
 ## Delivery and retry behavior
 
-The Durable Object claim is a five-minute lease. A successful delivery is
-retained as accepted for one hour. A setup or GitHub API failure releases the
-claim so GitHub can retry; an expired lease is also reclaimable. A delivery id
-received with a different body digest is rejected as a conflict.
+There is no webhook deduplication store. Two deliveries for the same
+repository both run. Branch creation and pull request creation return 422
+when they already exist, and that response is treated as done. GitHub does
+not redeliver automatically. A manual redelivery reruns the same idempotent
+setup.
+
+Multi-repository setup posts an HMAC-signed cursor to the Worker's own
+`/github/setup-continue` route through the `SELF` service binding, inside
+`waitUntil`, not through the public URL. The cursor carries the installation
+id, delivery id, page, offset, and expiry. Each step re-reads
+`/installation/repositories` and the installation permissions. If that listing
+changes, setup restarts at page 1. There is no durable alarm. If a
+continuation request is lost, setup stops part way; redeliver the webhook or
+wait for the next `installation_repositories` event. Setup failure logs
+contain only `delivery_id`, `error_code`, and the failure count.
 
 The Worker validates the signed payload before any GitHub API call. It creates
 one setup branch and pull request per selected repository, checks for an open
@@ -257,10 +277,14 @@ The isolated `POST /github/token` route accepts a bounded OIDC exchange for
 resolves the configured workflow tag, verifies its tag ref and runtime SHA,
 and checks repository identity; it rejects
 forks and unsupported runner environments/events, resolves the installation server-side,
-and claims replay/rate state in `BrokerLedger`. A bounded pre-auth admission
-check runs before JWKS work, public JWKS reads are cached for five minutes with
-concurrent refresh coalescing, and a verified assertion is claimed before any
-GitHub repository or installation lookup. The route is no-store and has no
+and refuses an OIDC `iat` older than five minutes. There is no replay set
+and no worker rate counter. Public JWKS reads are cached for five minutes with
+concurrent refresh coalescing. Enrollment is `known` when an App-authored
+submitted review has `commit_id` equal to the head, or an App-authored
+operation record already exists; otherwise it is `enrolled`. A session grant
+is an HMAC over the scope, attestation digest, audience, run id hash, and
+expiry, with a 10-minute TTL. The Worker does not record one-use; the
+repository records the consumed grant digest. The route is no-store and has no
 CORS contract. `PUBLIC_WORKFLOW_TAG` is the only workflow-channel Worker
 variable and must be set before deployment.
 
@@ -305,11 +329,13 @@ broaden the generic adapter to tolerate unrecognized read or `none` grants.
 
 ## Rollback and operations
 
-Deploy from a known Git commit. To roll back, redeploy the previous Worker
-commit with the same Wrangler configuration and migration history, then verify `GET /healthz` and
-send a signed test delivery from GitHub. Do not delete the `DeliveryLedger`
-or `BrokerLedger` namespace during rollback; their migrations and accepted
-identity state are part of the delivery contract. Rotate secrets with `wrangler secret put`
+Deploy from a known Git commit. `DeliveryLedger` and `BrokerLedger` are
+removed. Migration `v3` deletes those classes. To roll back the Worker code,
+redeploy the previous Worker version, then verify `GET /healthz` and send a
+signed test delivery from GitHub. That older migration recreates empty
+ledgers, so replay ids, rate counters, and enrollment witnesses start empty.
+In-flight setup continuations are dropped at deploy. Setup for an affected
+installation is rerun from the start. Rotate secrets with `wrangler secret put`
 and redeploy.
 
 This repository does not run `wrangler deploy` or register the GitHub App as

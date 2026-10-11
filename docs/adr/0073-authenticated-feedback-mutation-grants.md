@@ -42,7 +42,7 @@ Full original UTF-8 bodies are loaded without clipping to recompute the exact
 Python-compatible selection digest. Bodies remain transient authorization input;
 credentials, ledger records and diagnostics contain metadata and hashes.
 
-Issued grants use the existing hashed BrokerLedger and consuming verification.
+Issued grants are HMAC-signed. `BrokerLedger` is removed. Consuming verification remains.
 A fresh OIDC assertion is required for each ordinary issuance. Version-1
 canonical grant hashing remains unchanged. Version-2 hashing uses canonical JSON
 with sorted object keys and preserved array order, matched by Python vectors.
@@ -59,8 +59,7 @@ original accounting or prove that an earlier pre-root failure spent no budget.
 The hosted richer route remains disabled until the owned-root, sealed-tail,
 durable attempt, source fences and queue checkpoint composition is qualified.
 
-Required follow-up evidence includes real production BrokerLedger SQLite
-transactions, fresh OIDC replay checks, source edit/deletion and actor changes,
+Required follow-up evidence includes real production grant verification. `BrokerLedger` is removed. Remaining evidence includes fresh OIDC age checks, source edit/deletion and actor changes,
 parent kills before and after consumption, whole-operation physical dispatches,
 root ambiguity reconciliation and original-deadline restart. The current
 transport lower bounds already exceed the original 64-dispatch envelope when

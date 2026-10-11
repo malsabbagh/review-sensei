@@ -14,9 +14,11 @@ from review_sensei.assessment_queue import (
     AssessmentQueueHostAdapter,
     FactoredAssessmentJournal,
     QueueHostState,
+    _resolved_attempt_witness,
 )
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
+from review_sensei.hosting.github.operation_host import OperationHandle
 from review_sensei.models import ProviderResponse
 from review_sensei.outcomes import ResourceBudget, ResourceBudgetTracker
 from tests.test_assessment_queue import DocumentStore, QueueFixture, fixture
@@ -318,6 +320,68 @@ class QueueHostAdapterTests(QueueFixture, unittest.TestCase):
         ).receipt(source_digest="d" * 64, operation_id="c" * 64)
         self.assertEqual(len(receipt["completed"]), 1)
         self.assertEqual(receipt["response_bytes_reserved"], 0)
+
+    def test_operation_handle_satisfies_original_attempt_witness(self):
+        handle = OperationHandle(
+            scope_digest="a" * 64,
+            event_id="b" * 64,
+            operation_id="c" * 64,
+            binding="original-attempt",
+            created_at_ms=1,
+            control_deadline_ms=2,
+            calls=1,
+            sequence=0,
+            root_sha="e" * 64,
+            root_generation=0,
+        )
+        pending, bundle, queue, _, requests, adapter = self.adapter_fixture(
+            witness=handle
+        )
+        provider = AssessingProvider()
+        result = self.run_work(
+            pending, bundle, queue, provider=provider, checkpoint=adapter.checkpoint()
+        )
+        self.assertEqual(len(requests), 3)
+        self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(len(result.reply.decisions), 4)
+        binding = "d" * 64
+        self.assertEqual(
+            _resolved_attempt_witness(
+                OperationHandle(
+                    scope_digest="a" * 64,
+                    event_id="b" * 64,
+                    operation_id="c" * 64,
+                    binding=binding,
+                    created_at_ms=1,
+                    control_deadline_ms=2,
+                    calls=1,
+                    sequence=0,
+                    root_sha="e" * 64,
+                    root_generation=0,
+                )
+            ),
+            binding,
+        )
+        self.assertIsNone(_resolved_attempt_witness({"binding": binding}))
+        self.assertIsNone(_resolved_attempt_witness(object()))
+
+    def test_snapshot_attempt_witness_is_refused(self):
+        for witness in ({"binding": "original-attempt"}, "a" * 64):
+            with self.subTest(witness=type(witness).__name__):
+                pending, bundle, queue, _, requests, adapter = self.adapter_fixture(
+                    witness=witness
+                )
+                provider = AssessingProvider()
+                with self.assertRaises(ReviewInputError):
+                    self.run_work(
+                        pending,
+                        bundle,
+                        queue,
+                        provider=provider,
+                        checkpoint=adapter.checkpoint(),
+                    )
+                self.assertEqual(provider.calls, [])
+                self.assertEqual(requests, [])
 
     def test_absent_original_witness_refuses_before_provider_or_activation(self):
         pending, bundle, queue, state, requests, adapter = self.adapter_fixture(

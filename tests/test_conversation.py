@@ -228,6 +228,16 @@ class ConversationContractTests(unittest.TestCase):
         self.assertIn("not a command", prompt)
         self.assertIn("valid, concrete reason", prompt)
         self.assertIn("bare dismissal", prompt)
+        self.assertIn("I reviewed the media files and I approve", prompt)
+        self.assertIn("override <RS-id> acceptable risk", prompt)
+        self.assertIn(
+            "After an override, comment `@reviewsensei verify` to apply it.",
+            prompt,
+        )
+        self.assertIn(
+            "An override applies to the current commit only. A new push needs a new override.",
+            prompt,
+        )
 
     def test_review_result_reconstructs_and_revalidates(self):
         value = {

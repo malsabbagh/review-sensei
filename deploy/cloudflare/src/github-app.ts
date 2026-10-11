@@ -25,6 +25,7 @@ import {
   historicalV4UninstallWorkflow,
   historicalV5UninstallWorkflow,
   historicalV5WorkflowTemplate,
+  resolveTriggerV5WorkflowTemplate,
   senseiOnlyV5WorkflowTemplate,
   mergeFocusedV4ConfigFile,
   mergeFocusedV4WorkflowTemplate,
@@ -355,6 +356,7 @@ function looksLikeManagedV5Setup(path: string, content: string): boolean {
     try {
       return (
         content === buildTaggedV4SetupFiles(publicWorkflowTag)[0].content ||
+        content === resolveTriggerV5WorkflowTemplate(publicWorkflowTag) ||
         content === historicalV5WorkflowTemplate(publicWorkflowTag) ||
         content === senseiOnlyV5WorkflowTemplate(publicWorkflowTag)
       );
@@ -420,7 +422,19 @@ async function classifySetupFiles(
         } else {
           return "unknown";
         }
-      } else if (marker === 4) {
+        continue;
+      }
+      if (marker === 5) {
+        if (looksLikeCurrentSetup(path, content, publicWorkflowTag)) {
+          hasCurrent = true;
+        } else if (looksLikeManagedV5Setup(path, content)) {
+          hasManaged = true;
+        } else {
+          return "unknown";
+        }
+        continue;
+      }
+      if (marker === 4) {
         if (!looksLikeManagedV4Setup(path, content)) {
           return "unknown";
         }

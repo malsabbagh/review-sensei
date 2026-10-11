@@ -17,18 +17,12 @@
 			"previews_enabled": false
 		}
 	],
-	"durable_objects": {
-		"bindings": [
-			{
-				"name": "DELIVERY_LEDGER",
-				"class_name": "DeliveryLedger"
-			},
-			{
-				"name": "BROKER_LEDGER",
-				"class_name": "BrokerLedger"
-			}
-		]
-	},
+	"services": [
+		{
+			"binding": "SELF",
+			"service": "reviewsensei-github-app"
+		}
+	],
 	"migrations": [
 		{
 			"tag": "v1",
@@ -39,6 +33,13 @@
 		{
 			"tag": "v2",
 			"new_sqlite_classes": [
+				"BrokerLedger"
+			]
+		},
+		{
+			"tag": "v3",
+			"deleted_classes": [
+				"DeliveryLedger",
 				"BrokerLedger"
 			]
 		}

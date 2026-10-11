@@ -6,6 +6,7 @@ const SHA_PATTERN = /^[a-f0-9]{40}$/;
 const DEFAULT_ISSUER = "https://token.actions.githubusercontent.com";
 const DEFAULT_AUDIENCE = "sts.reviewsensei.dev";
 const JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
+const MAX_ASSERTION_AGE_SECONDS = 5 * 60;
 
 let jwksCache: {
   issuer: string;
@@ -244,6 +245,9 @@ export async function verifyOidcAssertion(
     throw new Error("oidc_identity_invalid");
   }
   if (now > claims.exp + skew || claims.iat - skew > now) {
+    throw new Error("oidc_time_invalid");
+  }
+  if (now - claims.iat > MAX_ASSERTION_AGE_SECONDS) {
     throw new Error("oidc_time_invalid");
   }
   if (claims.nbf !== undefined && claims.nbf - skew > now) {

@@ -82,8 +82,10 @@ Process: `docs/process/adr-process.md`
 | [0057](0057-one-check-run-as-the-single-merge-authority.md) | Proposed | One head-bound `ReviewSensei` check run as the only merge authority, with evidence-bound default approval | #181 F | Review events stay `COMMENT`; required-check setup and stale change-request reconciliation remain administrator/transition work |
 
 | [0073](0073-authenticated-feedback-mutation-grants.md) | Proposed | Authenticate complete human feedback as a distinct session mutation source | #238, #242, #243, #245 | Live numeric actor/source authorization; version-1 compatibility; original-attempt and whole-budget composition remain activation gates |
-| [0074](0074-durable-original-attempt-accounting.md) | Proposed | Retain original accounting and unknown transitions without renewing an allowance | #238, #240, #242, #245 | Dormant SQLite storage primitive; independent authorizer, bootstrap, restore and whole-budget qualification required |
+| [0074](0074-durable-original-attempt-accounting.md) | Superseded by ADR 0076 (GitHub operation record) | Retain original accounting and unknown transitions without renewing an allowance | #238, #240, #242, #245 | Historical only. The live store is the GitHub operation record, not the removed SQLite journal |
 | [0075](0075-complete-provider-response-contract.md) | Proposed | Refuse unsafe completion metadata and bind exact qualified adapter endpoints | #238, #244, #245 | Strict library contract remains opt-in; no model qualification, producer adoption or writer activation |
+| [0076](0076-pr253-gap-closure-contracts.md) | Proposed | Freeze PR253 context, producer, check, unchanged-file, mixed-coverage, bootstrap and acceptance-store contracts | #238, #253 | Uninterrupted bootstrap only; writers stay opt-in until P1 and maintainer acceptance |
+| [0077](0077-explicit-human-file-review.md) | Proposed | Record explicit human review of unsupported binary files without treating AI coverage as complete | #253 | Confirmation is audit; mixed APPROVE waives only the binary blocker |
 
 ## Policy
 

@@ -18,6 +18,7 @@ from .feedback_attestation import parse_feedback_attestation
 
 MAX_BROKER_BODY_BYTES = 256 * 1024
 DEFAULT_BROKER_URL = "https://github.reviewsensei.dev/github/token"
+SESSION_GRANT_PATTERN = re.compile(r"sg1\.[1-9][0-9]{10,15}\.[A-Za-z0-9_-]{43}\Z")
 Opener = Callable[..., Any]
 
 
@@ -208,11 +209,6 @@ class BrokerClient:
         if parsed.get("capability") != "review_session":
             raise GitHubBrokerClientError("Broker session response was invalid")
         state = parsed.get("session_state")
-        if state == "rate_limited":
-            # Enrollment spends the same per-scope budget as an assertion, so
-            # an exhausted window is a transient broker condition the caller
-            # can retry rather than a malformed response.
-            raise GitHubHTTPTransientError("broker session enrollment is rate limited")
         if state not in {"enrolled", "known"}:
             raise GitHubBrokerClientError("Broker session response was invalid")
         from ...errors import ReviewInputError
@@ -266,7 +262,7 @@ class BrokerClient:
             not isinstance(token, str)
             or not token.strip()
             or not isinstance(grant, str)
-            or re.fullmatch(r"[A-Za-z0-9_-]{43}", grant) is None
+            or SESSION_GRANT_PATTERN.fullmatch(grant) is None
             or state not in {"enrolled", "known"}
         ):
             raise GitHubBrokerClientError("Broker session response was invalid")
@@ -284,10 +280,7 @@ class BrokerClient:
     ) -> dict[str, object]:
         """Verify the opaque grant immediately before a remote ledger write."""
 
-        if (
-            not isinstance(grant, str)
-            or re.fullmatch(r"[A-Za-z0-9_-]{43}", grant) is None
-        ):
+        if not isinstance(grant, str) or SESSION_GRANT_PATTERN.fullmatch(grant) is None:
             raise GitHubBrokerClientError("Broker session grant is invalid")
         attestation = self._validated_attestation_grant(session_attestation)
         parsed = self._post(

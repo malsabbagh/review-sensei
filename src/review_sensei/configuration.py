@@ -69,6 +69,7 @@ TIMEOUT_SECONDS_CEILING = 3_600.0
 REVIEW_POLICIES = ("auto-approve", "blocking", "advisory")
 LEARNING_MODES = ("disabled", "proposals", "pull-requests")
 ARTIFACT_MODES = ("none", "diagnostics")
+OPERATION_ENTRY_MODES = ("enabled", "disabled")
 
 _KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 _INTEGER_PATTERN = re.compile(r"^-?\d+$")
@@ -90,6 +91,7 @@ GITHUB_FIELDS = (
     "mentions",
     "learning",
     "artifacts",
+    "operation_entry",
 )
 ADVANCED_FIELDS = (
     "endpoint",
@@ -365,6 +367,7 @@ class GitHubSection:
     mentions: bool = True
     learning: str = "disabled"
     artifacts: str = "none"
+    operation_entry: str = "enabled"
 
 
 @dataclass(frozen=True)
@@ -1155,6 +1158,13 @@ def _build_github(
             "github.artifacts",
             ARTIFACT_MODES,
             "none",
+            fail=fail,
+        ),
+        operation_entry=_enum_field(
+            mapping.get("operation_entry"),
+            "github.operation_entry",
+            OPERATION_ENTRY_MODES,
+            "enabled",
             fail=fail,
         ),
     )
@@ -2281,6 +2291,7 @@ def import_legacy_setup_configuration(content: object) -> LegacySetupImport:
                         else "disabled"
                     ),
                     "  artifacts: " + ("diagnostics" if artifacts_flag else "none"),
+                    "  operation_entry: enabled",
                 ]
             )
         if endpoint is not None:
@@ -2546,6 +2557,7 @@ _DEFAULT_FIELD_VALUES: Mapping[str, Any] = {
     "github.mentions": True,
     "github.learning": "disabled",
     "github.artifacts": "none",
+    "github.operation_entry": "enabled",
     "advanced.endpoint.allow_custom_endpoint": False,
     "advanced.routing.upstream_provider": "not set",
     "advanced.context.symbol_context.enabled": False,
@@ -2577,6 +2589,7 @@ def _omitted_field_lines(configuration: ProductConfiguration) -> list[str]:
 __all__ = [
     "ADVANCED_FIELDS",
     "ARTIFACT_MODES",
+    "OPERATION_ENTRY_MODES",
     "AdvancedSection",
     "BACKEND_DEFAULTS",
     "BackendDefaults",

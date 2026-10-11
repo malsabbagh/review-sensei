@@ -1,0 +1,21 @@
+{
+  "schema_version": "human-file-review-v1",
+  "repository": "owner/repo",
+  "repository_id": 1,
+  "pull_request": 2,
+  "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "review_id": 3,
+  "result_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "files": [
+    {
+      "path": "photo.png",
+      "change": "modified",
+      "old_blob": "dddddddddddddddddddddddddddddddddddddddd",
+      "new_blob": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "old_path": null,
+      "old_mode": "100644",
+      "new_mode": "100644"
+    }
+  ]
+}

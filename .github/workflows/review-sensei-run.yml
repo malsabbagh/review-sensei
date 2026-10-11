@@ -921,6 +921,7 @@ jobs:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
+          REVIEWSENSEI_APP_ID: ${{ github.event.installation.app_id }}
           TITLE_B64: ${{ needs.authoritative-preflight.outputs.pull_request_title_b64 }}
           HEAD_SHA: ${{ inputs.head_sha }}
           BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
@@ -1079,6 +1080,8 @@ jobs:
           CREDENTIAL_REQUIRED: ${{ needs.bootstrap.outputs.credential_required }}
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
+          REPOSITORY_ID: ${{ inputs.repository_id }}
+          REVIEWSENSEI_APP_ID: ${{ github.event.installation.app_id }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
           SOURCE_UPDATED_AT: ${{ inputs.source_updated_at }}
@@ -1088,7 +1091,7 @@ jobs:
         run: |
           reply_output="$RUNNER_TEMP/review-sensei-reply-status"
           reply_args=(--generate --provider "$BACKEND" --base-url "$BASE_URL" \
-            --model "$MODEL" --repository "$REPOSITORY" \
+            --model "$MODEL" --repository "$REPOSITORY" --repository-id "$REPOSITORY_ID" \
             --pull-request "$PULL_REQUEST" --source-comment-id "$SOURCE_COMMENT_ID" \
             --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
             --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
@@ -1525,6 +1528,8 @@ jobs:
           MODEL: ${{ needs.bootstrap.outputs.model }}
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
+          REPOSITORY_ID: ${{ inputs.repository_id }}
+          REVIEWSENSEI_APP_ID: ${{ github.event.installation.app_id }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           SOURCE_COMMENT_ID: ${{ inputs.source_comment_id }}
           SOURCE_UPDATED_AT: ${{ inputs.source_updated_at }}
@@ -1538,7 +1543,7 @@ jobs:
           ollama show "$MODEL" >/dev/null
           reply_output="$RUNNER_TEMP/review-sensei-reply-status"
           reply_args=(--generate --provider "$BACKEND" --base-url "$BASE_URL" \
-            --model "$MODEL" --repository "$REPOSITORY" \
+            --model "$MODEL" --repository "$REPOSITORY" --repository-id "$REPOSITORY_ID" \
             --pull-request "$PULL_REQUEST" --source-comment-id "$SOURCE_COMMENT_ID" \
             --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
             --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \

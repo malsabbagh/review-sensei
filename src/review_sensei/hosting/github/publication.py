@@ -41,6 +41,7 @@ from ...presentation import (
     OPTIONAL_FINDING,
     WITHHELD_STATE,
     FindingView,
+    append_response_instructions,
     assign_finding_identifiers,
     build_finding_view,
     build_review_summary_view,
@@ -306,7 +307,7 @@ def format_coverage_digest(coverage: CoverageManifest) -> str:
 
 
 def _with_discussion_instruction(text: str) -> str:
-    return f"{text}\n\n{DISCUSSION_INSTRUCTION}"
+    return append_response_instructions(f"{text}\n\n{DISCUSSION_INSTRUCTION}")
 
 
 def _published_summary_byte_limit(result: ReviewResult) -> int:

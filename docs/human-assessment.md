@@ -39,8 +39,14 @@ a new full review; prose and short display IDs cannot reconstruct authority.
 
 There is no general `mark human assessment complete` command. Recognized parser
 commands are `review status`, `review pause`, `review continue`, `review reenroll`,
-`verify`, and `dismiss|defer|accept-risk <16–64 hex ID> --reason <reason>`, each
-preceded by the standalone mention. Disposition reasons have a 512-byte limit.
+`verify`, `dismiss|defer|accept-risk <16–64 hex ID> --reason <reason>`,
+`I reviewed the media files and I approve`, and
+`override <RS-id> acceptable risk` or `<RS-id> is acceptable risk`, each
+preceded by the standalone mention. The media sentence and the `RS-` override
+require a maintainer or admin. The published review repeats those commands.
+After an override, comment `@reviewsensei verify` to apply it. An override
+applies to the current commit only. A new push needs a new override.
+Disposition reasons have a 512-byte limit.
 `review continue` unpauses the session; it does not replenish an assessment
 operation's resource allowance. These command IDs are distinct from the complete
 64-hex finding IDs required by the proposed targeted assessment API.

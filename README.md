@@ -751,6 +751,12 @@ Both handles use the same authorization, publication policy, and bounded context
 For concrete factual replies, verified operator commands, human-inventory
 boundaries and the complete-feedback API's current integration status, see
 [human assessment workflows](docs/human-assessment.md).
+
+The local, opt-in [human file review library](docs/human-file-review.md) records
+explicit selected binary-file confirmations with exact snapshot/content and
+live reviewer checks. AI coverage stays unsupported; text findings remain open.
+Confirmation defaults off, and released CLI/mention routing and automatic
+approval are not enabled by this library change.
 Existing installations need a caller update as well as the matching runtime and
 broker update; see [the caller rollout guide](docs/mention-handle-rollout.md).
 
@@ -760,7 +766,11 @@ outcome. Follow-up mentions in the same inline or PR conversation include the
 bounded prior thread, diff context, findings, and trusted-base learnings. Cloud
 mode sends that bounded conversation context to Ollama Cloud; local mode keeps
 it on the configured local service. Published review summaries and inline
-findings also tell readers to reply with @reviewsensei followed by their question.
+findings also tell readers to reply with @reviewsensei followed by their question,
+and they include the maintainer commands for approving media and overriding a
+finding by its `RS-` id. After an override, comment `@reviewsensei verify` to
+apply it. An override applies to the current commit only. A new push needs a
+new override.
 `review.json` is uploaded only when
 `github.artifacts: diagnostics` is set in `.reviewsensei.yml`; setup-v5 does not
 create a separate version artifact. See

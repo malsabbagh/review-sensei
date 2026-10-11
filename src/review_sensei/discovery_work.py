@@ -686,6 +686,17 @@ def discover(
             source_context_coverage=service._source_context_coverage(request),
         )
         result = service._attach_coverage(result, coverage)
+        # Complete reviewable text (including an empty text set) may coexist
+        # with binary obligations. Context/stage failures never gain this flag.
+        from .human_file_review import coverage_only_binary
+
+        if (
+            not failed
+            and not context_incomplete
+            and comment_stage
+            and coverage_only_binary(coverage)
+        ):
+            result = replace(result, coverage_only_partial=True)
     except ReviewInputError:
         return service._finish_run(
             tracker=tracker,

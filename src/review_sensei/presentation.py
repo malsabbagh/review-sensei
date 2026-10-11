@@ -33,6 +33,21 @@ WITHHELD_STATE = "withheld"
 INCOMPLETE_STATE = "incomplete"
 ADVISORY_STATE = "advisory"
 
+# Fixed text on every published review and mention reply. Later agents copy
+# these commands; they do not invent a per-file media checklist.
+MAINTAINER_RESPONSE_INSTRUCTIONS = """\
+### Maintainer commands
+
+A maintainer or admin handles this review with one comment. Copy a command exactly.
+
+- Approve the media files without listing each file: `@reviewsensei I reviewed the media files and I approve`
+- Override one finding by its id: `@reviewsensei override RS-ABCDEF acceptable risk` or `@reviewsensei RS-ABCDEF is acceptable risk`. Replace `RS-ABCDEF` with the finding id in this review.
+
+After an override, comment `@reviewsensei verify` to apply it. An override applies to the current commit only. A new push needs a new override.
+
+The override is stored on this pull request as an acceptable-risk decision. The AI review stays partial. Write access alone cannot use these commands.\
+"""
+
 _HIGHLIGHTED_OPTIONAL_LIMIT = 3
 _REFERENCE_EXCERPT_LIMIT = 160
 _UNSPECIFIC_DEFECT_KINDS = frozenset(("", "unknown"))
@@ -599,6 +614,17 @@ def build_review_summary_view(
     )
 
 
+def append_response_instructions(text: str) -> str:
+    """Attach the maintainer commands unless this response already states them."""
+
+    if "### Maintainer commands" in text or (
+        "I reviewed the media files and I approve" in text
+        and "override RS-ABCDEF acceptable risk" in text
+    ):
+        return text
+    return f"{text}\n\n{MAINTAINER_RESPONSE_INSTRUCTIONS}"
+
+
 def render_review_summary(view: ReviewSummaryView) -> str:
     """Render the §9 review summary: heading, facts, counts, references, action."""
 
@@ -781,6 +807,7 @@ __all__ = [
     "REQUIRED_FINDING",
     "ReviewSummaryView",
     "WITHHELD_STATE",
+    "append_response_instructions",
     "assign_finding_identifiers",
     "build_finding_view",
     "build_review_summary_view",
