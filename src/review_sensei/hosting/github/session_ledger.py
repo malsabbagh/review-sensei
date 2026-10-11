@@ -26,6 +26,7 @@ from typing import Any, Callable, Mapping, cast
 from urllib.parse import quote
 
 from ...bounded_evidence import (
+    INLINE_ENCODING,
     MAX_PART_BYTES,
     MAX_STORED_PART_BYTES,
     MAX_STORED_PARTS,
@@ -38,7 +39,9 @@ from ...bounded_evidence import (
     TailDispatch,
     _operation_witness_matches,
     canonical_bytes,
+    inline_manifest,
     partition_evidence,
+    read_inline_evidence,
     read_partitioned_evidence,
     stage_partitioned_evidence,
 )
@@ -541,6 +544,8 @@ class GitHubIssueCommentSessionLedger:
             or expected_binding.get("producer") != self.evidence_producer()
         ):
             raise ReviewInputError("GitHub partition binding does not match")
+        if isinstance(manifest, dict) and manifest.get("encoding") == INLINE_ENCODING:
+            return read_inline_evidence(manifest, expected_binding=expected_binding)
         if self.evidence_budget is None:
             raise ReviewInputError(
                 "partition reader requires shared metadata/read budget"
@@ -576,6 +581,14 @@ class GitHubIssueCommentSessionLedger:
             or binding.get("producer") != self.evidence_producer()
         ):
             raise ReviewInputError("GitHub partition binding does not match")
+        inlined = inline_manifest(document, binding=binding, item_count=item_count)
+        if (
+            inlined is not None
+            and isinstance(max_manifest_bytes, int)
+            and not isinstance(max_manifest_bytes, bool)
+            and len(canonical_bytes(inlined)) <= max_manifest_bytes
+        ):
+            return inlined
         items = self._bounded_comments(identity)
         existing: dict[str, str] = {}
         stored_bytes = 0

@@ -626,12 +626,12 @@ class HostedTailTests(unittest.TestCase):
             broker.request = request
             self.fresh(broker, ledger)
             current = self.activate(ledger, phase=phase)
-        self.assertEqual(ledger.evidence_budget.calls, 31)
+        self.assertEqual(ledger.evidence_budget.calls, 25)
         self.assertEqual(
             ledger.evidence_budget.calls, len(state.calls) + len(broker.calls)
         )
         self.assertEqual(
-            current.assessment_queue["active_operation"]["read_accounting"]["calls"], 31
+            current.assessment_queue["active_operation"]["read_accounting"]["calls"], 25
         )
         self.assertEqual(len(broker.used), 3)
 
@@ -719,23 +719,28 @@ class HostedTailTests(unittest.TestCase):
         state, broker, ledger = self.setup_host()
         self.reserve(ledger)
         self.assertEqual(ledger.evidence_budget.calls, 7)
-        for phase, expected in ((0, 19), (1, 31), (2, 43), (3, 55)):
+        for phase, expected in (
+            (0, 16),
+            (1, 25),
+            (2, 34),
+            (3, 43),
+            (4, 52),
+            (5, 61),
+        ):
             self.fresh(broker, ledger)
             saved = self.activate(ledger, phase=phase)
             self.assertEqual(ledger.evidence_budget.calls, expected)
-        self.fresh(broker, ledger)
-        self.assertEqual(ledger.evidence_budget.calls, 58)
         with self.assertRaisesRegex(ReviewInputError, "budget"):
-            self.activate(ledger, phase=4)
-        # Staging past the original cap is charged and retained; the root is not patched.
-        self.assertEqual(ledger.evidence_budget.calls, 60)
-        self.assertEqual(len(state.calls), 48)
-        self.assertEqual(len(broker.calls), 12)
+            self.fresh(broker, ledger)
+        # The next checkpoint refuses before a grant is installed. The root stays.
+        self.assertEqual(ledger.evidence_budget.calls, 61)
+        self.assertEqual(len(state.calls), 47)
+        self.assertEqual(len(broker.calls), 14)
         reader = state.ledger()
         self.assertEqual(reader.load(fixture.IDENTITY, now=fixture.NOW).record, saved)
         calls = ledger.evidence_budget.calls
-        with self.assertRaises(NonResumableActivationError):
-            self.activate(ledger, phase=4)
+        with self.assertRaisesRegex(ReviewInputError, "budget"):
+            self.activate(ledger, phase=6)
         self.assertEqual(ledger.evidence_budget.calls, calls)
 
     def test_reused_grant_cannot_supply_second_checkpoint(self):

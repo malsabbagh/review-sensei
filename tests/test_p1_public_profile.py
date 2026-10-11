@@ -47,8 +47,8 @@ class P1PublicProfileTests(unittest.TestCase):
         for phase in (0, 1):
             case.fresh(broker, ledger)
             case.activate(ledger, phase=phase)
-        self.assertEqual(budget.calls, 31)
-        self.assertEqual(len(state.calls), 25)
+        self.assertEqual(budget.calls, 25)
+        self.assertEqual(len(state.calls), 19)
         self.assertEqual(len(broker.calls), 6)
 
         pending, bundle, queue = fixture(4)
@@ -129,7 +129,7 @@ class P1PublicProfileTests(unittest.TestCase):
         self.assertIsNotNone(getattr(second, "replay_payload", None))
         self.assertEqual(executes["n"], 1)
         self.assertLessEqual(budget.calls, 60)
-        self.assertEqual(budget.calls, 36)
+        self.assertEqual(budget.calls, 30)
 
     def _checkpoints(self, comments):
         case = HostedTailTests()

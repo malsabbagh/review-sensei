@@ -26,18 +26,61 @@
       "maximum": 2147483647
     },
     "state_manifest": {
-      "allOf": [
+      "anyOf": [
         {
-          "$ref": "https://reviewsensei.dev/schemas/v1/evidence-manifest.schema.json"
+          "allOf": [
+            {
+              "$ref": "https://reviewsensei.dev/schemas/v1/evidence-manifest.schema.json"
+            },
+            {
+              "properties": {
+                "binding": {
+                  "properties": {
+                    "purpose": {
+                      "const": "queue"
+                    }
+                  }
+                }
+              }
+            }
+          ]
         },
         {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "encoding",
+            "binding",
+            "item_count",
+            "sha256",
+            "document"
+          ],
           "properties": {
+            "encoding": {
+              "const": "inline-json-v1"
+            },
             "binding": {
+              "type": "object",
+              "required": [
+                "purpose"
+              ],
               "properties": {
                 "purpose": {
                   "const": "queue"
                 }
               }
+            },
+            "item_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "document": {
+              "type": "object"
             }
           }
         }

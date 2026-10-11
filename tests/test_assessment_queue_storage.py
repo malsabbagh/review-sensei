@@ -62,6 +62,11 @@ def stored_queue_record(root):
     )
 
 
+# Larger than the inline manifest cap, so the part-comment path stays covered.
+PARTITIONED_JOURNAL = {"schema_version": "1.0", "pad": "x" * 8000}
+PARTITIONED_JOURNAL_NEXT = {"schema_version": "1.0", "pad": "y" * 8000}
+
+
 def activate(ledger, *, payload=None, active=None):
     """One permitted storage mutation; no inference, source ack or receipt logic."""
     payload = payload or {"schema_version": "1.0", "synthetic_journal": [1, 2, 3]}
@@ -245,7 +250,7 @@ class QueueAdapterTests(unittest.TestCase):
                 state = GitHubState()
                 ledger = state.ledger()
                 ledger.initialize(fixture.IDENTITY, now=fixture.NOW)
-                activate(ledger)
+                activate(ledger, payload=PARTITIONED_JOURNAL)
                 part_id = next(
                     identity
                     for identity, item in state.comments.items()
@@ -387,7 +392,7 @@ class QueueAdapterTests(unittest.TestCase):
         state = GitHubState()
         ledger = state.ledger()
         ledger.initialize(fixture.IDENTITY, now=fixture.NOW)
-        original, _ = activate(ledger)
+        original, _ = activate(ledger, payload=PARTITIONED_JOURNAL)
         item = next(
             item
             for item in state.comments.values()
@@ -399,10 +404,7 @@ class QueueAdapterTests(unittest.TestCase):
             state.comments[orphan["id"]] = orphan
         before = copy.deepcopy(state.comments)
         with self.assertRaises(ReviewInputError):
-            activate(
-                state.ledger(),
-                payload={"schema_version": "1.0", "synthetic_journal": [4]},
-            )
+            activate(state.ledger(), payload=PARTITIONED_JOURNAL_NEXT)
         self.assertEqual(state.comments, before)
         self.assertEqual(
             state.ledger().load(fixture.IDENTITY, now=fixture.NOW).record, original

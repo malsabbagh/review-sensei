@@ -229,6 +229,14 @@ Change the session root writer and reader.
 Expected: the two part posts and the remaining part reads go away. Checkpoints
 drop to about **18**, and the complete profile to about **24**.
 
+Measured: a receipt that fits the session-root allowance is stored as
+`inline-json-v1` and posts no part comment. The two checkpoints charge **25**
+(19 GitHub and 6 broker). The complete profile charges **30**. Larger
+documents, including the 250-finding baseline, still use part comments. The
+local ledger still writes parts; both readers accept an inline manifest.
+Six checkpoints fit, ending at 61, and the next one refuses before a grant is
+installed. The v4 and v5 fixtures are unchanged.
+
 Exit: the frozen fixture tests pass unchanged. The P1 test asserts the new
 count.
 

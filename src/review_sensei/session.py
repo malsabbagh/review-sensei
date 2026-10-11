@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol, Sequence, cast
 
 from .bounded_evidence import (
+    INLINE_ENCODING,
     MAX_PART_BYTES,
     MAX_STORED_PART_BYTES,
     MAX_STORED_PARTS,
@@ -43,6 +44,7 @@ from .bounded_evidence import (
     _operation_witness_matches,
     canonical_bytes,
     partition_evidence,
+    read_inline_evidence,
     read_partitioned_evidence,
     stage_partitioned_evidence,
     validate_manifest,
@@ -196,8 +198,16 @@ def _stored_assessment_queue(value: object) -> dict[str, object] | None:
         raise ReviewInputError(
             "assessment queue root exceeds actual bounded allocation"
         )
-    manifest = validate_manifest(normalized["state_manifest"])
-    binding = cast(dict[str, object], manifest["binding"])
+    state_manifest = normalized["state_manifest"]
+    if (
+        isinstance(state_manifest, dict)
+        and state_manifest.get("encoding") == INLINE_ENCODING
+    ):
+        read_inline_evidence(state_manifest, expected_binding=state_manifest["binding"])
+        binding = cast(dict[str, object], state_manifest["binding"])
+    else:
+        manifest = validate_manifest(state_manifest)
+        binding = cast(dict[str, object], manifest["binding"])
     if (
         binding["purpose"] != "queue"
         or binding["generation"] != normalized["inventory_generation"]
@@ -3050,7 +3060,12 @@ def _tail_part_ids(
     if isinstance(baseline, dict) and baseline.get("encoding") == PARTITION_ENCODING:
         manifests.append(validate_manifest(baseline))
     if record.assessment_queue is not None:
-        manifests.append(validate_manifest(record.assessment_queue["state_manifest"]))
+        state_manifest = record.assessment_queue["state_manifest"]
+        if (
+            isinstance(state_manifest, dict)
+            and state_manifest.get("encoding") == PARTITION_ENCODING
+        ):
+            manifests.append(validate_manifest(state_manifest))
     return (
         tuple(
             ref["storage_id"]
@@ -3425,6 +3440,8 @@ class LocalSessionLedger:
             or expected_binding.get("producer") != self.evidence_producer()
         ):
             raise ReviewInputError("local partition binding does not match")
+        if isinstance(manifest, dict) and manifest.get("encoding") == INLINE_ENCODING:
+            return read_inline_evidence(manifest, expected_binding=expected_binding)
         return read_partitioned_evidence(
             manifest,
             reader=lambda storage_id: self._read_part(identity, storage_id),
