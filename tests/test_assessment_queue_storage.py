@@ -125,7 +125,7 @@ class RootParserTests(unittest.TestCase):
             ("response_bytes_reserved", True),
             ("response_bytes_reserved", 1_048_577),
             ("response_bytes_reserved", -1),
-            ("provider_calls", 9),
+            ("provider_calls", 33),
             ("prompt_bytes", 2_097_153),
             ("execution_identity", "e" * 64),
             ("deadline_at", "2026-10-10T00:02:00+01:00"),

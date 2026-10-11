@@ -7,6 +7,7 @@ import json
 import re
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Sequence
 
@@ -243,19 +244,35 @@ def _scope(paths: Sequence[str]) -> frozenset[str]:
     )
 
 
+@lru_cache(maxsize=256)
+def _document_features(
+    content: str,
+) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    """Path-independent scoring inputs, reused across every batch's ranking."""
+    tokens = frozenset(
+        next(group for group in match.groups() if group is not None)
+        for match in _REFERENCES.finditer(content)
+    )
+    heading = next((line for line in content.splitlines() if line.startswith("#")), "")
+    return tokens, _terms(heading), _terms(content)
+
+
 def _score(
     path: str, content: str, changed_paths: Sequence[str]
 ) -> tuple[int, int, int, int]:
     terms = _scope(changed_paths)
-    heading = next((line for line in content.splitlines() if line.startswith("#")), "")
+    paths = frozenset(changed_paths)
+    tokens, heading_terms, content_terms = _document_features(content)
+    references = {
+        token if token in paths else token.rstrip(".")
+        for token in tokens
+        if token in paths or token.rstrip(".") in paths
+    }
     return (
-        len(
-            _references(content, frozenset(changed_paths))
-            | ({path} if path in changed_paths else set())
-        ),
+        len(references | ({path} if path in changed_paths else set())),
         len(terms & _terms(PurePosixPath(path).stem)),
-        len(terms & _terms(heading)),
-        len(terms & _terms(content)),
+        len(terms & heading_terms),
+        len(terms & content_terms),
     )
 
 

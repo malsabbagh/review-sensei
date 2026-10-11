@@ -21,6 +21,8 @@ DEFAULT_TOTAL_WORK_MAX_FILES = 4_000
 DEFAULT_TOTAL_WORK_MAX_HUNKS = 40_000
 DEFAULT_TOTAL_WORK_MAX_CHUNKS = 8
 DEFAULT_TOTAL_WORK_MAX_PROVIDER_CALLS = 8
+TOTAL_WORK_MAX_CHUNKS_CEILING = 32
+TOTAL_WORK_MAX_PROVIDER_CALLS_CEILING = 32
 
 MAX_REPOSITORY_PATH_BYTES = 4_096
 MAX_REPOSITORY_PATH_SEGMENT_BYTES = 255
@@ -85,7 +87,11 @@ DEFAULT_REVIEW_LIMITS = ReviewLimits()
 
 @dataclass(frozen=True)
 class TotalWorkBudget:
-    """Aggregate ceilings for one planned change, distinct from per-request limits."""
+    """Aggregate ceilings for one planned change, distinct from per-request limits.
+
+    Chunk and provider-call counts default to 8 and may be raised to their
+    separate ceilings; every other field's default is its ceiling.
+    """
 
     max_total_diff_bytes: int = DEFAULT_TOTAL_WORK_MAX_DIFF_BYTES
     max_total_diff_lines: int = DEFAULT_TOTAL_WORK_MAX_DIFF_LINES
@@ -95,15 +101,15 @@ class TotalWorkBudget:
     max_provider_calls: int = DEFAULT_TOTAL_WORK_MAX_PROVIDER_CALLS
 
     def __post_init__(self) -> None:
-        defaults = {
+        ceilings = {
             "max_total_diff_bytes": DEFAULT_TOTAL_WORK_MAX_DIFF_BYTES,
             "max_total_diff_lines": DEFAULT_TOTAL_WORK_MAX_DIFF_LINES,
             "max_total_files": DEFAULT_TOTAL_WORK_MAX_FILES,
             "max_total_hunks": DEFAULT_TOTAL_WORK_MAX_HUNKS,
-            "max_chunks": DEFAULT_TOTAL_WORK_MAX_CHUNKS,
-            "max_provider_calls": DEFAULT_TOTAL_WORK_MAX_PROVIDER_CALLS,
+            "max_chunks": TOTAL_WORK_MAX_CHUNKS_CEILING,
+            "max_provider_calls": TOTAL_WORK_MAX_PROVIDER_CALLS_CEILING,
         }
-        for name, ceiling in defaults.items():
+        for name, ceiling in ceilings.items():
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ReviewInputError(f"{name} must be a positive integer")
@@ -324,6 +330,8 @@ __all__ = [
     "MAX_REPOSITORY_PATH_BYTES",
     "MAX_REPOSITORY_PATH_SEGMENT_BYTES",
     "ReviewLimits",
+    "TOTAL_WORK_MAX_CHUNKS_CEILING",
+    "TOTAL_WORK_MAX_PROVIDER_CALLS_CEILING",
     "TotalWorkBudget",
     "decode_git_c_quoted_path",
     "decode_git_path",

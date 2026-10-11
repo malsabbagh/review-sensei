@@ -16,7 +16,6 @@ from review_sensei.context import (
     admit_prompt_context,
 )
 from review_sensei.diff import analyze_diff
-from review_sensei.discovery_work import CONTEXT_APPENDIX_RESERVE
 from review_sensei.document_context import DocumentDecision, DocumentSelectionReport
 from review_sensei.errors import ContextLoadError, ReviewInputError
 from review_sensei.models import (
@@ -135,17 +134,7 @@ def _service(provider: _Provider) -> ReviewService:
     )
 
 
-def _suffix(request: ReviewRequest) -> str:
-    reserve = CONTEXT_APPENDIX_RESERVE
-    return (
-        "\n"
-        + CONTEXT_REQUEST_INSTRUCTION
-        + (
-            f"\nHost reserves {reserve} UTF-8 summary bytes for admission diagnostics. "
-            f"Provider summary must fit {request.limits.max_summary_bytes - reserve} "
-            "UTF-8 bytes."
-        )
-    )
+SUFFIX = "\n" + CONTEXT_REQUEST_INSTRUCTION
 
 
 def _rendered_prompt(service: ReviewService, request: ReviewRequest) -> str:
@@ -156,7 +145,7 @@ def _rendered_prompt(service: ReviewService, request: ReviewRequest) -> str:
         capabilities=None,
         output_tokens=None,
     )
-    suffix = _suffix(request)
+    suffix = SUFFIX
     frame_bytes = len(suffix.encode("utf-8")) + len(
         ("\n\n" + _PROVIDER_OUTPUT_CORRECTION).encode("utf-8")
     )
@@ -360,9 +349,9 @@ class Pr253ContextPolicyTests(unittest.TestCase):
                     if source.required
                 ]
                 self.assertEqual(required, [])
-                self.assertTrue(
+                self.assertFalse(
                     any(
-                        source.path == RULES_DOCUMENT and not source.required
+                        source.path == RULES_DOCUMENT
                         for source in category.document_sources
                     )
                 )
@@ -398,7 +387,7 @@ class Pr253ContextPolicyTests(unittest.TestCase):
                 json.loads(paths[0].read_text(encoding="utf-8"))
             ).document_sources
         )
-        self.assertTrue(discovered[RULES_DOCUMENT][1])
+        self.assertFalse(discovered[RULES_DOCUMENT][1])
         self.assertIn(GUIDE_DOCUMENT, discovered)
         self.assertFalse(discovered[GUIDE_DOCUMENT][1])
         self.assertFalse(discovered["docs/architecture/index.md"][1])

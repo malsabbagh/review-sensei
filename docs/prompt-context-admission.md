@@ -13,23 +13,30 @@ active lenses. Instructions, learnings, categories, source context and atomic
 evidence remain unchanged. Selection ranks against the actual batch paths and
 uses exact UTF-8 rendered bytes, including JSON escaping. Existing qualified
 provider capacity uses the configured adapter output-token reserve; unqualified
-input stays at 49,152 bytes. At most 65 formatter probes fit the existing
+input stays at 49,152 bytes. Omitting a whole document never grows the
+rendered frame, so the fewest lowest-ranked omissions that fit are found by
+bisection: at most 9 formatter probes fit the existing
 64-unique-document envelope, with original-deadline checks before ranking and
 between probes. Expiry is a deadline refusal, not a capacity diagnosis.
 
-The host reserves 8,192 summary bytes before dispatch for diagnostics, including
-2,048 bytes for precise pending-work text. Output or diagnostic-inventory bounds
-have distinct refusal reasons. A provider response that would exceed the final
-summary bound remains pending as a whole; provider prose is never clipped.
-The accepted-batch appendix contains original report digests/counts/reasons and
-a separate executed selection digest, selected/mandatory/omitted counts and
-rendered bytes. It contains no raw documents and excludes planner probes.
+The host reserves 2,048 summary bytes for precise pending-work text. A provider
+response that would exceed the final summary bound remains pending as a whole;
+provider prose is never clipped. Admission diagnostics take no summary or
+response budget, so the call cap does not depend on summary space. The CLI
+writes them to stderr as one `review-sensei: context-admission` JSON line per
+run, from `ReviewRun.context_admission`. The record holds original report
+digests/counts/reasons and, per accepted batch, a separate executed selection
+digest, selected/mandatory/omitted counts and rendered bytes. It contains no
+raw documents and excludes planner probes. The published summary keeps only a
+fixed-size `Document context admission sha256:` line over that record, so the
+result digest still changes when the executed selection does.
 
 An actual accepted batch with complete changed-file coverage can produce a
 publishable partial review when document selection is incomplete. That result
 cannot replace the completed baseline, overwrite cache authority, close omitted
 prior findings, or authorize incremental reuse. The existing authenticated
-checkpoint and COMMENT publication carry the summary appendix. Human findings
+checkpoint and COMMENT publication carry the partial status and coverage, not
+the admission record. Human findings
 retain their inventory, and resolving them leaves the durable `review-partial`
 automatic-approval blocker. No public schema extension is required.
 
@@ -43,13 +50,14 @@ The pinned `docs/architecture.md` alone is 61,136 UTF-8 bytes, digest
 It remains a genuine zero-call mandatory refusal under the unqualified cap.
 Optional selection and lossless deduplication cannot remove that obligation.
 The packaged architecture category now keeps that long guide supplemental.
-`docs/architecture/mandatory-rules.md` is a direct file source. When a
-repository contains it, selection pins that file and cannot omit it. A
-repository that does not contain it can still be reviewed. Its governing
-rules are copied verbatim from `docs/architecture.md`, and the guide, the rest
-of `docs/architecture/`, and `docs/adr/` stay supplemental.
-`tests/test_pr253_context_policy.py` proves that this required file, unchanged,
-plus a one-file complete diff, admits through the unqualified complete-frame
+`docs/architecture/mandatory-rules.md` copies the governing rules verbatim from
+`docs/architecture.md`. The packaged category reaches it only through the
+`docs/architecture/` directory source, so it is supplemental like the guide,
+the rest of `docs/architecture/`, and `docs/adr/`. Admission may trim it when
+the diff needs the room; a direct single-file source would pin it, and at
+about 37 KB a pinned copy leaves a real review frame no room for evidence.
+`tests/test_pr253_context_policy.py` proves that this file, unchanged and
+pinned, plus a one-file complete diff, admits through the unqualified complete-frame
 ceiling of 49,152 UTF-8 bytes, including the reserved structural correction. A
 frame of exactly 49,152 bytes admits. One byte over that ceiling raises
 `PromptContextOverflow` and the unified review path makes zero provider calls.

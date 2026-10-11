@@ -175,11 +175,14 @@ class ReviewRun:
     ``result`` is present only when a publisher-ready aggregate was produced.
     ``error`` preserves the original fail-closed exception for callers of
     ``review()``; logs and ``outcome.diagnostic`` never include that text.
+    ``context_admission`` is the per-batch document admission record for
+    executed unified batches; it is a log diagnostic, never published.
     """
 
     outcome: RunOutcome
     result: ReviewResult | None = None
     error: BaseException | None = None
+    context_admission: Mapping[str, object] | None = None
 
 
 @dataclass
@@ -1419,6 +1422,7 @@ class ReviewService:
         error: BaseException | None = None,
         repository: str | None = None,
         pull_request_number: int | None = None,
+        context_admission: Mapping[str, object] | None = None,
     ) -> ReviewRun:
         return ReviewRun(
             RunOutcome(
@@ -1436,6 +1440,7 @@ class ReviewService:
             ),
             result=result,
             error=error,
+            context_admission=context_admission,
         )
 
     def _coverage_decision(

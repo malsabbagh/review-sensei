@@ -2013,6 +2013,22 @@ def _add_work_recovery_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _configured_resource_budget(
+    budget: ResourceBudget, configuration: ProductConfiguration
+) -> ResourceBudget:
+    """Apply the YAML call cap (unified routes only) and run deadline."""
+
+    resources = configuration.advanced.resources
+    if (
+        configuration.advanced.review_work.mode == "unified"
+        and resources.max_provider_calls is not None
+    ):
+        budget = replace(budget, max_provider_calls=resources.max_provider_calls)
+    if resources.review_deadline_seconds is not None:
+        budget = replace(budget, timeout_ms=resources.review_deadline_seconds * 1000)
+    return budget
+
+
 def _work_recovery_from_cli(
     args: argparse.Namespace, configuration: ProductConfiguration
 ) -> WorkRecoveryStore | None:
@@ -2697,15 +2713,9 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 stage_providers=stage_providers,
                 work_budgets=work_configuration.advanced.review_work,
             )
-        reply_budget = ResourceBudget.create()
-        if (
-            work_configuration.advanced.review_work.mode == "unified"
-            and work_configuration.advanced.resources.max_provider_calls is not None
-        ):
-            reply_budget = replace(
-                reply_budget,
-                max_provider_calls=work_configuration.advanced.resources.max_provider_calls,
-            )
+        reply_budget = _configured_resource_budget(
+            ResourceBudget.create(), work_configuration
+        )
         reply_outcome = application.generate_and_publish_reply(
             options=GitHubWriteOptions(
                 github_writes=True,
@@ -3417,6 +3427,13 @@ def _run_review_provider(
 
     def produced() -> ReviewRun:
         run = service.run(request, **kwargs)  # type: ignore[attr-defined]
+        admission = getattr(run, "context_admission", None)
+        if admission:
+            print(
+                "review-sensei: context-admission "
+                + json.dumps(admission, ensure_ascii=True, sort_keys=True),
+                file=sys.stderr,
+            )
         if callable(adjust):
             run = adjust(run)
         if not isinstance(run, ReviewRun):
@@ -3653,15 +3670,9 @@ def main(argv: list[str] | None = None) -> int:
         work_configuration = load_configuration(getattr(args, "config", None))
         work_budgets = work_configuration.advanced.review_work
         work_recovery = _work_recovery_from_cli(args, work_configuration)
-        resource_budget = ResourceBudget.for_limits(limits)
-        if (
-            work_budgets.mode == "unified"
-            and work_configuration.advanced.resources.max_provider_calls is not None
-        ):
-            resource_budget = replace(
-                resource_budget,
-                max_provider_calls=work_configuration.advanced.resources.max_provider_calls,
-            )
+        resource_budget = _configured_resource_budget(
+            ResourceBudget.for_limits(limits), work_configuration
+        )
         orchestrate = (
             bool(getattr(args, "orchestrate_large_changes", False))
             or work_budgets.mode == "unified"
@@ -3670,6 +3681,15 @@ def main(argv: list[str] | None = None) -> int:
         # performs a bounded ``maximum + 1`` read and strict UTF-8
         # decoding; the shared analysis validates all diff/path dimensions.
         work_budget = DEFAULT_TOTAL_WORK_BUDGET
+        if (
+            work_budgets.mode == "unified"
+            and resource_budget.max_provider_calls > work_budget.max_provider_calls
+        ):
+            work_budget = replace(
+                work_budget,
+                max_chunks=resource_budget.max_provider_calls,
+                max_provider_calls=resource_budget.max_provider_calls,
+            )
         if orchestrate:
             from .planning import plan_change
 

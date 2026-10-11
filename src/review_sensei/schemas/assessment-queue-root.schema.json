@@ -141,7 +141,7 @@
             "provider_calls": {
               "type": "integer",
               "minimum": 0,
-              "maximum": 8
+              "maximum": 32
             },
             "transport_retries": {
               "type": "integer",

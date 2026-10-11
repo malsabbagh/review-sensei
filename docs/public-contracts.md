@@ -552,7 +552,9 @@ order; the explanation is not repeated per finding.
 
 Per-request `ReviewLimits` are unchanged. Opt-in `--orchestrate-large-changes`
 partitions a larger change into bounded chunks under a separate
-`TotalWorkBudget` (default 8 chunks and 8 provider calls). The CLI and
+`TotalWorkBudget` (default 8 chunks and 8 provider calls, each with a ceiling
+of 32). `ResourceBudget` defaults to 8 provider calls and a 120-second run
+deadline, with ceilings of 32 calls and 600 seconds. The CLI and
 `plan_change` read ceiling widens to `TotalWorkBudget.max_total_diff_bytes`
 (8 MiB) in orchestration mode; the default single-request path remains bounded
 by `ReviewLimits.max_diff_bytes` (1 MiB). Related changed paths are named in
