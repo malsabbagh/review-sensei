@@ -2046,6 +2046,77 @@ def _work_recovery_from_cli(
     return WorkRecoveryStore(directory, key=key, artifacts="diagnostics")
 
 
+def _override_facts(
+    http: object,
+    *,
+    token: str,
+    repository: str,
+    repository_id: int,
+    pull_request: int,
+    head_sha: str,
+    actor: str,
+    app_slug: str,
+) -> tuple[str, tuple[str, ...]]:
+    """Read collaborator permission and the current App review fingerprints.
+
+    The command does not accept a caller-supplied review file. Fingerprints
+    come from the latest App review on this head.
+    """
+
+    from .hosting.github.operation_entry import fingerprints_for_head
+
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,39}", actor):
+        raise ReviewInputError("maintainer actor is invalid")
+    permission_status, permission_body = http.request(  # type: ignore[attr-defined]
+        "GET",
+        http.repository_path(  # type: ignore[attr-defined]
+            repository, f"/collaborators/{actor}/permission"
+        ),
+        token=token,
+    )
+    permission = (
+        permission_body.get("permission") if isinstance(permission_body, dict) else None
+    )
+    if permission_status != 200 or not isinstance(permission, str):
+        raise ReviewInputError("collaborator permission is unavailable")
+    status, reviews = http.request(  # type: ignore[attr-defined]
+        "GET",
+        http.repository_path(  # type: ignore[attr-defined]
+            repository, f"/pulls/{pull_request}/reviews?per_page=100"
+        ),
+        token=token,
+    )
+    if status != 200 or not isinstance(reviews, list):
+        raise ReviewInputError("current review fingerprints are unavailable")
+    latest_body = ""
+    latest_id = -1
+    for review in reviews:
+        if not isinstance(review, dict):
+            continue
+        user = review.get("user")
+        login = user.get("login") if isinstance(user, dict) else None
+        if not isinstance(login, str) or login.lower() != app_slug.lower():
+            continue
+        if review.get("commit_id") != head_sha:
+            continue
+        review_id = review.get("id")
+        body = review.get("body")
+        if (
+            isinstance(review_id, int)
+            and not isinstance(review_id, bool)
+            and review_id >= latest_id
+            and isinstance(body, str)
+        ):
+            latest_id = review_id
+            latest_body = body
+    return permission, fingerprints_for_head(
+        latest_body,
+        repository_id=repository_id,
+        pull_request=pull_request,
+        head_sha=head_sha,
+    )
+
+
 def _bind_hosted_command_attestation(
     attestation: dict[str, object],
     *,
@@ -2186,6 +2257,26 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 )
                 session_attestation = loaded_attestation
             http = GitHubHttp()
+            actor_permission = None
+            finding_fingerprints = None
+            if parsed.action == "approve-media" or parsed.finding_reference:
+                read_token = os.environ.get("GITHUB_TOKEN") or os.environ.get(
+                    "GH_TOKEN"
+                )
+                if not isinstance(read_token, str) or not read_token.strip():
+                    raise ReviewInputError(
+                        "maintainer override requires GitHub metadata access"
+                    )
+                actor_permission, finding_fingerprints = _override_facts(
+                    http,
+                    token=read_token.strip(),
+                    repository=args.repository,
+                    repository_id=args.repository_id,
+                    pull_request=args.pull_request,
+                    head_sha=args.head_sha,
+                    actor=args.actor,
+                    app_slug=args.app_slug,
+                )
             application = GitHubApplication(
                 broker=BrokerClient(),
                 http=http,
@@ -2210,6 +2301,8 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 app_slug=args.app_slug,
                 source_comment_id=source_comment_id,
                 session_attestation=session_attestation,
+                actor_permission=actor_permission,
+                finding_fingerprints=finding_fingerprints,
             )
             print(result.summary)
             return 0
@@ -3168,6 +3261,106 @@ def _report_broker_failure(error: BaseException, args: argparse.Namespace) -> bo
     return True
 
 
+def _actions_app_id() -> int | None:
+    """GitHub App id for an Actions run, when the event or env provides one."""
+
+    raw = os.environ.get("REVIEWSENSEI_APP_ID", "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    event_path = os.environ.get("GITHUB_EVENT_PATH", "").strip()
+    if not event_path:
+        return None
+    try:
+        event = json.loads(Path(event_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    installation = event.get("installation") if isinstance(event, dict) else None
+    app_id = installation.get("app_id") if isinstance(installation, dict) else None
+    if isinstance(app_id, int) and not isinstance(app_id, bool) and app_id > 0:
+        return app_id
+    return None
+
+
+def _run_review_provider(service: object, request: object, **kwargs: object) -> object:
+    """Call the provider, or replay an accepted Actions attempt.
+
+    The operation entry runs only for a hosted session ledger when the policy
+    is enabled and this process has an Actions run id and App id. Every other
+    caller keeps the existing provider call.
+    """
+
+    hosted = kwargs.pop("hosted_session_ledger", False)
+    operation_entry = kwargs.pop("operation_entry", "disabled")
+    ledger = kwargs.pop("ledger", None)
+    repository = kwargs.pop("repository", None)
+    repository_id = kwargs.pop("repository_id", None)
+    pull_request = kwargs.pop("pull_request", None)
+    run_id = os.environ.get("GITHUB_RUN_ID", "").strip()
+    app_id = _actions_app_id()
+    head_sha = kwargs.get("trusted_head_sha")
+    if (
+        hosted is not True
+        or operation_entry != "enabled"
+        or ledger is None
+        or not run_id
+        or app_id is None
+        or not isinstance(repository, str)
+        or not isinstance(repository_id, int)
+        or isinstance(pull_request, bool)
+        or not isinstance(pull_request, int)
+        or not isinstance(head_sha, str)
+        or len(head_sha) != 40
+    ):
+        return service.run(request, **kwargs)  # type: ignore[attr-defined]
+    from .hosting.github.operation_entry import (
+        HostedProviderResult,
+        analysis_payload,
+        run_actions_analysis,
+    )
+    from .hosting.github.operation_host import OperationRefusal
+    from .models import ReviewResult
+    from .outcomes import RunOutcome
+    from .service import ReviewRun
+    from .session import session_reservation_id
+
+    reservation = session_reservation_id(
+        repository=repository,
+        pull_request=pull_request,
+        head_sha=head_sha,
+        kind="publish",
+    )
+    admitted = run_actions_analysis(
+        http=ledger.http,
+        token=ledger.token,
+        repository=repository,
+        repository_id=repository_id,
+        pull_request=pull_request,
+        run_id=run_id,
+        run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT", "1").strip() or "1",
+        app_id=app_id,
+        reservation_id=reservation,
+        attestation_digest=hashlib.sha256(
+            f"{repository_id}:{pull_request}:{head_sha}".encode()
+        ).hexdigest(),
+        execute=lambda: service.run(request, **kwargs),  # type: ignore[attr-defined]
+        encode=analysis_payload,
+    )
+    if isinstance(admitted, OperationRefusal):
+        raise ReviewInputError(f"operation entry refused: {admitted.reason}")
+    if not isinstance(admitted, HostedProviderResult):
+        raise ReviewInputError("operation entry refused: invalid")
+    if admitted.fresh is not None:
+        return admitted.fresh
+    if admitted.replay_payload is None:
+        raise ReviewInputError("operation entry refused: result_missing")
+    result = ReviewResult.from_dict(json.loads(admitted.replay_payload))
+    status, diagnostic = service._run_outcome_for_result(result)  # type: ignore[attr-defined]
+    return ReviewRun(
+        outcome=RunOutcome(status, diagnostic=diagnostic),
+        result=result,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     _configure_standard_streams()
     args_list = list(argv) if argv is not None else sys.argv[1:]
@@ -4006,7 +4199,8 @@ def main(argv: list[str] | None = None) -> int:
             verification_scope = scope
             incremental = scope.incremental
         try:
-            run = service.run(
+            run = _run_review_provider(
+                service,
                 request,
                 incremental=incremental,
                 current_key=current_key,
@@ -4015,6 +4209,12 @@ def main(argv: list[str] | None = None) -> int:
                 profile=effective_profile,
                 budget=resource_budget,
                 work_recovery=work_recovery,
+                hosted_session_ledger=hosted_session_ledger,
+                operation_entry=work_configuration.github.operation_entry,
+                ledger=ledger,
+                repository=args.repository,
+                repository_id=getattr(args, "repository_id", None),
+                pull_request=args.pull_request,
             )
             if (
                 run.result is not None

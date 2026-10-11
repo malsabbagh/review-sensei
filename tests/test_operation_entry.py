@@ -5,14 +5,20 @@ from __future__ import annotations
 import hashlib
 import unittest
 
+from review_sensei.hosting.github.operation_comments import ResultPartStore
 from review_sensei.hosting.github.operation_entry import (
+    accepted_payload_matches,
+    analysis_payload,
     consume_recorded_grant,
+    fingerprints_for_head,
     github_admission_proof,
     github_event_id,
     operation_handle_witness,
     run_admitted_trigger,
+    run_hosted_provider,
 )
 from review_sensei.hosting.github.operation_host import (
+    OPERATION_COMMENT_MARKER,
     AdmissionProof,
     ExecutionResult,
     GitHubCommentOperationStore,
@@ -189,3 +195,77 @@ class AdmissionTests(unittest.TestCase):
         store = GitHubCommentOperationStore(comments, app_user_id=42)
         self.assertTrue(consume_recorded_grant(store, "grant-9"))
         self.assertFalse(consume_recorded_grant(store, "grant-9"))
+
+    def test_hosted_provider_calls_once_and_replays_the_bytes(self):
+        comments = MemoryComments()
+        store = GitHubCommentOperationStore(comments, app_user_id=42)
+        parts = ResultPartStore(comments, app_user_id=42)
+        calls = {"n": 0}
+
+        class Result:
+            def to_dict(self) -> dict[str, str]:
+                return {"review_status": "complete"}
+
+        class Run:
+            def __init__(self) -> None:
+                self.result = Result()
+
+        def execute() -> Run:
+            calls["n"] += 1
+            return Run()
+
+        values = dict(
+            trigger="full-review",
+            repository_id=7,
+            pull_request=11,
+            attestation_digest=_hex("attestation"),
+            run_id="100",
+            run_attempt="1",
+            app_id=99,
+            reservation_id="reservation-1",
+            delivery_id="delivery-1",
+            grant="grant-1",
+            server_started_ms=1_000,
+            execute=execute,
+            encode=analysis_payload,
+            parts=parts,
+            now=lambda: 1_000,
+        )
+        first = run_hosted_provider(store, **values)
+        second = run_hosted_provider(store, **values)
+        self.assertEqual(calls["n"], 1)
+        self.assertIsNotNone(first.fresh)
+        self.assertIsNone(second.fresh)
+        self.assertIsNotNone(second.replay_payload)
+        assert second.replay_payload is not None
+        self.assertIn(b"complete", second.replay_payload)
+
+    def test_fingerprints_come_from_the_current_head_only(self):
+        head = "a" * 40
+        other = "b" * 40
+        current = "c" * 64
+        stale = "d" * 64
+        body = (
+            f"<!-- reviewsensei:finding:v2 repo=7 pr=11 head={head} "
+            f"base={'e' * 40} fingerprint={current} state=new blocking=true -->\n"
+            f"<!-- reviewsensei:finding:v2 repo=7 pr=11 head={other} "
+            f"base={'e' * 40} fingerprint={stale} state=new blocking=true -->"
+        )
+        self.assertEqual(
+            fingerprints_for_head(
+                body, repository_id=7, pull_request=11, head_sha=head
+            ),
+            (current,),
+        )
+
+    def test_publish_requires_the_accepted_digest_when_a_record_exists(self):
+        digest = "a" * 64
+        self.assertIsNone(accepted_payload_matches(("hello",), digest))
+        self.assertFalse(
+            accepted_payload_matches((f"{OPERATION_COMMENT_MARKER}\n{{}}\n",), digest)
+        )
+        self.assertTrue(
+            accepted_payload_matches(
+                (f"{OPERATION_COMMENT_MARKER}\n{digest}\n",), digest
+            )
+        )

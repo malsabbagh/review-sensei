@@ -921,6 +921,7 @@ jobs:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
+          REVIEWSENSEI_APP_ID: ${{ github.event.installation.app_id }}
           TITLE_B64: ${{ needs.authoritative-preflight.outputs.pull_request_title_b64 }}
           HEAD_SHA: ${{ inputs.head_sha }}
           BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
