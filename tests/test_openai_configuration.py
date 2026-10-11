@@ -333,6 +333,9 @@ class OpenAIConfigurationTests(IsolatedWorkingDirectoryMixin, unittest.TestCase)
                 )
                 self.assertEqual(effective["base_url"], GATEWAY)
                 self.assertTrue(effective["allow_custom_endpoint"])
+                self.assertEqual(
+                    effective["provenance"]["base_url"]["source"], "configuration file"
+                )
                 self.assertEqual(self.requests, [])
                 self.assertEqual(self.adapters, [])
         for command in ("doctor", "plan"):
@@ -346,6 +349,25 @@ class OpenAIConfigurationTests(IsolatedWorkingDirectoryMixin, unittest.TestCase)
             self.assertEqual(status, {"doctor": 2, "plan": 3}[command], error)
             self.assertEqual(
                 json.loads(output)["provider_configuration"]["base_url"], OTHER
+            )
+            provenance = json.loads(output)["provider_configuration"]["provenance"]
+            self.assertEqual(
+                provenance["base_url"],
+                {"source": "command line", "detail": "--base-url"},
+            )
+            self.assertEqual(
+                provenance["allow_custom_endpoint"],
+                {"source": "command line", "detail": "--allow-custom-endpoint"},
+            )
+            status, output, error = self.invoke(
+                [command, "--base-url", "https://api.openai.com/v1", "--json"]
+            )
+            self.assertEqual(status, {"doctor": 2, "plan": 3}[command], error)
+            effective = json.loads(output)["provider_configuration"]
+            self.assertFalse(effective["allow_custom_endpoint"])
+            self.assertEqual(
+                effective["provenance"]["allow_custom_endpoint"]["source"],
+                "packaged default",
             )
         self.assertEqual(self.requests, [])
 

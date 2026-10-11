@@ -3,6 +3,8 @@
 
 Use the clean wheel environment's interpreter with -I. No source checkout
 package may satisfy imports; all installed product files must match the wheel.
+Only test scaffolding is loaded from the checkout; product imports use the
+verified installed wheel.
 """
 
 import argparse

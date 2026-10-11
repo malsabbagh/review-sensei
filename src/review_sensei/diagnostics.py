@@ -133,6 +133,22 @@ def _diagnostic_provider_configuration(
         validate_openai_compatible_endpoint(endpoint, allow_custom_endpoint=permission)
     credential_env = api_key_env if api_key_env is not None else resolved.credential_env
     mode = "local" if resolved.inference_location == "local" else "cloud"
+    provenance = {
+        key: {"source": value.source, "detail": value.detail}
+        for key, value in resolved.provenance.items()
+    }
+    if base_url is not None:
+        provenance["base_url"] = {"source": "command line", "detail": "--base-url"}
+    if allow_custom_endpoint:
+        provenance["allow_custom_endpoint"] = {
+            "source": "command line",
+            "detail": "--allow-custom-endpoint",
+        }
+    elif not permission:
+        provenance["allow_custom_endpoint"] = {
+            "source": "packaged default",
+            "detail": "custom OpenAI-compatible endpoints denied by default",
+        }
     return mode, {
         "profile": None,
         "backend": resolved.backend,
@@ -160,10 +176,7 @@ def _diagnostic_provider_configuration(
         ),
         "timeout_seconds": resolved.timeout_seconds,
         "qualification_status": "unknown",
-        "provenance": {
-            key: {"source": value.source, "detail": value.detail}
-            for key, value in resolved.provenance.items()
-        },
+        "provenance": provenance,
     }
 
 
