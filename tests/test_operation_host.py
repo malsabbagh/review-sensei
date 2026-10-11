@@ -136,7 +136,14 @@ class OperationHostTests(unittest.TestCase):
         started: int = 1_000,
         store: InMemoryOperationStore | None = None,
         request: OperationRequest | None = None,
-    ) -> tuple[OperationHost, InMemoryOperationStore, AdmissionProof, OperationRequest, OperationHandle, dict[str, int]]:
+    ) -> tuple[
+        OperationHost,
+        InMemoryOperationStore,
+        AdmissionProof,
+        OperationRequest,
+        OperationHandle,
+        dict[str, int],
+    ]:
         clock = {"now": started}
         backing = store if store is not None else InMemoryOperationStore()
         host = OperationHost(backing, now=lambda: clock["now"])
@@ -403,7 +410,9 @@ class OperationHostTests(unittest.TestCase):
             grants["n"] += 1
             return True
 
-        ordinary = host.consume_transition(handle, _plan(ordinary=1, fence=0), consume_grant=grant)
+        ordinary = host.consume_transition(
+            handle, _plan(ordinary=1, fence=0), consume_grant=grant
+        )
         self.assertIsInstance(ordinary, OperationRefusal)
         assert isinstance(ordinary, OperationRefusal)
         self.assertEqual(ordinary.reason, "budget")
@@ -465,9 +474,14 @@ class OperationHostTests(unittest.TestCase):
         self.assertEqual(retained.calls, 64)
         self.assertEqual(retained.deadline_ms, 1_000 + CONTROL_DEADLINE_MS)
 
-        deadline_host, _deadline_store, deadline_proof, deadline_request, deadline_handle, deadline_clock = (
-            self._host(bootstrap=3, started=5_000)
-        )
+        (
+            deadline_host,
+            _deadline_store,
+            deadline_proof,
+            deadline_request,
+            deadline_handle,
+            deadline_clock,
+        ) = self._host(bootstrap=3, started=5_000)
         deadline_clock["now"] = 5_000 + CONTROL_DEADLINE_MS
         expired = deadline_host.consume_transition(
             deadline_handle,

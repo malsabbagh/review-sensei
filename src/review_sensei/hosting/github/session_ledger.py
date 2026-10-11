@@ -725,9 +725,11 @@ class GitHubIssueCommentSessionLedger:
 
     def _note_anchor(self, items: list[Any]) -> None:
         stamps = [
-            item.get("updated_at")
+            stamp
             for item in items
-            if isinstance(item, dict) and isinstance(item.get("updated_at"), str)
+            if isinstance(item, dict)
+            for stamp in (item.get("updated_at"),)
+            if isinstance(stamp, str)
         ]
         if not stamps:
             return

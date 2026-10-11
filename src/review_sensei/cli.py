@@ -15,6 +15,7 @@ from typing import NoReturn
 from .baseline import (
     RECOVERABLE_FALLBACK_REASONS,
     BaselinePersistenceError,
+    ReviewBaseline,
     admission_context_document,
     admission_context_from_document,
     baseline_history_document,
@@ -86,7 +87,7 @@ from .providers.openrouter import (
 )
 from .providers.profiles import get_provider_profile
 from .providers.routing import bind_stage_providers
-from .service import DEFAULT_STAGES, ReviewService
+from .service import DEFAULT_STAGES, ReviewRun, ReviewService
 from .session import read_session_baseline
 from .validation import DEFAULT_REVIEW_LIMITS, read_bounded_utf8
 from .work_recovery import WorkRecoveryStore
@@ -3363,11 +3364,18 @@ def _reconcile_hosted_result(
 ) -> object:
     """Return the overflow reconciliation applied to one provider result."""
 
+    from .models import ReviewResult
+
     def adjust(run: object) -> object:
         result = getattr(run, "result", None)
         coverage = getattr(verification_scope, "coverage_mode", None)
         reason = getattr(verification_scope, "invalidation_reason", None)
-        if result is None or admission_baseline is None or verification_scope is None:
+        if (
+            not isinstance(result, ReviewResult)
+            or not isinstance(admission_baseline, ReviewBaseline)
+            or not isinstance(coverage, str)
+            or verification_scope is None
+        ):
             return run
         if coverage != "incremental" and reason != "related-context-overflow":
             return run
@@ -3386,7 +3394,9 @@ def _reconcile_hosted_result(
     return adjust
 
 
-def _run_review_provider(service: object, request: object, **kwargs: object) -> object:
+def _run_review_provider(
+    service: object, request: object, **kwargs: object
+) -> ReviewRun:
     """Call the provider, or replay an accepted Actions attempt.
 
     The operation entry runs only for a hosted session ledger when the policy
@@ -3405,10 +3415,12 @@ def _run_review_provider(service: object, request: object, **kwargs: object) -> 
     app_id = _actions_app_id()
     head_sha = kwargs.get("trusted_head_sha")
 
-    def produced() -> object:
+    def produced() -> ReviewRun:
         run = service.run(request, **kwargs)  # type: ignore[attr-defined]
         if callable(adjust):
             run = adjust(run)
+        if not isinstance(run, ReviewRun):
+            raise ReviewInputError("review provider returned an invalid result")
         return run
 
     if (
@@ -3433,7 +3445,6 @@ def _run_review_provider(service: object, request: object, **kwargs: object) -> 
     from .hosting.github.operation_host import OperationRefusal
     from .models import ReviewResult
     from .outcomes import RunOutcome
-    from .service import ReviewRun
     from .session import session_reservation_id
 
     reservation = session_reservation_id(
@@ -3443,8 +3454,8 @@ def _run_review_provider(service: object, request: object, **kwargs: object) -> 
         kind="publish",
     )
     admitted = run_actions_analysis(
-        http=ledger.http,
-        token=ledger.token,
+        http=getattr(ledger, "http"),
+        token=getattr(ledger, "token"),
         repository=repository,
         repository_id=repository_id,
         pull_request=pull_request,
@@ -3463,6 +3474,8 @@ def _run_review_provider(service: object, request: object, **kwargs: object) -> 
     if not isinstance(admitted, HostedProviderResult):
         raise ReviewInputError("operation entry refused: invalid")
     if admitted.fresh is not None:
+        if not isinstance(admitted.fresh, ReviewRun):
+            raise ReviewInputError("operation entry refused: invalid")
         return admitted.fresh
     if admitted.replay_payload is None:
         raise ReviewInputError("operation entry refused: result_missing")

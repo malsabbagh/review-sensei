@@ -302,11 +302,7 @@ def _issue_comments(
             return None
         collected.extend(payload)
         if len(payload) < 100:
-            primed = getattr(http, "primed_issue_comments", None)
-            if not isinstance(primed, dict):
-                primed = {}
-                http.primed_issue_comments = primed
-            primed[path] = collected
+            http.primed_issue_comments[path] = collected
             return collected
     return None
 

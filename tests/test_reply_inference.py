@@ -132,6 +132,7 @@ class ReplyInferenceTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                         "MODEL": model,
                         "BASE_URL": endpoint,
                         "REPOSITORY": "owner/repo",
+                        "REPOSITORY_ID": "1",
                         "PULL_REQUEST": "2",
                         "SOURCE_COMMENT_ID": "10",
                         "SOURCE_UPDATED_AT": "2026-10-05T00:00:00Z",

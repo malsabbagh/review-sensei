@@ -89,6 +89,7 @@ class GitHubHttp:
         self.api_url = api_url.rstrip("/")
         self.opener = opener
         self.timeout = timeout
+        self.primed_issue_comments: dict[str, list[Any]] = {}
 
     def repository_path(self, repository: str, suffix: str = "") -> str:
         owner, _, name = repository.partition("/")

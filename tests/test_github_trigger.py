@@ -505,7 +505,7 @@ class InlineCallerResolverTests(unittest.TestCase):
                 "worker-template",
                 (ROOT / "deploy" / "cloudflare" / "src" / "setup-content.ts")
                 .read_text(encoding="utf-8")
-                .split("function resolveTriggerWorkflowTemplate(", 1)[1],
+                .split("function resolveTriggerV5WorkflowTemplate(", 1)[1],
             ),
         ):
             with self.subTest(name=name):

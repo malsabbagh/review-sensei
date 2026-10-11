@@ -52,9 +52,7 @@ _MAX_REPOSITORY_BYTES = 256
 _MAX_PULL_REQUEST = 2_147_483_647
 # Directory names from the generated-path policy. Nested copies refuse even
 # when the path does not start with the prefix.
-_EXCLUDED_DIRECTORY_NAMES = frozenset(
-    {"dist", "generated", "node_modules", "vendor"}
-)
+_EXCLUDED_DIRECTORY_NAMES = frozenset({"dist", "generated", "node_modules", "vendor"})
 _PATH_BINDING_PREFIX = b"unchanged-source-v1\0"
 
 
@@ -262,9 +260,7 @@ def _mapped_blob(blobs: dict[str, object], key: str) -> bytes | None:
     return value
 
 
-def bind_snapshot(
-    record: UnchangedSourceCitation, blobs: Mapping[str, bytes]
-) -> bytes:
+def bind_snapshot(record: UnchangedSourceCitation, blobs: Mapping[str, bytes]) -> bytes:
     """Return the cited range after both snapshots resolve to that blob.
 
     ``blobs`` maps a Git blob SHA, and each snapshot path address from

@@ -78,9 +78,7 @@ class UnchangedSourceTests(unittest.TestCase):
         record = parse_unchanged_source(document)
         self.assertEqual(bind_snapshot(record, _snapshot(record, _BODY)), _BODY)
         executable = parse_unchanged_source(_document(mode="100755"))
-        self.assertEqual(
-            bind_snapshot(executable, _snapshot(executable, _BODY)), _BODY
-        )
+        self.assertEqual(bind_snapshot(executable, _snapshot(executable, _BODY)), _BODY)
 
     def test_exact_range_matches_cited_bytes(self) -> None:
         body = b"alpha\nbeta\ngamma\n"
@@ -98,7 +96,9 @@ class UnchangedSourceTests(unittest.TestCase):
             parse_unchanged_source(document)
         self.assertIn("changed", str(caught.exception))
 
-        record = parse_unchanged_source(document | {"head_blob_sha": document["base_blob_sha"]})
+        record = parse_unchanged_source(
+            document | {"head_blob_sha": document["base_blob_sha"]}
+        )
         blobs = _snapshot(record, _BODY)
         blobs[snapshot_path_key(record.head_sha, record.path)] = other
         with self.assertRaises(ReviewInputError) as caught:
@@ -148,7 +148,13 @@ class UnchangedSourceTests(unittest.TestCase):
             parse_unchanged_source(negative)
 
     def test_secret_paths_refuse(self) -> None:
-        for path in (".env", "config/.env.local", "keys/id_rsa", "certs/server.pem", "id_ed25519"):
+        for path in (
+            ".env",
+            "config/.env.local",
+            "keys/id_rsa",
+            "certs/server.pem",
+            "id_ed25519",
+        ):
             with self.subTest(path=path):
                 with self.assertRaises(ReviewInputError) as caught:
                     parse_unchanged_source(_document(path=path))
@@ -195,7 +201,12 @@ class UnchangedSourceTests(unittest.TestCase):
         self.assertNotIn("missing", str(caught.exception))
 
     def test_escaped_paths_refuse(self) -> None:
-        for path in ("../secrets.py", "/etc/passwd", "src\\app.py", "https://example.com/a.py"):
+        for path in (
+            "../secrets.py",
+            "/etc/passwd",
+            "src\\app.py",
+            "https://example.com/a.py",
+        ):
             with self.subTest(path=path):
                 with self.assertRaises(ReviewInputError):
                     parse_unchanged_source(_document(path=path))

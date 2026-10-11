@@ -35,7 +35,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 
 _LOG = logging.getLogger("review_sensei.hosting.github.operation")
 
@@ -1456,9 +1456,9 @@ class GitHubCommentOperationStore(InMemoryOperationStore):
         grants.update(embedded_grants)
         for scope_key, scope in embedded_scopes.items():
             current = scopes.get(scope_key)
-            if current is None or _as_int(scope["root_generation"]) >= _as_int(
-                current["root_generation"]
-            ):
+            if not isinstance(current, dict) or _as_int(
+                scope["root_generation"]
+            ) >= _as_int(current["root_generation"]):
                 scopes[scope_key] = scope
         missing = listed - set(decoded_events)
         if missing:
@@ -1466,14 +1466,14 @@ class GitHubCommentOperationStore(InMemoryOperationStore):
         if set(decoded_events) - listed:
             self._index_needs_rewrite = True
         for key, event in decoded_events.items():
-            scope_key = event["scope_digest"]
+            scope_digest = event["scope_digest"]
             observed = {
                 "root_sha": event["root_sha"],
                 "root_generation": event["root_generation"],
             }
-            current = scopes.get(scope_key)
+            current = scopes.get(scope_digest)
             if current is None:
-                scopes[scope_key] = observed
+                scopes[scope_digest] = observed
                 self._index_needs_rewrite = True
                 continue
             if not isinstance(current, dict):
@@ -1485,14 +1485,17 @@ class GitHubCommentOperationStore(InMemoryOperationStore):
             if observed_generation == current_generation:
                 raise ValueError("ambiguous operation scope")
             if observed_generation > current_generation:
-                scopes[scope_key] = observed
+                scopes[scope_digest] = observed
                 self._index_needs_rewrite = True
-        self._committed = {
-            "events": decoded_events,
-            "transitions": transitions,
-            "grants": grants,
-            "scopes": scopes,
-        }
+        self._committed = cast(
+            dict[str, dict[object, object]],
+            {
+                "events": decoded_events,
+                "transitions": transitions,
+                "grants": grants,
+                "scopes": scopes,
+            },
+        )
 
     def _write(
         self,
@@ -1727,10 +1730,13 @@ def encode_index_comment(pending: dict[str, dict[object, object]]) -> str:
         ):
             raise ValueError("operation grant is invalid")
         grants[key] = True
-    payload = {
-        "events": sorted(
-            _event_key_text((str(key[0]), str(key[1]))) for key in pending["events"]
-        ),
+    event_ids: list[str] = []
+    for key in pending["events"]:
+        if not isinstance(key, tuple) or len(key) != 2:
+            raise ValueError("operation event is invalid")
+        event_ids.append(_event_key_text((str(key[0]), str(key[1]))))
+    payload: dict[str, object] = {
+        "events": sorted(event_ids),
         "grants": grants,
         "kind": "index",
         "scopes": scopes,
@@ -2038,7 +2044,10 @@ def _import_transition(value: dict[str, object]) -> dict[str, object]:
         tuple(obligations) if isinstance(obligations, list) else obligations
     )
     exported = _public_transition(normalized)
-    exported["obligation_ids"] = tuple(exported["obligation_ids"])
+    obligations = exported["obligation_ids"]
+    if not isinstance(obligations, list):
+        raise ValueError("operation transition is invalid")
+    exported["obligation_ids"] = tuple(obligations)
     return exported
 
 

@@ -1839,6 +1839,7 @@ export function importLegacySetupConfiguration(
           learningPrs ? "pull-requests" : proposals ? "proposals" : "disabled"
         }`,
         `  artifacts: ${artifactsFlag ? "diagnostics" : "none"}`,
+        "  operation_entry: enabled",
       );
     }
     if (endpoint !== null) {
