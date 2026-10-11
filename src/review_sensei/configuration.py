@@ -367,7 +367,7 @@ class GitHubSection:
     mentions: bool = True
     learning: str = "disabled"
     artifacts: str = "none"
-    operation_entry: str = "enabled"
+    operation_entry: str = "disabled"
 
 
 @dataclass(frozen=True)
@@ -1164,7 +1164,7 @@ def _build_github(
             mapping.get("operation_entry"),
             "github.operation_entry",
             OPERATION_ENTRY_MODES,
-            "enabled",
+            "disabled",
             fail=fail,
         ),
     )
@@ -2291,7 +2291,7 @@ def import_legacy_setup_configuration(content: object) -> LegacySetupImport:
                         else "disabled"
                     ),
                     "  artifacts: " + ("diagnostics" if artifacts_flag else "none"),
-                    "  operation_entry: enabled",
+                    "  operation_entry: disabled",
                 ]
             )
         if endpoint is not None:
@@ -2557,7 +2557,7 @@ _DEFAULT_FIELD_VALUES: Mapping[str, Any] = {
     "github.mentions": True,
     "github.learning": "disabled",
     "github.artifacts": "none",
-    "github.operation_entry": "enabled",
+    "github.operation_entry": "disabled",
     "advanced.endpoint.allow_custom_endpoint": False,
     "advanced.routing.upstream_provider": "not set",
     "advanced.context.symbol_context.enabled": False,

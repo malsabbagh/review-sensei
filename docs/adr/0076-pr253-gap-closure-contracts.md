@@ -30,8 +30,10 @@ measured 64/60 public profile, process attestation, or deployed qualification.
 **D-A.** Accepted. The validated review result, not prompts or transcripts, is
 stored as App-authored part comments on the same pull request.
 
-**D-B.** Accepted. `github.operation_entry` defaults to enabled. The 64/60
-budget is not yet measured
+**D-B.** Accepted. `github.operation_entry` defaults to disabled. The synthetic
+P1 trace spends 44 dispatches on two GitHub checkpoint activations, then
+exhausts the 60 ordinary dispatches during operation-comment acceptance,
+before accepted readback
 ([#267](https://github.com/malsabbagh/review-sensei/issues/267)). Caps are
 never raised.
 
@@ -164,10 +166,11 @@ distinct pending instances with complete evidence, one provider request and
 two durable checkpoints, then accepted readback before acknowledgement.
 Ordinary dispatches stay 60 and total dispatches stay 64. The control deadline
 stays 60 seconds. Provider calls after a kill that follows accepted authority
-must stay 1 then 1 on replay. The 64/60 budget is not yet measured
-([#267](https://github.com/malsabbagh/review-sensei/issues/267)). If that
-profile does not fit, set `github.operation_entry` to disabled. Caps are
-never raised.
+must stay 1 then 1 on replay. The synthetic trace does not fit: two GitHub
+checkpoint activations cost 44 dispatches, and operation-comment acceptance
+then exhausts the 60 ordinary dispatches before accepted readback
+([#267](https://github.com/malsabbagh/review-sensei/issues/267)).
+`github.operation_entry` therefore defaults to disabled. Caps are never raised.
 
 ### Shared host
 
@@ -175,7 +178,7 @@ One operation host owns admission, restore, transport accounting, checkpoint
 activation and publication reconciliation for full review, reply,
 reassessment and verify. Those triggers enter through `run_review_trigger`.
 The record is the App-authored GitHub comments above. Domain modules do not
-gain broker authority. `github.operation_entry` defaults to enabled.
+gain broker authority. `github.operation_entry` defaults to disabled.
 
 ## Scope
 
@@ -223,8 +226,9 @@ A fixed structural clock is not elapsed-time proof.
 
 ## Rollout and rollback
 
-`github.operation_entry` defaults to enabled. Rollback sets that switch to
-disabled and keeps compatible readers, original guards, unknown transitions,
+`github.operation_entry` defaults to disabled. `enabled` opts into the shared
+entry. Rollback keeps that switch disabled and keeps compatible readers,
+original guards, unknown transitions,
 receipts and tombstones. Do not delete unknown in-flight state or reset an
 event budget.
 

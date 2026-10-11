@@ -153,7 +153,7 @@ file uses the packaged defaults:
 | `github.mentions` | `true` | Authorized `@reviewsensei` conversation |
 | `github.learning` | `disabled` | Learning mode: `disabled`, `proposals`, or `pull-requests` |
 | `github.artifacts` | `none` | Artifact mode: `none` or `diagnostics` |
-| `github.operation_entry` | `enabled` | Shared operation entry. `disabled` keeps the previous paths. The 64/60 budget for this route is not yet measured (#267). |
+| `github.operation_entry` | `disabled` | Shared operation entry stays off. The measured P1 profile does not fit 60 ordinary dispatches (#267). `enabled` opts in. Caps stay 60/64 and 60 seconds. |
 
 The packaged model for the selected backend applies unless `inference.model`
 names another one. `REVIEWSENSEI_PROVIDER` and `REVIEWSENSEI_MODEL` are the

@@ -152,10 +152,12 @@ snapshot or a fresh consuming grant is still not an original-attempt witness.
    admission hashes cannot prove a proposed first admission absent from that
    root. The removed SQLite journal is not the live store and is not connected.
    The live record is the GitHub operation record in ADR 0076.
-3. The original 64-dispatch/60-second useful hosted path remains unqualified.
-   Coalescing from five to three and optionally two checkpoint saves improves
-   structural cost but does not establish fit after all source, provider,
-   broker-internal, retained-history, root and acknowledgement work. Refusal
+3. The original 64-dispatch/60-second useful hosted path does not fit. A
+   synthetic trace of one pull request, four pending instances, one provider
+   request and two GitHub checkpoint activations spends 44 dispatches, then
+   operation-comment acceptance exhausts the 60 ordinary dispatches before
+   accepted readback (#267). `github.operation_entry` defaults to disabled.
+   Caps stay 60 ordinary, 64 total, and 60 seconds. Refusal
    must preserve previous authority and unknown outcomes without replenishment.
 4. Joint baseline, human inventory, feedback, evidence, visible prose, current
    queue and historical-child retention must fit actual root/piece/scan bounds.
