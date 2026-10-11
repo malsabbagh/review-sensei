@@ -684,6 +684,9 @@ class GitHubIssueCommentSessionLedger:
             raise ReviewInputError("session grant verification failed") from exc
         if not isinstance(verified, Mapping) or dict(verified) != attestation:
             raise ReviewInputError("session grant verification failed")
+        remember = getattr(self, "_remember_consumed_grant", None)
+        if callable(remember) and remember(self._session_grant) is not True:
+            raise ReviewInputError("session grant was already used")
         if self._tail_authorizing and self.evidence_budget is not None:
             self.evidence_budget.check()
 

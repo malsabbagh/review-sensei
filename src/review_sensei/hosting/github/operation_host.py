@@ -442,6 +442,24 @@ class InMemoryOperationStore:
     def has_grant(self, grant_id: str) -> bool:
         return self._committed["grants"].get(grant_id) is True
 
+    def note_consumed_grant(self, grant: str) -> bool:
+        """Record one session grant digest. A digest already committed is a replay.
+
+        Call this inside the open debit transaction. A false return rolls that
+        debit back with the grant, and the committed digest stays consumed.
+        """
+
+        if not isinstance(grant, str) or not grant or len(grant) > 256:
+            return False
+        digest = hashlib.sha256(grant.encode("utf-8")).hexdigest()
+        if self._committed["grants"].get(digest) is True:
+            return False
+        grants = self._live()["grants"]
+        if grants.get(digest) is True:
+            return False
+        grants[digest] = True
+        return True
+
 
 def _obligations(value: object) -> tuple[str, ...]:
     if not isinstance(value, tuple) or len(value) > MAX_OBLIGATIONS:
