@@ -234,11 +234,56 @@ class AdmissionTests(unittest.TestCase):
         first = run_hosted_provider(store, **values)
         second = run_hosted_provider(store, **values)
         self.assertEqual(calls["n"], 1)
+        self.assertLessEqual(comments.requests, 64)
         self.assertIsNotNone(first.fresh)
         self.assertIsNone(second.fresh)
         self.assertIsNotNone(second.replay_payload)
         assert second.replay_payload is not None
         self.assertIn(b"complete", second.replay_payload)
+
+    def test_each_trigger_uses_the_same_entry_and_replays(self):
+        for trigger in ("full-review", "reply", "reassessment", "verify"):
+            comments = MemoryComments()
+            store = GitHubCommentOperationStore(comments, app_user_id=42)
+            parts = ResultPartStore(comments, app_user_id=42)
+            calls = {"n": 0}
+
+            class Result:
+                def to_dict(self) -> dict[str, str]:
+                    return {"trigger": trigger}
+
+            class Run:
+                def __init__(self) -> None:
+                    self.result = Result()
+
+            def execute() -> Run:
+                calls["n"] += 1
+                return Run()
+
+            values = dict(
+                trigger=trigger,
+                repository_id=7,
+                pull_request=11,
+                attestation_digest=_hex("attestation"),
+                run_id="100",
+                run_attempt="1",
+                app_id=99,
+                reservation_id=f"reservation-{trigger}",
+                delivery_id=f"delivery-{trigger}",
+                grant=f"grant-{trigger}",
+                server_started_ms=1_000,
+                execute=execute,
+                encode=analysis_payload,
+                parts=parts,
+                now=lambda: 1_000,
+            )
+            run_hosted_provider(store, **values)
+            replay = run_hosted_provider(store, **values)
+            self.assertEqual(calls["n"], 1, trigger)
+            self.assertLessEqual(comments.requests, 64, trigger)
+            self.assertIsNone(replay.fresh)
+            assert replay.replay_payload is not None
+            self.assertIn(trigger.encode(), replay.replay_payload)
 
     def test_fingerprints_come_from_the_current_head_only(self):
         head = "a" * 40

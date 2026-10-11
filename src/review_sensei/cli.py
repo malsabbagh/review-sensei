@@ -2046,6 +2046,63 @@ def _work_recovery_from_cli(
     return WorkRecoveryStore(directory, key=key, artifacts="diagnostics")
 
 
+def _require_accepted_result(
+    result: object,
+    *,
+    repository: str,
+    pull_request: int,
+    app_slug: str,
+) -> None:
+    """Refuse publication when an operation record accepted different bytes."""
+
+    if not os.environ.get("GITHUB_RUN_ID", "").strip():
+        return
+    configuration = load_configuration(None)
+    if configuration.github.operation_entry != "enabled":
+        return
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if not isinstance(token, str) or not token.strip():
+        raise ReviewInputError("operation record is unavailable")
+    from .hosting.github.http import GitHubHttp
+    from .hosting.github.operation_entry import accepted_payload_matches
+
+    http = GitHubHttp()
+    status, comments = http.request(
+        "GET",
+        http.repository_path(
+            repository, f"/issues/{pull_request}/comments?per_page=100"
+        ),
+        token=token.strip(),
+    )
+    if status != 200 or not isinstance(comments, list):
+        raise ReviewInputError("operation record is unavailable")
+    bodies: list[str] = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        user = comment.get("user")
+        login = user.get("login") if isinstance(user, dict) else None
+        body = comment.get("body")
+        if (
+            isinstance(login, str)
+            and login.lower() == app_slug.lower()
+            and isinstance(body, str)
+        ):
+            bodies.append(body)
+    digest = hashlib.sha256(
+        json.dumps(
+            result.to_dict(),  # type: ignore[attr-defined]
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    match = accepted_payload_matches(tuple(bodies), digest)
+    if match is False:
+        raise ReviewInputError(
+            "published result does not match the accepted operation record"
+        )
+
+
 def _override_facts(
     http: object,
     *,
@@ -2505,6 +2562,12 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 )
             except ReviewInputError as exc:
                 raise ReviewInputError(f"admission context is invalid: {exc}") from exc
+        _require_accepted_result(
+            result,
+            repository=args.repository,
+            pull_request=args.pull_request,
+            app_slug=args.app_slug,
+        )
         try:
             review_outcome = application.publish_review(
                 options=GitHubWriteOptions(
@@ -3281,6 +3344,37 @@ def _actions_app_id() -> int | None:
     return None
 
 
+def _reconcile_hosted_result(
+    service: object,
+    *,
+    admission_baseline: object,
+    verification_scope: object,
+) -> object:
+    """Return the overflow reconciliation applied to one provider result."""
+
+    def adjust(run: object) -> object:
+        result = getattr(run, "result", None)
+        coverage = getattr(verification_scope, "coverage_mode", None)
+        reason = getattr(verification_scope, "invalidation_reason", None)
+        if result is None or admission_baseline is None or verification_scope is None:
+            return run
+        if coverage != "incremental" and reason != "related-context-overflow":
+            return run
+        reconciled = reconcile_overflow_review(
+            result,
+            admission_baseline,
+            coverage_mode=coverage,
+        )
+        status, diagnostic = service._run_outcome_for_result(reconciled)  # type: ignore[attr-defined]
+        return replace(
+            run,  # type: ignore[type-var]
+            result=reconciled,
+            outcome=replace(run.outcome, status=status, diagnostic=diagnostic),  # type: ignore[attr-defined]
+        )
+
+    return adjust
+
+
 def _run_review_provider(service: object, request: object, **kwargs: object) -> object:
     """Call the provider, or replay an accepted Actions attempt.
 
@@ -3295,9 +3389,17 @@ def _run_review_provider(service: object, request: object, **kwargs: object) -> 
     repository = kwargs.pop("repository", None)
     repository_id = kwargs.pop("repository_id", None)
     pull_request = kwargs.pop("pull_request", None)
+    adjust = kwargs.pop("adjust", None)
     run_id = os.environ.get("GITHUB_RUN_ID", "").strip()
     app_id = _actions_app_id()
     head_sha = kwargs.get("trusted_head_sha")
+
+    def produced() -> object:
+        run = service.run(request, **kwargs)  # type: ignore[attr-defined]
+        if callable(adjust):
+            run = adjust(run)
+        return run
+
     if (
         hosted is not True
         or operation_entry != "enabled"
@@ -3311,7 +3413,7 @@ def _run_review_provider(service: object, request: object, **kwargs: object) -> 
         or not isinstance(head_sha, str)
         or len(head_sha) != 40
     ):
-        return service.run(request, **kwargs)  # type: ignore[attr-defined]
+        return produced()
     from .hosting.github.operation_entry import (
         HostedProviderResult,
         analysis_payload,
@@ -3342,7 +3444,7 @@ def _run_review_provider(service: object, request: object, **kwargs: object) -> 
         attestation_digest=hashlib.sha256(
             f"{repository_id}:{pull_request}:{head_sha}".encode()
         ).hexdigest(),
-        execute=lambda: service.run(request, **kwargs),  # type: ignore[attr-defined]
+        execute=produced,
         encode=analysis_payload,
     )
     if isinstance(admitted, OperationRefusal):
@@ -4215,28 +4317,12 @@ def main(argv: list[str] | None = None) -> int:
                 repository=args.repository,
                 repository_id=getattr(args, "repository_id", None),
                 pull_request=args.pull_request,
+                adjust=_reconcile_hosted_result(
+                    service,
+                    admission_baseline=admission_baseline,
+                    verification_scope=verification_scope,
+                ),
             )
-            if (
-                run.result is not None
-                and admission_baseline is not None
-                and verification_scope is not None
-                and (
-                    verification_scope.coverage_mode == "incremental"
-                    or verification_scope.invalidation_reason
-                    == "related-context-overflow"
-                )
-            ):
-                reconciled = reconcile_overflow_review(
-                    run.result,
-                    admission_baseline,
-                    coverage_mode=verification_scope.coverage_mode,
-                )
-                status, diagnostic = service._run_outcome_for_result(reconciled)
-                run = replace(
-                    run,
-                    result=reconciled,
-                    outcome=replace(run.outcome, status=status, diagnostic=diagnostic),
-                )
         except (KeyboardInterrupt, SystemExit) as analysis_error:
             cleanup_analysis_error(analysis_error, charge_failed_attempt=False)
             raise
