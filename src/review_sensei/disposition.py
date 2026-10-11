@@ -491,14 +491,39 @@ def apply_session_command(
             summary="automated review paused pending maintainer continuation",
         )
     if command.action == "verify":
-        return record, MaintainerCommandResult(
-            action="verify",
-            applied=False,
-            operator_paused=paused,
-            summary=(
+        dispositions = session_dispositions(record)
+        from .presentation import finding_identifier
+
+        stale: list[str] = []
+        current: list[FindingDisposition] = []
+        for item in dispositions:
+            if item.honors(item.fingerprint, head_sha=command.head_sha):
+                current.append(item)
+            elif item.head_sha is not None and item.head_sha != command.head_sha:
+                stale.append(finding_identifier(item.fingerprint))
+        if stale:
+            summary = (
+                "stale override "
+                + ", ".join(stale)
+                + "; a new push needs a new override"
+            )
+            applied = False
+        elif current:
+            summary = (
+                "overrides for this commit are loaded; the AI result stays partial"
+            )
+            applied = True
+        else:
+            summary = (
                 "verification requires an evidence-backed review result; "
                 "session pause state is unchanged"
-            ),
+            )
+            applied = False
+        return record, MaintainerCommandResult(
+            action="verify",
+            applied=applied,
+            operator_paused=paused,
+            summary=summary,
         )
     if command.action == "continue":
         if record.reservation_id is not None:

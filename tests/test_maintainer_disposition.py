@@ -374,6 +374,31 @@ class SessionCommandTests(unittest.TestCase):
         self.assertTrue(record.operator_paused)
         self.assertIn("evidence-backed", result.summary)
 
+    def test_verify_names_a_stale_override_and_keeps_the_current_one_partial(self):
+        ledger = InMemorySessionLedger()
+        fingerprint = "abcd1234abcd1234"
+        override = parse_maintainer_command(
+            f"@sensei accept-risk {fingerprint} --reason launch exception",
+            actor="alice",
+            head_sha="a" * 40,
+        )
+        apply_session_command(ledger, IDENTITY, override, now=FIXED_NOW)
+        current = parse_maintainer_command(
+            "@sensei verify", actor="alice", head_sha="a" * 40
+        )
+        _record, applied = apply_session_command(
+            ledger, IDENTITY, current, now=FIXED_NOW
+        )
+        self.assertTrue(applied.applied)
+        self.assertIn("AI result stays partial", applied.summary)
+        pushed = parse_maintainer_command(
+            "@sensei verify", actor="alice", head_sha="b" * 40
+        )
+        _record, stale = apply_session_command(ledger, IDENTITY, pushed, now=FIXED_NOW)
+        self.assertFalse(stale.applied)
+        self.assertIn("stale override RS-ABCD12", stale.summary)
+        self.assertIn("a new push needs a new override", stale.summary)
+
     def test_status_reports_the_authoritative_head_binding(self):
         ledger = InMemorySessionLedger()
         command = parse_maintainer_command(
