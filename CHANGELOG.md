@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.20 - 2026-10-11
+
 - Allow `advanced.resources.max_provider_calls` up to 32 (unified work also
   raises its chunk cap to match) and add `advanced.resources.review_deadline_seconds`
   up to 600 for the whole-review deadline, planning included. Defaults stay at

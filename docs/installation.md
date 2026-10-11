@@ -10,8 +10,8 @@ install lifecycle hook. An external `git` executable is also required for
 
 <!-- release-installation:package-npm-1:start -->
 ```bash
-npx --yes @reviewsensei/cli@0.6.19 --version
-npx --yes @reviewsensei/cli@0.6.19 prepare-diff \
+npx --yes @reviewsensei/cli@0.6.20 --version
+npx --yes @reviewsensei/cli@0.6.20 prepare-diff \
   --repository . --base-ref main --head-ref feature --output pr.patch
 ```
 <!-- release-installation:package-npm-1:end -->
