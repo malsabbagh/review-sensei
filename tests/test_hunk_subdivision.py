@@ -1,5 +1,6 @@
 """Exact, bounded discovery segments never become complete file evidence."""
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -9,10 +10,16 @@ from unittest.mock import patch
 
 from review_sensei.budgets import ReviewWorkBudgets
 from review_sensei.diff import analyze_diff
+from review_sensei.document_context import DocumentDecision, DocumentSelectionReport
 from review_sensei.errors import ReviewInputError
 from review_sensei.evidence import EvidenceBundle, EvidenceRecord, EvidenceSnapshot
 from review_sensei.hunk_subdivision import SubdivisionAllowance, subdivide_hunk
-from review_sensei.models import ProviderResponse, ReviewRequest
+from review_sensei.models import (
+    ProviderResponse,
+    ReviewDocument,
+    ReviewLensContext,
+    ReviewRequest,
+)
 from review_sensei.outcomes import ResourceBudget
 from review_sensei.service import ReviewService
 from review_sensei.stages import Stage
@@ -74,6 +81,83 @@ class HunkSubdivisionTests(unittest.TestCase):
             lines = part.analysis.hunk_records[0].text.splitlines()
             self.assertEqual(lines[-1], "\\ No newline at end of file")
             self.assertEqual(len(lines), 3)
+
+    def test_empty_canonical_body_is_rejected_before_admission(self):
+        snapshot, _, record, hunk = self.fixture("@@ -0,0 +1 @@\n+line\n")
+        hunk = replace(
+            hunk,
+            old_start=0,
+            old_count=0,
+            new_start=0,
+            new_count=0,
+            text="@@ -0,0 +0,0 @@\n",
+            added_lines=frozenset(),
+            deleted_lines=frozenset(),
+        )
+        record = replace(
+            record,
+            text=record.header + hunk.text,
+            hunks=(hunk,),
+            added_lines=frozenset(),
+            deleted_lines=frozenset(),
+        )
+        probes = []
+        with self.assertRaisesRegex(ReviewInputError, "source body is missing"):
+            subdivide_hunk(
+                record, hunk, snapshot, admit=lambda part: probes.append(part) or True
+            )
+        self.assertFalse(probes)
+
+    def test_single_part_and_zero_shared_allowance_preserve_the_whole_body(self):
+        snapshot, _, record, hunk = self.fixture("@@ -0,0 +1,4 @@\n+a\n+b\n+c\n+d\n")
+        for options in ({"max_parts": 1}, {"allowance": SubdivisionAllowance(0)}):
+            with self.subTest(options=options):
+                probes = []
+                parts = subdivide_hunk(
+                    record,
+                    hunk,
+                    snapshot,
+                    admit=lambda part: probes.append(part) or False,
+                    **options,
+                )
+                self.assertEqual(len(probes), 1)
+                self.assertEqual(len(parts), 1)
+                self.assertEqual(parts[0].fragment.body_start, 0)
+                self.assertEqual(
+                    parts[0].fragment.body_end, parts[0].fragment.body_bytes
+                )
+                self.assertEqual(
+                    parts[0].analysis.hunk_records[0].text.partition("\n")[2],
+                    hunk.text.partition("\n")[2],
+                )
+                self.assertFalse(parts[0].complete)
+
+    def test_invalid_partition_and_shared_allowances_are_rejected(self):
+        snapshot, _, record, hunk = self.fixture("@@ -1 +1 @@\n-old\n+new\n")
+        for value in (0, -1, True, 1.5):
+            with self.subTest(max_parts=value), self.assertRaises(ReviewInputError):
+                subdivide_hunk(
+                    record, hunk, snapshot, admit=lambda part: True, max_parts=value
+                )
+        for value in (-1, 128, True, 1.5):
+            with self.subTest(remaining=value), self.assertRaises(ReviewInputError):
+                SubdivisionAllowance(value)
+
+    def test_crlf_input_and_multibyte_lines_conserve_the_canonical_utf8_body(self):
+        snapshot, _, record, hunk = self.fixture("@@ -0,0 +1,2 @@\r\n+新\r\n+é\r\n")
+        # Diff parsing canonicalizes line endings before subdivision. Identity
+        # and byte offsets bind that canonical source, not the raw CRLF input.
+        self.assertEqual(hunk.text, "@@ -0,0 +1,2 @@\n+新\n+é\n")
+        parts = subdivide_hunk(record, hunk, snapshot, admit=lambda part: False)
+        bodies = [
+            part.analysis.hunk_records[0].text.partition("\n")[2].encode("utf-8")
+            for part in parts
+        ]
+        self.assertEqual(b"".join(bodies), hunk.text.partition("\n")[2].encode())
+        self.assertEqual(
+            [(part.fragment.body_start, part.fragment.body_end) for part in parts],
+            [(0, len(bodies[0])), (len(bodies[0]), sum(map(len, bodies)))],
+        )
 
     def test_giant_line_and_part_ceiling_keep_unadmitted_evidence(self):
         snapshot, _, record, hunk = self.fixture(
@@ -223,6 +307,7 @@ class DiscoverySubdivisionTests(unittest.TestCase):
                 self.assertLessEqual(
                     len(provider.requests), service.budget.max_provider_calls
                 )
+                self.assertGreaterEqual(len(provider.requests), 1)
 
     def test_authenticated_replay_reuses_all_segments_and_original_counters(self):
         record, provider, service = self.fixture()
@@ -284,7 +369,6 @@ class DiscoverySubdivisionTests(unittest.TestCase):
 
     def test_document_omission_remains_partial_after_all_segments_are_reviewed(self):
         from review_sensei.stages import ReviewCategory
-        from tests.test_prompt_context_admission import lens
 
         record, provider, service = self.fixture()
         category = ReviewCategory(
@@ -301,11 +385,29 @@ class DiscoverySubdivisionTests(unittest.TestCase):
             budget=service.budget,
             work_budgets=service.work_budgets,
         )
-        run = service.run(
-            ReviewRequest(
-                diff=record.diff, lens_contexts=(lens(size=10, count=1, omitted=1),)
-            )
+        document = ReviewDocument(
+            "docs/selected.md",
+            "requirements",
+            hashlib.sha256(b"requirements").hexdigest(),
         )
+        context = ReviewLensContext(
+            "documents",
+            documents=(document,),
+            document_selection=DocumentSelectionReport(
+                (
+                    DocumentDecision("docs/omitted.md", "omitted", "file-budget"),
+                    DocumentDecision(
+                        document.path,
+                        "selected",
+                        "configured-source",
+                        document.sha256,
+                        document.sha256,
+                        len(document.content.encode()),
+                    ),
+                )
+            ),
+        )
+        run = service.run(ReviewRequest(diff=record.diff, lens_contexts=(context,)))
         self.assertTrue(run.result.coverage.fully_reviewed)
         self.assertEqual(run.outcome.status, "partial")
         self.assertEqual(run.context_admission["original_inventories"][0]["omitted"], 1)

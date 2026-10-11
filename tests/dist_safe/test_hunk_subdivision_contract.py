@@ -34,6 +34,7 @@ original_execute = work.execute_plan
 def execute(plan, **kwargs):
     plans.append({"plan_id":plan.plan_id,"snapshot":plan.bundle.snapshot.to_dict(),
         "records":[record.to_dict() for record in plan.bundle.records],
+        "record_ids":[record.evidence_id for record in plan.bundle.records],
         "unprocessed":plan.unprocessed})
     render = kwargs["render"]
     def traced_render(batch):
@@ -63,6 +64,17 @@ class InstalledHunkSubdivisionTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+
+    def subdivision_plan(self, witness):
+        plans = [
+            plan
+            for plan in witness["plans"]
+            if any("fragment" in record for record in plan["records"])
+        ]
+        self.assertEqual(len(plans), 1, "expected one executed subdivision plan")
+        self.assertTrue(plans[0]["records"])
+        self.assertTrue(all("fragment" in record for record in plans[0]["records"]))
+        return plans[0]
 
     def run_cli(self, *, lines=200, giant=False, calls=8, recovery=False):
         bodies = ["+" + f"line{index}:" + "x" * 290 + "\n" for index in range(lines)]
@@ -152,7 +164,9 @@ class InstalledHunkSubdivisionTests(unittest.TestCase):
         lines = [line for call in calls for line in call["added_lines"]]
         self.assertEqual(sorted(lines), list(range(1, 201)))
         self.assertEqual(len(lines), len(set(lines)))
-        records = witness["plans"][0]["records"]
+        # Select by content even if an unrelated stage executes beforehand.
+        witness["plans"].insert(0, {"records": [], "unprocessed": []})
+        records = self.subdivision_plan(witness)["records"]
         intervals = sorted(
             (record["fragment"]["body_start"], record["fragment"]["body_end"])
             for record in records
@@ -170,13 +184,22 @@ class InstalledHunkSubdivisionTests(unittest.TestCase):
         result, witness, _ = self.run_cli(lines=1)
         self.assertEqual(result["review_status"], "complete")
         self.assertEqual(len(witness["calls"]), 1)
-        self.assertNotIn("fragment", witness["plans"][0]["records"][0])
+        records = [record for plan in witness["plans"] for record in plan["records"]]
+        self.assertEqual(len(records), 1)
+        self.assertNotIn("fragment", records[0])
+        # Golden identity independently obtained from the pre-subdivision base
+        # for this fixed patch, snapshot and ordinary evidence provenance.
+        self.assertEqual(
+            [identity for plan in witness["plans"] for identity in plan["record_ids"]],
+            ["5452374469fe4d69579380b583f60ecbee69de399233af5e0b2b2f50985e8393"],
+        )
 
     def test_giant_line_is_retained_and_never_certified_as_complete(self):
         result, witness, _ = self.run_cli(lines=2, giant=True)
         self.assertEqual(result["review_status"], "partial")
         self.assertEqual(result["coverage"]["hunks"][0]["outcome"], "budget-exhausted")
-        records = witness["plans"][0]["records"]
+        plan = self.subdivision_plan(witness)
+        records = plan["records"]
         self.assertTrue(
             any(
                 record["fragment"]["body_end"] - record["fragment"]["body_start"]
@@ -184,7 +207,7 @@ class InstalledHunkSubdivisionTests(unittest.TestCase):
                 for record in records
             )
         )
-        self.assertTrue(witness["plans"][0]["unprocessed"])
+        self.assertTrue(plan["unprocessed"])
 
     def test_one_call_does_not_mark_an_unvisited_segment_reviewed(self):
         result, witness, _ = self.run_cli(calls=1)
