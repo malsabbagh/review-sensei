@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import string
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -23,7 +24,14 @@ def _display(value: str, maximum: int = 160) -> str:
     pieces: list[str] = []
     used = 0
     for character in " ".join(value.split()):
-        piece = f"&#{ord(character)};" if character in string.punctuation else character
+        if unicodedata.category(character) in {"Cc", "Cf"}:
+            # Validated rationale text can retain direction/format controls.
+            # Show their codepoint instead of letting them reorder authority.
+            piece = f"U{ord(character):04X}"
+        else:
+            piece = (
+                f"&#{ord(character)};" if character in string.punctuation else character
+            )
         size = len(piece.encode("utf-8"))
         if used + size > maximum - 3:
             return "".join(pieces) + "..."

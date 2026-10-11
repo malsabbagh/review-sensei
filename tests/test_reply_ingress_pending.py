@@ -138,6 +138,23 @@ class ReplyIngressTests(unittest.TestCase):
 
 
 class PendingPresentationTests(unittest.TestCase):
+    def test_unicode_rationale_controls_cannot_reorder_authority(self):
+        current = prior()
+        finding = current.human_review.pending[0]
+        text = pending_reply_pages(
+            body="Discussion.",
+            head_sha=HEAD,
+            eligibility=current,
+            decision_reasons={
+                finding.fingerprint: "A\u202eB\u2066C\u200bD\x00E\u00a0F\u2028G"
+            },
+        )[0].body
+        self.assertIn("AU202EBU2066CU200BDU0000E F G", text)
+        for control in ("\u202e", "\u2066", "\u200b", "\x00", "\u00a0", "\u2028"):
+            self.assertNotIn(control, text)
+        self.assertEqual(text.count(finding.fingerprint), 1)
+        self.assertIn("does not grant approval", text)
+
     def test_untrusted_locations_and_reasons_cannot_format_authority(self):
         path = "src/[APPROVED](https:evil)`*_file.py"
         reason = "[APPROVED](https://evil) **cleared** `done` @admin <b>x</b> \\"
