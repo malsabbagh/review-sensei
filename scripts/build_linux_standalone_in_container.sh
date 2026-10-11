@@ -82,7 +82,7 @@ docker run --rm --pull never --platform "$platform" --network none \
     "$executable" --version
     "$executable" plan \
       --diff /workspace/evaluation/v1/diffs/off-by-one.patch \
-      --provider ollama --json >/dev/null
+      --provider local-ollama --json >/dev/null
     # The local review contract must hold with no host identity, no Python,
     # and no network: one required fix exits 1, and the same completed run
     # under the operational contract exits 0.
