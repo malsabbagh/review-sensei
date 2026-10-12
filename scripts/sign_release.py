@@ -94,9 +94,10 @@ def registered_identity(fingerprint: str, email: str) -> None:
         )
 
 
-def publication_gates() -> None:
+def publication_gates(*, hosted: bool = False) -> None:
     """Require Mo as the sole reviewer; never create or relax environments."""
-    for name in ("npm", "pypi"):
+    names = ("npm", "pypi", "pypi-github") if hosted else ("npm", "pypi")
+    for name in names:
         environment = docs.api(f"environments/{name}")
         rules = [
             rule
@@ -159,7 +160,13 @@ def valid_signature(status: str, fingerprint: str) -> None:
         raise ValueError("tag is not validly signed by the dedicated release key")
 
 
-def sign(root: Path, sha: str, version: str, date: str) -> dict[str, str]:
+def sign(
+    root: Path,
+    sha: str,
+    version: str,
+    date: str,
+    github_version: str | None = None,
+) -> dict[str, str]:
     prep.workflow_context()
     fingerprint, email = signing_identity()
     if git(root, "remote", "get-url", "origin").removesuffix(".git") != (
@@ -172,10 +179,32 @@ def sign(root: Path, sha: str, version: str, date: str) -> dict[str, str]:
     )
     registered_identity(fingerprint, email)
     qualify(root, sha, version, date)
+    if github_version is None:
+        selected = [("v" + version, f"ReviewSensei {version}")]
+    else:
+        receipt = prep.receipt_record(root)
+        if receipt["github_version"] != github_version:
+            raise ValueError("hosted release intent differs from the prepared receipt")
+        selected = []
+        if receipt["engine_tag"]:
+            selected.append((receipt["engine_tag"], f"ReviewSensei {version}"))
+        if receipt["github_tag"]:
+            selected.append(
+                (
+                    receipt["github_tag"],
+                    f"review-sensei-github {receipt['github_version']}",
+                )
+            )
+            publication_gates(hosted=True)
+        if not selected:
+            raise ValueError("prepared release has no tag")
     # Deliberately refuse even a same-version existing tag. Publication retry
     # belongs to the existing Release run, never a second signing operation.
-    prep.unused(version)
-    tag = "v" + version
+    for tag, _message in selected:
+        if tag.startswith("github-v"):
+            prep.unused_github(tag.removeprefix("github-v"))
+        else:
+            prep.unused(tag.removeprefix("v"))
     with signing_home() as home:
         home.chmod(0o700)
         key = home / "key.asc"
@@ -201,7 +230,7 @@ def sign(root: Path, sha: str, version: str, date: str) -> dict[str, str]:
             GNUPGHOME=str(home), GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull
         )
         gpg = ["gpg", "--batch", "--no-tty", "--homedir", str(home)]
-        created = False
+        created: list[str] = []
         try:
             run([*gpg, "--import", str(key)], operation=Operation.IMPORT_KEY, env=env)
             keys = run(
@@ -248,80 +277,94 @@ def sign(root: Path, sha: str, version: str, date: str) -> dict[str, str]:
                 "-c",
                 f"user.email={email}",
             ]
-            run(
-                [*command, "tag", "--sign", tag, sha, "-m", f"ReviewSensei {version}"],
-                operation=Operation.SIGN_TAG,
-                env=env,
-            )
-            created = True
-            tag_object = git(root, "rev-parse", f"refs/tags/{tag}")
-            verified = subprocess.run(
-                [*command, "verify-tag", "--raw", tag],
-                env=env,
-                capture_output=True,
-                text=True,
-            )
-            if verified.returncode:
-                raise SigningCommandError(
-                    f"git verify release tag failed with exit code {verified.returncode}; private diagnostics withheld"
+            signed: list[tuple[str, str]] = []
+            for tag, message in selected:
+                run(
+                    [*command, "tag", "--sign", tag, sha, "-m", message],
+                    operation=Operation.SIGN_TAG,
+                    env=env,
                 )
-            valid_signature(verified.stderr, fingerprint)
-            print(
-                json.dumps(
-                    {
-                        "prepared_tag": tag,
-                        "tag_object_sha": tag_object,
-                        "source_sha": sha,
-                        "fingerprint": fingerprint,
-                    }
+                created.append(tag)
+                tag_object = git(root, "rev-parse", f"refs/tags/{tag}")
+                verified = subprocess.run(
+                    [*command, "verify-tag", "--raw", tag],
+                    env=env,
+                    capture_output=True,
+                    text=True,
                 )
-            )
+                if verified.returncode:
+                    raise SigningCommandError(
+                        "git verify release tag failed with exit code "
+                        f"{verified.returncode}; private diagnostics withheld"
+                    )
+                valid_signature(verified.stderr, fingerprint)
+                print(
+                    json.dumps(
+                        {
+                            "prepared_tag": tag,
+                            "tag_object_sha": tag_object,
+                            "source_sha": sha,
+                            "fingerprint": fingerprint,
+                        }
+                    )
+                )
+                signed.append((tag, tag_object))
             # Refresh every authority after importing/signing, just before write.
             qualify(root, sha, version, date)
-            prep.unused(version)
+            for tag, _message in selected:
+                if tag.startswith("github-v"):
+                    prep.unused_github(tag.removeprefix("github-v"))
+                else:
+                    prep.unused(tag.removeprefix("v"))
+            if any(tag.startswith("github-v") for tag, _message in selected):
+                publication_gates(hosted=True)
             bot.check(
                 os.environ["RELEASE_DOCS_APP_ID"], os.environ["RELEASE_DOCS_APP_SLUG"]
             )
             registered_identity(fingerprint, email)
             if prep.remote_main() != sha or prep.ci_once(sha) is None:
                 raise ValueError("main/CI advanced before immutable tag push")
-            pushed = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(root),
-                    "-c",
-                    "credential.helper=",
-                    "-c",
-                    "credential.helper=!gh auth git-credential",
-                    "push",
-                    "origin",
-                    f"{tag_object}:refs/tags/{tag}",
-                ],
-                env=env,
-                capture_output=True,
-                text=True,
-            )
-            # Reconcile a dropped push response only against this exact verified
-            # object. Never delete, update or force an existing remote tag.
-            remote_object, remote_source = docs.tag_identity(tag)
-            if (remote_object, remote_source) != (tag_object, sha):
-                raise ValueError(
-                    "remote signed tag does not match the exact created object"
+            for tag, tag_object in signed:
+                pushed = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(root),
+                        "-c",
+                        "credential.helper=",
+                        "-c",
+                        "credential.helper=!gh auth git-credential",
+                        "push",
+                        "origin",
+                        f"{tag_object}:refs/tags/{tag}",
+                    ],
+                    env=env,
+                    capture_output=True,
+                    text=True,
                 )
-            # Both success and a dropped/error response require the identical
-            # freshly created locally verified object; an existing different
-            # object fails above regardless of the push return code.
-            if pushed.returncode:
-                print(
-                    f"git push release tag returned exit code {pushed.returncode}; exact GitHub-verified object reconciled"
-                )
-            return {
-                "tag": tag,
+                # Reconcile a dropped push response only against this exact
+                # verified object. Never delete, update or force a remote tag.
+                remote_object, remote_source = docs.tag_identity(tag)
+                if (remote_object, remote_source) != (tag_object, sha):
+                    raise ValueError(
+                        "remote signed tag does not match the exact created object"
+                    )
+                if pushed.returncode:
+                    print(
+                        "git push release tag returned exit code "
+                        f"{pushed.returncode}; exact GitHub-verified object reconciled"
+                    )
+            first_tag, first_object = signed[0]
+            result = {
+                "tag": first_tag,
                 "source_sha": sha,
-                "tag_object_sha": tag_object,
+                "tag_object_sha": first_object,
                 "fingerprint": fingerprint,
             }
+            if len(signed) > 1:
+                result["github_tag"] = signed[1][0]
+                result["github_tag_object_sha"] = signed[1][1]
+            return result
         finally:
             # Ephemeral runner keyring; no private artifact/cache is uploaded.
             actions: list[tuple[str, Callable[[], Any]]] = [
@@ -335,15 +378,16 @@ def sign(root: Path, sha: str, version: str, date: str) -> dict[str, str]:
                 )
             ]
             if created:
-                actions.append(
+                actions.extend(
                     (
                         Operation.DELETE_TAG.value,
-                        lambda: run(
+                        lambda tag=tag: run(
                             ["git", "-C", str(root), "tag", "--delete", tag],
                             operation=Operation.DELETE_TAG,
                             env=env,
                         ),
                     )
+                    for tag in created
                 )
             cleanup(actions)
 
@@ -355,6 +399,7 @@ def main() -> int:
     parser.add_argument("--sha")
     parser.add_argument("--version")
     parser.add_argument("--date")
+    parser.add_argument("--github-version")
     args = parser.parse_args()
     try:
         if args.check_publication_gates:
@@ -365,13 +410,22 @@ def main() -> int:
             value is None for value in (args.root, args.sha, args.version, args.date)
         ):
             raise ValueError("signing requires root, exact SHA, version and date")
-        result = sign(args.root.resolve(), args.sha, args.version, args.date)
+        result = sign(
+            args.root.resolve(),
+            args.sha,
+            args.version,
+            args.date,
+            args.github_version,
+        )
         print(json.dumps(result))
         summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if summary:
+            tags = result["tag"]
+            if "github_tag" in result:
+                tags = f"{tags}` and `{result['github_tag']}"
             with Path(summary).open("a", encoding="utf-8") as handle:
                 handle.write(
-                    f"\nDedicated-key signed `{result['tag']}` on `{result['source_sha']}`; "
+                    f"\nDedicated-key signed `{tags}` on `{result['source_sha']}`; "
                     f"GitHub verified tag object `{result['tag_object_sha']}`.\n\n"
                     "Release builds from this source. npm and PyPI each await Mo's environment approval. "
                     "Approval authorizes publication; it is not a cryptographic signature.\n"

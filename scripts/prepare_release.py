@@ -45,9 +45,11 @@ NPM_MANIFESTS = (
         for name in versions.NPM_TARGETS
     ),
 )
+HOSTED_PROJECT = "packages/python/review-sensei-github/pyproject.toml"
 PAYLOAD_PATHS = frozenset(
     (
         "pyproject.toml",
+        HOSTED_PROJECT,
         "CHANGELOG.md",
         *MARKDOWN_TARGETS,
         *NPM_MANIFESTS,
@@ -254,6 +256,9 @@ def receipt_record(root: Path) -> dict[str, Any]:
         "repository",
         "version",
         "tag",
+        "engine_tag",
+        "github_version",
+        "github_tag",
         "release_date",
         "base_sha",
         "notes_sha256",
@@ -265,6 +270,14 @@ def receipt_record(root: Path) -> dict[str, Any]:
         receipt["schema_version"] != "1.0"
         or receipt["repository"] != docs.REPOSITORY
         or receipt["tag"] != "v" + receipt["version"]
+        or receipt["engine_tag"] not in {"", receipt["tag"]}
+        or not versions.GITHUB_TAG_PATTERN.fullmatch(
+            "github-v" + receipt["github_version"]
+        )
+        or not (
+            receipt["github_tag"] == ""
+            or receipt["github_tag"] == "github-v" + receipt["github_version"]
+        )
         or not isinstance(receipt["files"], dict)
         or set(receipt["files"]) != PAYLOAD_PATHS
         or any(
@@ -280,19 +293,26 @@ def validate_payload(root: Path) -> dict[str, Any]:
     receipt = receipt_record(root)
     if receipt["files"] != file_hashes(root):
         raise ValueError("release preparation payload bytes differ")
-    versions.validate_release_tag(receipt["tag"], root)
-    notes = released_notes(
-        (root / "CHANGELOG.md").read_text(encoding="utf-8"),
-        receipt["version"],
-        receipt["release_date"],
-    )
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    if receipt["engine_tag"]:
+        versions.validate_release_tag(receipt["engine_tag"], root)
+        notes = released_notes(changelog, receipt["version"], receipt["release_date"])
+    else:
+        notes = hosted_released_notes(
+            changelog, receipt["github_version"], receipt["release_date"]
+        )
+    if receipt["github_tag"]:
+        versions.validate_github_release_tag(receipt["github_tag"], root)
     if receipt["notes_sha256"] != hashlib.sha256(notes.encode()).hexdigest():
         raise ValueError("reviewed release notes differ from preparation receipt")
     manifest = json.loads((root / "docs/site/data/site-manifest.json").read_text())
     if (
         manifest["release_facts"]["version"] != receipt["version"]
         or manifest["release_facts"]["tag"] != receipt["tag"]
-        or manifest["last_updated"] != receipt["release_date"]
+        or (
+            receipt["engine_tag"]
+            and manifest["last_updated"] != receipt["release_date"]
+        )
     ):
         raise ValueError("prepared source docs do not match the release")
     check_site(root)
@@ -306,7 +326,74 @@ def validate_payload(root: Path) -> dict[str, Any]:
     return receipt
 
 
-def generate(root: Path, version: str, date: str, base: str) -> dict[str, Any]:
+def hosted_released_notes(text: str, version: str, date: str) -> str:
+    headings = list(re.finditer(r"^## [^\n]+$", text, re.MULTILINE))
+    heading = f"## review-sensei-github {version} - {date}"
+    matching = [index for index, item in enumerate(headings) if item.group() == heading]
+    if len(matching) != 1:
+        raise ValueError("hosted release preparation changelog date/heading differs")
+    index = matching[0]
+    end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+    notes = text[headings[index].end() : end].strip()
+    if not notes:
+        raise ValueError("hosted release requires reviewed changelog notes")
+    return notes
+
+
+def rewrite_hosted_project(root: Path, version: str, engine_version: str) -> None:
+    path = root / HOSTED_PROJECT
+    source = path.read_text(encoding="utf-8")
+    updated, count = re.subn(
+        r'^version = "[^"\n]+"$',
+        f'version = "{version}"',
+        source,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if count != 1:
+        raise ValueError("hosted project version declaration is ambiguous")
+    pinned, pins = re.subn(
+        r"review-sensei==\d+\.\d+\.\d+",
+        f"review-sensei=={engine_version}",
+        updated,
+        count=1,
+    )
+    if pins != 1:
+        raise ValueError("hosted project engine pin is ambiguous")
+    path.write_text(pinned, encoding="utf-8", newline="\n")
+
+
+def insert_hosted_release(
+    text: str, *, version: str, date: str, notes: str, after_engine: str | None
+) -> str:
+    heading = f"## review-sensei-github {version} - {date}"
+    if re.search(rf"^{re.escape(heading)}$", text, re.MULTILINE):
+        raise ValueError("hosted release version already occurs in the changelog")
+    block = f"{heading}\n\n{notes}\n\n"
+    if after_engine is None:
+        prefix, _pending, rest = changelog_parts(text)
+        return prefix + "\n\n" + block + rest
+    engine_heading = f"## {after_engine} - {date}"
+    headings = list(re.finditer(r"^## [^\n]+$", text, re.MULTILINE))
+    matches = [item for item in headings if item.group() == engine_heading]
+    if len(matches) != 1:
+        raise ValueError("engine release heading is missing")
+    index = headings.index(matches[0])
+    insert_at = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+    return text[:insert_at] + block + text[insert_at:]
+
+
+def hosted_pin_note(engine_version: str) -> str:
+    return f"- Pin `review-sensei=={engine_version}`."
+
+
+def generate(
+    root: Path,
+    version: str,
+    date: str,
+    base: str,
+    github_version: str | None = None,
+) -> dict[str, Any]:
     """Render authored notes or exact reviewed-source history without provider calls."""
     inputs(version, date, base)
     safe_paths(root)
@@ -321,6 +408,24 @@ def generate(root: Path, version: str, date: str, base: str) -> dict[str, Any]:
                 raise ValueError("marked package installation target lacks a version")
     if docs.version_tuple("v" + version) < docs.version_tuple("v" + current):
         raise ValueError("release preparation cannot decrease the source version")
+    current_hosted, _pin = versions.hosted_project(root)
+    release_github = False
+    if github_version is not None:
+        if not versions.GITHUB_TAG_PATTERN.fullmatch("github-v" + github_version):
+            raise ValueError("hosted release version must be X.Y.Z")
+        if docs.version_tuple("v" + github_version) < docs.version_tuple(
+            "v" + current_hosted
+        ):
+            raise ValueError("hosted release cannot decrease the package version")
+        release_github = github_version != current_hosted
+    if github_version is not None and version == current and not release_github:
+        raise ValueError(
+            "pass a new engine or hosted version; a current version skips that package"
+        )
+    if release_github and version == current:
+        return render_hosted_only(
+            root, version, date, base, github_version, current_hosted
+        )
     text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     prefix, pending, rest = changelog_parts(text)
     if current == version:
@@ -382,11 +487,89 @@ def generate(root: Path, version: str, date: str, base: str) -> dict[str, Any]:
         releases_output=root / "docs/site/releases/index.html",
     )
     docs.rewrite_installation_versions(root / "docs/site", version)
+    recorded_github = current_hosted
+    github_tag = ""
+    if release_github:
+        assert github_version is not None
+        changelog = root / "CHANGELOG.md"
+        changelog.write_text(
+            insert_hosted_release(
+                changelog.read_text(encoding="utf-8"),
+                version=github_version,
+                date=date,
+                notes=hosted_pin_note(version),
+                after_engine=version,
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+        rewrite_hosted_project(root, github_version, version)
+        recorded_github = github_version
+        github_tag = "github-v" + github_version
     receipt = {
         "schema_version": "1.0",
         "repository": docs.REPOSITORY,
         "version": version,
         "tag": "v" + version,
+        "engine_tag": "v" + version,
+        "github_version": recorded_github,
+        "github_tag": github_tag,
+        "release_date": date,
+        "base_sha": base,
+        "notes_sha256": hashlib.sha256(notes.encode()).hexdigest(),
+        "files": file_hashes(root),
+    }
+    (root / RECEIPT).parent.mkdir(parents=True, exist_ok=True)
+    (root / RECEIPT).write_text(
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    return validate_payload(root)
+
+
+def render_hosted_only(
+    root: Path,
+    version: str,
+    date: str,
+    base: str,
+    github_version: str,
+    current_hosted: str,
+) -> dict[str, Any]:
+    """Prepare a hosted release without bumping or tagging the engine."""
+
+    if github_version == current_hosted:
+        raise ValueError(
+            "pass a new engine or hosted version; a current version skips that package"
+        )
+    text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    _prefix, pending, _rest = changelog_parts(text)
+    notes = pending or hosted_pin_note(version)
+    if pending and hosted_pin_note(version) not in pending:
+        notes = f"{pending}\n{hosted_pin_note(version)}"
+    (root / "CHANGELOG.md").write_text(
+        insert_hosted_release(
+            text,
+            version=github_version,
+            date=date,
+            notes=notes,
+            after_engine=None,
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    rewrite_hosted_project(root, github_version, version)
+    notes = hosted_released_notes(
+        (root / "CHANGELOG.md").read_text(encoding="utf-8"), github_version, date
+    )
+    receipt = {
+        "schema_version": "1.0",
+        "repository": docs.REPOSITORY,
+        "version": version,
+        "tag": "v" + version,
+        "engine_tag": "",
+        "github_version": github_version,
+        "github_tag": "github-v" + github_version,
         "release_date": date,
         "base_sha": base,
         "notes_sha256": hashlib.sha256(notes.encode()).hexdigest(),
@@ -487,6 +670,14 @@ def absent_registry(url: str) -> None:
         raise ValueError("registry absence could not be verified") from None
 
 
+def unused_github(version: str) -> None:
+    if not versions.GITHUB_TAG_PATTERN.fullmatch("github-v" + version):
+        raise ValueError("hosted release version must be X.Y.Z")
+    absent_github(f"git/ref/tags/github-v{version}")
+    absent_github(f"releases/tags/github-v{version}")
+    absent_registry(f"https://pypi.org/pypi/review-sensei-github/{version}/json")
+
+
 def unused(version: str) -> None:
     absent_github(f"git/ref/tags/v{version}")
     absent_github(f"releases/tags/v{version}")
@@ -562,7 +753,13 @@ def workflow_context() -> None:
         )
 
 
-def prepare(root: Path, version: str, date: str, base: str) -> str:
+def prepare(
+    root: Path,
+    version: str,
+    date: str,
+    base: str,
+    github_version: str | None = None,
+) -> str:
     inputs(version, date, base)
     workflow_context()
     if (
@@ -574,7 +771,19 @@ def prepare(root: Path, version: str, date: str, base: str) -> str:
         os.environ.get("RELEASE_DOCS_APP_ID", ""),
         os.environ.get("RELEASE_DOCS_APP_SLUG", ""),
     )
-    unused(version)
+    release_engine = version != source_version(root, base)
+    current_hosted = tomllib.loads(git(root, "show", f"{base}:{HOSTED_PROJECT}"))[
+        "project"
+    ]["version"]
+    release_github = github_version is not None and github_version != current_hosted
+    if github_version is not None and not release_engine and not release_github:
+        raise ValueError(
+            "pass a new engine or hosted version; a current version skips that package"
+        )
+    if release_engine:
+        unused(version)
+    if release_github:
+        unused_github(github_version)
     with tempfile.TemporaryDirectory(prefix="prepare-release-") as temporary:
         checkout = Path(temporary) / "main"
         git(root, "fetch", "--no-tags", "origin", "refs/heads/main")
@@ -593,10 +802,14 @@ def prepare(root: Path, version: str, date: str, base: str) -> str:
                 except ValueError:
                     previous = None
                 if previous and previous["version"] == version:
-                    if previous["release_date"] != date or base not in {
-                        observed,
-                        previous["base_sha"],
-                    }:
+                    if (
+                        previous["release_date"] != date
+                        or base not in {observed, previous["base_sha"]}
+                        or (
+                            github_version is not None
+                            and previous["github_version"] != github_version
+                        )
+                    ):
                         raise ValueError("same-version preparation intent differs")
                     return observed
             if observed != base:
@@ -606,9 +819,15 @@ def prepare(root: Path, version: str, date: str, base: str) -> str:
             if ci_once(base) is None:
                 raise ValueError("reviewed main CI is not terminal success")
             qualify_notes_origin(checkout, version, base)
-            generate(checkout, version, date, base)
+            generate(checkout, version, date, base, github_version)
             git(checkout, "add", "--", *sorted(ALLOWED_PATHS))
             validate_index(checkout)
+            if release_github and not release_engine:
+                message = f"release: prepare github-v{github_version}"
+            elif release_github:
+                message = f"release: prepare v{version} and github-v{github_version}"
+            else:
+                message = f"release: prepare v{version}"
             git(
                 checkout,
                 "-c",
@@ -622,11 +841,15 @@ def prepare(root: Path, version: str, date: str, base: str) -> str:
                 "commit",
                 "-s",
                 "-m",
-                f"release: prepare v{version}",
+                message,
             )
             sha = git(checkout, "rev-parse", "HEAD")
             verify_commit(checkout, sha)
-            unused(version)
+            if release_engine:
+                unused(version)
+            if release_github:
+                assert github_version is not None
+                unused_github(github_version)
             if remote_main() != base or ci_once(base) is None:
                 raise ValueError(
                     "reviewed main/CI advanced before push; dispatch again"
@@ -779,6 +1002,7 @@ def main() -> int:
         item.add_argument("--version", required=True)
         item.add_argument("--date", required=True)
         item.add_argument("--base-sha", required=True)
+        item.add_argument("--github-version")
     item = sub.add_parser("wait-ci")
     item.add_argument("--sha", required=True)
     item.add_argument("--version")
@@ -791,10 +1015,22 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.command == "render":
-            generate(args.root.resolve(), args.version, args.date, args.base_sha)
+            generate(
+                args.root.resolve(),
+                args.version,
+                args.date,
+                args.base_sha,
+                args.github_version,
+            )
             print("Rendered local release candidate; no network, tag or publication")
         elif args.command == "prepare":
-            sha = prepare(args.root.resolve(), args.version, args.date, args.base_sha)
+            sha = prepare(
+                args.root.resolve(),
+                args.version,
+                args.date,
+                args.base_sha,
+                args.github_version,
+            )
             output = os.environ.get("GITHUB_OUTPUT")
             if output:
                 with Path(output).open("a", encoding="utf-8") as handle:

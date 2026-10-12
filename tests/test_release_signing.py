@@ -268,6 +268,9 @@ class SigningOperationTests(unittest.TestCase):
         late_main=False,
         fail_agent=False,
         fail_delete=False,
+        github_version=None,
+        sign_engine=True,
+        sign_hosted=True,
     ):
         calls = []
         secret_locations = []
@@ -349,6 +352,27 @@ class SigningOperationTests(unittest.TestCase):
                     return_value=("d" * 40 if bad_remote else TAG_OBJECT, SHA),
                 )
             )
+            if github_version is not None:
+                stack.enter_context(patch.object(SIGN, "publication_gates"))
+                stack.enter_context(patch.object(SIGN.prep, "unused_github"))
+                stack.enter_context(
+                    patch.object(
+                        SIGN.prep,
+                        "receipt_record",
+                        return_value={
+                            "version": VERSION,
+                            "release_date": DATE,
+                            "github_version": github_version,
+                            "engine_tag": f"v{VERSION}" if sign_engine else "",
+                            "github_tag": (
+                                f"github-v{github_version}" if sign_hosted else ""
+                            ),
+                        },
+                    )
+                )
+            def sign():
+                return SIGN.sign(ROOT, SHA, VERSION, DATE, github_version)
+
             if any(
                 (
                     fail_verify,
@@ -361,7 +385,7 @@ class SigningOperationTests(unittest.TestCase):
                 )
             ):
                 with self.assertRaises(ValueError) as exc:
-                    SIGN.sign(ROOT, SHA, VERSION, DATE)
+                    sign()
                 if late_main:
                     self.assertEqual(
                         str(exc.exception), "main/CI advanced before immutable tag push"
@@ -374,10 +398,14 @@ class SigningOperationTests(unittest.TestCase):
                 elif fail_agent or fail_delete:
                     self.assertIn("release signing cleanup failed", str(exc.exception))
             else:
-                self.assertEqual(
-                    SIGN.sign(ROOT, SHA, VERSION, DATE)["tag_object_sha"], TAG_OBJECT
-                )
-            self.assertGreaterEqual(unused.call_count, 1)
+                result = sign()
+                self.assertEqual(result["tag_object_sha"], TAG_OBJECT)
+                if github_version is not None and sign_engine and sign_hosted:
+                    self.assertEqual(result["github_tag"], f"github-v{github_version}")
+            if github_version is None or sign_engine:
+                self.assertGreaterEqual(unused.call_count, 1)
+            else:
+                self.assertEqual(unused.call_count, 0)
         self.assertTrue(all(not path.exists() for path in secret_locations))
         return calls
 
@@ -394,6 +422,42 @@ class SigningOperationTests(unittest.TestCase):
             any("--force" in arg or "refs/heads/main" in arg for arg in push)
         )
         self.assertTrue(any(args[0] == "gpgconf" for args in calls))
+
+    def test_changed_versions_sign_engine_and_hosted_tags(self):
+        calls = self.exercise(github_version="0.1.1")
+        signed = [args for args in calls if "--sign" in args]
+        self.assertEqual(
+            [args[args.index("--sign") + 1] for args in signed],
+            [f"v{VERSION}", "github-v0.1.1"],
+        )
+        pushes = [args[-1] for args in calls if "push" in args]
+        self.assertEqual(
+            pushes,
+            [
+                f"{TAG_OBJECT}:refs/tags/v{VERSION}",
+                f"{TAG_OBJECT}:refs/tags/github-v0.1.1",
+            ],
+        )
+
+    def test_current_hosted_version_signs_only_the_engine_tag(self):
+        calls = self.exercise(github_version="0.1.0", sign_hosted=False)
+        signed = [args for args in calls if "--sign" in args]
+        self.assertEqual([args[args.index("--sign") + 1] for args in signed], [f"v{VERSION}"])
+        self.assertEqual(
+            [args[-1] for args in calls if "push" in args],
+            [f"{TAG_OBJECT}:refs/tags/v{VERSION}"],
+        )
+
+    def test_current_engine_version_signs_only_the_hosted_tag(self):
+        calls = self.exercise(github_version="0.1.1", sign_engine=False)
+        signed = [args for args in calls if "--sign" in args]
+        self.assertEqual(
+            [args[args.index("--sign") + 1] for args in signed], ["github-v0.1.1"]
+        )
+        self.assertEqual(
+            [args[-1] for args in calls if "push" in args],
+            [f"{TAG_OBJECT}:refs/tags/github-v0.1.1"],
+        )
 
     def test_invalid_local_signature_or_wrong_imported_key_never_pushes(self):
         for options in ({"fail_verify": True}, {"bad_key": True}):

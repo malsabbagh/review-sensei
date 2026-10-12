@@ -209,31 +209,41 @@ can affect the package identity.
 ## review-sensei-github
 
 The hosted GitHub runtime is a second PyPI distribution,
-`review-sensei-github`, in `packages/python/review-sensei-github`. It pins the
-engine with `review-sensei==` the version in the root `pyproject.toml`. A
-hosted-only fix bumps only the hosted version. An engine fix bumps the engine
-version and that exact pin together.
+`review-sensei-github`, in `packages/python/review-sensei-github`. Its version
+is independent of the engine. The published wheel's `review-sensei==` pin is
+immutable, so the pin moves only when that same preparation also publishes a
+new hosted version.
 
-This repository change does not publish the package and does not move `v5`.
-The operator does that, in order:
+`prepare-release.yml` prepares whichever package receives a new version. Pass
+a package's current version to leave it unchanged and untagged. `sign_tag=true`
+signs `vX.Y.Z` only when the engine version is new, and `github-vX.Y.Z` only
+when the hosted version is new.
 
-1. Register the `review-sensei-github` project on PyPI.
-2. Add a Trusted Publisher for `malsabbagh/review-sensei`, workflow
-   `release-github.yml`, and environment `pypi-github`. Create that protected
-   environment.
-3. When the engine should move, release it through the existing engine
-   process. Do not bump the engine version in an ordinary pull request.
-4. Confirm the pin with `python scripts/prepare_release.py prepare-github`.
-   That command prints the identity and creates no tag.
-5. Sign and push `github-vX.Y.Z`, where `X.Y.Z` is the hosted version. Add a
-   changelog heading `## review-sensei-github X.Y.Z - YYYY-MM-DD` first;
-   `scripts/check_release_version.py --package github` requires it.
-6. After both versions in that commit are the ones runners should install,
-   move the public `v5` workflow tag onto that commit. Until then, runners
-   keep installing the previously published engine.
+```bash
+gh workflow run prepare-release.yml --ref main \
+  -f version=0.6.23 -f github_version=0.1.1 \
+  -f release_date=2026-10-12 -f sign_tag=true
+```
 
-`review-sensei github`, `host-plan`, and `resolve-hosted-openrouter` remain as
-subprocess stubs for one engine release. Remove them in the following release.
+- Engine `0.6.23` and hosted `0.1.1` prepare both. The hosted pin becomes
+  `review-sensei==0.6.23`. Signing pushes `v0.6.23` and `github-v0.1.1`.
+- Engine `0.6.23` and hosted `0.1.0` (the current hosted version) prepare the
+  engine only. The pin stays `review-sensei==0.6.22`. Do not move `v5` onto
+  that commit: the workflow resolver installs the hosted package from that
+  commit, and its pin must equal the engine version declared there.
+- Engine `0.6.22` and hosted `0.1.1` prepare the hosted package only. The pin
+  stays on the current engine. Signing pushes `github-v0.1.1` and does not
+  push `v0.6.22`.
+
+`prepare-github` still prints that identity and creates no tag. The first
+hosted publish needs the PyPI project `review-sensei-github` and a Trusted
+Publisher for workflow `release-github.yml` and environment `pypi-github`.
+Create that protected environment before signing a hosted tag; publication
+waits for Mo's approval there. Move `v5` last, only onto a commit whose
+declared engine and hosted versions are already published and whose pin
+matches the engine. `review-sensei github`, `host-plan`, and
+`resolve-hosted-openrouter` remain subprocess stubs for one engine release.
+Remove them in the following release.
 
 ## Prepare main before signing and building
 
@@ -256,8 +266,12 @@ changes the main metadata through the dedicated App; tagging an unchanged
 
    ```bash
    gh workflow run prepare-release.yml --ref main \
-     -f version=0.6.17 -f release_date=2026-10-08
+     -f version=0.6.17 -f github_version=0.1.0 -f release_date=2026-10-08
    ```
+
+   `github_version` is the hosted package version. Pass its current version,
+   as above, to prepare the engine only. Pass the engine's current version to
+   prepare the hosted package only. See [review-sensei-github](#review-sensei-github).
 
 3. Preparation requires full terminal-success **push/main CI on the dispatch SHA**
    before writes. It executes trusted dispatch code and integrates a clean
@@ -277,9 +291,10 @@ changes the main metadata through the dedicated App; tagging an unchanged
    or ambiguous ancestry, an unchanged source or history beyond the bounded
    256-commit / 256 KiB allowance stops preparation. Maintainers can supply authored
    notes for an exceptional range. Routine empty Unreleased sections require no
-   notes PR. Generated notes are recomputed from source during commit validation;
-   their digest remains bound to the existing preparation receipt. No receipt
-   schema or App permission changes are needed. See [ADR 0071](adr/0071-generated-release-notes.md).
+   notes PR.    Generated notes are recomputed from source during commit validation;
+   their digest remains bound to the preparation receipt. The receipt also
+   records `engine_tag` and `github_tag`; an empty tag means that package is
+   unchanged and will not be signed. App permissions are unchanged. See [ADR 0071](adr/0071-generated-release-notes.md).
    Historical examples outside markers and the `@v5` channel stay unchanged.
    `PAYLOAD_PATHS` in `scripts/prepare_release.py` lists the complete allowlist.
    Runtime source, configs, tests, workflows, credentials and protection policy
