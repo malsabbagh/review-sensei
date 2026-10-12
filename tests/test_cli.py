@@ -82,6 +82,11 @@ class FakeRegistry:
 
 
 class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
+    @unittest.skipUnless(
+        os.name == "posix",
+        "SIGTERM delivery to a Python handler is POSIX; Windows job "
+        "termination does not deliver it to the process",
+    )
     def test_sigterm_is_normalized_to_cancellation_cleanup(self):
         # GitHub cancellation escalates to SIGTERM. It must unwind through
         # the same KeyboardInterrupt cleanup as SIGINT (exit 130) instead
