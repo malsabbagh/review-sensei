@@ -175,7 +175,6 @@ def discover(
     context_diagnostics: list[dict[str, object]] = []
     refusal_reasons: dict[str, int] = {}
     mandatory_refused_documents: dict[str, int] = {}
-    context_incomplete = False
     context_enabled = any(
         context.documents or context.document_selection
         for context in request.lens_contexts
@@ -431,7 +430,6 @@ def discover(
             return fields
 
         def accept(item: CompletedBatch[DiscoveryBatchOutput]) -> bool:
-            nonlocal context_incomplete
             output = item.value
             try:
                 admission = admissions.get(item.batch.batch_id)
@@ -462,8 +460,10 @@ def discover(
             comments.extend(output.comments)
             proposals.extend(output.proposals)
             if context_enabled:
+                # Optional file-budget, prompt-budget, and summary trims stay
+                # on this record. Mandatory context that cannot fit never
+                # reaches an accepted batch.
                 context_diagnostics.append(context_diagnostic(item.batch, admission))
-                context_incomplete = context_incomplete or not admission.complete
             return True
 
         if coverage_decision.skip_provider:
@@ -661,11 +661,9 @@ def discover(
         hunk_outcomes=hunk_outcomes,
         limits=request.limits,
     )
-    status = (
-        "partial"
-        if failed or context_incomplete or not coverage.fully_reviewed
-        else "complete"
-    )
+    # A finished diff stays complete when only optional documents were
+    # trimmed. Unfinished required work and incomplete diff coverage do not.
+    status = "partial" if failed or not coverage.fully_reviewed else "complete"
     if not comment_stage:
         status = "summary-only"
     context_admission = context_admission_document(context_diagnostics)
@@ -702,12 +700,7 @@ def discover(
         # with binary obligations. Context/stage failures never gain this flag.
         from .human_file_review import coverage_only_binary
 
-        if (
-            not failed
-            and not context_incomplete
-            and comment_stage
-            and coverage_only_binary(coverage)
-        ):
+        if not failed and comment_stage and coverage_only_binary(coverage):
             result = replace(result, coverage_only_partial=True)
     except ReviewInputError:
         return service._finish_run(

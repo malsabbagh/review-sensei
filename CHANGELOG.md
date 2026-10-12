@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Keep a review complete when optional document context is trimmed to the
+  file or prompt budget. Those omissions stay on the context-admission
+  record. Required documents that do not fit, unfinished diff coverage, and
+  open findings still withhold approval.
+
 - Send the ReviewSensei `User-Agent` on OIDC broker requests. Cloudflare's
   browser integrity check rejected urllib's default agent on
   `/github/session-grant` with error 1010 before the Worker ran, so every
