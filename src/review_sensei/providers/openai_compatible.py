@@ -79,6 +79,43 @@ def is_allowlisted_openai_compatible_endpoint(base_url: str) -> bool:
     )
 
 
+def validate_openai_compatible_endpoint(
+    base_url: str, *, allow_custom_endpoint: bool = False
+) -> str:
+    """Validate endpoint authority without credentials or network access."""
+
+    if not isinstance(allow_custom_endpoint, bool):
+        raise ValueError("allow_custom_endpoint must be a boolean")
+    parsed = urlsplit(base_url)
+    if parsed.scheme.casefold() != "https" or parsed.hostname is None:
+        raise ValueError("OpenAI-compatible endpoint must use HTTPS")
+    if _openai_endpoint_has_userinfo(parsed):
+        raise ValueError("OpenAI-compatible endpoint must not contain credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError(
+            "OpenAI-compatible endpoint must not contain a query or fragment"
+        )
+    try:
+        hostname = parsed.hostname.encode("idna").decode("ascii").casefold()
+    except UnicodeError as exc:
+        raise ValueError("OpenAI-compatible endpoint host is invalid") from exc
+    path = parsed.path.rstrip("/") or "/"
+    if not allow_custom_endpoint and (
+        hostname != "api.openai.com" or not (path == "/v1" or path.startswith("/v1/"))
+    ):
+        raise ValueError(
+            "OpenAI-compatible endpoint is not allowlisted; pass "
+            "allow_custom_endpoint=True only for an explicitly trusted service"
+        )
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("OpenAI-compatible endpoint port is invalid") from exc
+    if port is not None and port != 443 and not allow_custom_endpoint:
+        raise ValueError("OpenAI-compatible endpoint must use the default HTTPS port")
+    return hostname
+
+
 class _NoRedirect(HTTPRedirectHandler):
     """Reject redirects so the configured bearer token cannot be forwarded."""
 
@@ -182,38 +219,9 @@ class OpenAICompatibleProvider:
             raise ValueError(
                 "OpenAI-compatible max_output_tokens exceeds the configured limit"
             )
-        if not isinstance(allow_custom_endpoint, bool):
-            raise ValueError("allow_custom_endpoint must be a boolean")
-        parsed = urlsplit(base_url)
-        if parsed.scheme.casefold() != "https" or parsed.hostname is None:
-            raise ValueError("OpenAI-compatible endpoint must use HTTPS")
-        if _openai_endpoint_has_userinfo(parsed):
-            raise ValueError("OpenAI-compatible endpoint must not contain credentials")
-        if parsed.query or parsed.fragment:
-            raise ValueError(
-                "OpenAI-compatible endpoint must not contain a query or fragment"
-            )
-        try:
-            hostname = parsed.hostname.encode("idna").decode("ascii").casefold()
-        except UnicodeError as exc:
-            raise ValueError("OpenAI-compatible endpoint host is invalid") from exc
-        path = parsed.path.rstrip("/") or "/"
-        if not allow_custom_endpoint and (
-            hostname != "api.openai.com"
-            or not (path == "/v1" or path.startswith("/v1/"))
-        ):
-            raise ValueError(
-                "OpenAI-compatible endpoint is not allowlisted; pass "
-                "allow_custom_endpoint=True only for an explicitly trusted service"
-            )
-        try:
-            port = parsed.port
-        except ValueError as exc:
-            raise ValueError("OpenAI-compatible endpoint port is invalid") from exc
-        if port is not None and port != 443 and not allow_custom_endpoint:
-            raise ValueError(
-                "OpenAI-compatible endpoint must use the default HTTPS port"
-            )
+        hostname = validate_openai_compatible_endpoint(
+            base_url, allow_custom_endpoint=allow_custom_endpoint
+        )
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key

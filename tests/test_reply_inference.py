@@ -318,6 +318,45 @@ class ReplyInferenceTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
         self.assertEqual(settings, [])
         self.assertEqual(calls, [])
 
+    def test_yaml_custom_endpoint_permission_reaches_reply_adapter(self):
+        config = Path("gateway.yml")
+        config.write_text(
+            "schema: 1\ninference:\n  backend: openai-compatible\n"
+            "advanced:\n  endpoint:\n    base_url: https://gateway.example/v1\n"
+            "    allow_custom_endpoint: true\n",
+            encoding="utf-8",
+        )
+        status, settings, calls, _, stderr = self.invoke(
+            ["--config", str(config)], environment={"OPENAI_API_KEY": "synthetic-key"}
+        )
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(settings[0].base_url, "https://gateway.example/v1")
+        self.assertTrue(settings[0].allow_custom_endpoint)
+        self.assertEqual(len(calls), 1)
+        status, settings, calls, _, stderr = self.invoke(
+            ["--config", str(config), "--base-url", "https://other.example/v1"],
+            environment={"OPENAI_API_KEY": "synthetic-key"},
+        )
+        self.assertEqual(status, 1)
+        self.assertIn("not allowlisted", stderr)
+        self.assertEqual(settings, [])
+        self.assertEqual(calls, [])
+
+    def test_reply_accepts_custom_endpoint_flag_after_subcommand(self):
+        status, settings, _, _, stderr = self.invoke(
+            [
+                "--provider",
+                "openai-compatible",
+                "--base-url",
+                "https://gateway.example/v1",
+                "--allow-custom-endpoint",
+            ],
+            environment={"OPENAI_API_KEY": "synthetic-key"},
+        )
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(settings[0].base_url, "https://gateway.example/v1")
+        self.assertTrue(settings[0].allow_custom_endpoint)
+
     def test_provider_failure_does_not_publish_and_reply_failure_exits_one(self):
         status, _, calls, _, stderr = self.invoke(
             factory_error=ProviderError("synthetic provider failure")

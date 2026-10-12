@@ -180,6 +180,11 @@ class HostedPlanResolutionTests(unittest.TestCase):
         plan = plan_hosted_execution(
             configuration(document), environ={"GATEWAY_API_KEY": "present"}
         )
+        self.assertTrue(plan.allow_custom_endpoint)
+        self.assertEqual(
+            dict(hosted_plan_outputs(plan))["allow_custom_endpoint"], "true"
+        )
+        self.assertTrue(plan.to_dict()["allow_custom_endpoint"])
         self.assertEqual(plan.credential_env, "GATEWAY_API_KEY")
         self.assertTrue(plan.credential_present)
         self.assertEqual(plan.runner_kind, "hosted")
@@ -206,6 +211,7 @@ class HostedPlanOutputTests(unittest.TestCase):
             environ={"OLLAMA_API_KEY": "hosted-secret-value"},
         )
         outputs = dict(hosted_plan_outputs(plan))
+        self.assertEqual(outputs["allow_custom_endpoint"], "false")
         self.assertEqual(outputs["backend"], "cloud-ollama")
         self.assertEqual(outputs["model"], "deepseek-v4.1-flash:cloud")
         self.assertEqual(outputs["base_url"], "https://ollama.com/api")

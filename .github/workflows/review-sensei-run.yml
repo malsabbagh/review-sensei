@@ -140,6 +140,8 @@ jobs:
       backend: ${{ steps.plan.outputs.backend }}
       model: ${{ steps.plan.outputs.model }}
       base_url: ${{ steps.plan.outputs.base_url }}
+      # Older exact-version packages emit no permission output: absence denies.
+      allow_custom_endpoint: ${{ steps.plan.outputs.allow_custom_endpoint || 'false' }}
       runner_kind: ${{ steps.plan.outputs.runner_kind }}
       credential_env: ${{ steps.plan.outputs.credential_env }}
       credential_required: ${{ steps.plan.outputs.credential_required }}
@@ -715,7 +717,7 @@ jobs:
           # The workspace is the frozen policy commit, so the package resolves
           # its configuration, stages, and categories from trusted content and
           # never from the pull-request head.
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ needs.bootstrap.outputs.policy_commit }}
           fetch-depth: 0
 
       - name: Check out the trusted reviewed base
@@ -742,6 +744,7 @@ jobs:
           BACKEND: ${{ needs.bootstrap.outputs.backend }}
           MODEL: ${{ needs.bootstrap.outputs.model }}
           BASE_URL: ${{ needs.bootstrap.outputs.base_url }}
+          ALLOW_CUSTOM_ENDPOINT: ${{ needs.bootstrap.outputs.allow_custom_endpoint }}
           CREDENTIAL_ENV: ${{ needs.bootstrap.outputs.credential_env }}
           CREDENTIAL_REQUIRED: ${{ needs.bootstrap.outputs.credential_required }}
           REPOSITORY: ${{ inputs.repository }}
@@ -789,6 +792,10 @@ jobs:
               raise SystemExit("plan endpoint is invalid")
           if not credential_pattern.fullmatch(os.environ.get("CREDENTIAL_ENV", "")):
               raise SystemExit("plan credential reference is invalid")
+          if os.environ.get("ALLOW_CUSTOM_ENDPOINT") not in {"true", "false"}:
+              raise SystemExit("plan custom endpoint permission is invalid")
+          if os.environ.get("ALLOW_CUSTOM_ENDPOINT") == "true" and os.environ.get("BACKEND") != "openai-compatible":
+              raise SystemExit("plan custom endpoint permission requires openai-compatible")
           if os.environ.get("CREDENTIAL_REQUIRED") not in {"true", "false"}:
               raise SystemExit("plan credential requirement is invalid")
           if not repository_pattern.fullmatch(os.environ.get("REPOSITORY", "")):
@@ -916,6 +923,7 @@ jobs:
           RUNNER_KIND: ${{ needs.bootstrap.outputs.runner_kind }}
           BACKEND: ${{ needs.bootstrap.outputs.backend }}
           BASE_URL: ${{ needs.bootstrap.outputs.base_url }}
+          ALLOW_CUSTOM_ENDPOINT: ${{ needs.bootstrap.outputs.allow_custom_endpoint }}
           MODEL: ${{ needs.bootstrap.outputs.model }}
           CREDENTIAL_ENV: ${{ needs.bootstrap.outputs.credential_env }}
           CREDENTIAL_REQUIRED: ${{ needs.bootstrap.outputs.credential_required }}
@@ -965,6 +973,7 @@ jobs:
           # Backend, endpoint, and model are plan outputs. The workflow holds
           # no provider default and no model chain.
           review_args+=(--provider "$BACKEND" --base-url "$BASE_URL" --model "$MODEL")
+          if [[ "$ALLOW_CUSTOM_ENDPOINT" == "true" ]]; then review_args+=(--allow-custom-endpoint); fi
           review_args+=(--format json --exit-semantics operational)
           # The named credential travels only when the selected backend
           # requires one. A backend that requires no credential receives none
@@ -1080,6 +1089,7 @@ jobs:
         env:
           BACKEND: ${{ needs.bootstrap.outputs.backend }}
           BASE_URL: ${{ needs.bootstrap.outputs.base_url }}
+          ALLOW_CUSTOM_ENDPOINT: ${{ needs.bootstrap.outputs.allow_custom_endpoint }}
           MODEL: ${{ needs.bootstrap.outputs.model }}
           CREDENTIAL_ENV: ${{ needs.bootstrap.outputs.credential_env }}
           CREDENTIAL_REQUIRED: ${{ needs.bootstrap.outputs.credential_required }}
@@ -1101,6 +1111,7 @@ jobs:
             --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
             --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
             --allow-write --enable-reply)
+          if [[ "$ALLOW_CUSTOM_ENDPOINT" == "true" ]]; then reply_args+=(--allow-custom-endpoint); fi
           if [[ "$CREDENTIAL_REQUIRED" == "true" ]]; then
             reply_args+=(--api-key-env "$CREDENTIAL_ENV")
           fi
@@ -1180,7 +1191,7 @@ jobs:
       - name: Check out the trusted policy commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ needs.bootstrap.outputs.policy_commit }}
           fetch-depth: 0
 
       - name: Check out the trusted reviewed base
@@ -1207,6 +1218,7 @@ jobs:
           BACKEND: ${{ needs.bootstrap.outputs.backend }}
           MODEL: ${{ needs.bootstrap.outputs.model }}
           BASE_URL: ${{ needs.bootstrap.outputs.base_url }}
+          ALLOW_CUSTOM_ENDPOINT: ${{ needs.bootstrap.outputs.allow_custom_endpoint }}
           CREDENTIAL_ENV: ${{ needs.bootstrap.outputs.credential_env }}
           CREDENTIAL_REQUIRED: ${{ needs.bootstrap.outputs.credential_required }}
           REPOSITORY: ${{ inputs.repository }}
@@ -1254,6 +1266,10 @@ jobs:
               raise SystemExit("plan endpoint is invalid")
           if not credential_pattern.fullmatch(os.environ.get("CREDENTIAL_ENV", "")):
               raise SystemExit("plan credential reference is invalid")
+          if os.environ.get("ALLOW_CUSTOM_ENDPOINT") not in {"true", "false"}:
+              raise SystemExit("plan custom endpoint permission is invalid")
+          if os.environ.get("ALLOW_CUSTOM_ENDPOINT") == "true" and os.environ.get("BACKEND") != "openai-compatible":
+              raise SystemExit("plan custom endpoint permission requires openai-compatible")
           if os.environ.get("CREDENTIAL_REQUIRED") not in {"true", "false"}:
               raise SystemExit("plan credential requirement is invalid")
           if not repository_pattern.fullmatch(os.environ.get("REPOSITORY", "")):
@@ -1363,6 +1379,7 @@ jobs:
           RUNNER_KIND: ${{ needs.bootstrap.outputs.runner_kind }}
           BACKEND: ${{ needs.bootstrap.outputs.backend }}
           BASE_URL: ${{ needs.bootstrap.outputs.base_url }}
+          ALLOW_CUSTOM_ENDPOINT: ${{ needs.bootstrap.outputs.allow_custom_endpoint }}
           MODEL: ${{ needs.bootstrap.outputs.model }}
           CREDENTIAL_ENV: ${{ needs.bootstrap.outputs.credential_env }}
           CREDENTIAL_REQUIRED: ${{ needs.bootstrap.outputs.credential_required }}
@@ -1421,6 +1438,7 @@ jobs:
             --configuration-context-output configuration-context.json \
             --admission-context-output admission-context.json)
           review_args+=(--provider "$BACKEND" --base-url "$BASE_URL" --model "$MODEL")
+          if [[ "$ALLOW_CUSTOM_ENDPOINT" == "true" ]]; then review_args+=(--allow-custom-endpoint); fi
           review_args+=(--format json --exit-semantics operational)
           if [[ "$CREDENTIAL_REQUIRED" == "true" ]]; then
             review_args+=(--api-key-env "$CREDENTIAL_ENV")
@@ -1532,6 +1550,7 @@ jobs:
         env:
           BACKEND: ${{ needs.bootstrap.outputs.backend }}
           BASE_URL: ${{ needs.bootstrap.outputs.base_url }}
+          ALLOW_CUSTOM_ENDPOINT: ${{ needs.bootstrap.outputs.allow_custom_endpoint }}
           MODEL: ${{ needs.bootstrap.outputs.model }}
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
@@ -1555,6 +1574,7 @@ jobs:
             --source-updated-at "$SOURCE_UPDATED_AT" --head-sha "$HEAD_SHA" \
             --root-comment-id "$ROOT_COMMENT_ID" --source-kind "$SOURCE_KIND" \
             --allow-write --enable-reply)
+          if [[ "$ALLOW_CUSTOM_ENDPOINT" == "true" ]]; then reply_args+=(--allow-custom-endpoint); fi
           if [[ "$CREDENTIAL_REQUIRED" == "true" ]]; then
             reply_args+=(--api-key-env "$CREDENTIAL_ENV")
           fi

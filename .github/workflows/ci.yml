@@ -231,6 +231,12 @@ jobs:
           export REVIEWSENSEI_EXPECTED_VERSION
           "$wheel_venv/bin/python" -I -m unittest discover -s "$suite/dist_safe" -v
           "$wheel_venv/bin/python" -I -m unittest discover -s "$suite/downstream" -v
+          # Exercise canonical custom-endpoint authority using the exact wheel
+          # and an injected transport; this suite forbids socket connections.
+          "$wheel_venv/bin/python" -I "$GITHUB_WORKSPACE/tests/published_cli/openai_configuration.py" \
+            --wheel "$GITHUB_WORKSPACE"/dist/*.whl \
+            --expected-version "$REVIEWSENSEI_EXPECTED_VERSION" \
+            --report "$RUNNER_TEMP/openai-configuration-wheel.json"
           "$wheel_venv/bin/python" -m pip check
 
   npm:

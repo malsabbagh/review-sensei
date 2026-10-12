@@ -42,6 +42,7 @@ from .provider_config import (
     hosted_openrouter_upstream,
     published_hosted_openrouter_models,
 )
+from .providers.openai_compatible import validate_openai_compatible_endpoint
 from .providers.openrouter import (
     DEFAULT_OPENROUTER_BASE_URL,
     is_allowlisted_openrouter_endpoint,
@@ -1497,6 +1498,7 @@ class ResolvedInference:
     backend: str
     model: str
     base_url: str
+    allow_custom_endpoint: bool
     credential_env: str | None
     credential_required: bool
     credential_present: bool
@@ -1508,6 +1510,18 @@ class ResolvedInference:
 
     def source_of(self, field_name: str) -> Provenance:
         return self.provenance[field_name]
+
+    def authorizes_custom_endpoint(self, base_url: str) -> bool:
+        """Bind file permission by exact URL text, ignoring trailing slashes.
+
+        Do not equate host case, explicit default ports, or other URL changes:
+        those overrides need their own opt-in. Endpoint safety is validated
+        separately before provider dispatch.
+        """
+
+        return self.allow_custom_endpoint and (
+            base_url.rstrip("/") == self.base_url.rstrip("/")
+        )
 
 
 def resolve_inference(
@@ -1593,6 +1607,26 @@ def resolve_inference(
         configuration, backend=backend, defaults=defaults
     )
     provenance["base_url"] = base_url_provenance
+    allow_custom_endpoint = bool(
+        backend == "openai-compatible"
+        and configuration.advanced.endpoint.base_url is not None
+        and configuration.advanced.endpoint.allow_custom_endpoint
+    )
+    provenance["allow_custom_endpoint"] = Provenance(
+        "configuration file" if allow_custom_endpoint else "packaged default",
+        f"{configuration.source} advanced.endpoint.allow_custom_endpoint"
+        if allow_custom_endpoint
+        else "custom OpenAI-compatible endpoints denied by default",
+    )
+    if backend == "openai-compatible":
+        try:
+            validate_openai_compatible_endpoint(
+                base_url, allow_custom_endpoint=allow_custom_endpoint
+            )
+        except ValueError as exc:
+            raise _located(
+                configuration, "advanced.endpoint.base_url", str(exc)
+            ) from exc
 
     credential_env = defaults.credential_env
     configured_credential = configuration.advanced.endpoint.credential_env
@@ -1636,6 +1670,7 @@ def resolve_inference(
         backend=backend,
         model=model,
         base_url=base_url,
+        allow_custom_endpoint=allow_custom_endpoint,
         credential_env=credential_env,
         credential_required=defaults.credential_required,
         credential_present=credential_present,
@@ -2420,6 +2455,7 @@ def render_configuration(
         ("backend", resolved.backend),
         ("model", resolved.model),
         ("base_url", resolved.base_url or "none"),
+        ("allow_custom_endpoint", _render_value(resolved.allow_custom_endpoint)),
         (
             "credential reference",
             f"{resolved.credential_env or 'none'}"

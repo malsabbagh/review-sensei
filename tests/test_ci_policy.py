@@ -3,6 +3,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -723,7 +724,9 @@ class ActionPinPolicyTests(unittest.TestCase):
         # defaults are the only sources for routing.
         self.assertNotIn("provider_profile", text)
         self.assertNotIn("allow_unqualified_profile", text)
-        self.assertNotIn("allow_custom_endpoint", text)
+        self.assertNotRegex(
+            text.split("jobs:", 1)[0], r"(?m)^      allow_custom_endpoint:"
+        )
         self.assertNotIn("OPENROUTER_UPSTREAM_PROVIDER", text)
         self.assertNotIn("resolve-hosted-openrouter", text)
         self.assertNotIn("validate_resolved_hosted_job_model", text)
@@ -734,6 +737,146 @@ class ActionPinPolicyTests(unittest.TestCase):
         # provider credential is ever forwarded to the Worker.
         self.assertIn("OPENROUTER_API_KEY:", text)
         self.assertIn("OPENAI_API_KEY:", text)
+
+    def test_custom_endpoint_permission_is_frozen_plan_authority(self):
+        text = _reusable_workflow_text()
+        self.assertEqual(
+            text.count("ref: ${{ needs.bootstrap.outputs.policy_commit }}"), 2
+        )
+        inputs = text.split("jobs:", 1)[0]
+        self.assertNotRegex(inputs, r"(?m)^      (allow_custom_endpoint|base_url):")
+        self.assertIn(
+            "allow_custom_endpoint: ${{ steps.plan.outputs.allow_custom_endpoint || 'false' }}",
+            text,
+        )
+        self.assertIn("base_url: ${{ steps.plan.outputs.base_url }}", text)
+        for job in ("hosted", "local"):
+            section = _job_section(text, job)
+            for name in (
+                "Validate trusted workflow inputs",
+                f"Run {job} review",
+                f"Generate and publish {job} mention reply",
+            ):
+                step = _step_block(section, name)
+                self.assertIn("BASE_URL: ${{ needs.bootstrap.outputs.base_url }}", step)
+                self.assertIn(
+                    "ALLOW_CUSTOM_ENDPOINT: ${{ needs.bootstrap.outputs.allow_custom_endpoint }}",
+                    step,
+                )
+        self.assertEqual(text.count("plan custom endpoint permission is invalid"), 2)
+        self.assertEqual(
+            text.count("plan custom endpoint permission requires openai-compatible"), 2
+        )
+
+    def test_workflow_rejects_custom_endpoint_permission_for_other_backends(self):
+        text = _reusable_workflow_text()
+        for job in ("hosted", "local"):
+            block = _step_block(
+                _job_section(text, job), "Validate trusted workflow inputs"
+            )
+            script = textwrap.dedent(_run_blocks(block)[0])
+            script = script.split("python - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+            environment = {
+                "MODE": "automatic",
+                "OPERATION": "review",
+                "RUNNER_KIND": job,
+                "MODEL": "synthetic-model",
+                "BASE_URL": "https://gateway.example/v1",
+                "ALLOW_CUSTOM_ENDPOINT": "true",
+                "CREDENTIAL_ENV": "OPENAI_API_KEY",
+                "CREDENTIAL_REQUIRED": "true",
+                "REPOSITORY": "owner/repo",
+                "BASE_REF": "main",
+                "HEAD_REF": "feature",
+                "BASE_SHA": "a" * 40,
+                "HEAD_SHA": "b" * 40,
+                "HEAD_REPOSITORY": "owner/repo",
+            }
+            for backend in (
+                "openai-compatible",
+                "local-ollama",
+                "cloud-ollama",
+                "openrouter",
+            ):
+                with self.subTest(job=job, backend=backend):
+                    result = subprocess.run(
+                        [sys.executable, "-c", script],
+                        env={**os.environ, **environment, "BACKEND": backend},
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if backend == "openai-compatible":
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(
+                            "plan custom endpoint permission requires openai-compatible",
+                            result.stderr,
+                        )
+
+    @unittest.skipIf(
+        os.name == "nt", "Hosted Linux argument assembly requires POSIX Bash"
+    )
+    def test_custom_endpoint_flag_reaches_all_linux_workflow_commands(self):
+        text = _reusable_workflow_text()
+        blocks = [
+            b
+            for b in _run_blocks(text)
+            if "review_args+=(--provider" in b or "reply_args=(--generate" in b
+        ]
+        self.assertEqual(len(blocks), 4)
+        for block in blocks:
+            review = "review_args+=(--provider" in block
+            name = "review_args" if review else "reply_args"
+            # Execute the actual argument assembly only, with no CLI/provider,
+            # host publication, broker, GitHub token or filesystem writes.
+            marker = "# A skipped committed attempt" if review else "set +e"
+            prefix = block[block.index(f"{name}=(") :].split(marker, 1)[0]
+            prefix += f'\nprintf "%s\\0" "${{{name}[@]}}"\n'
+            for permission in ("false", "true"):
+                with self.subTest(review=review, permission=permission):
+                    environment = {
+                        "RUNNER_KIND": "hosted"
+                        if "hosted review requires" in block
+                        else "local",
+                        "BACKEND": "openai-compatible",
+                        "BASE_URL": "https://gateway.example/v1",
+                        "MODEL": "synthetic-model",
+                        "ALLOW_CUSTOM_ENDPOINT": permission,
+                        "CREDENTIAL_REQUIRED": "true",
+                        "CREDENTIAL_ENV": "OPENAI_API_KEY",
+                        "REPOSITORY": "owner/repo",
+                        "REPOSITORY_ID": "1",
+                        "PULL_REQUEST": "2",
+                        "TITLE_B64": "",
+                        "LEARNING": "disabled",
+                        "ARTIFACTS": "none",
+                        "HEAD_SHA": "",
+                        "BASE_SHA": "",
+                        "RUNNER_TEMP": "/tmp",
+                        "SOURCE_COMMENT_ID": "10",
+                        "SOURCE_UPDATED_AT": "2026-10-11T00:00:00Z",
+                        "ROOT_COMMENT_ID": "0",
+                        "SOURCE_KIND": "issue",
+                    }
+                    result = subprocess.run(
+                        ["bash", "-e", "-c", prefix],
+                        env={**os.environ, **environment},
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    args = result.stdout.decode().split("\0")[:-1]
+                    self.assertEqual(
+                        "--allow-custom-endpoint" in args, permission == "true"
+                    )
+                    self.assertEqual(
+                        args[args.index("--base-url") + 1], environment["BASE_URL"]
+                    )
+                    self.assertEqual(
+                        args[args.index("--api-key-env") + 1], "OPENAI_API_KEY"
+                    )
 
     def test_reusable_workflow_review_lanes_pin_the_versioned_json_artifact(self):
         # The provider lane selects its canonical backend from the resolved
@@ -1484,6 +1627,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             "BASE_URL": "http://127.0.0.1:11434",
             "CREDENTIAL_ENV": "OLLAMA_API_KEY",
             "CREDENTIAL_REQUIRED": "false",
+            "ALLOW_CUSTOM_ENDPOINT": "false",
             "REPOSITORY": "owner/repo",
             "HEAD_REF": "",
             "HEAD_REPOSITORY": "",
@@ -1523,6 +1667,28 @@ class ActionPinPolicyTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(valid.returncode, 0, valid.stderr)
+        for permission, backend in (
+            ("", "local-ollama"),
+            ("yes", "openai-compatible"),
+            ("true", "openrouter"),
+            ("true", "local-ollama"),
+        ):
+            with self.subTest(permission=permission, backend=backend):
+                result = subprocess.run(
+                    ["python3", "-c", block],
+                    env={
+                        **os.environ,
+                        **environment,
+                        "BASE_REF": "main-feature",
+                        "ALLOW_CUSTOM_ENDPOINT": permission,
+                        "BACKEND": backend,
+                    },
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("custom endpoint permission", result.stderr)
         # Both provider jobs share one validator body: only the plan check may
         # differ, so a ref rule tightened for one runner cannot drift.
         hosted = _run_block_containing(

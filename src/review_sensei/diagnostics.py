@@ -41,6 +41,7 @@ from .provider_config import (
     provider_mode_default,
     resolve_effective_provider_configuration,
 )
+from .providers.openai_compatible import validate_openai_compatible_endpoint
 from .release_manifest import validate_compatibility_manifest
 from .service import DEFAULT_CATEGORY_CATALOG, DEFAULT_STAGES
 from .session import (
@@ -78,6 +79,7 @@ def _diagnostic_provider_configuration(
     profile: str | None,
     provider: str | None,
     base_url: str | None,
+    allow_custom_endpoint: bool,
     model: str | None,
     api_key_env: str | None,
     provider_mode: str | None,
@@ -94,6 +96,10 @@ def _diagnostic_provider_configuration(
     # Explicit legacy mode is a display-only compatibility seam. The normal
     # CLI path shares review's canonical file/environment/default resolution.
     if profile is not None or provider_mode is not None:
+        if allow_custom_endpoint:
+            raise ReviewInputError(
+                "--allow-custom-endpoint cannot be combined with --profile or --provider-mode"
+            )
         mode = provider_mode_default(provider_mode or "local")
         configuration = resolve_effective_provider_configuration(
             profile=profile,
@@ -122,8 +128,27 @@ def _diagnostic_provider_configuration(
         endpoint
     ):
         raise ReviewInputError("openrouter endpoint is not allowlisted")
+    permission = allow_custom_endpoint or resolved.authorizes_custom_endpoint(endpoint)
+    if resolved.backend == "openai-compatible":
+        validate_openai_compatible_endpoint(endpoint, allow_custom_endpoint=permission)
     credential_env = api_key_env if api_key_env is not None else resolved.credential_env
     mode = "local" if resolved.inference_location == "local" else "cloud"
+    provenance = {
+        key: {"source": value.source, "detail": value.detail}
+        for key, value in resolved.provenance.items()
+    }
+    if base_url is not None:
+        provenance["base_url"] = {"source": "command line", "detail": "--base-url"}
+    if allow_custom_endpoint:
+        provenance["allow_custom_endpoint"] = {
+            "source": "command line",
+            "detail": "--allow-custom-endpoint",
+        }
+    elif not permission:
+        provenance["allow_custom_endpoint"] = {
+            "source": "packaged default",
+            "detail": "custom OpenAI-compatible endpoints denied by default",
+        }
     return mode, {
         "profile": None,
         "backend": resolved.backend,
@@ -132,6 +157,7 @@ def _diagnostic_provider_configuration(
         else resolved.backend,
         "model": resolved.model,
         "base_url": endpoint,
+        "allow_custom_endpoint": permission,
         "execution_location": "local",
         "inference_location": (
             "local"
@@ -150,10 +176,7 @@ def _diagnostic_provider_configuration(
         ),
         "timeout_seconds": resolved.timeout_seconds,
         "qualification_status": "unknown",
-        "provenance": {
-            key: {"source": value.source, "detail": value.detail}
-            for key, value in resolved.provenance.items()
-        },
+        "provenance": provenance,
     }
 
 
@@ -590,6 +613,7 @@ def run_doctor(
     profile: str | None = None,
     provider: str | None = None,
     base_url: str | None = None,
+    allow_custom_endpoint: bool = False,
     model: str | None = None,
     api_key_env: str | None = None,
     compatibility_manifest: Path | None = None,
@@ -678,6 +702,7 @@ def run_doctor(
             profile=profile,
             provider=provider,
             base_url=base_url,
+            allow_custom_endpoint=allow_custom_endpoint,
             model=model,
             api_key_env=api_key_env,
             provider_mode=provider_mode,
@@ -997,6 +1022,7 @@ def build_plan(
     profile: str | None = None,
     provider: str | None = None,
     base_url: str | None = None,
+    allow_custom_endpoint: bool = False,
     model: str | None = None,
     api_key_env: str | None = None,
     provider_mode: str | None = None,
@@ -1060,6 +1086,7 @@ def build_plan(
         profile=profile,
         provider=provider,
         base_url=base_url,
+        allow_custom_endpoint=allow_custom_endpoint,
         model=model,
         api_key_env=api_key_env,
         provider_mode=provider_mode,

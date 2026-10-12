@@ -265,6 +265,44 @@ class ConfigurationDocumentTests(unittest.TestCase):
 
 
 class ConfigurationResolutionTests(unittest.TestCase):
+    def test_none_configuration_is_defaulted_before_endpoint_validation(self):
+        resolved = resolve_inference(None, cli_provider="openai-compatible", environ={})
+        self.assertEqual(resolved.base_url, "https://api.openai.com/v1")
+        self.assertFalse(resolved.allow_custom_endpoint)
+        with (
+            patch(
+                "review_sensei.configuration.validate_openai_compatible_endpoint",
+                side_effect=ValueError("synthetic endpoint rejection"),
+            ),
+            self.assertRaises(ConfigurationError) as error,
+        ):
+            resolve_inference(None, cli_provider="openai-compatible", environ={})
+        self.assertIn("advanced.endpoint.base_url", str(error.exception))
+        self.assertIn("synthetic endpoint rejection", str(error.exception))
+
+    def test_endpoint_permission_requires_exact_url_except_trailing_slashes(self):
+        resolved = resolve_inference(
+            parse(
+                "schema: 1\ninference:\n  backend: openai-compatible\n"
+                "advanced:\n  endpoint:\n"
+                "    base_url: https://gateway.example/v1\n"
+                "    allow_custom_endpoint: true\n"
+            ),
+            environ={},
+        )
+        self.assertTrue(resolved.authorizes_custom_endpoint(resolved.base_url + "/"))
+        for endpoint in (
+            "https://GATEWAY.example/v1",
+            "https://gateway.example:443/v1",
+            "https://user@gateway.example/v1",
+            resolved.base_url + "?query=1",
+            resolved.base_url + "#fragment",
+            "http://gateway.example/v1",
+            "https://other.example/v1",
+        ):
+            with self.subTest(endpoint=endpoint):
+                self.assertFalse(resolved.authorizes_custom_endpoint(endpoint))
+
     def test_backend_registry_is_documented_and_complete(self):
         self.assertEqual(
             documented_backend_names(),

@@ -507,8 +507,9 @@ uses it. Source inspection identifies these current limitations:
   `--symbol-context-max-files`, `--symbol-context-max-bytes` and
   `--symbol-context-max-depth` flags, rather than the parsed YAML
   symbol section. `advanced.egress` is not consumed by normal inference;
-  explicit endpoint/profile gates still apply. Direct custom endpoint settings
-  also require the applicable `--allow-custom-endpoint` invocation gate.
+  explicit endpoint/profile gates still apply. OpenAI-compatible custom endpoints
+  require `--allow-custom-endpoint` or YAML permission bound to the declared
+  `advanced.endpoint.base_url`; named profiles retain their endpoint restrictions.
 - The raw normal parser still reads `REVIEWSENSEI_STAGES_DIR` and
   `REVIEWSENSEI_CATEGORIES_DIR`; symbol enablement still reads
   `REVIEWSENSEI_ENABLE_SYMBOL_CONTEXT`. Some are retired/reported by canonical
