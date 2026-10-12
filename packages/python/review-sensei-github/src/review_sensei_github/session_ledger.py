@@ -2049,7 +2049,7 @@ class GitHubIssueCommentSessionLedger:
         wait_seconds: float = 5.0,
         sleeper=None,
     ) -> SessionRecord:
-        """Admission self-heal for a leaked reservation (ADR 0064).
+        """Admission self-heal for a leaked reservation (ADR 0079).
 
         Same evidence and CAS seam as maintainer continuation, but driven
         by the review's own grant and never unpausing: the caller checks

@@ -1847,7 +1847,7 @@ def prepare_session_round(
         flags.setdefault("paused", True)
     held = record.reservation_id
     if held is not None and not record.operator_paused:
-        # Admission self-heal (ADR 0064): a leaked reservation from a lost
+        # Admission self-heal (ADR 0079): a leaked reservation from a lost
         # runner must not block this review until expiry when the owner
         # run provably completed. A maintainer pause is checked first and
         # is never cleared here. Any recovery failure keeps today's
