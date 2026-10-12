@@ -7,22 +7,23 @@ import unittest
 from dataclasses import replace
 from urllib.parse import parse_qs, urlparse
 
+from review_sensei_github.approval import approval_eligibility_from_result
+from review_sensei_github.http import GitHubHttp
+from review_sensei_github.prose_publication import (
+    CommentReviewProseStore,
+    ProseStagingError,
+    VisibleProseReceipt,
+)
+from review_sensei_github.publication_parts import (
+    prepare_finding_prose_parts,
+)
+
 from review_sensei.bounded_evidence import (
     AuthenticatedPart,
     EvidenceReadBudget,
     canonical_bytes,
 )
 from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github.approval import approval_eligibility_from_result
-from review_sensei.hosting.github.http import GitHubHttp
-from review_sensei.hosting.github.prose_publication import (
-    CommentReviewProseStore,
-    ProseStagingError,
-    VisibleProseReceipt,
-)
-from review_sensei.hosting.github.publication_parts import (
-    prepare_finding_prose_parts,
-)
 from review_sensei.human_assessment import HumanInventoryResolution, PendingHumanReview
 from review_sensei.human_inventory import read_human_inventory, stage_human_inventory
 from tests.fake_github_http import json_response

@@ -8,8 +8,7 @@ from unittest import mock
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
-
-from review_sensei.hosting.github import (
+from review_sensei_github import (
     DEFAULT_BROKER_AUDIENCE,
     DEFAULT_OIDC_ISSUER,
     GitHubOIDCAudienceError,
@@ -22,7 +21,7 @@ from review_sensei.hosting.github import (
     VerifiedOIDCClaims,
     verify_oidc_token,
 )
-from review_sensei.hosting.github.oidc import MAX_OIDC_TOKEN_BYTES, HttpJwksFetcher
+from review_sensei_github.oidc import MAX_OIDC_TOKEN_BYTES, HttpJwksFetcher
 
 
 def make_key_pair():
@@ -287,14 +286,12 @@ class HttpJwksFetcherTTLTests(unittest.TestCase):
 
         fetcher = HttpJwksFetcher(opener=opener, jwks_ttl_seconds=60)
         now = time.time()
-        with mock.patch(
-            "review_sensei.hosting.github.oidc.time.time", return_value=now
-        ):
+        with mock.patch("review_sensei_github.oidc.time.time", return_value=now):
             fetcher.fetch_jwks(DEFAULT_OIDC_ISSUER)
             fetcher.fetch_jwks(DEFAULT_OIDC_ISSUER)
         self.assertEqual(len(calls), 1)  # second call served from cache
         with mock.patch(
-            "review_sensei.hosting.github.oidc.time.time",
+            "review_sensei_github.oidc.time.time",
             return_value=now + 61,
         ):
             fetcher.fetch_jwks(DEFAULT_OIDC_ISSUER)
@@ -325,13 +322,11 @@ class HttpJwksFetcherTTLTests(unittest.TestCase):
 
         fetcher = HttpJwksFetcher(opener=opener, jwks_ttl_seconds=60)
         now = time.time()
-        with mock.patch(
-            "review_sensei.hosting.github.oidc.time.time", return_value=now
-        ):
+        with mock.patch("review_sensei_github.oidc.time.time", return_value=now):
             fetcher.fetch_jwks(DEFAULT_OIDC_ISSUER)
         good[0] = False
         with mock.patch(
-            "review_sensei.hosting.github.oidc.time.time",
+            "review_sensei_github.oidc.time.time",
             return_value=now + 61,
         ):
             with self.assertRaises(GitHubOIDCSignatureError):

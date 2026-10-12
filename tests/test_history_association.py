@@ -10,6 +10,12 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
+from review_sensei_github import GitHubHttp
+from review_sensei_github.session_ledger import (
+    GitHubIssueCommentSessionLedger,
+    render_session_comment,
+)
+
 from review_sensei.assessment_history_index import (
     IndexedAssessmentJournal,
     history_envelope,
@@ -28,11 +34,6 @@ from review_sensei.bounded_evidence import (
 )
 from review_sensei.errors import ReviewInputError
 from review_sensei.history_association import parse_history
-from review_sensei.hosting.github import GitHubHttp
-from review_sensei.hosting.github.session_ledger import (
-    GitHubIssueCommentSessionLedger,
-    render_session_comment,
-)
 from review_sensei.session import (
     LocalSessionLedger,
     SessionIdentity,
@@ -754,7 +755,8 @@ class HistoryAssociationTests(unittest.TestCase):
     def test_frozen_combined_reason_requires_both_exact_digests_and_primitive_reason(
         self,
     ):
-        from review_sensei.hosting.github.errors import GitHubBrokerClientError
+        from review_sensei_github.errors import GitHubBrokerClientError
+
         from tests import test_review_transaction as original
         from tests.test_activation_tail import ConsumingBroker, feedback_request
 

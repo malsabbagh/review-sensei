@@ -154,9 +154,10 @@ class WorkContinuationTests(unittest.TestCase):
     def test_retained_coverage_uses_closed_approval_vocabulary(self):
         from dataclasses import replace
 
-        from review_sensei.hosting.github.approval import (
+        from review_sensei_github.approval import (
             approval_eligibility_from_result,
         )
+
         from review_sensei.models import ReviewComment, ReviewResult
 
         result = ReviewResult(
@@ -215,9 +216,10 @@ class WorkContinuationTests(unittest.TestCase):
     def test_repeated_discovery_finding_keeps_prior_cross_file_requirements(self):
         from dataclasses import replace
 
-        from review_sensei.hosting.github.approval import (
+        from review_sensei_github.approval import (
             approval_eligibility_from_result,
         )
+
         from review_sensei.models import ReviewComment, ReviewResult
 
         result = ReviewResult(
@@ -282,7 +284,8 @@ class WorkContinuationTests(unittest.TestCase):
                 )
 
     def test_normal_full_replay_cannot_drop_retained_human_obligations(self):
-        from review_sensei.hosting.github.publication import ReviewPublisher
+        from review_sensei_github.publication import ReviewPublisher
+
         from review_sensei.models import ReviewResult
         from tests import test_human_assessment
 
@@ -355,13 +358,14 @@ class WorkContinuationTests(unittest.TestCase):
             self.assertEqual(restarted.outcome.provider_calls, 1)
 
     def test_hosted_broader_discovery_publishes_new_result_with_prior_identity(self):
-        from review_sensei.hosting.github import GitHubApplication, GitHubWriteOptions
-        from review_sensei.hosting.github.conversation import ConversationPublisher
-        from review_sensei.hosting.github.errors import GitHubBrokerClientError
-        from review_sensei.hosting.github.publication import (
+        from review_sensei_github import GitHubApplication, GitHubWriteOptions
+        from review_sensei_github.conversation import ConversationPublisher
+        from review_sensei_github.errors import GitHubBrokerClientError
+        from review_sensei_github.publication import (
             ReviewPublisher,
             approval_eligibility_from_body,
         )
+
         from tests import test_human_assessment
 
         state = test_human_assessment.State()
@@ -452,10 +456,11 @@ class WorkContinuationTests(unittest.TestCase):
         self.assertEqual(state.reply_count, 1)
 
     def test_broader_result_retains_exact_prior_authority_and_replays_once(self):
-        from review_sensei.hosting.github.publication import (
+        from review_sensei_github.publication import (
             ReviewPublisher,
             approval_eligibility_from_body,
         )
+
         from review_sensei.models import ReviewResult
         from tests import test_human_assessment
 
@@ -499,7 +504,8 @@ class WorkContinuationTests(unittest.TestCase):
         self.assertEqual(state.events(), ["REQUEST_CHANGES"])
 
     def test_broader_result_with_changed_source_cannot_publish(self):
-        from review_sensei.hosting.github.publication import ReviewPublisher
+        from review_sensei_github.publication import ReviewPublisher
+
         from review_sensei.models import ReviewResult
         from tests import test_human_assessment
 
@@ -602,7 +608,7 @@ class WorkContinuationTests(unittest.TestCase):
     ):
         from unittest.mock import patch
 
-        from review_sensei.hosting.github.http import GitHubHttp
+        from review_sensei_github.http import GitHubHttp
 
         start = float.fromhex("0x1.ffff100000003p+22")
         self.assertGreater(start + 60 - start, 60)
@@ -615,9 +621,10 @@ class WorkContinuationTests(unittest.TestCase):
             self.test_hosted_scope_writes_richer_pending_authority_and_never_approves()
 
     def test_hosted_scope_writes_richer_pending_authority_and_never_approves(self):
-        from review_sensei.hosting.github.publication import (
+        from review_sensei_github.publication import (
             approval_eligibility_from_body,
         )
+
         from tests import test_human_assessment
 
         state = test_human_assessment.State()

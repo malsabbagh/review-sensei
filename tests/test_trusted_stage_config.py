@@ -9,13 +9,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from review_sensei import ProviderResponse
-from review_sensei.cli import main
-from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github.setup import (
+from review_sensei_github.setup import (
     _provider_parity_workflow,
     _tagged_workflow,
 )
+
+from review_sensei import ProviderResponse
+from review_sensei.cli import main
+from review_sensei.errors import ReviewInputError
 from review_sensei.stages import MAX_STAGE_FILE_BYTES
 from review_sensei.validation import ReviewLimits
 from review_sensei.workflow import prepare_diff

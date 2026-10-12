@@ -10,9 +10,10 @@ import hashlib
 from dataclasses import dataclass
 from typing import Mapping
 
-from ...bounded_evidence import EvidenceReadBudget
-from ...errors import ReviewInputError
-from ...validation import validate_repository_path
+from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.errors import ReviewInputError
+from review_sensei.validation import validate_repository_path
+
 from .errors import GitHubHTTPError, GitHubPublicationError
 from .http import GitHubHttp
 from .publication_parts import (

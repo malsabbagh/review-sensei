@@ -19,6 +19,19 @@ from packaging_guard import assert_distribution_import  # noqa: E402
 assert_distribution_import()
 
 from fake_github_http import make_http  # noqa: E402
+from review_sensei_github import (  # noqa: E402
+    GitHubApplication,
+    GitHubWriteOptions,
+    SetupPlanBuilder,
+)
+from review_sensei_github.conversation import ReplyResult  # noqa: E402
+from review_sensei_github.learning_pr import LearningPRResult  # noqa: E402
+from review_sensei_github.publication import PublicationResult  # noqa: E402
+from review_sensei_github.setup import (  # noqa: E402
+    CONFIG_PATH,
+    UNINSTALL_WORKFLOW_PATH,
+    WORKFLOW_PATH,
+)
 
 from review_sensei.baseline import (  # noqa: E402
     ReviewBaseline,
@@ -29,19 +42,6 @@ from review_sensei.cli import main  # noqa: E402
 from review_sensei.concurrency import ReviewConcurrencyPlan  # noqa: E402
 from review_sensei.context import ReviewContextCacheKey  # noqa: E402
 from review_sensei.convergence import ReviewConvergencePolicy  # noqa: E402
-from review_sensei.hosting.github import (  # noqa: E402
-    GitHubApplication,
-    GitHubWriteOptions,
-    SetupPlanBuilder,
-)
-from review_sensei.hosting.github.conversation import ReplyResult  # noqa: E402
-from review_sensei.hosting.github.learning_pr import LearningPRResult  # noqa: E402
-from review_sensei.hosting.github.publication import PublicationResult  # noqa: E402
-from review_sensei.hosting.github.setup import (  # noqa: E402
-    CONFIG_PATH,
-    UNINSTALL_WORKFLOW_PATH,
-    WORKFLOW_PATH,
-)
 from review_sensei.models import (  # noqa: E402
     ProviderResponse,
     ReviewRequest,

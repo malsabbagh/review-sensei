@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
-from review_sensei.hosting.github import (
+from review_sensei_github import (
     GitHubSetupClient,
     GitHubSetupError,
     GitHubSetupTransientError,
@@ -16,7 +16,7 @@ from review_sensei.hosting.github import (
     SetupPullRequestService,
     VerifiedDelivery,
 )
-from review_sensei.hosting.github.setup import (
+from review_sensei_github.setup import (
     BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS,
     CONFIG_PATH,
     LEGACY_CONFIG_PATH,
@@ -872,7 +872,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
     def test_managed_v4_recognition_does_not_read_the_current_templates(self):
         from unittest.mock import patch
 
-        from review_sensei.hosting.github import setup as setup_module
+        from review_sensei_github import setup as setup_module
 
         cases = (
             ("caller", lambda: _merge_focused_v4_workflow("v5"), "_tagged_workflow"),
@@ -913,7 +913,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
     def test_frozen_caller_reference_guard_rejects_ambiguous_fixtures(self):
         from unittest.mock import patch
 
-        from review_sensei.hosting.github import setup as setup_module
+        from review_sensei_github import setup as setup_module
 
         reference = "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml"
         caller = _merge_focused_v4_workflow("v5")
@@ -935,7 +935,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         # A manually reverted marker must not turn live setup-v5 bytes into
         # managed-v4 content: the marker==4 branch accepts only the frozen
         # historical templates, and no live renderer's bytes are among them.
-        from review_sensei.hosting.github import setup as setup_module
+        from review_sensei_github import setup as setup_module
 
         tag = setup_module.DEFAULT_PUBLIC_WORKFLOW_TAG
         current = _tagged_workflow(tag)
@@ -1089,7 +1089,7 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         self.assertTrue(any(r[0] == "create_pull_request" for r in transport.requests))
 
     def test_sensei_only_v5_caller_migrates_but_edited_content_is_preserved(self):
-        import review_sensei.hosting.github.setup as setup_module
+        import review_sensei_github.setup as setup_module
 
         plan = SetupPlanBuilder().build("owner/repo")
         files = {file.path: file.content for file in plan.files}

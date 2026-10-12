@@ -5,9 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from review_sensei_github.observed import restored_compatible_baseline
+
 from review_sensei.budgets import ReviewWorkBudgets
 from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github.observed import restored_compatible_baseline
 from review_sensei.models import ConversationFinding, ReviewRequest
 from review_sensei.schemas import validate_public_document
 from review_sensei.service import ReviewService

@@ -13,6 +13,10 @@ import json
 import unittest
 from urllib.parse import urlparse
 
+from review_sensei_github import GitHubHttp
+from review_sensei_github.application import _assessment_bytes
+from review_sensei_github.operation_entry import run_actions_analysis
+
 from review_sensei.bounded_evidence import (
     MAX_PART_READS,
     PART_READ_SECONDS,
@@ -20,9 +24,6 @@ from review_sensei.bounded_evidence import (
 )
 from review_sensei.budgets import ReviewWorkBudgets
 from review_sensei.configuration import GitHubSection
-from review_sensei.hosting.github import GitHubHttp
-from review_sensei.hosting.github.application import _assessment_bytes
-from review_sensei.hosting.github.operation_entry import run_actions_analysis
 from review_sensei.outcomes import ResourceBudget, ResourceBudgetTracker
 from tests import test_review_transaction as review_fixture
 from tests.fake_github_http import json_response

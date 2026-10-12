@@ -16,7 +16,7 @@ import re
 import unittest
 from pathlib import Path
 
-from review_sensei.hosting.github.setup import _tagged_workflow
+from review_sensei_github.setup import _tagged_workflow
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_WORKFLOW = ROOT / ".github" / "workflows" / "review-sensei-run.yml"
@@ -60,7 +60,7 @@ def _job_bodies(text: str) -> dict[str, str]:
 def _is_writer(job_id: str, body: str) -> bool:
     if job_id in {"review", "reply", "command"}:
         return True
-    if re.search(r"\bgithub (?:review|reply|command)\b", body):
+    if re.search(r'review-sensei-github" (?:review|publish|reply|command)\b', body):
         return True
     return "needs.resolve-trigger.outputs.operation" in body
 

@@ -4,14 +4,14 @@ import unittest
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
 
-from review_sensei.hosting.github import (
+from review_sensei_github import (
     GitHubHttp,
     GitHubHTTPError,
     GitHubHTTPPaginationLimitError,
     GitHubHTTPResponseTooLargeError,
     GitHubHTTPTransientError,
 )
-from review_sensei.hosting.github.http import MAX_GITHUB_RESPONSE_BYTES
+from review_sensei_github.http import MAX_GITHUB_RESPONSE_BYTES
 
 
 class FakeResponse(io.BytesIO):

@@ -217,7 +217,7 @@ These imports are public and stable within a major version:
 - `review_sensei.ObservedSequenceEvent`
 - `review_sensei.SequenceStep`
 - `review_sensei.replay_review_sequence`
-- `review_sensei.hosting.github.observed.run_observed_review_sequence`
+- `review_sensei_github.observed.run_observed_review_sequence`
 - `review_sensei.compare_sequence_policies`
 - `review_sensei.SessionIdentity`
 - `review_sensei.SessionRecord`
@@ -914,10 +914,10 @@ payload carries no cap or remaining-allowance fields. See
 [ADR 0055](adr/0055-merge-focused-default-and-legacy-retirement.md).
 
 `--observed` writes an observed-convergence report through
-`review_sensei.hosting.github.observed.run_observed_review_sequence`.
+`review_sensei_github.observed.run_observed_review_sequence`.
 That runner is not a package-root import, so `import review_sensei` does
 not load the GitHub host adapter. Import it from
-`review_sensei.hosting.github.observed`. The `hosting.github` package
+`review_sensei_github.observed`. The `hosting.github` package
 does not re-export it. A completed `--observed` run with unmet gates
 writes the report and exits 1. Invalid input, including `--review-mode
 legacy`, exits 1 without a report. In that report, `approval_events` is
@@ -1014,7 +1014,7 @@ Optional GitHub App-identity publication uses the narrow authentication
 adapter documented in [`docs/github-app-auth.md`](github-app-auth.md):
 
 ```python
-from review_sensei.hosting.github import (
+from review_sensei_github import (
     EnvPrivateKeySource,
     GitHubAppAuth,
     RequestedPermissions,
@@ -1045,7 +1045,7 @@ Optional App installation bootstrap uses webhook signature verification and an
 idempotent setup pull request service. Public entry points include:
 
 ```python
-from review_sensei.hosting.github import (
+from review_sensei_github import (
     EnvWebhookSecretSource,
     SetupPullRequestService,
     WebhookVerifier,

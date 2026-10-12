@@ -11,21 +11,21 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
-from ...baseline import ReviewBaseline
-from ...bounded_evidence import EvidenceReadBudget
-from ...context import ReviewContextCacheKey, finding_lifecycle_for_comment
-from ...convergence import (
+from review_sensei.baseline import ReviewBaseline
+from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.context import ReviewContextCacheKey, finding_lifecycle_for_comment
+from review_sensei.convergence import (
     LEGACY_REVIEW_MODE,
     BlockerCandidate,
     ReviewConvergencePolicy,
 )
-from ...coverage import CoverageManifest, coverage_approval_state
-from ...diff import DiffAnalysis, analyze_diff
-from ...errors import ReviewInputError
-from ...human_assessment import finding_instance_fingerprint
-from ...models import ReviewComment, ReviewResult
-from ...outcomes import PUBLIC_DIAGNOSTICS, RunOutcome, sanitize_diagnostic
-from ...placement import (
+from review_sensei.coverage import CoverageManifest, coverage_approval_state
+from review_sensei.diff import DiffAnalysis, analyze_diff
+from review_sensei.errors import ReviewInputError
+from review_sensei.human_assessment import finding_instance_fingerprint
+from review_sensei.models import ReviewComment, ReviewResult
+from review_sensei.outcomes import PUBLIC_DIAGNOSTICS, RunOutcome, sanitize_diagnostic
+from review_sensei.placement import (
     BODY_PLACEMENT,
     CONVERSATION_RESOLUTION_NOT_REQUIRED,
     CONVERSATION_RESOLUTION_REQUIRED,
@@ -33,7 +33,7 @@ from ...placement import (
     placement_note,
     plan_finding_placement_detail,
 )
-from ...presentation import (
+from review_sensei.presentation import (
     ADVISORY_STATE,
     CHANGES_REQUIRED_STATE,
     INCOMPLETE_STATE,
@@ -50,8 +50,13 @@ from ...presentation import (
     render_finding,
     render_review_summary,
 )
-from ...validation import validate_bounded_text
-from ...verifier import CandidateFinding, PublishableReview, prepare_publishable_review
+from review_sensei.validation import validate_bounded_text
+from review_sensei.verifier import (
+    CandidateFinding,
+    PublishableReview,
+    prepare_publishable_review,
+)
+
 from .approval import (
     ReviewApprovalEligibility,
     approval_eligibility_from_result,

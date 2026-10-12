@@ -16,32 +16,29 @@ import json
 import unittest
 from urllib.error import URLError
 
-from review_sensei.convergence import derive_blocker_candidate
-from review_sensei.coverage import CoverageManifest, FileCoverage
-from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github.application import (
+from review_sensei_github.application import (
     GitHubApplication,
     GitHubWriteOptions,
 )
-from review_sensei.hosting.github.approval import (
+from review_sensei_github.approval import (
     approval_eligibility_from_result,
     approval_facts_from_result,
     approval_withheld_diagnostic,
     evaluate_approval_facts,
     evaluate_auto_approval,
 )
-from review_sensei.hosting.github.checks import (
+from review_sensei_github.checks import (
     CheckOutcome,
     ReviewCheckPublisher,
     check_outcome_for_result,
     required_check_identity,
     review_check_outcome,
 )
-from review_sensei.hosting.github.errors import (
+from review_sensei_github.errors import (
     GitHubPublicationError,
     GitHubPublicationTransientError,
 )
-from review_sensei.hosting.github.publication import (
+from review_sensei_github.publication import (
     ReviewApprovalFinalizer,
     ReviewPublisher,
     approval_eligibility_marker,
@@ -49,6 +46,10 @@ from review_sensei.hosting.github.publication import (
     outcome_from_publication,
     review_marker,
 )
+
+from review_sensei.convergence import derive_blocker_candidate
+from review_sensei.coverage import CoverageManifest, FileCoverage
+from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.outcomes import PUBLIC_DIAGNOSTICS
 

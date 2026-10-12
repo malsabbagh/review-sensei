@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from ...broker_diagnostics import BrokerDiagnostic
-from ...errors import ReviewSenseiError
+from review_sensei.broker_diagnostics import BrokerDiagnostic
+from review_sensei.errors import ReviewSenseiError
 
 
 class GitHubAuthError(ReviewSenseiError):

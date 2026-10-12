@@ -9,8 +9,9 @@ import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from ...errors import ReviewInputError
-from ...presentation import assign_finding_identifiers, finding_identifier
+from review_sensei.errors import ReviewInputError
+from review_sensei.presentation import assign_finding_identifiers, finding_identifier
+
 from .approval import ReviewApprovalEligibility, evaluate_approval_facts
 
 MAX_PENDING_PAGE_BYTES = 12 * 1024

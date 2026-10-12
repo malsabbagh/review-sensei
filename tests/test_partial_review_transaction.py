@@ -10,15 +10,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from review_sensei.cli import main
-from review_sensei.coverage import CoverageManifest, FileCoverage
-from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github import (
+from review_sensei_github import (
     GitHubApplication,
     GitHubWriteOptions,
     ReviewPublisher,
 )
-from review_sensei.hosting.github.publication import outcome_from_publication
+from review_sensei_github.publication import outcome_from_publication
+
+from review_sensei.cli import main
+from review_sensei.coverage import CoverageManifest, FileCoverage
+from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.outcomes import RecoveryArtifact, RunOutcome
 from review_sensei.service import ReviewRun

@@ -11,22 +11,23 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github.conversation import (
+from review_sensei_github.conversation import (
     MAX_REPLY_BYTES,
     ConversationPublisher,
 )
-from review_sensei.hosting.github.errors import GitHubConversationError
-from review_sensei.hosting.github.http import GitHubHttp
-from review_sensei.hosting.github.human_assessment import HumanAssessmentPublisher
-from review_sensei.hosting.github.pending import (
+from review_sensei_github.errors import GitHubConversationError
+from review_sensei_github.http import GitHubHttp
+from review_sensei_github.human_assessment import HumanAssessmentPublisher
+from review_sensei_github.pending import (
     MAX_PENDING_PAGE_BYTES,
     pending_reply_pages,
 )
-from review_sensei.hosting.github.reply_budget import (
+from review_sensei_github.reply_budget import (
     ReplyPublicationHttp,
     reply_publication_budget,
 )
+
+from review_sensei.errors import ReviewInputError
 from review_sensei.human_assessment import (
     MAX_HUMAN_SOURCE_BYTES,
     HumanAssessmentDecision,
@@ -527,7 +528,7 @@ class PendingDeliveryTests(unittest.TestCase):
         state = state_with_inventory()
         original = state.reviews[0]["body"]
         with patch(
-            "review_sensei.hosting.github.reply_budget.MAX_REPLY_PUBLICATION_REQUESTS",
+            "review_sensei_github.reply_budget.MAX_REPLY_PUBLICATION_REQUESTS",
             8,
         ):
             with self.assertRaises(GitHubConversationError):

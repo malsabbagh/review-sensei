@@ -11,10 +11,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from review_sensei.disposition import MAINTAINER_ACTIONS, parse_maintainer_command
-from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github.setup import _tagged_workflow
-from review_sensei.hosting.github.trigger import (
+from review_sensei_github.setup import _tagged_workflow
+from review_sensei_github.trigger import (
     TriggerResolution,
     choose_head_sha,
     comment_mentions_sensei,
@@ -25,9 +23,12 @@ from review_sensei.hosting.github.trigger import (
     resolve_review_comment_event,
     write_github_output,
 )
-from review_sensei.hosting.github.trigger import (
+from review_sensei_github.trigger import (
     main as trigger_main,
 )
+
+from review_sensei.disposition import MAINTAINER_ACTIONS, parse_maintainer_command
+from review_sensei.errors import ReviewInputError
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO_CALLER = ROOT / ".github" / "workflows" / "review-sensei-review.yml"
@@ -459,7 +460,7 @@ class InlineCallerResolverTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIn(expected, text)
                 self.assertNotIn(
-                    "PYTHONPATH=src python -m review_sensei.hosting.github.trigger",
+                    "PYTHONPATH=src python -m review_sensei_github.trigger",
                     text,
                 )
 
@@ -667,9 +668,9 @@ class InlineCallerResolverTests(unittest.TestCase):
                 "deploy/cloudflare/src/setup-content.ts",
                 "deploy/cloudflare/test/setup-content.test.ts",
                 "examples/github-actions/review-sensei-review.yml",
-                "src/review_sensei/hosting/github/fixtures/merge-focused-v4-caller.yml",
-                "src/review_sensei/hosting/github/fixtures/sensei-only-v5-caller.yml",
-                "src/review_sensei/hosting/github/setup.py",
+                "packages/python/review-sensei-github/src/review_sensei_github/fixtures/merge-focused-v4-caller.yml",
+                "packages/python/review-sensei-github/src/review_sensei_github/fixtures/sensei-only-v5-caller.yml",
+                "packages/python/review-sensei-github/src/review_sensei_github/setup.py",
                 "tests/test_github_trigger.py",
             },
         )

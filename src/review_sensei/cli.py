@@ -7,18 +7,18 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 from .baseline import (
     RECOVERABLE_FALLBACK_REASONS,
     BaselinePersistenceError,
     ReviewBaseline,
     admission_context_document,
-    admission_context_from_document,
     baseline_history_document,
     plan_verification_scope,
     reconcile_overflow_review,
@@ -27,7 +27,6 @@ from .configuration import (
     BACKEND_DEFAULTS,
     IGNORED_PROVIDER_ENVIRONMENT_SETTINGS,
     ProductConfiguration,
-    customization_directories,
     documented_backend_names,
     internal_backend_names,
     load_configuration,
@@ -64,9 +63,7 @@ from .outcomes import (
     RecoveryArtifact,
     ResourceBudget,
     RunOutcome,
-    diagnostic_for_recovery_error,
     emit_host_outcome,
-    load_recovery_artifact,
     recovery_expires_at,
     review_exit_code,
     review_exit_reason,
@@ -948,7 +945,7 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
-def _parser() -> argparse.ArgumentParser:
+def _parser(*, include_hosted: bool = False) -> argparse.ArgumentParser:
     parser = _ProviderArgumentParser(
         prog="review-sensei",
         description="Run a provider-neutral AI review against a unified diff.",
@@ -1243,54 +1240,33 @@ def _parser() -> argparse.ArgumentParser:
             "and refuse unadmitted rounds."
         ),
     )
-    parser.add_argument(
-        "--github-session-ledger",
-        action="store_true",
-        help=(
-            "Checkpoint the identity-bound transaction into the "
-            "broker-attested GitHub issue-comment session ledger; the hosted "
-            "publication boundary reads that same comment, so a fresh runner "
-            "continues the durable rounds and baselines. Requires --transaction."
-        ),
-    )
-    parser.add_argument(
-        "--repository-id",
-        type=int,
-        help="GitHub repository database ID required for the hosted session ledger",
-    )
-    parser.add_argument(
-        "--app-slug",
-        default="reviewsensei[bot]",
-        help=(
-            "App login whose issue comments are trusted as the hosted session marker"
-        ),
-    )
-    parser.add_argument(
-        "--oidc-token",
-        help="Optional GitHub Actions OIDC assertion for the hosted ledger.",
-    )
-    return parser
-
-
-def _resolve_hosted_openrouter_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="review-sensei resolve-hosted-openrouter",
-        description=(
-            "Resolve and validate hosted OpenRouter model and upstream "
-            "from workflow environment variables."
-        ),
-    )
-    parser.add_argument(
-        "action",
-        choices=("model", "upstream", "both"),
-        help="Emit resolved model, upstream, or both as a tab-separated line.",
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=_package_version(),
-        help="Print the installed ReviewSensei version and exit",
-    )
+    if include_hosted:
+        parser.add_argument(
+            "--github-session-ledger",
+            action="store_true",
+            help=(
+                "Checkpoint the identity-bound transaction into the "
+                "broker-attested GitHub issue-comment session ledger; the hosted "
+                "publication boundary reads that same comment, so a fresh runner "
+                "continues the durable rounds and baselines. Requires --transaction."
+            ),
+        )
+        parser.add_argument(
+            "--repository-id",
+            type=int,
+            help="GitHub repository database ID required for the hosted session ledger",
+        )
+        parser.add_argument(
+            "--app-slug",
+            default="reviewsensei[bot]",
+            help=(
+                "App login whose issue comments are trusted as the hosted session marker"
+            ),
+        )
+        parser.add_argument(
+            "--oidc-token",
+            help="Optional GitHub Actions OIDC assertion for the hosted ledger.",
+        )
     return parser
 
 
@@ -1443,37 +1419,6 @@ def _doctor_parser() -> argparse.ArgumentParser:
         "--allow-data-egress",
         action="store_true",
         help="Authorize read-only probes of a non-loopback provider endpoint.",
-    )
-    parser.add_argument("--json", action="store_true", dest="as_json")
-    return parser
-
-
-def _host_plan_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="review-sensei host-plan",
-        description=(
-            "Resolve the trusted hosted backend, runner requirement, and GitHub "
-            "policy without provider or GitHub calls."
-        ),
-    )
-    parser.add_argument(
-        "--config",
-        type=Path,
-        help=(
-            "Configuration file to resolve; defaults to .reviewsensei.yml when "
-            "present, then packaged defaults."
-        ),
-    )
-    parser.add_argument("--provider", help="Backend override (inference.backend)")
-    parser.add_argument("--model", help="Model override (inference.model)")
-    parser.add_argument(
-        "--github-output",
-        type=Path,
-        help=(
-            "Write the plan as Actions environment-file lines to this path. "
-            "The workflow passes its own $GITHUB_OUTPUT file; the command never "
-            "reads that variable itself."
-        ),
     )
     parser.add_argument("--json", action="store_true", dest="as_json")
     return parser
@@ -1772,253 +1717,6 @@ def _run_promotion(argv: list[str]) -> int:
     return 0
 
 
-def _github_parser() -> argparse.ArgumentParser:
-    from .configuration import REVIEW_POLICIES
-
-    parser = argparse.ArgumentParser(
-        prog="review-sensei github",
-        description="Run GitHub publication seams with write opt-ins.",
-    )
-    _add_allow_custom_endpoint_argument(parser)
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    review = subparsers.add_parser("review", help="Publish a validated review result")
-    publication_source = review.add_mutually_exclusive_group()
-    publication_source.add_argument("--result", type=Path)
-    review.add_argument(
-        "--configuration-context",
-        type=Path,
-        help=(
-            "Trusted configuration-context JSON emitted alongside an "
-            "identity-bound analysis result"
-        ),
-    )
-    review.add_argument(
-        "--evidence-context",
-        type=Path,
-        help="Optional trusted evidence-context JSON for an identity-bound result",
-    )
-    review.add_argument(
-        "--admission-context",
-        type=Path,
-        help=(
-            "Trusted admission-context JSON (prior baseline and current review "
-            "context cache key) emitted by the analysis that produced this "
-            "result; required to publish a verification round, which cannot "
-            "reconstruct either input from the durable transaction alone"
-        ),
-    )
-    review.add_argument("--diff", type=Path, required=True)
-    review.add_argument("--repository", required=True)
-    review.add_argument("--repository-id", type=int, required=True)
-    review.add_argument("--pull-request", type=int, required=True)
-    review.add_argument("--head-sha", required=True)
-    review.add_argument("--base-branch")
-    review.add_argument("--base-sha")
-    review.add_argument("--app-slug", default="reviewsensei[bot]")
-    review.add_argument("--oidc-token")
-    review.add_argument(
-        "--outcome",
-        type=Path,
-        help="Write the structured run-outcome JSON for this publication",
-    )
-    publication_source.add_argument(
-        "--recover-from",
-        type=Path,
-        help="Publish a retained recovery artifact without invoking a model. Ambient REVIEWSENSEI_REVIEW_MODE does not apply; an explicit operator --review-mode is refused because serialized results drop admission state.",
-    )
-    review.add_argument(
-        "--allow-write",
-        action="store_true",
-        help="Acknowledge that GitHub writes are enabled for this invocation.",
-    )
-    review.add_argument(
-        "--enable-review",
-        action="store_true",
-        help="Opt into review publication for this invocation.",
-    )
-    review.add_argument(
-        "--enable-auto-approve",
-        dest="enable_auto_approve",
-        action="store_true",
-        default=True,
-        help="Approve eligible complete reviews (the default).",
-    )
-    review.add_argument(
-        "--no-auto-approve",
-        dest="enable_auto_approve",
-        action="store_false",
-        help=(
-            "Enforce required fixes through the ReviewSensei check without "
-            "emitting an approval, unless --reviews-policy says otherwise."
-        ),
-    )
-    review.add_argument(
-        "--reviews-policy",
-        choices=list(REVIEW_POLICIES),
-        default=None,
-        help=(
-            "Canonical github.reviews mode: auto-approve (default), blocking, "
-            "or advisory. Takes precedence over the approval boolean."
-        ),
-    )
-    review.add_argument(
-        "--enable-learning-prs",
-        action="store_true",
-        help="Opt into deterministic draft learning-PR publication.",
-    )
-    review.add_argument(
-        "--review-mode",
-        help=(
-            "Review-convergence mode: merge-focused (default), advisory, or "
-            "strict. Legacy settings must be migrated before execution. "
-            "Operator modes apply trusted blocker admission before GitHub review "
-            "events. Recovery artifacts cannot be republished under operator modes."
-        ),
-    )
-    review.add_argument(
-        "--session-ledger",
-        type=Path,
-        help=(
-            "Local directory for the issue #136 durable session ledger. "
-            "Operator modes reserve/commit a counted round around publication "
-            "and refuse unadmitted REQUEST_CHANGES (C5)."
-        ),
-    )
-    review.add_argument(
-        "--github-session-ledger",
-        action="store_true",
-        help=(
-            "Persist the C3 session ledger as one GitHub issue comment on the "
-            "source pull request. Operator modes keep rounds, baselines, and "
-            "dispositions durable."
-        ),
-    )
-    command = subparsers.add_parser(
-        "command",
-        help="Apply an authenticated @reviewsensei maintainer command to the session ledger",
-    )
-    command.add_argument("--comment-body", required=True)
-    command.add_argument("--actor", required=True)
-    command.add_argument("--actor-type", default="User")
-    command.add_argument("--association", required=True)
-    command.add_argument("--repository", required=True)
-    command.add_argument(
-        "--repository-id",
-        type=int,
-        help="GitHub repository database ID required for the hosted session ledger",
-    )
-    command.add_argument("--pull-request", type=int, required=True)
-    command.add_argument("--head-sha")
-    command.add_argument(
-        "--source-comment-id",
-        type=int,
-        help="GitHub issue-comment ID required for a hosted command mutation",
-    )
-    command.add_argument("--app-slug", default="reviewsensei[bot]")
-    command.add_argument(
-        "--session-ledger",
-        type=Path,
-        help=(
-            "Local operator directory for the durable session ledger; hosted "
-            "webhook commands use GitHubApplication and broker authorization."
-        ),
-    )
-    command.add_argument(
-        "--github-session-ledger",
-        action="store_true",
-        help="Use the broker-attested GitHub issue-comment session ledger.",
-    )
-    command.add_argument(
-        "--session-attestation",
-        type=Path,
-        help="Broker-bound hosted command attestation JSON.",
-    )
-    command.add_argument(
-        "--oidc-token",
-        help="Optional GitHub Actions OIDC assertion for the hosted ledger.",
-    )
-    command.add_argument(
-        "--allow-write",
-        action="store_true",
-        help=(
-            "Required for mutating session commands and when exchanging a "
-            "GitHub capability; read-only status does not require it."
-        ),
-    )
-
-    reply = subparsers.add_parser("reply", help="Generate or publish a mention reply")
-    reply.add_argument("--reply", type=Path)
-    _add_work_recovery_arguments(reply)
-    reply.add_argument(
-        "--enable-broader-review",
-        action="store_true",
-        help="Allow one bounded full discovery continuation under trusted unified review policy.",
-    )
-    reply.add_argument(
-        "--config", type=Path, help="Path to trusted ReviewSensei configuration"
-    )
-    reply.add_argument(
-        "--generate",
-        action="store_true",
-        help="Build bounded GitHub context, invoke the provider, and publish the reply.",
-    )
-    reply.add_argument("--repository", required=True)
-    reply.add_argument("--repository-id", type=int)
-    reply.add_argument("--pull-request", type=int, required=True)
-    reply.add_argument("--source-comment-id", type=int, required=True)
-    reply.add_argument("--source-updated-at", required=True)
-    reply.add_argument("--head-sha")
-    reply.add_argument(
-        "--source-kind",
-        choices=("inline", "issue"),
-        default="inline",
-    )
-    reply.add_argument("--app-slug", default="reviewsensei[bot]")
-    reply.add_argument("--root-comment-id", type=int, default=0)
-    reply.add_argument("--oidc-token")
-    reply.add_argument("--github-token-env", default="GITHUB_TOKEN")
-    reply.add_argument(
-        "--profile",
-        default=None,
-        help=(
-            "Named provider profile (local-private, fast-triage, deep-verification, "
-            "openrouter-sonnet, openrouter-gpt)"
-        ),
-    )
-    reply.add_argument(
-        "--provider", default=os.getenv("REVIEWSENSEI_PROVIDER", "ollama")
-    )
-    reply.add_argument("--base-url", default=_default_ollama_base_url())
-    _add_allow_custom_endpoint_argument(reply, default=argparse.SUPPRESS)
-    reply.add_argument("--model", default=_default_ollama_model())
-    reply.add_argument("--api-key-env", default="OLLAMA_API_KEY")
-    reply.add_argument(
-        "--timeout-seconds",
-        type=_positive_float,
-        default=os.getenv("OLLAMA_TIMEOUT_SECONDS", "900"),
-    )
-    reply.add_argument(
-        "--allow-unqualified-profile",
-        action="store_true",
-        help=(
-            "Authorize live provider use with an unqualified profile before "
-            "qualification evidence exists"
-        ),
-    )
-    reply.add_argument(
-        "--allow-write",
-        action="store_true",
-        help="Acknowledge that GitHub writes may be enabled for this invocation.",
-    )
-    reply.add_argument(
-        "--enable-reply",
-        action="store_true",
-        help="Enable mention reply publication for this invocation.",
-    )
-    return parser
-
-
 def _add_work_recovery_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--work-recovery-dir",
@@ -2083,756 +1781,6 @@ def _work_recovery_from_cli(
     return WorkRecoveryStore(directory, key=key, artifacts="diagnostics")
 
 
-def _require_accepted_result(
-    result: object,
-    *,
-    repository: str,
-    pull_request: int,
-    app_slug: str,
-) -> None:
-    """Refuse publication when an operation record accepted different bytes."""
-
-    if not os.environ.get("GITHUB_RUN_ID", "").strip():
-        return
-    configuration = load_configuration(None)
-    if configuration.github.operation_entry != "enabled":
-        return
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    if not isinstance(token, str) or not token.strip():
-        raise ReviewInputError("operation record is unavailable")
-    from .hosting.github.errors import GitHubHTTPError
-    from .hosting.github.http import MAX_PAGINATION_PAGES, GitHubHttp
-    from .hosting.github.operation_entry import accepted_payload_matches
-
-    http = GitHubHttp()
-    try:
-        comments = http.paginate(
-            path=http.repository_path(repository, f"/issues/{pull_request}/comments"),
-            token=token.strip(),
-            max_requests=MAX_PAGINATION_PAGES,
-            timeout_seconds=60,
-        )
-    except GitHubHTTPError:
-        # A missing record permits the legacy path only after a complete read.
-        # A full final page, rejected page or bounded transport failure cannot
-        # establish that no accepted operation exists beyond the observed prefix.
-        raise ReviewInputError(
-            "operation record inventory is incomplete or unavailable"
-        ) from None
-    bodies: list[str] = []
-    for comment in comments:
-        if not isinstance(comment, dict):
-            continue
-        user = comment.get("user")
-        login = user.get("login") if isinstance(user, dict) else None
-        body = comment.get("body")
-        if (
-            isinstance(login, str)
-            and login.lower() == app_slug.lower()
-            and isinstance(body, str)
-        ):
-            bodies.append(body)
-    digest = hashlib.sha256(
-        json.dumps(
-            result.to_dict(),  # type: ignore[attr-defined]
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
-    match = accepted_payload_matches(tuple(bodies), digest)
-    if match is False:
-        raise ReviewInputError(
-            "published result does not match the accepted operation record"
-        )
-
-
-def _override_facts(
-    http: object,
-    *,
-    token: str,
-    repository: str,
-    repository_id: int,
-    pull_request: int,
-    head_sha: str,
-    actor: str,
-    app_slug: str,
-) -> tuple[str, tuple[str, ...]]:
-    """Read collaborator permission and the current App review fingerprints.
-
-    The command does not accept a caller-supplied review file. Fingerprints
-    come from the latest App review on this head.
-    """
-
-    from .hosting.github.operation_entry import fingerprints_for_head
-
-    if not re.fullmatch(r"[A-Za-z0-9-]{1,39}", actor):
-        raise ReviewInputError("maintainer actor is invalid")
-    permission_status, permission_body = http.request(  # type: ignore[attr-defined]
-        "GET",
-        http.repository_path(  # type: ignore[attr-defined]
-            repository, f"/collaborators/{actor}/permission"
-        ),
-        token=token,
-    )
-    permission = (
-        permission_body.get("permission") if isinstance(permission_body, dict) else None
-    )
-    if permission_status != 200 or not isinstance(permission, str):
-        raise ReviewInputError("collaborator permission is unavailable")
-    # GitHub projects the built-in maintain role onto legacy permission=write.
-    # Only that exact pair supplies maintain authority; ordinary write and
-    # custom roles retain their legacy permission and the existing denial.
-    if permission == "write" and permission_body.get("role_name") == "maintain":
-        permission = "maintain"
-    status, reviews = http.request(  # type: ignore[attr-defined]
-        "GET",
-        http.repository_path(  # type: ignore[attr-defined]
-            repository, f"/pulls/{pull_request}/reviews?per_page=100"
-        ),
-        token=token,
-    )
-    if status != 200 or not isinstance(reviews, list):
-        raise ReviewInputError("current review fingerprints are unavailable")
-    latest_body = ""
-    latest_id = -1
-    for review in reviews:
-        if not isinstance(review, dict):
-            continue
-        user = review.get("user")
-        login = user.get("login") if isinstance(user, dict) else None
-        if not isinstance(login, str) or login.lower() != app_slug.lower():
-            continue
-        if review.get("commit_id") != head_sha:
-            continue
-        review_id = review.get("id")
-        body = review.get("body")
-        if (
-            isinstance(review_id, int)
-            and not isinstance(review_id, bool)
-            and review_id >= latest_id
-            and isinstance(body, str)
-        ):
-            latest_id = review_id
-            latest_body = body
-    return permission, fingerprints_for_head(
-        latest_body,
-        repository_id=repository_id,
-        pull_request=pull_request,
-        head_sha=head_sha,
-    )
-
-
-def _bind_hosted_command_attestation(
-    attestation: dict[str, object],
-    *,
-    repository: str,
-    repository_id: int,
-    pull_request: int,
-    head_sha: str,
-    source_comment_id: int,
-) -> None:
-    """Reject a hosted command attestation that disagrees with this invocation.
-
-    The broker re-checks this binding against the OIDC claims; checking it here
-    fails a mismatched attestation before any credential is exchanged.
-
-    `run_id` is intentionally not compared: the CLI has no trustworthy run
-    identity of its own, so the broker is the only place that can bind it.
-    """
-
-    if (
-        attestation.get("version") != 1
-        or attestation.get("operation") != "command"
-        or attestation.get("repository") != repository
-        or attestation.get("repository_id") != repository_id
-        or attestation.get("pull_request") != pull_request
-        or attestation.get("head_sha") != head_sha
-        or attestation.get("source_comment_id") != source_comment_id
-        or attestation.get("concurrency_group")
-        != f"reviewsensei-session-{repository_id}-{pull_request}"
-    ):
-        raise ReviewInputError(
-            "session attestation does not match the hosted command identity"
-        )
-
-
-def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
-    from .convergence import (
-        OPERATOR_REVIEW_MODES,
-        ReviewConvergencePolicy,
-        resolve_review_convergence_policy,
-        resolve_review_mode,
-    )
-    from .hosting.github import (
-        BrokerClient,
-        ConversationPublisher,
-        GitHubApplication,
-        GitHubHttp,
-        GitHubWriteOptions,
-        LearningPRPublisher,
-        LearningPRResult,
-        ReviewPublisher,
-    )
-    from .hosting.github.errors import (
-        GitHubPublicationError,
-        GitHubPublicationTransientError,
-    )
-    from .hosting.github.publication import outcome_from_publication
-    from .models import ConversationReply, ReviewResult
-    from .session import resolve_local_session_ledger
-
-    if args.command == "command":
-        from .disposition import (
-            apply_session_command,
-            authorized_maintainer,
-            parse_maintainer_command,
-        )
-        from .session import SessionIdentity
-
-        parsed = parse_maintainer_command(
-            args.comment_body,
-            actor=args.actor,
-            head_sha=getattr(args, "head_sha", None),
-        )
-        if parsed is None:
-            raise ReviewInputError("comment is not a supported maintainer command")
-        if not authorized_maintainer(
-            login=args.actor,
-            user_type=args.actor_type,
-            association=args.association,
-            app_slug=args.app_slug,
-        ):
-            raise ReviewInputError("maintainer command is unauthorized")
-        if parsed.action != "status" and not args.allow_write:
-            raise ReviewInputError("github writes require --allow-write")
-        if getattr(args, "github_session_ledger", False):
-            if args.session_ledger is not None:
-                raise ReviewInputError(
-                    "hosted maintainer commands cannot use --session-ledger"
-                )
-            if (
-                isinstance(args.repository_id, bool)
-                or not isinstance(args.repository_id, int)
-                or args.repository_id <= 0
-            ):
-                raise ReviewInputError(
-                    "hosted maintainer commands require --repository-id"
-                )
-            if not isinstance(args.head_sha, str) or not re.fullmatch(
-                r"[a-f0-9]{40}", args.head_sha
-            ):
-                raise ReviewInputError("hosted maintainer commands require --head-sha")
-            source_comment_id = getattr(args, "source_comment_id", None)
-            session_attestation = None
-            if parsed.action != "status":
-                if (
-                    isinstance(source_comment_id, bool)
-                    or not isinstance(source_comment_id, int)
-                    or source_comment_id <= 0
-                ):
-                    raise ReviewInputError(
-                        "hosted command mutations require --source-comment-id"
-                    )
-                attestation_path = getattr(args, "session_attestation", None)
-                if attestation_path is None:
-                    raise ReviewInputError(
-                        "hosted command mutations require --session-attestation"
-                    )
-                try:
-                    loaded_attestation = json.loads(
-                        read_bounded_utf8(
-                            attestation_path,
-                            maximum=16 * 1024,
-                            label="session attestation",
-                        )
-                    )
-                except json.JSONDecodeError as exc:
-                    raise ReviewInputError(
-                        "session attestation is invalid JSON"
-                    ) from exc
-                if not isinstance(loaded_attestation, dict):
-                    raise ReviewInputError("session attestation must be an object")
-                _bind_hosted_command_attestation(
-                    loaded_attestation,
-                    repository=args.repository,
-                    repository_id=args.repository_id,
-                    pull_request=args.pull_request,
-                    head_sha=args.head_sha,
-                    source_comment_id=source_comment_id,
-                )
-                session_attestation = loaded_attestation
-            http = GitHubHttp()
-            actor_permission = None
-            finding_fingerprints = None
-            if parsed.action == "approve-media" or parsed.finding_reference:
-                read_token = os.environ.get("GITHUB_TOKEN") or os.environ.get(
-                    "GH_TOKEN"
-                )
-                if not isinstance(read_token, str) or not read_token.strip():
-                    raise ReviewInputError(
-                        "maintainer override requires GitHub metadata access"
-                    )
-                actor_permission, finding_fingerprints = _override_facts(
-                    http,
-                    token=read_token.strip(),
-                    repository=args.repository,
-                    repository_id=args.repository_id,
-                    pull_request=args.pull_request,
-                    head_sha=args.head_sha,
-                    actor=args.actor,
-                    app_slug=args.app_slug,
-                )
-            application = GitHubApplication(
-                broker=BrokerClient(),
-                http=http,
-                reviewer=ReviewPublisher(http=http),
-                learner=LearningPRPublisher(http=http),
-                replier=ConversationPublisher(http=http),
-            )
-            command_configuration = load_configuration(getattr(args, "config", None))
-            result = application.apply_maintainer_command(
-                options=GitHubWriteOptions(
-                    github_writes=args.allow_write,
-                    github_session_ledger=True,
-                ),
-                oidc_token=getattr(args, "oidc_token", None),
-                repository=args.repository,
-                repository_id=args.repository_id,
-                pull_request=args.pull_request,
-                head_sha=args.head_sha,
-                body=args.comment_body,
-                actor_login=args.actor,
-                actor_type=args.actor_type,
-                association=args.association,
-                app_slug=args.app_slug,
-                source_comment_id=source_comment_id,
-                session_attestation=session_attestation,
-                actor_permission=actor_permission,
-                finding_fingerprints=finding_fingerprints,
-                operation_entry=command_configuration.github.operation_entry,
-                app_id=_actions_app_id(),
-                run_id=os.environ.get("GITHUB_RUN_ID", "").strip() or None,
-                run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT", "1").strip() or "1",
-            )
-            print(result.summary)
-            return 0
-        for flag, value in (
-            ("--repository-id", getattr(args, "repository_id", None)),
-            ("--source-comment-id", getattr(args, "source_comment_id", None)),
-            ("--session-attestation", getattr(args, "session_attestation", None)),
-            ("--oidc-token", getattr(args, "oidc_token", None)),
-        ):
-            if value is not None:
-                raise ReviewInputError(
-                    f"{flag} requires --github-session-ledger for maintainer commands"
-                )
-        ledger = resolve_local_session_ledger(getattr(args, "session_ledger", None))
-        if ledger is None:
-            raise ReviewInputError("maintainer commands require a session ledger")
-        session_identity = SessionIdentity(
-            repository=args.repository, pull_request=args.pull_request
-        )
-        _record, command_result = apply_session_command(
-            ledger, session_identity, parsed
-        )
-        print(command_result.summary)
-        return 0
-
-    if not args.allow_write:
-        raise ReviewInputError("github writes require --allow-write")
-    broker = BrokerClient()
-    http = GitHubHttp()
-    session_ledger = None
-    if args.command == "review":
-        if (
-            getattr(args, "session_ledger", None) is not None
-            or getattr(args, "github_session_ledger", False)
-        ) and (
-            not getattr(args, "repository", None)
-            or getattr(args, "pull_request", None) is None
-        ):
-            raise ReviewInputError(
-                "session ledger requires --repository and --pull-request"
-            )
-        session_ledger = resolve_local_session_ledger(
-            getattr(args, "session_ledger", None)
-        )
-    application = GitHubApplication(
-        broker=broker,
-        http=http,
-        reviewer=ReviewPublisher(http=http),
-        learner=LearningPRPublisher(http=http),
-        replier=ConversationPublisher(http=http),
-        session_ledger=session_ledger,
-    )
-    if args.command == "review":
-        diff = read_bounded_utf8(args.diff, maximum=1_048_576, label="diff")
-        if args.enable_review and (not args.base_branch or not args.base_sha):
-            raise ReviewInputError(
-                "review publication requires --base-branch and --base-sha"
-            )
-        identity = {
-            "repository": args.repository,
-            "pull_request_number": args.pull_request,
-            "base_sha": args.base_sha,
-            "head_sha": args.head_sha,
-        }
-        if args.recover_from and args.enable_learning_prs:
-            outcome = RunOutcome(
-                "publication_failed",
-                diagnostic="recovery_learning_prs_refused",
-                **identity,
-            )
-            emit_host_outcome(outcome, output_path=args.outcome)
-            print(
-                "review-sensei: publication recovery cannot write learning pull requests",
-                file=sys.stderr,
-            )
-            print(outcome.status)
-            return run_outcome_exit_code(outcome.status)
-        explicit_mode = getattr(args, "review_mode", None)
-        if args.recover_from:
-            if (
-                explicit_mode is not None
-                and resolve_review_mode(explicit_mode) in OPERATOR_REVIEW_MODES
-            ):
-                convergence_policy = resolve_review_convergence_policy(
-                    mode=explicit_mode
-                )
-            else:
-                convergence_policy = ReviewConvergencePolicy()
-        else:
-            convergence_policy = resolve_review_convergence_policy(mode=explicit_mode)
-        if args.recover_from:
-            try:
-                artifact = load_recovery_artifact(args.recover_from)
-                artifact.validate(
-                    repository=args.repository,
-                    pull_request_number=args.pull_request,
-                    base_sha=args.base_sha,
-                    head_sha=args.head_sha,
-                )
-                review_publication = application.recover_review(
-                    options=GitHubWriteOptions(
-                        github_writes=True,
-                        auto_review=args.enable_review,
-                        auto_approve=args.enable_auto_approve,
-                        reviews_policy=getattr(args, "reviews_policy", None),
-                    ),
-                    oidc_token=args.oidc_token,
-                    repository=args.repository,
-                    repository_id=args.repository_id,
-                    pull_request=args.pull_request,
-                    head_sha=args.head_sha,
-                    base_branch=args.base_branch,
-                    base_sha=args.base_sha,
-                    artifact=artifact,
-                    diff=diff,
-                    app_slug=args.app_slug,
-                    convergence_policy=convergence_policy,
-                )
-            except (GitHubPublicationTransientError, GitHubPublicationError) as exc:
-                diagnostic = (
-                    "publication_ambiguous"
-                    if isinstance(exc, GitHubPublicationTransientError)
-                    else "publication_failed"
-                )
-                outcome = RunOutcome(
-                    "publication_failed",
-                    diagnostic=diagnostic,
-                    **identity,
-                )
-                emit_host_outcome(outcome, output_path=args.outcome)
-                print(f"review-sensei: {exc}", file=sys.stderr)
-                print(outcome.status)
-                return run_outcome_exit_code(outcome.status)
-            except ReviewInputError as exc:
-                outcome = RunOutcome(
-                    "publication_failed",
-                    diagnostic=diagnostic_for_recovery_error(exc),
-                    **identity,
-                )
-                emit_host_outcome(outcome, output_path=args.outcome)
-                print(f"review-sensei: {exc}", file=sys.stderr)
-                print(outcome.status)
-                return run_outcome_exit_code(outcome.status)
-            outcome = outcome_from_publication(
-                review_publication,
-                review_result=ReviewResult.from_dict(artifact.result),
-                **identity,
-            )
-            emit_host_outcome(outcome, output_path=args.outcome)
-            print(review_publication.status)
-            return run_outcome_exit_code(outcome.status)
-        if args.result is None:
-            outcome = RunOutcome(
-                "publication_failed",
-                diagnostic="publication_failed",
-                **identity,
-            )
-            emit_host_outcome(outcome, output_path=args.outcome)
-            print(
-                "review-sensei: review publication requires --result or --recover-from",
-                file=sys.stderr,
-            )
-            print(outcome.status)
-            return run_outcome_exit_code(outcome.status)
-        result = ReviewResult.from_dict(
-            json.loads(
-                read_bounded_utf8(args.result, maximum=2_097_152, label="result")
-            )
-        )
-        configuration_context = (
-            _load_context_document(
-                args.configuration_context,
-                label="configuration context",
-            )
-            if args.configuration_context is not None
-            else None
-        )
-        evidence_context = (
-            _load_context_document(args.evidence_context, label="evidence context")
-            if args.evidence_context is not None
-            else None
-        )
-        admission_baseline = None
-        admission_current_key = None
-        if args.admission_context is not None:
-            if configuration_context is None:
-                # The identity-bound transaction is what makes the admission
-                # inputs meaningful; accepting them without it would let a
-                # hosted caller bypass F3 admission with caller-supplied state.
-                raise ReviewInputError(
-                    "admission context requires an identity-bound configuration context"
-                )
-            try:
-                admission_baseline, admission_current_key = (
-                    admission_context_from_document(
-                        _load_context_document(
-                            args.admission_context, label="admission context"
-                        )
-                    )
-                )
-            except ReviewInputError as exc:
-                raise ReviewInputError(f"admission context is invalid: {exc}") from exc
-        _require_accepted_result(
-            result,
-            repository=args.repository,
-            pull_request=args.pull_request,
-            app_slug=args.app_slug,
-        )
-        try:
-            review_outcome = application.publish_review(
-                options=GitHubWriteOptions(
-                    github_writes=True,
-                    auto_review=args.enable_review,
-                    auto_approve=args.enable_auto_approve,
-                    reviews_policy=getattr(args, "reviews_policy", None),
-                    github_session_ledger=getattr(args, "github_session_ledger", False),
-                ),
-                oidc_token=args.oidc_token,
-                repository=args.repository,
-                repository_id=args.repository_id,
-                pull_request=args.pull_request,
-                head_sha=args.head_sha,
-                base_branch=args.base_branch,
-                base_sha=args.base_sha,
-                result=result,
-                diff=diff,
-                app_slug=args.app_slug,
-                convergence_policy=convergence_policy,
-                configuration_context=configuration_context,
-                evidence_context=evidence_context,
-                baseline=admission_baseline,
-                current_key=admission_current_key,
-            )
-        except GitHubPublicationTransientError as exc:
-            outcome = RunOutcome(
-                "publication_failed",
-                diagnostic="publication_ambiguous",
-                **identity,
-            )
-            emit_host_outcome(outcome, output_path=args.outcome)
-            print(f"review-sensei: {exc}", file=sys.stderr)
-            print(outcome.status)
-            return run_outcome_exit_code(outcome.status)
-        except GitHubPublicationError as exc:
-            outcome = RunOutcome(
-                "publication_failed",
-                diagnostic="publication_failed",
-                **identity,
-            )
-            emit_host_outcome(outcome, output_path=args.outcome)
-            print(f"review-sensei: {exc}", file=sys.stderr)
-            print(outcome.status)
-            return run_outcome_exit_code(outcome.status)
-        learning_outcomes: tuple[LearningPRResult, ...] = ()
-        review_allows_learning = not args.enable_review or review_outcome.status in {
-            "published",
-            "already_published",
-        }
-        if args.enable_learning_prs and review_allows_learning:
-            if not args.base_branch or not args.base_sha:
-                raise ReviewInputError(
-                    "learning PR publication requires --base-branch and --base-sha"
-                )
-            learning_outcomes = application.publish_learning_proposals(
-                options=GitHubWriteOptions(
-                    github_writes=True,
-                    learning_prs=True,
-                ),
-                oidc_token=args.oidc_token,
-                repository=args.repository,
-                repository_id=args.repository_id,
-                pull_request=args.pull_request,
-                head_sha=args.head_sha,
-                base_branch=args.base_branch,
-                base_sha=args.base_sha,
-                result=result,
-            )
-        outcome = outcome_from_publication(
-            review_outcome, review_result=result, **identity
-        )
-        emit_host_outcome(outcome, output_path=args.outcome)
-        statuses = [review_outcome.status]
-        statuses.extend(item.status for item in learning_outcomes)
-        print(" ".join(statuses))
-        return run_outcome_exit_code(outcome.status)
-    if args.generate:
-        if not args.enable_reply:
-            print("disabled")
-            return 0
-        read_token = os.getenv(args.github_token_env)
-        if not read_token:
-            raise ReviewInputError(
-                f"GitHub read token environment variable {args.github_token_env} is unavailable"
-            )
-        _validate_live_profile_gates(args, argv)
-        provider_settings, _ = resolve_review_inference(args, argv)
-        provider = default_registry().create(provider_settings)
-        work_configuration = load_configuration(getattr(args, "config", None))
-        work_recovery = _work_recovery_from_cli(args, work_configuration)
-        broader_service = None
-        if getattr(args, "enable_broader_review", False):
-            if (
-                work_configuration.advanced.review_work.mode != "unified"
-                or not work_configuration.github.automatic_reviews
-                or not work_configuration.github.writes
-            ):
-                raise ReviewInputError(
-                    "broader review requires unified mode and trusted full-review/write policy"
-                )
-            from .stages import (
-                category_catalog_for_configured_stages,
-                load_stages_from_dir,
-            )
-
-            custom = customization_directories(work_configuration)
-            stages = load_stages_from_dir(
-                custom.stages or Path(__file__).parent / "default_stages",
-                category_catalog=category_catalog_for_configured_stages(
-                    custom.categories
-                ),
-            )
-            full_provider, stage_providers = bind_stage_providers(
-                registry=default_registry(), settings=provider_settings, stages=stages
-            )
-            broader_service = ReviewService(
-                full_provider,
-                stages=stages,
-                stage_providers=stage_providers,
-                work_budgets=work_configuration.advanced.review_work,
-            )
-        reply_budget = _configured_resource_budget(
-            ResourceBudget.create(), work_configuration
-        )
-        reply_outcome = application.generate_and_publish_reply(
-            options=GitHubWriteOptions(
-                github_writes=True,
-                mention_replies=True,
-                auto_review=broader_service is not None,
-                reviews_policy=work_configuration.github.reviews,
-                upload_artifacts=work_configuration.github.artifacts == "diagnostics",
-            ),
-            oidc_token=args.oidc_token,
-            read_token=read_token,
-            repository=args.repository,
-            pull_request=args.pull_request,
-            source_comment_id=args.source_comment_id,
-            source_updated_at=args.source_updated_at,
-            expected_head_sha=args.head_sha or None,
-            reply_provider=provider,
-            model=args.model,
-            app_slug=args.app_slug,
-            root_comment_id=args.root_comment_id or None,
-            source_kind=args.source_kind,
-            work_budgets=work_configuration.advanced.review_work,
-            budget=reply_budget,
-            work_recovery=work_recovery,
-            broader_service=broader_service,
-            operation_entry=work_configuration.github.operation_entry,
-            repository_id=getattr(args, "repository_id", None),
-            app_id=_actions_app_id(),
-            run_id=os.environ.get("GITHUB_RUN_ID", "").strip() or None,
-            run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT", "1").strip() or "1",
-        )
-        print(reply_outcome.status)
-        assessment_status = getattr(reply_outcome, "assessment_status", None)
-        if assessment_status is not None:
-            assessment_diagnostic = getattr(
-                reply_outcome, "assessment_diagnostic", None
-            )
-            print(
-                f"review-sensei: assessment={assessment_status}"
-                + (
-                    f" diagnostic={assessment_diagnostic}"
-                    if assessment_diagnostic
-                    else ""
-                ),
-                file=sys.stderr,
-            )
-        approval_status = getattr(reply_outcome, "approval_status", None)
-        if approval_status is not None:
-            reply_approval_diagnostic = getattr(
-                reply_outcome, "approval_diagnostic", None
-            )
-            print(
-                f"review-sensei: approval={approval_status}"
-                + (
-                    f" diagnostic={reply_approval_diagnostic}"
-                    if reply_approval_diagnostic
-                    else ""
-                ),
-                file=sys.stderr,
-            )
-        return 0
-    if args.reply is None or not args.head_sha:
-        raise ReviewInputError(
-            "publishing a reply requires --reply and --head-sha unless --generate is used"
-        )
-    reply = ConversationReply.from_dict(
-        json.loads(read_bounded_utf8(args.reply, maximum=16 * 1024, label="reply"))
-    )
-    reply_outcome = application.publish_reply(
-        options=GitHubWriteOptions(
-            github_writes=True,
-            mention_replies=args.enable_reply,
-        ),
-        oidc_token=args.oidc_token,
-        repository=args.repository,
-        pull_request=args.pull_request,
-        source_comment_id=args.source_comment_id,
-        source_updated_at=args.source_updated_at,
-        head_sha=args.head_sha,
-        reply=reply,
-        app_slug=args.app_slug,
-        root_comment_id=args.root_comment_id,
-        source_kind=args.source_kind,
-    )
-    print(reply_outcome.status)
-    return 0
-
-
 def _print_offline_error(exc: BaseException) -> None:
     print(f"review-sensei: {exc}", file=sys.stderr)
 
@@ -2881,30 +1829,6 @@ def _run_doctor_command(arguments: list[str]) -> int:
         _print_offline_error(
             RuntimeError(f"unexpected diagnostic failure: {type(exc).__name__}")
         )
-        return 2
-
-
-def _run_host_plan_command(arguments: list[str]) -> int:
-    args = _host_plan_parser().parse_args(arguments)
-    try:
-        from .hosted import (
-            hosted_plan_outputs,
-            load_and_plan_hosted,
-            render_hosted_plan,
-            write_github_outputs,
-        )
-
-        plan = load_and_plan_hosted(
-            args.config,
-            cli_provider=args.provider,
-            cli_model=args.model,
-        )
-        if args.github_output is not None:
-            write_github_outputs(args.github_output, hosted_plan_outputs(plan))
-        sys.stdout.write(render_hosted_plan(plan, as_json=args.as_json))
-        return 0
-    except (OSError, ValueError, TypeError, ReviewSenseiError) as exc:
-        _print_offline_error(exc)
         return 2
 
 
@@ -3095,7 +2019,9 @@ def _asserted_observed_identity(value: object) -> str:
     return value
 
 
-def _run_evaluate_convergence_command(arguments: list[str]) -> int:
+def _run_evaluate_convergence_command(
+    arguments: list[str], *, observed_runner: Callable[..., Any] | None = None
+) -> int:
     args = _evaluate_convergence_parser().parse_args(arguments)
     try:
         from .convergence import (
@@ -3167,8 +2093,11 @@ def _run_evaluate_convergence_command(arguments: list[str]) -> int:
                 "observed evidence and legacy comparison cannot run in one report"
             )
         if args.observed:
-            from .hosting.github.observed import run_observed_review_sequence
-
+            if observed_runner is None:
+                raise ReviewInputError(
+                    "observed evidence moved to review-sensei-github evaluate-observed"
+                )
+            run_observed_review_sequence = observed_runner
             source_identity = _asserted_observed_identity(args.source_identity)
             package_identity = _asserted_observed_identity(args.package_identity)
             workflow_identity = _asserted_observed_identity(args.workflow_identity)
@@ -3331,7 +2260,6 @@ def _run_config_command(arguments: list[str]) -> int:
 _OFFLINE_COMMANDS = {
     "doctor": _run_doctor_command,
     "plan": _run_plan_command,
-    "host-plan": _run_host_plan_command,
     "learnings": _run_learnings_command,
     "evaluate-convergence": _run_evaluate_convergence_command,
 }
@@ -3350,53 +2278,6 @@ def _configure_standard_streams() -> None:
             reconfigure(encoding="utf-8")
         except (OSError, ValueError):
             continue
-
-
-def _report_broker_failure(error: BaseException, args: argparse.Namespace) -> bool:
-    """Supplement broker failures without changing exits or wrapper semantics."""
-    from .broker_diagnostics import exception_broker_diagnostic
-    from .hosting.github.errors import GitHubHTTPTransientError
-
-    diagnostic = exception_broker_diagnostic(error)
-    if diagnostic is None:
-        return False
-    transient = isinstance(error, GitHubHTTPTransientError)
-    token = "broker_temporarily_unavailable" if transient else "broker_rejected"
-    print(f"review-sensei: {diagnostic.message()}", file=sys.stderr)
-    print(f"review-sensei: reason={token}", file=sys.stderr)
-    try:
-        emit_host_outcome(
-            RunOutcome(
-                status="action_required",
-                diagnostic=token,
-                stage_summary=diagnostic.metadata(),
-            ),
-            output_path=getattr(args, "outcome", None),
-        )
-    except (OSError, ValueError, ReviewSenseiError):
-        # Optional output must never replace the original failure or its exit.
-        print("review-sensei: broker diagnostic output unavailable", file=sys.stderr)
-    return True
-
-
-def _actions_app_id() -> int | None:
-    """GitHub App id for an Actions run, when the event or env provides one."""
-
-    raw = os.environ.get("REVIEWSENSEI_APP_ID", "").strip()
-    if raw.isdigit() and int(raw) > 0:
-        return int(raw)
-    event_path = os.environ.get("GITHUB_EVENT_PATH", "").strip()
-    if not event_path:
-        return None
-    try:
-        event = json.loads(Path(event_path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    installation = event.get("installation") if isinstance(event, dict) else None
-    app_id = installation.get("app_id") if isinstance(installation, dict) else None
-    if isinstance(app_id, int) and not isinstance(app_id, bool) and app_id > 0:
-        return app_id
-    return None
 
 
 def _reconcile_hosted_result(
@@ -3449,14 +2330,11 @@ def _run_review_provider(
 
     hosted = kwargs.pop("hosted_session_ledger", False)
     operation_entry = kwargs.pop("operation_entry", "disabled")
-    ledger = kwargs.pop("ledger", None)
-    repository = kwargs.pop("repository", None)
-    repository_id = kwargs.pop("repository_id", None)
-    pull_request = kwargs.pop("pull_request", None)
+    for hosted_key in ("ledger", "repository", "repository_id", "pull_request"):
+        kwargs.pop(hosted_key, None)
     adjust = kwargs.pop("adjust", None)
-    run_id = os.environ.get("GITHUB_RUN_ID", "").strip()
-    app_id = _actions_app_id()
-    head_sha = kwargs.get("trusted_head_sha")
+    if hosted is True and operation_entry == "enabled":
+        raise ReviewInputError("Actions operation entry requires review-sensei-github")
 
     def produced() -> ReviewRun:
         run = service.run(request, **kwargs)  # type: ignore[attr-defined]
@@ -3473,82 +2351,82 @@ def _run_review_provider(
             raise ReviewInputError("review provider returned an invalid result")
         return run
 
-    if (
-        hosted is not True
-        or operation_entry != "enabled"
-        or ledger is None
-        or not run_id
-        or app_id is None
-        or not isinstance(repository, str)
-        or not isinstance(repository_id, int)
-        or isinstance(pull_request, bool)
-        or not isinstance(pull_request, int)
-        or not isinstance(head_sha, str)
-        or len(head_sha) != 40
-    ):
-        return produced()
-    from .hosting.github.operation_entry import (
-        HostedProviderResult,
-        analysis_payload,
-        run_actions_analysis,
-    )
-    from .hosting.github.operation_host import OperationRefusal
-    from .models import ReviewResult
-    from .outcomes import RunOutcome
-    from .session import session_reservation_id
-
-    reservation = session_reservation_id(
-        repository=repository,
-        pull_request=pull_request,
-        head_sha=head_sha,
-        kind="publish",
-    )
-    admitted = run_actions_analysis(
-        http=getattr(ledger, "http"),
-        token=getattr(ledger, "token"),
-        repository=repository,
-        repository_id=repository_id,
-        pull_request=pull_request,
-        run_id=run_id,
-        run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT", "1").strip() or "1",
-        app_id=app_id,
-        reservation_id=reservation,
-        attestation_digest=hashlib.sha256(
-            f"{repository_id}:{pull_request}:{head_sha}".encode()
-        ).hexdigest(),
-        execute=produced,
-        encode=analysis_payload,
-    )
-    if isinstance(admitted, OperationRefusal):
-        raise ReviewInputError(f"operation entry refused: {admitted.reason}")
-    if not isinstance(admitted, HostedProviderResult):
-        raise ReviewInputError("operation entry refused: invalid")
-    if admitted.fresh is not None:
-        if not isinstance(admitted.fresh, ReviewRun):
-            raise ReviewInputError("operation entry refused: invalid")
-        return admitted.fresh
-    if admitted.replay_payload is None:
-        raise ReviewInputError("operation entry refused: result_missing")
-    result = ReviewResult.from_dict(json.loads(admitted.replay_payload))
-    status, diagnostic = service._run_outcome_for_result(result)  # type: ignore[attr-defined]
-    return ReviewRun(
-        outcome=RunOutcome(status, diagnostic=diagnostic),
-        result=result,
-    )
+    return produced()
 
 
-def main(argv: list[str] | None = None) -> int:
+_MOVED_TO_GITHUB_CLI = frozenset({"github", "host-plan", "resolve-hosted-openrouter"})
+
+
+def _report_broker_failure(error: BaseException, args: argparse.Namespace) -> bool:
+    """Render a catalogued broker failure without importing the hosted package."""
+
+    from .broker_diagnostics import exception_broker_diagnostic
+
+    diagnostic = exception_broker_diagnostic(error)
+    if diagnostic is None:
+        return False
+    transient = type(error).__name__ == "GitHubHTTPTransientError"
+    token = "broker_temporarily_unavailable" if transient else "broker_rejected"
+    print(f"review-sensei: {diagnostic.message()}", file=sys.stderr)
+    print(f"review-sensei: reason={token}", file=sys.stderr)
+    try:
+        emit_host_outcome(
+            RunOutcome(
+                status="action_required",
+                diagnostic=token,
+                stage_summary=diagnostic.metadata(),
+            ),
+            output_path=getattr(args, "outcome", None),
+        )
+    except (OSError, ValueError, ReviewSenseiError):
+        print("review-sensei: broker diagnostic output unavailable", file=sys.stderr)
+    return True
+
+
+def _delegate_moved_command(args_list: list[str]) -> int:
+    """Run a command that now lives in review-sensei-github.
+
+    The engine does not import that package. A missing install surfaces as
+    the subprocess failure.
+    """
+
+    forwarded = list(args_list)
+    if forwarded and forwarded[0] == "github":
+        forwarded = forwarded[1:]
+        if forwarded and forwarded[0] == "review":
+            forwarded = ["publish", *forwarded[1:]]
+    if not forwarded:
+        forwarded = ["--help"]
+    # Tests that already loaded the hosted CLI keep their patches. A normal
+    # engine process has not imported it, so this is not an engine import.
+    loaded = sys.modules.get("review_sensei_github.cli")
+    if loaded is not None:
+        return int(loaded.main(forwarded))
+    print(
+        "review-sensei: this command moved to review-sensei-github",
+        file=sys.stderr,
+    )
+    completed = subprocess.run(
+        [sys.executable, "-m", "review_sensei_github", *forwarded],
+        check=False,
+    )
+    return int(completed.returncode)
+
+
+def main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) -> int:
     """Normalize cancellation after command-specific cleanup has unwound."""
     try:
-        return _main(argv)
+        return _main(argv, hosted_hooks=hosted_hooks)
     except KeyboardInterrupt:
         print("review-sensei: cancelled", file=sys.stderr)
         return 130
 
 
-def _main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) -> int:
     _configure_standard_streams()
     args_list = list(argv) if argv is not None else sys.argv[1:]
+    if args_list and args_list[0] in _MOVED_TO_GITHUB_CLI:
+        return _delegate_moved_command(args_list)
     # The default review command is flag-based, so optional commands cannot be
     # required argparse subparsers. config/doctor/plan/learnings/
     # evaluate-convergence use the same first-token command map as prepare-diff,
@@ -3569,11 +2447,6 @@ def _main(argv: list[str] | None = None) -> int:
         ) as exc:
             print(f"review-sensei: {exc}", file=sys.stderr)
             return 1
-    if args_list and args_list[0] == "resolve-hosted-openrouter":
-        args = _resolve_hosted_openrouter_parser().parse_args(args_list[1:])
-        from .hosting.openrouter_workflow import emit_hosted_openrouter_resolution
-
-        return emit_hosted_openrouter_resolution(args.action)
     if args_list and args_list[0] == "prepare-diff":
         args = _prepare_diff_parser().parse_args(args_list[1:])
         if args.version:
@@ -3609,23 +2482,8 @@ def _main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError, ReviewSenseiError) as exc:
             print(f"review-sensei: {exc}", file=sys.stderr)
             return 1
-    if args_list and args_list[0] == "github":
-        github_argv = args_list[1:]
-        github_parser = _github_parser()
-        args = github_parser.parse_args(github_argv)
-        args._explicit_cli_options = _explicit_cli_options(
-            github_parser, github_argv, subcommand=args.command
-        )
-        try:
-            if getattr(args, "command", None) == "reply":
-                _apply_provider_defaults(args, github_argv)
-            return _run_github(args, argv=github_argv)
-        except (OSError, ValueError, ReviewSenseiError) as exc:
-            if not _report_broker_failure(exc, args):
-                print(f"review-sensei: {exc}", file=sys.stderr)
-            return 1
     try:
-        args = _parser().parse_args(args_list)
+        args = _parser(include_hosted=hosted_hooks is not None).parse_args(args_list)
     except ReviewInputError as exc:
         print(f"review-sensei: {exc}", file=sys.stderr)
         if _operational_exit_semantics(args_list):
@@ -3821,19 +2679,12 @@ def _main(argv: list[str] | None = None) -> int:
         if ledger is None and hosted_session_ledger:
             assert resolved_head_sha is not None
             assert isinstance(args.repository_id, int)
-            from .hosting.github.application import resolve_hosted_session_ledger
-            from .hosting.github.broker_client import BrokerClient
-            from .hosting.github.http import GitHubHttp
-
-            ledger = resolve_hosted_session_ledger(
-                broker=BrokerClient(),
-                http=GitHubHttp(),
-                oidc_token=getattr(args, "oidc_token", None),
-                repository=args.repository,
-                repository_id=args.repository_id,
-                pull_request=args.pull_request,
-                head_sha=resolved_head_sha,
-                app_slug=getattr(args, "app_slug", None),
+            if hosted_hooks is None or not hasattr(hosted_hooks, "resolve_ledger"):
+                raise ReviewInputError(
+                    "hosted session ledger requires review-sensei-github"
+                )
+            ledger = hosted_hooks.resolve_ledger(  # type: ignore[attr-defined]
+                args, resolved_head_sha=resolved_head_sha
             )
         identity = None
         reservation = None
@@ -4384,7 +3235,12 @@ def _main(argv: list[str] | None = None) -> int:
             verification_scope = scope
             incremental = scope.incremental
         try:
-            run = _run_review_provider(
+            run_provider = (
+                hosted_hooks.run_provider  # type: ignore[attr-defined]
+                if hosted_hooks is not None and hasattr(hosted_hooks, "run_provider")
+                else _run_review_provider
+            )
+            run = run_provider(
                 service,
                 request,
                 incremental=incremental,

@@ -17,10 +17,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
-from ...configuration import REVIEW_POLICIES
-from ...errors import ReviewInputError
-from ...models import ReviewResult
-from ...validation import validate_bounded_text
+from review_sensei.configuration import REVIEW_POLICIES
+from review_sensei.errors import ReviewInputError
+from review_sensei.models import ReviewResult
+from review_sensei.validation import validate_bounded_text
+
 from .approval import has_blocking_findings
 from .errors import (
     GitHubHTTPError,

@@ -206,6 +206,35 @@ project-scoped upload credential. It is still critical to protect the trusted
 workflow and environment: a contributor who can change and run that workflow
 can affect the package identity.
 
+## review-sensei-github
+
+The hosted GitHub runtime is a second PyPI distribution,
+`review-sensei-github`, in `packages/python/review-sensei-github`. It pins the
+engine with `review-sensei==` the version in the root `pyproject.toml`. A
+hosted-only fix bumps only the hosted version. An engine fix bumps the engine
+version and that exact pin together.
+
+This repository change does not publish the package and does not move `v5`.
+The operator does that, in order:
+
+1. Register the `review-sensei-github` project on PyPI.
+2. Add a Trusted Publisher for `malsabbagh/review-sensei`, workflow
+   `release-github.yml`, and environment `pypi-github`. Create that protected
+   environment.
+3. When the engine should move, release it through the existing engine
+   process. Do not bump the engine version in an ordinary pull request.
+4. Confirm the pin with `python scripts/prepare_release.py prepare-github`.
+   That command prints the identity and creates no tag.
+5. Sign and push `github-vX.Y.Z`, where `X.Y.Z` is the hosted version. Add a
+   changelog heading `## review-sensei-github X.Y.Z - YYYY-MM-DD` first;
+   `scripts/check_release_version.py --package github` requires it.
+6. After both versions in that commit are the ones runners should install,
+   move the public `v5` workflow tag onto that commit. Until then, runners
+   keep installing the previously published engine.
+
+`review-sensei github`, `host-plan`, and `resolve-hosted-openrouter` remain as
+subprocess stubs for one engine release. Remove them in the following release.
+
 ## Prepare main before signing and building
 
 The normal complete Python/npm release uses `prepare-release.yml` before the

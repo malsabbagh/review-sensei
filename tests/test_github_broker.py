@@ -20,7 +20,7 @@ except ModuleNotFoundError:
         make_key_pair,
     )
 
-from review_sensei.hosting.github import (
+from review_sensei_github import (
     ApprovedWorkflow,
     AuditRecord,
     BrokerPolicy,
@@ -38,7 +38,7 @@ from review_sensei.hosting.github import (
     TokenBucketRateLimiter,
     VerifiedOIDCClaims,
 )
-from review_sensei.hosting.github.broker import (
+from review_sensei_github.broker import (
     MAX_AUDIT_RECORDS_IN_MEMORY,
     GitHubForkChecker,
     GitHubInstallationLookup,
@@ -150,7 +150,7 @@ class GitHubBrokerTests(unittest.TestCase):
 
     def exchange(self, broker=None, token="oidc.token.secret"):
         with mock.patch(
-            "review_sensei.hosting.github.broker.verify_oidc_token",
+            "review_sensei_github.broker.verify_oidc_token",
             return_value=self.claims,
         ):
             return (broker or self.make_broker()).exchange(token)
@@ -174,7 +174,7 @@ class GitHubBrokerTests(unittest.TestCase):
         broker = self.make_broker()
         with (
             mock.patch(
-                "review_sensei.hosting.github.broker.verify_oidc_token",
+                "review_sensei_github.broker.verify_oidc_token",
                 return_value=unapproved,
             ),
             self.assertRaises(BrokerRejectionError),
@@ -192,7 +192,7 @@ class GitHubBrokerTests(unittest.TestCase):
         broker = self.make_broker()
         with (
             mock.patch(
-                "review_sensei.hosting.github.broker.verify_oidc_token",
+                "review_sensei_github.broker.verify_oidc_token",
                 return_value=claims,
             ),
             self.assertRaises(BrokerRejectionError),
@@ -206,7 +206,7 @@ class GitHubBrokerTests(unittest.TestCase):
         broker = self.make_broker()
         with (
             mock.patch(
-                "review_sensei.hosting.github.broker.verify_oidc_token",
+                "review_sensei_github.broker.verify_oidc_token",
                 return_value=claims,
             ),
             self.assertRaises(BrokerRejectionError),
@@ -291,7 +291,7 @@ class GitHubBrokerTests(unittest.TestCase):
         broker = self.make_broker()
         with (
             mock.patch(
-                "review_sensei.hosting.github.broker.verify_oidc_token",
+                "review_sensei_github.broker.verify_oidc_token",
                 side_effect=GitHubOIDCInvalidTokenError("OIDC token was invalid"),
             ),
             self.assertRaises(GitHubOIDCInvalidTokenError),
@@ -326,7 +326,7 @@ class GitHubBrokerTests(unittest.TestCase):
         )
         broker = self.make_broker()
         with mock.patch(
-            "review_sensei.hosting.github.broker.verify_oidc_token", return_value=claims
+            "review_sensei_github.broker.verify_oidc_token", return_value=claims
         ):
             token = broker.exchange("oidc-token")
         self.assertEqual(token.token, "ghs_installation_secret")

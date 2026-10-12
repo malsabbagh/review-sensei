@@ -37,7 +37,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol, cast
 
-_LOG = logging.getLogger("review_sensei.hosting.github.operation")
+from review_sensei.operation_witness import OperationHandle
+
+_LOG = logging.getLogger("review_sensei_github.operation")
 
 ORDINARY_DISPATCH_LIMIT = 60
 TOTAL_DISPATCH_LIMIT = 64
@@ -257,22 +259,6 @@ class Acknowledgement:
             raise ValueError("invalid acknowledgement")
         if not isinstance(self.unknown, bool):
             raise ValueError("invalid acknowledgement")
-
-
-@dataclass(frozen=True, slots=True)
-class OperationHandle:
-    """Identity-bound handle. Counters on a stale handle are not authority."""
-
-    scope_digest: str
-    event_id: str
-    operation_id: str
-    binding: str
-    created_at_ms: int
-    control_deadline_ms: int
-    calls: int
-    sequence: int
-    root_sha: str
-    root_generation: int
 
 
 @dataclass(frozen=True, slots=True)

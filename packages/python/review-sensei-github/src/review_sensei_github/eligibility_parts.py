@@ -9,15 +9,16 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Mapping, Protocol
 
-from ...bounded_evidence import (
+from review_sensei.bounded_evidence import (
     EvidenceReadBudget,
     canonical_bytes,
     validate_binding,
     validate_manifest,
 )
-from ...errors import ReviewInputError
-from ...human_assessment import HumanInventoryResolution, PendingHumanReview
-from ...human_inventory import inventory_from_result_document
+from review_sensei.errors import ReviewInputError
+from review_sensei.human_assessment import HumanInventoryResolution, PendingHumanReview
+from review_sensei.human_inventory import inventory_from_result_document
+
 from .prose_publication import VisibleProseReceipt
 
 if TYPE_CHECKING:

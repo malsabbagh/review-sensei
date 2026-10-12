@@ -5,13 +5,13 @@ from __future__ import annotations
 import hashlib
 import unittest
 
-from review_sensei.hosting.github.operation_comments import (
+from review_sensei_github.operation_comments import (
     MAX_RESULT_PARTS,
     GitHubIssueCommentOperationPort,
     ResultPartStore,
     ensure_result_part_capacity,
 )
-from review_sensei.hosting.github.operation_host import (
+from review_sensei_github.operation_host import (
     RESULT_COMMENT_MARKER,
     OperationComment,
     OperationWriteUnconfirmed,
@@ -189,7 +189,7 @@ class ResultPartTests(unittest.TestCase):
     def test_a_foreign_part_is_ignored_and_a_duplicate_refuses(self):
         body_result = b"validated-result"
         digest = hashlib.sha256(body_result).hexdigest()
-        from review_sensei.hosting.github.operation_host import render_marked_comment
+        from review_sensei_github.operation_host import render_marked_comment
 
         part = render_marked_comment(
             RESULT_COMMENT_MARKER,
@@ -228,7 +228,7 @@ class ResultPartTests(unittest.TestCase):
         self.assertLessEqual(ensure_result_part_capacity(1_048_576), MAX_RESULT_PARTS)
         with self.assertRaisesRegex(ValueError, "result size is invalid"):
             ensure_result_part_capacity(1_048_577)
-        import review_sensei.hosting.github.operation_comments as parts
+        import review_sensei_github.operation_comments as parts
 
         original = parts._RESULT_CHUNK
         parts._RESULT_CHUNK = 10

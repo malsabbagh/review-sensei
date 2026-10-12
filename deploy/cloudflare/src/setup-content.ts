@@ -1951,7 +1951,7 @@ export const SETUP_PULL_REQUEST_TITLE = "ReviewSensei review setup";
 
 /**
  * Setup pull request body, byte-identical to the Python builder in
- * review_sensei.hosting.github.setup for the same imported settings.
+ * review_sensei_github.setup for the same imported settings.
  */
 export function setupPullRequestBody(
   importedSettings: readonly string[] = [],

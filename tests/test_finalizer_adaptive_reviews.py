@@ -5,15 +5,16 @@ import json
 import unittest
 from urllib.parse import parse_qs, urlparse
 
-from review_sensei.bounded_evidence import EvidenceReadBudget
-from review_sensei.hosting.github.approval import approval_eligibility_from_result
-from review_sensei.hosting.github.errors import GitHubPublicationError
-from review_sensei.hosting.github.http import GitHubHttp
-from review_sensei.hosting.github.publication import (
+from review_sensei_github.approval import approval_eligibility_from_result
+from review_sensei_github.errors import GitHubPublicationError
+from review_sensei_github.http import GitHubHttp
+from review_sensei_github.publication import (
     APPROVAL_ELIGIBILITY_MARKER_PREFIX,
     ReviewApprovalFinalizer,
     approval_eligibility_marker,
 )
+
+from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.models import ReviewResult
 from tests.fake_github_http import json_response
 from tests.test_human_assessment import APP, BASE, HEAD, prior

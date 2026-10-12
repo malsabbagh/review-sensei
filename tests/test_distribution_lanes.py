@@ -201,7 +201,14 @@ class DistributionLaneTests(unittest.TestCase):
             for relative in CONTRACT["lanes"]["dist_safe"]["helpers"]
             if relative.endswith(".py")
         }
-        allowed = set(sys.stdlib_module_names) | {"review_sensei"} | declared
+        allowed = (
+            set(sys.stdlib_module_names)
+            | {
+                "review_sensei",
+                "review_sensei_github",
+            }
+            | declared
+        )
         for module in _lane_modules():
             for name in sorted(_top_level_imports(module)):
                 with self.subTest(module=module.name, imported=name):

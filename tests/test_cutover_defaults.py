@@ -5,12 +5,13 @@ import json
 import unittest
 from unittest.mock import patch
 
+from review_sensei_github import GitHubPublicationError, ReviewPublisher
+
 from review_sensei.convergence import (
     REVIEW_MODE_ENV,
     ReviewConvergencePolicy,
     derive_blocker_candidate,
 )
-from review_sensei.hosting.github import GitHubPublicationError, ReviewPublisher
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.verifier import (
     CandidateFinding,

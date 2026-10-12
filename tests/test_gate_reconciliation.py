@@ -19,9 +19,11 @@ import re
 import unittest
 from pathlib import Path
 
+from review_sensei_github.checks import REVIEW_CHECK_NAME
+from review_sensei_github.doctor import with_github_checks
+from review_sensei_github.setup import SETUP_APP_LOGIN
+
 from review_sensei.diagnostics import run_doctor
-from review_sensei.hosting.github.checks import REVIEW_CHECK_NAME
-from review_sensei.hosting.github.setup import SETUP_APP_LOGIN
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLATION = ROOT / "docs" / "installation.md"
@@ -29,7 +31,13 @@ APP_AUTH = ROOT / "docs" / "github-app-auth.md"
 GATE_ADR = ROOT / "docs" / "adr" / "0057-one-check-run-as-the-single-merge-authority.md"
 TOKEN_BROKER = ROOT / "deploy" / "cloudflare" / "src" / "token-broker.ts"
 BROKER_CLIENT = (
-    ROOT / "src" / "review_sensei" / "hosting" / "github" / "broker_client.py"
+    ROOT
+    / "packages"
+    / "python"
+    / "review-sensei-github"
+    / "src"
+    / "review_sensei_github"
+    / "broker_client.py"
 )
 
 SECTION_TITLE = "## Reconciling a prior gate state"
@@ -206,7 +214,7 @@ class GateReconciliationTests(unittest.TestCase):
                 self.assertNotIn("dismissals", path.read_text(encoding="utf-8"))
 
     def test_doctor_gate_line_matches_the_documented_sample(self):
-        report = run_doctor()
+        report = with_github_checks(run_doctor())
         gate = next(
             check for check in report["checks"] if check["name"] == "review-gate"
         )

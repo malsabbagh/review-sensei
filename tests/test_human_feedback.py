@@ -6,13 +6,14 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
+from review_sensei_github.human_assessment import HumanAssessmentPublisher
+
 from review_sensei.feedback import (
     MAX_FEEDBACK_BYTES,
     MAX_FEEDBACK_SOURCE_BYTES,
     FeedbackAdmissionError,
     FeedbackReference,
 )
-from review_sensei.hosting.github.human_assessment import HumanAssessmentPublisher
 from review_sensei.human_assessment import HumanAssessmentService
 from tests.test_human_assessment import APP, BASE, HEAD, Provider, State, response_for
 
@@ -352,7 +353,7 @@ class CompleteFeedbackTests(unittest.TestCase):
         self.assertEqual(len(self.http.calls), 1)
         # A transport that ignores its timeout cannot activate a late response.
         with patch(
-            "review_sensei.hosting.github.human_assessment.time.monotonic",
+            "review_sensei_github.human_assessment.time.monotonic",
             side_effect=[0, 61],
         ):
             with self.assertRaises(FeedbackAdmissionError):

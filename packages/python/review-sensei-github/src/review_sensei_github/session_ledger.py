@@ -25,7 +25,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Mapping, cast
 from urllib.parse import quote
 
-from ...bounded_evidence import (
+from review_sensei.bounded_evidence import (
     INLINE_ENCODING,
     MAX_PART_BYTES,
     MAX_STORED_PART_BYTES,
@@ -45,13 +45,13 @@ from ...bounded_evidence import (
     read_partitioned_evidence,
     stage_partitioned_evidence,
 )
-from ...errors import ReviewInputError
-from ...history_association import (
+from review_sensei.errors import ReviewInputError
+from review_sensei.history_association import (
     HistoryAssociation,
     associate_history,
     read_associated_history,
 )
-from ...session import (
+from review_sensei.session import (
     MAX_SESSION_COMMENT_BYTES,
     SessionIdentity,
     SessionLoadError,
@@ -75,6 +75,7 @@ from ...session import (
     read_session_assessment_queue,
     read_session_baseline,
 )
+
 from .broker_client import SESSION_GRANT_PATTERN, BrokerClient, BrokerSessionGrant
 from .errors import (
     GitHubBrokerClientError,
@@ -381,7 +382,7 @@ class GitHubIssueCommentSessionLedger:
             if record is None:
                 raise ReviewInputError("history current root is missing")
             # _discover already authenticated and decoded the complete envelope.
-            from ...session import _history_cached
+            from review_sensei.session import _history_cached
 
             payload = _history_cached(self, record)
             if payload is None:
@@ -2036,7 +2037,8 @@ class GitHubIssueCommentSessionLedger:
         """One broker grant, one CAS replacement, live Actions proof twice."""
         import hashlib
 
-        from ...session import MAX_FAILED_ATTEMPTS, _failed_attempt_scope
+        from review_sensei.session import MAX_FAILED_ATTEMPTS, _failed_attempt_scope
+
         from .reservation_recovery import ActionsReservationEvidence
 
         if (

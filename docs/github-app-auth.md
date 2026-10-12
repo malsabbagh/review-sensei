@@ -66,7 +66,7 @@ headers, or API bodies.
 ## Usage
 
 ```python
-from review_sensei.hosting.github import (
+from review_sensei_github import (
     EnvPrivateKeySource,
     GitHubAppAuth,
     RequestedPermissions,

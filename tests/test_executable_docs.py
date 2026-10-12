@@ -42,18 +42,21 @@ REVIEW_SENSEI_LINE = "review-sensei "
 
 # Documented commands are parsed against the parser that owns their first
 # token; the default (no subcommand) review command uses the main parser.
+# Hosted commands live on review-sensei-github and are not engine parsers.
 COMMAND_PARSERS = {
     "config": "_config_parser",
     "doctor": "_doctor_parser",
     "plan": "_plan_parser",
-    "host-plan": "_host_plan_parser",
     "prepare-diff": "_prepare_diff_parser",
     "evaluate": "_evaluate_parser",
     "evaluate-convergence": "_evaluate_convergence_parser",
-    "github": "_github_parser",
     "learnings": "_learnings_parser",
     "promotion": "_promotion_parser",
-    "resolve-hosted-openrouter": "_resolve_hosted_openrouter_parser",
+}
+HOSTED_COMMAND_PARSERS = {
+    "host-plan": "host_plan_parser",
+    "github": "github_parser",
+    "resolve-hosted-openrouter": "resolve_hosted_openrouter_parser",
 }
 
 # Documented placeholders stand in for operator values; parsing never touches
@@ -164,7 +167,12 @@ def _installed_cli():
 
 def _documented_command_environment() -> dict[str, str]:
     environment = dict(os.environ)
-    source_root = str(ROOT / "src")
+    source_root = os.pathsep.join(
+        (
+            str(ROOT / "src"),
+            str(ROOT / "packages" / "python" / "review-sensei-github" / "src"),
+        )
+    )
     existing = environment.get("PYTHONPATH")
     environment["PYTHONPATH"] = (
         source_root if not existing else source_root + os.pathsep + existing
@@ -188,7 +196,13 @@ class DocumentedCommandParsingTests(unittest.TestCase):
                     ]
                 rest = tokens[1:]
                 factory_name = COMMAND_PARSERS.get(rest[0])
-                if factory_name is None:
+                hosted_name = HOSTED_COMMAND_PARSERS.get(rest[0])
+                if hosted_name is not None:
+                    from review_sensei_github import commands as hosted_commands
+
+                    parser = getattr(hosted_commands, hosted_name)()
+                    rest = rest[1:]
+                elif factory_name is None:
                     parser = cli._parser()
                 else:
                     parser = getattr(cli, factory_name)()

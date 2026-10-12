@@ -5,10 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Mapping
 
-from ...coverage import coverage_approval_state
-from ...errors import ReviewInputError
-from ...human_assessment import PendingHumanReview
-from ...models import ReviewResult
+from review_sensei.coverage import coverage_approval_state
+from review_sensei.errors import ReviewInputError
+from review_sensei.human_assessment import PendingHumanReview
+from review_sensei.models import ReviewResult
 
 if TYPE_CHECKING:
     from .eligibility_parts import (
@@ -473,7 +473,7 @@ def qualification_state_for_configuration(
     declares verified qualification.
     """
 
-    from ...openrouter_qualification import PUBLISHED_QUALIFICATION_SLICES
+    from review_sensei.openrouter_qualification import PUBLISHED_QUALIFICATION_SLICES
 
     if not isinstance(provider, str) or provider.strip().lower() != "openrouter":
         return "not-required"
@@ -505,7 +505,7 @@ def qualification_state_for_publication(
     and never enough to claim qualification for an OpenRouter deployment.
     """
 
-    from ...providers.profiles import get_provider_profile
+    from review_sensei.providers.profiles import get_provider_profile
 
     identity = provider_identity if isinstance(provider_identity, Mapping) else {}
     base_url = identity.get("base_url")

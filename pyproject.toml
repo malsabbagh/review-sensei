@@ -51,17 +51,19 @@ review_sensei = [
   "default_stages/*.json",
   "schemas/*.json",
 ]
-"review_sensei.hosting.github.fixtures" = ["*.yml"]
-
 [tool.ruff]
 target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]
 
+[tool.ruff.lint.per-file-ignores]
+"packages/python/review-sensei-github/src/review_sensei_github/command_bodies.py" = ["F821", "F401"]
+
 [tool.mypy]
 python_version = "3.11"
-files = ["src"]
+files = ["src", "packages/python/review-sensei-github/src"]
+exclude = ["command_bodies\\.py"]
 check_untyped_defs = true
 no_implicit_optional = true
 ignore_missing_imports = true

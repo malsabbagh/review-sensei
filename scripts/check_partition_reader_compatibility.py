@@ -19,11 +19,12 @@ READERS = (
 
 def worker(source: Path, fixture_path: Path) -> None:
     sys.path.insert(0, str(source))
-    from review_sensei.errors import ReviewInputError
-    from review_sensei.hosting.github import GitHubHttp
-    from review_sensei.hosting.github.session_ledger import (
+    from review_sensei_github import GitHubHttp
+    from review_sensei_github.session_ledger import (
         GitHubIssueCommentSessionLedger,
     )
+
+    from review_sensei.errors import ReviewInputError
     from review_sensei.session import LocalSessionLedger, SessionIdentity
 
     payload = json.loads(fixture_path.read_text())
@@ -82,7 +83,8 @@ def main() -> int:
         worker(Path(sys.argv[2]), Path(sys.argv[3]))
         return 0
     sys.path[:0] = [str(ROOT / "src"), str(ROOT)]
-    from review_sensei.hosting.github.session_ledger import render_session_comment
+    from review_sensei_github.session_ledger import render_session_comment
+
     from review_sensei.session import LocalSessionLedger, SessionRecord
     from tests import test_review_transaction as fixture
     from tests.test_assessment_queue_storage import activate

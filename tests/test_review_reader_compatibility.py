@@ -10,14 +10,15 @@ from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 
-from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github.approval import ReviewApprovalEligibility
-from review_sensei.hosting.github.errors import GitHubPublicationError
-from review_sensei.hosting.github.publication import (
+from review_sensei_github.approval import ReviewApprovalEligibility
+from review_sensei_github.errors import GitHubPublicationError
+from review_sensei_github.publication import (
     ReviewApprovalFinalizer,
     approval_eligibility_from_body,
     approval_eligibility_marker,
 )
+
+from review_sensei.errors import ReviewInputError
 from review_sensei.human_assessment import PendingHumanReview
 from tests.test_human_assessment import APP, HEAD, State, prior
 

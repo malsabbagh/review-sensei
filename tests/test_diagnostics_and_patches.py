@@ -8,6 +8,9 @@ from unittest.mock import patch
 from urllib.error import URLError
 from urllib.request import Request
 
+from review_sensei_github.checks import REVIEW_CHECK_NAME
+from review_sensei_github.doctor import with_github_checks
+
 from review_sensei.diagnostics import (
     DiagnosticCheck,
     build_plan,
@@ -19,7 +22,6 @@ from review_sensei.diagnostics import (
     run_doctor,
 )
 from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github.checks import REVIEW_CHECK_NAME
 from review_sensei.patches import (
     MAX_PATCH_FILES,
     MAX_PATCH_METADATA_BYTES,
@@ -50,7 +52,7 @@ class DiagnosticsTests(unittest.TestCase):
         )
 
     def test_doctor_reports_the_expected_check_identity_and_producer(self):
-        report = run_doctor()
+        report = with_github_checks(run_doctor())
         gate = next(
             check for check in report["checks"] if check["name"] == "review-gate"
         )

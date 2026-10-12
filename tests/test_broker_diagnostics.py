@@ -9,6 +9,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import HTTPError
 
+from review_sensei_github.broker_client import BrokerClient
+from review_sensei_github.cli import main as github_main
+from review_sensei_github.errors import (
+    GitHubBrokerClientError,
+    GitHubHTTPTransientError,
+)
+
 from review_sensei.broker_diagnostics import (
     MAX_DIAGNOSTIC_BYTES,
     BrokerDiagnostic,
@@ -17,11 +24,6 @@ from review_sensei.broker_diagnostics import (
 )
 from review_sensei.cli import _report_broker_failure, main
 from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github.broker_client import BrokerClient
-from review_sensei.hosting.github.errors import (
-    GitHubBrokerClientError,
-    GitHubHTTPTransientError,
-)
 from review_sensei.outcomes import RunOutcome, render_actions_summary
 from review_sensei.schemas import validate_public_document
 
@@ -197,10 +199,10 @@ class BrokerDiagnosticTests(unittest.TestCase):
                     {"GITHUB_STEP_SUMMARY": str(summary), "GITHUB_OUTPUT": str(output)},
                     clear=True,
                 ),
-                patch("review_sensei.cli._run_github", side_effect=wrapper),
+                patch("review_sensei_github.cli.run_github", side_effect=wrapper),
                 redirect_stderr(stderr),
             ):
-                status = main(
+                status = github_main(
                     [
                         "github",
                         "reply",

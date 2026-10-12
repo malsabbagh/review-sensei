@@ -6,8 +6,9 @@ import json
 import unittest
 from dataclasses import replace
 
+from review_sensei_github.publication import approval_eligibility_from_body
+
 from review_sensei.budgets import ReviewWorkBudgets
-from review_sensei.hosting.github.publication import approval_eligibility_from_body
 from review_sensei.human_assessment import HumanReviewFinding, PendingHumanReview
 from review_sensei.models import ProviderResponse
 from tests import test_human_assessment as host

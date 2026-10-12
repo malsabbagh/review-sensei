@@ -5,8 +5,8 @@ from __future__ import annotations
 import os
 import sys
 
-from ..errors import ReviewInputError
-from ..provider_config import (
+from review_sensei.errors import ReviewInputError
+from review_sensei.provider_config import (
     hosted_openrouter_upstream,
     validate_resolved_hosted_job_model,
 )

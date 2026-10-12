@@ -35,7 +35,8 @@ class ReplyInferenceTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
         factory_error=None,
         reply_error=None,
     ):
-        from review_sensei.hosting import github as github_module
+        import review_sensei_github as github_module
+        import review_sensei_github.cli  # noqa: F401
 
         settings = []
         calls = []

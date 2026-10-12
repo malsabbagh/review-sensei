@@ -17,8 +17,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from review_sensei_github import ReviewPublisher
+
 from review_sensei.convergence import ReviewConvergencePolicy, derive_blocker_candidate
-from review_sensei.hosting.github import ReviewPublisher
 from review_sensei.models import ReviewResult
 from review_sensei.validation import ReviewLimits
 

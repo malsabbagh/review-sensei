@@ -5,17 +5,18 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
-from review_sensei.bounded_evidence import canonical_bytes
-from review_sensei.context import finding_lifecycle_for_comment
-from review_sensei.coverage import CoverageManifest, FileCoverage
-from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github.publication import approval_eligibility_from_body
-from review_sensei.hosting.github.publication_parts import (
+from review_sensei_github.publication import approval_eligibility_from_body
+from review_sensei_github.publication_parts import (
     MAX_PROSE_PART_BYTES,
     FindingProseReadback,
     prepare_finding_prose_parts,
     verify_finding_prose_readbacks,
 )
+
+from review_sensei.bounded_evidence import canonical_bytes
+from review_sensei.context import finding_lifecycle_for_comment
+from review_sensei.coverage import CoverageManifest, FileCoverage
+from review_sensei.errors import ReviewInputError
 from review_sensei.human_assessment import (
     MAX_HUMAN_REVIEW_BYTES,
     HumanAssessmentDecision,
@@ -239,7 +240,7 @@ class CompleteInventoryTests(unittest.TestCase):
             receipt.restore(extended)
 
     def test_twenty_resolved_then_new_shared_concern_preserves_original_ids(self):
-        from review_sensei.hosting.github.approval import (
+        from review_sensei_github.approval import (
             approval_eligibility_from_result,
         )
 
@@ -361,7 +362,7 @@ class ProsePublicationTests(unittest.TestCase):
         # The conservative maximum-count header reserve is two bytes wider.
         for delta, accepted in ((0, True), (-1, False)):
             with patch(
-                "review_sensei.hosting.github.publication_parts.MAX_PROSE_PART_BYTES",
+                "review_sensei_github.publication_parts.MAX_PROSE_PART_BYTES",
                 part.byte_length + 2 + delta,
             ):
                 if accepted:

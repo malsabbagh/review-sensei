@@ -7,6 +7,8 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+from review_sensei_github.operation_host import OperationHandle
+
 from review_sensei.assessment_queue import (
     AssessmentCheckpoint,
     AssessmentJournal,
@@ -18,7 +20,6 @@ from review_sensei.assessment_queue import (
 )
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github.operation_host import OperationHandle
 from review_sensei.models import ProviderResponse
 from review_sensei.outcomes import ResourceBudget, ResourceBudgetTracker
 from tests.test_assessment_queue import DocumentStore, QueueFixture, fixture

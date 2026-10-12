@@ -59,7 +59,7 @@ _ATTEMPT_WITNESS = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 def _operation_attempt_binding(witness: object) -> str | None:
     """Binding of an OperationHandle. A snapshot, digest, or grant is not one."""
 
-    from .hosting.github.operation_entry import operation_handle_witness
+    from .operation_witness import operation_handle_witness
 
     binding = operation_handle_witness(witness)
     if not isinstance(binding, str) or _ATTEMPT_WITNESS.fullmatch(binding) is None:

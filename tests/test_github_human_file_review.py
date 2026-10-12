@@ -9,21 +9,22 @@ import copy
 import unittest
 from dataclasses import replace
 
-from review_sensei.bounded_evidence import EvidenceReadBudget
-from review_sensei.coverage import CoverageManifest, FileCoverage
-from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github.approval import (
+from review_sensei_github.approval import (
     ReviewApprovalEligibility,
     approval_facts_from_result,
 )
-from review_sensei.hosting.github.human_file_review import (
+from review_sensei_github.human_file_review import (
     HumanFileReviewPolicy,
     HumanFileReviewPublisher,
 )
-from review_sensei.hosting.github.publication import (
+from review_sensei_github.publication import (
     approval_eligibility_marker,
     review_result_digest,
 )
+
+from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.coverage import CoverageManifest, FileCoverage
+from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewComment, ReviewResult
 
 BASE, HEAD = "a" * 40, "b" * 40
@@ -576,7 +577,7 @@ class GitHubHumanFileReviewTests(unittest.TestCase):
         )
         # Use the actual eligibility prefix so the malformed latest candidate
         # is recognized as authority rather than unrelated conversation.
-        from review_sensei.hosting.github.publication import (
+        from review_sensei_github.publication import (
             APPROVAL_ELIGIBILITY_MARKER_PREFIX,
         )
 

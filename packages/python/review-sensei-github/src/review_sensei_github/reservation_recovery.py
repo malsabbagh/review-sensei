@@ -10,8 +10,9 @@ import re
 from datetime import datetime
 from typing import Any
 
-from ...errors import ReviewInputError
-from ...session import SessionIdentity, SessionRecord
+from review_sensei.errors import ReviewInputError
+from review_sensei.session import SessionIdentity, SessionRecord
+
 from .http import GitHubHttp
 
 _TERMINAL_CONCLUSIONS = frozenset(

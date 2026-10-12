@@ -9,6 +9,19 @@ import zlib
 from dataclasses import replace
 from pathlib import Path
 
+from review_sensei_github.approval import (
+    ReviewApprovalEligibility,
+    approval_eligibility_from_result,
+    approval_facts_from_result,
+    evaluate_approval_facts,
+)
+from review_sensei_github.checks import check_outcome_for_result
+from review_sensei_github.publication import _review_summary_state
+from review_sensei_github.session_ledger import (
+    parse_session_comment,
+    render_session_comment,
+)
+
 from review_sensei.baseline import (
     MAX_HISTORY_BASELINE_BYTES,
     BaselineFinding,
@@ -26,18 +39,6 @@ from review_sensei.bounded_evidence import (
 )
 from review_sensei.coverage import CoverageManifest, FileCoverage
 from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github.approval import (
-    ReviewApprovalEligibility,
-    approval_eligibility_from_result,
-    approval_facts_from_result,
-    evaluate_approval_facts,
-)
-from review_sensei.hosting.github.checks import check_outcome_for_result
-from review_sensei.hosting.github.publication import _review_summary_state
-from review_sensei.hosting.github.session_ledger import (
-    parse_session_comment,
-    render_session_comment,
-)
 from review_sensei.human_assessment import (
     HumanAssessmentDecision,
     HumanAssessmentReply,

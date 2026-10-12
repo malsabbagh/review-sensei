@@ -11,8 +11,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from review_sensei_github import GitHubApplication, GitHubHttp
+
 from review_sensei.cli import main
-from review_sensei.hosting.github import GitHubApplication, GitHubHttp
 from review_sensei.session import InMemorySessionLedger, SessionIdentity
 
 HEAD = "b" * 40
@@ -131,8 +132,8 @@ class HostedOverrideMetadataTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, environment or {}, clear=True),
                 patch.object(http, "request", reads),
-                patch("review_sensei.hosting.github.GitHubHttp", return_value=http),
-                patch("review_sensei.hosting.github.BrokerClient", return_value=broker),
+                patch("review_sensei_github.GitHubHttp", return_value=http),
+                patch("review_sensei_github.BrokerClient", return_value=broker),
                 patch.object(
                     GitHubApplication, "_session_ledger_for_token", return_value=ledger
                 ) as ledger_factory,

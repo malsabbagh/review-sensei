@@ -11,7 +11,8 @@ import re
 from collections.abc import Mapping
 from typing import Any, NoReturn
 
-from ...evidence import evidence_digest
+from review_sensei.evidence import evidence_digest
+
 from .errors import GitHubBrokerClientError
 
 REQUEST_KEYS = frozenset(

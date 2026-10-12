@@ -12,17 +12,22 @@ from dataclasses import dataclass
 from typing import Any, Sequence
 from urllib.parse import quote
 
-from ...errors import LearningLoadError, ReviewInputError
-from ...learnings import MAX_LEARNING_FILE_BYTES, MAX_LEARNING_FILES, LearningStore
-from ...models import (
+from review_sensei.errors import LearningLoadError, ReviewInputError
+from review_sensei.learnings import (
+    MAX_LEARNING_FILE_BYTES,
+    MAX_LEARNING_FILES,
+    LearningStore,
+)
+from review_sensei.models import (
     ConversationContext,
     ConversationFinding,
     ConversationMessage,
     ConversationReply,
     LearningEntry,
 )
-from ...presentation import append_response_instructions
-from ...validation import validate_repository_path
+from review_sensei.presentation import append_response_instructions
+from review_sensei.validation import validate_repository_path
+
 from .errors import (
     GitHubConversationError,
     GitHubConversationTransientError,
@@ -261,7 +266,7 @@ class HumanAssessmentDiffContext:
     diagnostic: str | None = None
 
     def __post_init__(self) -> None:
-        from ...human_assessment import HUMAN_ASSESSMENT_EVIDENCE_DIAGNOSTICS
+        from review_sensei.human_assessment import HUMAN_ASSESSMENT_EVIDENCE_DIAGNOSTICS
 
         if self.diagnostic is not None and (
             self.diagnostic not in HUMAN_ASSESSMENT_EVIDENCE_DIAGNOSTICS
@@ -752,7 +757,7 @@ class ConversationPublisher:
         use only the remaining budget. This leaves ordinary conversations and
         their historical inline-hunk selection unchanged.
         """
-        from ...human_assessment import MAX_HUMAN_FINDINGS
+        from review_sensei.human_assessment import MAX_HUMAN_FINDINGS
 
         if isinstance(pending_paths, str) or len(pending_paths) > MAX_HUMAN_FINDINGS:
             raise GitHubConversationError("human assessment paths are invalid")
@@ -845,7 +850,7 @@ class ConversationPublisher:
         feedback and evidence phases must not replenish one another's allowance.
         Transport failures retain pending obligations without partial authority.
         """
-        from ...evidence import EvidenceBundle, EvidenceSnapshot
+        from review_sensei.evidence import EvidenceBundle, EvidenceSnapshot
 
         if isinstance(required_paths, str) or len(required_paths) > 64:
             raise GitHubConversationError("human assessment paths are invalid")

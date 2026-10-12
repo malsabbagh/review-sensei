@@ -3,9 +3,10 @@
 import unittest
 from dataclasses import replace
 
+from review_sensei_github.human_file_review import HumanFileReviewPolicy
+
 from review_sensei.coverage import CoverageManifest, FileCoverage, HunkCoverage
 from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github.human_file_review import HumanFileReviewPolicy
 from review_sensei.human_file_review import UnsupportedFile
 from review_sensei.mixed_coverage import BinaryConfirmation, evaluate_mixed_coverage
 from review_sensei.models import ReviewComment, ReviewResult

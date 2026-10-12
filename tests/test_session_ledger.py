@@ -9,6 +9,21 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from review_sensei_github import (
+    GitHubApplication,
+    GitHubBrokerClientError,
+    GitHubHttp,
+    GitHubHTTPPaginationLimitError,
+    GitHubWriteOptions,
+)
+from review_sensei_github.errors import GitHubPublicationTransientError
+from review_sensei_github.session_ledger import (
+    SESSION_MARKER_PREFIX,
+    GitHubIssueCommentSessionLedger,
+    parse_session_comment,
+    render_session_comment,
+)
+
 from review_sensei.baseline import (
     MAX_HISTORY_BASELINE_BYTES,
     MAX_HISTORY_ENVELOPE_RESERVE_BYTES,
@@ -25,20 +40,6 @@ from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.diagnostics import build_plan, run_doctor
 from review_sensei.disposition import apply_session_command, parse_maintainer_command
 from review_sensei.errors import ReviewInputError, ReviewSenseiError
-from review_sensei.hosting.github import (
-    GitHubApplication,
-    GitHubBrokerClientError,
-    GitHubHttp,
-    GitHubHTTPPaginationLimitError,
-    GitHubWriteOptions,
-)
-from review_sensei.hosting.github.errors import GitHubPublicationTransientError
-from review_sensei.hosting.github.session_ledger import (
-    SESSION_MARKER_PREFIX,
-    GitHubIssueCommentSessionLedger,
-    parse_session_comment,
-    render_session_comment,
-)
 from review_sensei.models import ReviewResult
 from review_sensei.schemas import validate_public_document
 from review_sensei.session import (
@@ -389,10 +390,10 @@ class SessionRecordTests(unittest.TestCase):
             "src/review_sensei/conversation.py",
             "src/review_sensei/coverage.py",
             "src/review_sensei/disposition.py",
-            "src/review_sensei/hosting/github/application.py",
-            "src/review_sensei/hosting/github/approval.py",
-            "src/review_sensei/hosting/github/broker_client.py",
-            "src/review_sensei/hosting/github/session_ledger.py",
+            "packages/python/review-sensei-github/src/review_sensei_github/application.py",
+            "packages/python/review-sensei-github/src/review_sensei_github/approval.py",
+            "packages/python/review-sensei-github/src/review_sensei_github/broker_client.py",
+            "packages/python/review-sensei-github/src/review_sensei_github/session_ledger.py",
             "src/review_sensei/schemas/session-record.schema.json",
             "src/review_sensei/service.py",
             "src/review_sensei/session.py",
@@ -438,7 +439,7 @@ class SessionRecordTests(unittest.TestCase):
                     fingerprint="b8" * 32,
                     resolution_criterion="c9" * 32,
                     concern="da" * 32,
-                    path="src/review_sensei/hosting/github/session_ledger.py",
+                    path="packages/python/review-sensei-github/src/review_sensei_github/session_ledger.py",
                     symbol="GitHubIssueCommentSessionLedger.load",
                     defect_kind="bug",
                     generation=3,
@@ -2394,7 +2395,7 @@ class GitHubApplicationSessionTests(unittest.TestCase):
             )
 
     def test_github_session_ledger_writes_through_application(self):
-        from review_sensei.hosting.github import PublicationResult
+        from review_sensei_github import PublicationResult
 
         class Broker:
             def exchange(self, token, *, capability=None):
@@ -2659,7 +2660,7 @@ class GitHubApplicationSessionTests(unittest.TestCase):
             raise RuntimeError("preparation failed")
 
         with patch(
-            "review_sensei.hosting.github.application.prepare_session_round",
+            "review_sensei_github.application.prepare_session_round",
             side_effect=reserve_then_fail,
         ):
             with self.assertRaisesRegex(RuntimeError, "preparation failed"):
@@ -2695,7 +2696,7 @@ class GitHubApplicationSessionTests(unittest.TestCase):
         )
         with (
             patch(
-                "review_sensei.hosting.github.application.prepare_session_round",
+                "review_sensei_github.application.prepare_session_round",
                 side_effect=RuntimeError("preparation failed"),
             ),
             patch.object(
@@ -2838,7 +2839,7 @@ class GitHubApplicationSessionTests(unittest.TestCase):
         self.assertIsNone(loaded.record.reservation_id)
 
     def test_non_published_publication_aborts_without_counting(self):
-        from review_sensei.hosting.github import PublicationResult
+        from review_sensei_github import PublicationResult
 
         class Broker:
             def exchange(self, token, *, capability=None):
@@ -3067,7 +3068,7 @@ class HostedSessionLedgerResolutionTests(unittest.TestCase):
         }
 
     def test_opens_a_broker_session_and_returns_an_attested_ledger(self):
-        from review_sensei.hosting.github.application import (
+        from review_sensei_github.application import (
             resolve_hosted_session_ledger,
         )
 
@@ -3109,7 +3110,7 @@ class HostedSessionLedgerResolutionTests(unittest.TestCase):
         self.assertEqual(ledger.load(IDENTITY).status, "ok")
 
     def test_requests_an_oidc_token_when_the_caller_has_none(self):
-        from review_sensei.hosting.github.application import (
+        from review_sensei_github.application import (
             resolve_hosted_session_ledger,
         )
 
@@ -3127,10 +3128,10 @@ class HostedSessionLedgerResolutionTests(unittest.TestCase):
         self.assertEqual(broker.oidc_tokens, ["requested-oidc-token"])
 
     def test_fails_closed_when_a_known_session_marker_is_missing(self):
-        from review_sensei.hosting.github.application import (
+        from review_sensei_github.application import (
             resolve_hosted_session_ledger,
         )
-        from review_sensei.hosting.github.errors import GitHubPublicationError
+        from review_sensei_github.errors import GitHubPublicationError
 
         http, _transport = self._http([])
         with self.assertRaisesRegex(GitHubPublicationError, "reenroll"):
@@ -3145,7 +3146,7 @@ class HostedSessionLedgerResolutionTests(unittest.TestCase):
             )
 
     def test_first_enrollment_is_not_blocked_by_a_missing_marker(self):
-        from review_sensei.hosting.github.application import (
+        from review_sensei_github.application import (
             resolve_hosted_session_ledger,
         )
 
@@ -3164,10 +3165,10 @@ class HostedSessionLedgerResolutionTests(unittest.TestCase):
         self.assertEqual(ledger.load(IDENTITY).status, "missing")
 
     def test_rejects_a_blank_or_missing_session_token(self):
-        from review_sensei.hosting.github.application import (
+        from review_sensei_github.application import (
             resolve_hosted_session_ledger,
         )
-        from review_sensei.hosting.github.errors import GitHubPublicationError
+        from review_sensei_github.errors import GitHubPublicationError
 
         for token in ("", "   "):
             http, _transport = self._http([])

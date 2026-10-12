@@ -5,6 +5,14 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
+from review_sensei_github import ReviewPublisher
+from review_sensei_github.checks import check_outcome_for_result
+from review_sensei_github.errors import GitHubPublicationError
+from review_sensei_github.publication import (
+    MAX_PUBLISHED_REVIEW_BODY_BYTES,
+    approval_eligibility_from_body,
+)
+
 from review_sensei.baseline import (
     BaselinePersistenceError,
     baseline_finding_from_comment,
@@ -14,13 +22,6 @@ from review_sensei.baseline import (
 from review_sensei.bounded_evidence import canonical_bytes, encode_evidence
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github import ReviewPublisher
-from review_sensei.hosting.github.checks import check_outcome_for_result
-from review_sensei.hosting.github.errors import GitHubPublicationError
-from review_sensei.hosting.github.publication import (
-    MAX_PUBLISHED_REVIEW_BODY_BYTES,
-    approval_eligibility_from_body,
-)
 from review_sensei.human_assessment import MAX_HUMAN_REVIEW_BYTES, PendingHumanReview
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.session import SessionRecord, checkpoint_baseline_capacity

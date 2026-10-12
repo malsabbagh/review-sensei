@@ -6,10 +6,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from review_sensei_github.broker_client import BrokerClient
+from review_sensei_github.errors import GitHubBrokerClientError
+from review_sensei_github.feedback_attestation import parse_feedback_attestation
+
 from review_sensei.evidence import evidence_digest
-from review_sensei.hosting.github.broker_client import BrokerClient
-from review_sensei.hosting.github.errors import GitHubBrokerClientError
-from review_sensei.hosting.github.feedback_attestation import parse_feedback_attestation
 from tests.test_github_broker_client import FakeResponse
 
 

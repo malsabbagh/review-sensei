@@ -155,6 +155,7 @@ jobs:
       artifacts: ${{ steps.plan.outputs.artifacts }}
       configuration_source: ${{ steps.plan.outputs.configuration_source }}
       package_version: ${{ steps.release-identity.outputs.package_version }}
+      github_package_version: ${{ steps.release-identity.outputs.github_package_version }}
       workflow_commit: ${{ steps.release-identity.outputs.workflow_commit }}
       policy_commit: ${{ steps.policy.outputs.commit }}
     steps:
@@ -338,13 +339,25 @@ jobs:
             echo "::error::The ReviewSensei workflow commit does not declare an exact released version." >&2
             exit 1
           fi
+          github_package_version="$(git --git-dir="$source_dir" show "$workflow_commit:packages/python/review-sensei-github/pyproject.toml" | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([0-9][0-9.]*\)"[[:space:]]*$/\1/p' | head -n 1)"
+          if [[ ! "$github_package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::The ReviewSensei workflow commit does not declare an exact review-sensei-github version." >&2
+            exit 1
+          fi
+          pinned_engine="$(git --git-dir="$source_dir" show "$workflow_commit:packages/python/review-sensei-github/pyproject.toml" | sed -n 's/^[[:space:]]*"review-sensei==\([0-9][0-9.]*\)".*/\1/p' | head -n 1)"
+          if [[ "$pinned_engine" != "$package_version" ]]; then
+            echo "::error::review-sensei-github does not pin review-sensei==$package_version." >&2
+            exit 1
+          fi
           echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
+          echo "github_package_version=$github_package_version" >> "$GITHUB_OUTPUT"
           echo "workflow_commit=$workflow_commit" >> "$GITHUB_OUTPUT"
-          echo "ReviewSensei release identity: review-sensei==$package_version at $workflow_commit."
+          echo "ReviewSensei release identity: review-sensei==$package_version and review-sensei-github==$github_package_version at $workflow_commit."
 
       - name: Install ReviewSensei package (PyPI first, GitHub fallback)
         env:
           REVIEW_SENSEI_VERSION: ${{ steps.release-identity.outputs.package_version }}
+          REVIEW_SENSEI_GITHUB_VERSION: ${{ steps.release-identity.outputs.github_package_version }}
           REVIEW_SENSEI_WORKFLOW_COMMIT: ${{ steps.release-identity.outputs.workflow_commit }}
         run: |
           set -euo pipefail
@@ -378,8 +391,32 @@ jobs:
             echo "::error::ReviewSensei version mismatch: expected $expected_version, installed $installed_version." >&2
             exit 1
           fi
+          github_expected="${REVIEW_SENSEI_GITHUB_VERSION#v}"
+          if [[ ! "$github_expected" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::The review-sensei-github release identity is invalid." >&2
+            exit 1
+          fi
+          github_log="$RUNNER_TEMP/review-sensei-github-pypi-install.log"
+          if "$python_bin" -m pip install --disable-pip-version-check "review-sensei-github==$github_expected" 2>&1 | tee "$github_log"; then
+            github_source="PyPI"
+          elif grep -Fq "No matching distribution found for review-sensei-github==" "$github_log" || \
+            grep -Fq "Could not find a version that satisfies the requirement review-sensei-github==" "$github_log"; then
+            echo "::warning::review-sensei-github==$github_expected is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_COMMIT."
+            "$python_bin" -m pip install --disable-pip-version-check --no-deps \
+              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_COMMIT#subdirectory=packages/python/review-sensei-github"
+            github_source="GitHub@$REVIEW_SENSEI_WORKFLOW_COMMIT"
+          else
+            echo "::error::PyPI installation failed for review-sensei-github==$github_expected for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
+            exit 1
+          fi
+          github_installed="$("$python_bin" -c 'import importlib.metadata; print(importlib.metadata.version("review-sensei-github"))')"
+          if [[ "$github_installed" != "$github_expected" ]]; then
+            echo "::error::review-sensei-github version mismatch: expected $github_expected, installed $github_installed." >&2
+            exit 1
+          fi
           "$python_bin" -m pip check
           echo "Installed ReviewSensei $installed_version from $install_source."
+          echo "Installed review-sensei-github $github_installed from $github_source."
 
       - name: Report retired repository variables
         # Retired managed variables are reported here, once per run, with the
@@ -430,7 +467,7 @@ jobs:
           REVIEWSENSEI_MODEL: ${{ vars.REVIEWSENSEI_MODEL }}
         run: |
           set -euo pipefail
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" host-plan \
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" host-plan \
             --github-output "$GITHUB_OUTPUT"
 
   authoritative-preflight:
@@ -587,6 +624,7 @@ jobs:
       - name: Install ReviewSensei package (PyPI first, GitHub fallback)
         env:
           REVIEW_SENSEI_VERSION: ${{ needs.bootstrap.outputs.package_version }}
+          REVIEW_SENSEI_GITHUB_VERSION: ${{ needs.bootstrap.outputs.github_package_version }}
           REVIEW_SENSEI_WORKFLOW_COMMIT: ${{ needs.bootstrap.outputs.workflow_commit }}
         run: |
           set -euo pipefail
@@ -619,8 +657,32 @@ jobs:
             echo "::error::ReviewSensei version mismatch: expected $expected_version, installed $installed_version." >&2
             exit 1
           fi
+          github_expected="${REVIEW_SENSEI_GITHUB_VERSION#v}"
+          if [[ ! "$github_expected" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::The review-sensei-github release identity is invalid." >&2
+            exit 1
+          fi
+          github_log="$RUNNER_TEMP/review-sensei-github-pypi-install.log"
+          if "$python_bin" -m pip install --disable-pip-version-check "review-sensei-github==$github_expected" 2>&1 | tee "$github_log"; then
+            github_source="PyPI"
+          elif grep -Fq "No matching distribution found for review-sensei-github==" "$github_log" || \
+            grep -Fq "Could not find a version that satisfies the requirement review-sensei-github==" "$github_log"; then
+            echo "::warning::review-sensei-github==$github_expected is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_COMMIT."
+            "$python_bin" -m pip install --disable-pip-version-check --no-deps \
+              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_COMMIT#subdirectory=packages/python/review-sensei-github"
+            github_source="GitHub@$REVIEW_SENSEI_WORKFLOW_COMMIT"
+          else
+            echo "::error::PyPI installation failed for review-sensei-github==$github_expected for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
+            exit 1
+          fi
+          github_installed="$("$python_bin" -c 'import importlib.metadata; print(importlib.metadata.version("review-sensei-github"))')"
+          if [[ "$github_installed" != "$github_expected" ]]; then
+            echo "::error::review-sensei-github version mismatch: expected $github_expected, installed $github_installed." >&2
+            exit 1
+          fi
           "$python_bin" -m pip check
           echo "Installed ReviewSensei $installed_version from $install_source."
+          echo "Installed review-sensei-github $github_installed from $github_source."
 
       - name: Apply broker-attested maintainer command
         env:
@@ -677,7 +739,7 @@ jobs:
               "job_workflow_sha": workflow_sha,
           }, open(sys.argv[1], "w", encoding="utf-8"), separators=(",", ":"))
           PY
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github command \
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" command \
             --comment-body "$COMMENT_BODY" --actor "$COMMENT_ACTOR" \
             --actor-type "$COMMENT_ACTOR_TYPE" --association "$COMMENT_ASSOCIATION" \
             --repository "$REPOSITORY" --repository-id "$REPOSITORY_ID" \
@@ -820,6 +882,7 @@ jobs:
       - name: Install ReviewSensei package (PyPI first, GitHub fallback)
         env:
           REVIEW_SENSEI_VERSION: ${{ needs.bootstrap.outputs.package_version }}
+          REVIEW_SENSEI_GITHUB_VERSION: ${{ needs.bootstrap.outputs.github_package_version }}
           REVIEW_SENSEI_WORKFLOW_COMMIT: ${{ needs.bootstrap.outputs.workflow_commit }}
         run: |
           set -euo pipefail
@@ -853,8 +916,32 @@ jobs:
             echo "::error::ReviewSensei version mismatch: expected $expected_version, installed $installed_version." >&2
             exit 1
           fi
+          github_expected="${REVIEW_SENSEI_GITHUB_VERSION#v}"
+          if [[ ! "$github_expected" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::The review-sensei-github release identity is invalid." >&2
+            exit 1
+          fi
+          github_log="$RUNNER_TEMP/review-sensei-github-pypi-install.log"
+          if "$python_bin" -m pip install --disable-pip-version-check "review-sensei-github==$github_expected" 2>&1 | tee "$github_log"; then
+            github_source="PyPI"
+          elif grep -Fq "No matching distribution found for review-sensei-github==" "$github_log" || \
+            grep -Fq "Could not find a version that satisfies the requirement review-sensei-github==" "$github_log"; then
+            echo "::warning::review-sensei-github==$github_expected is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_COMMIT."
+            "$python_bin" -m pip install --disable-pip-version-check --no-deps \
+              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_COMMIT#subdirectory=packages/python/review-sensei-github"
+            github_source="GitHub@$REVIEW_SENSEI_WORKFLOW_COMMIT"
+          else
+            echo "::error::PyPI installation failed for review-sensei-github==$github_expected for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
+            exit 1
+          fi
+          github_installed="$("$python_bin" -c 'import importlib.metadata; print(importlib.metadata.version("review-sensei-github"))')"
+          if [[ "$github_installed" != "$github_expected" ]]; then
+            echo "::error::review-sensei-github version mismatch: expected $github_expected, installed $github_installed." >&2
+            exit 1
+          fi
           "$python_bin" -m pip check
           echo "Installed ReviewSensei $installed_version from $install_source."
+          echo "Installed review-sensei-github $github_installed from $github_source."
 
       - name: Scope the selected backend credential
         id: credential
@@ -988,7 +1075,7 @@ jobs:
             configuration-context.json admission-context.json checkpoint-evidence.json checkpoint-diagnostics.json
           echo 'checkpoint_workspace_clean=true' >> "$GITHUB_OUTPUT"
           echo 'result_ready=false' >> "$GITHUB_OUTPUT"
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" review "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --output review.json --outcome outcome.json
           if [[ -s review.json ]]; then
@@ -1074,7 +1161,7 @@ jobs:
           if [[ "$LEARNING" == "pull-requests" ]]; then
             publish_args+=(--enable-learning-prs)
           fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github review \
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" publish \
             --result review.json --diff pr.patch --repository "$REPOSITORY" \
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
@@ -1116,7 +1203,7 @@ jobs:
             reply_args+=(--api-key-env "$CREDENTIAL_ENV")
           fi
           set +e
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github reply \
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" reply \
             "${reply_args[@]}" > "$reply_output"
           reply_exit=$?
           set -e
@@ -1294,6 +1381,7 @@ jobs:
       - name: Install ReviewSensei package (PyPI first, GitHub fallback)
         env:
           REVIEW_SENSEI_VERSION: ${{ needs.bootstrap.outputs.package_version }}
+          REVIEW_SENSEI_GITHUB_VERSION: ${{ needs.bootstrap.outputs.github_package_version }}
           REVIEW_SENSEI_WORKFLOW_COMMIT: ${{ needs.bootstrap.outputs.workflow_commit }}
         run: |
           set -euo pipefail
@@ -1326,8 +1414,32 @@ jobs:
             echo "::error::ReviewSensei version mismatch: expected $expected_version, installed $installed_version." >&2
             exit 1
           fi
+          github_expected="${REVIEW_SENSEI_GITHUB_VERSION#v}"
+          if [[ ! "$github_expected" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::The review-sensei-github release identity is invalid." >&2
+            exit 1
+          fi
+          github_log="$RUNNER_TEMP/review-sensei-github-pypi-install.log"
+          if "$python_bin" -m pip install --disable-pip-version-check "review-sensei-github==$github_expected" 2>&1 | tee "$github_log"; then
+            github_source="PyPI"
+          elif grep -Fq "No matching distribution found for review-sensei-github==" "$github_log" || \
+            grep -Fq "Could not find a version that satisfies the requirement review-sensei-github==" "$github_log"; then
+            echo "::warning::review-sensei-github==$github_expected is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_COMMIT."
+            "$python_bin" -m pip install --disable-pip-version-check --no-deps \
+              "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_COMMIT#subdirectory=packages/python/review-sensei-github"
+            github_source="GitHub@$REVIEW_SENSEI_WORKFLOW_COMMIT"
+          else
+            echo "::error::PyPI installation failed for review-sensei-github==$github_expected for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
+            exit 1
+          fi
+          github_installed="$("$python_bin" -c 'import importlib.metadata; print(importlib.metadata.version("review-sensei-github"))')"
+          if [[ "$github_installed" != "$github_expected" ]]; then
+            echo "::error::review-sensei-github version mismatch: expected $github_expected, installed $github_installed." >&2
+            exit 1
+          fi
           "$python_bin" -m pip check
           echo "Installed ReviewSensei $installed_version from $install_source."
+          echo "Installed review-sensei-github $github_installed from $github_source."
 
       - name: Scope the selected backend credential
         id: credential
@@ -1449,7 +1561,7 @@ jobs:
             configuration-context.json admission-context.json checkpoint-evidence.json checkpoint-diagnostics.json
           echo 'checkpoint_workspace_clean=true' >> "$GITHUB_OUTPUT"
           echo 'result_ready=false' >> "$GITHUB_OUTPUT"
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" "${review_args[@]}" \
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" review "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --output review.json --outcome outcome.json
           if [[ -s review.json ]]; then
@@ -1535,7 +1647,7 @@ jobs:
           if [[ "$LEARNING" == "pull-requests" ]]; then
             publish_args+=(--enable-learning-prs)
           fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github review \
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" publish \
             --result review.json --diff pr.patch --repository "$REPOSITORY" \
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
@@ -1579,7 +1691,7 @@ jobs:
             reply_args+=(--api-key-env "$CREDENTIAL_ENV")
           fi
           set +e
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" github reply \
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" reply \
             "${reply_args[@]}" > "$reply_output"
           reply_exit=$?
           set -e

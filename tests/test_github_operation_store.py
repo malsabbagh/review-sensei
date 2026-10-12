@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import unittest
 
-from review_sensei.hosting.github.operation_host import (
+from review_sensei_github.operation_host import (
     REVIEW_TRIGGERS,
     AdmissionProof,
     ExecutionResult,
@@ -229,14 +229,12 @@ class GitHubOperationStoreTests(unittest.TestCase):
             "User",
         )
         comments.next_id = 2
-        with self.assertLogs(
-            "review_sensei.hosting.github.operation", level="WARNING"
-        ) as logs:
+        with self.assertLogs("review_sensei_github.operation", level="WARNING") as logs:
             GitHubCommentOperationStore(comments, app_user_id=42)
         self.assertIn("ignored", logs.output[0])
 
     def test_two_app_indexes_are_ambiguous(self):
-        from review_sensei.hosting.github.operation_host import encode_index_comment
+        from review_sensei_github.operation_host import encode_index_comment
 
         comments = MemoryComments()
         body = encode_index_comment(

@@ -14,7 +14,7 @@ There is no new YAML option or release in this change.
 
 `HumanFileReviewPolicy()` defaults to `allow_confirmations=False`. A trusted
 operator must explicitly pass `HumanFileReviewPolicy(allow_confirmations=True)`
-to `review_sensei.hosting.github.human_file_review.HumanFileReviewPublisher`.
+to `review_sensei_github.human_file_review.HumanFileReviewPublisher`.
 Neither repository prose nor model output controls this policy.
 
 The host supplies its existing GitHub HTTP transport, trusted API URL,

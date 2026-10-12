@@ -730,6 +730,46 @@ def qualify_tag(root: Path, tag: str) -> None:
         raise ValueError("release tag identity changed during qualification")
 
 
+def prepare_github(root: Path) -> dict[str, str]:
+    """Report the hosted release identity without tagging or publishing.
+
+    The operator signs ``github-vX.Y.Z`` only after registering the PyPI
+    project and the ``pypi-github`` Trusted Publisher. This command does not
+    create that tag.
+    """
+
+    import tomllib
+
+    def _load(path: Path) -> dict[str, Any]:
+        with path.open("rb") as handle:
+            project = tomllib.load(handle).get("project", {})
+        if not isinstance(project, dict):
+            raise ValueError("project metadata is invalid")
+        return project
+
+    engine = _load(root / "pyproject.toml")
+    hosted = _load(
+        root / "packages" / "python" / "review-sensei-github" / "pyproject.toml"
+    )
+    engine_version = engine.get("version")
+    hosted_version = hosted.get("version")
+    dependencies = hosted.get("dependencies")
+    if not isinstance(engine_version, str) or not isinstance(hosted_version, str):
+        raise ValueError("release versions are missing")
+    if (
+        not isinstance(dependencies, list)
+        or f"review-sensei=={engine_version}" not in dependencies
+    ):
+        raise ValueError("review-sensei-github does not pin the current engine")
+    return {
+        "engine_version": engine_version,
+        "github_version": hosted_version,
+        "tag": f"github-v{hosted_version}",
+        "environment": "pypi-github",
+        "tag_created": "false",
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -746,6 +786,8 @@ def main() -> int:
     item.add_argument("--timeout", type=int, default=3600)
     item = sub.add_parser("qualify-tag")
     item.add_argument("--tag", required=True)
+    item = sub.add_parser("prepare-github")
+    item.add_argument("--root", type=Path, default=TRUSTED_ROOT)
     args = parser.parse_args()
     try:
         if args.command == "render":
@@ -779,9 +821,13 @@ def main() -> int:
                         "Hold if main/CI advances or this tag exists. Release builds "
                         "Python/npm from this exact signed source. Channel/Worker changes remain separate.\n"
                     )
-        else:
+        elif args.command == "prepare-github":
+            print(json.dumps(prepare_github(args.root.resolve())))
+        elif args.command == "qualify-tag":
             qualify_tag(TRUSTED_ROOT, args.tag)
             print("Signed tag, generated source receipt and exact-head CI qualified")
+        else:
+            raise ValueError("unknown release command")
     except (ValueError, OSError, KeyError, TypeError, subprocess.CalledProcessError):
         # Do not expose captured subprocess output or network response bodies.
         # ValueError messages in this helper contain only validated public data.

@@ -19,9 +19,10 @@ from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
+from review_sensei_github.errors import GitHubConversationError
+from review_sensei_github.publication import approval_eligibility_from_body
+
 from review_sensei.budgets import ReviewWorkBudgets
-from review_sensei.hosting.github.errors import GitHubConversationError
-from review_sensei.hosting.github.publication import approval_eligibility_from_body
 from review_sensei.work_recovery import WorkRecoveryStore
 from tests import test_human_assessment as host
 from tests import test_work_recovery as recovery

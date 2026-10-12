@@ -12,9 +12,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from ...errors import ReviewInputError
-from ...evidence import EvidenceBundle, EvidenceRecord, EvidenceSnapshot
-from ...validation import validate_repository_path
+from review_sensei.errors import ReviewInputError
+from review_sensei.evidence import EvidenceBundle, EvidenceRecord, EvidenceSnapshot
+from review_sensei.validation import validate_repository_path
+
 from .errors import (
     GitHubHTTPError,
     GitHubHTTPPaginationLimitError,

@@ -9,6 +9,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from review_sensei_github import (
+    GitHubApplication,
+    GitHubWriteOptions,
+    PublicationResult,
+    ReviewPublisher,
+)
+from review_sensei_github.errors import GitHubPublicationError
+
 from review_sensei.baseline import (
     ReviewBaseline,
     admission_context_from_document,
@@ -24,13 +32,6 @@ from review_sensei.cli import (
 from review_sensei.context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from review_sensei.convergence import ReviewConvergencePolicy, derive_blocker_candidate
 from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github import (
-    GitHubApplication,
-    GitHubWriteOptions,
-    PublicationResult,
-    ReviewPublisher,
-)
-from review_sensei.hosting.github.errors import GitHubPublicationError
 from review_sensei.models import (
     ProviderResponse,
     ReviewComment,

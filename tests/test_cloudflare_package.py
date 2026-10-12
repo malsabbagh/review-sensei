@@ -137,7 +137,7 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertNotIn("vars.", caller)
 
     def test_current_config_matches_ts_builder_bytes(self):
-        from review_sensei.hosting.github.setup import _current_config_file
+        from review_sensei_github.setup import _current_config_file
 
         ts_source = (CLOUDFLARE / "src" / "setup-content.ts").read_text(
             encoding="utf-8"
@@ -254,8 +254,9 @@ class CloudflarePackageTests(unittest.TestCase):
         )
 
     def test_current_config_lists_packaged_defaults(self):
+        from review_sensei_github.setup import _current_config_file
+
         from review_sensei.configuration import parse_configuration_text
-        from review_sensei.hosting.github.setup import _current_config_file
 
         content = _current_config_file()
         configuration = parse_configuration_text(content, source=".reviewsensei.yml")
@@ -297,7 +298,7 @@ class CloudflarePackageTests(unittest.TestCase):
     def test_released_runner_switch_v4_fixture_copies_share_canonical_digest(self):
         import hashlib
 
-        from review_sensei.hosting.github.setup import (
+        from review_sensei_github.setup import (
             RELEASED_RUNNER_SWITCH_V4_SHA256,
             _released_runner_switch_v4_caller_bytes,
             _released_runner_switch_v4_workflow,
@@ -314,10 +315,11 @@ class CloudflarePackageTests(unittest.TestCase):
         copies = {
             "python-package": (
                 ROOT
+                / "packages"
+                / "python"
+                / "review-sensei-github"
                 / "src"
-                / "review_sensei"
-                / "hosting"
-                / "github"
+                / "review_sensei_github"
                 / "fixtures"
                 / "released-v4-resolve-trigger-runner-switch.yml"
             ).read_text(encoding="utf-8"),
@@ -349,7 +351,7 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertIn(RELEASED_RUNNER_SWITCH_V4_SHA256, ts_source)
 
     def test_setup_builders_share_paths_and_minimal_bytes(self):
-        from review_sensei.hosting.github.setup import (
+        from review_sensei_github.setup import (
             SETUP_FILE_PATHS,
             SetupPlanBuilder,
             _current_config_file,
@@ -400,7 +402,7 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertEqual(plan.files[1].content, _current_uninstall_workflow())
 
     def test_user_guidance_describes_setup_v5_publication_contract(self):
-        from review_sensei.hosting.github.setup import SETUP_FILE_PATHS
+        from review_sensei_github.setup import SETUP_FILE_PATHS
 
         readme = (ROOT / "README.md").read_text()
         installation = (ROOT / "docs" / "installation.md").read_text()
