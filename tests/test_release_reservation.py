@@ -145,6 +145,14 @@ class ReleaseReservationTests(unittest.TestCase):
         self.assertIsNone(persisted.reservation_owner)
         self.assertIsNone(persisted.transaction)
 
+    def test_owner_from_a_different_head_is_a_noop(self):
+        reserved = _reserved()
+        http, calls = make_http(
+            [json_response([{"id": 7, "body": _body(reserved)}])]
+        )
+        self.assertEqual(self._release(http, head_sha="b" * 40), "not-owner")
+        self.assertNotIn("PATCH", [method for method, _url, _data in calls])
+
     def test_not_owner_is_a_noop(self):
         reserved = _reserved(owner_run_id="99999999999")
         http, calls = make_http([json_response([{"id": 7, "body": _body(reserved)}])])

@@ -92,6 +92,7 @@ def release_own_reservation(
     if (
         record.reservation_owner is None
         or str(record.reservation_owner.get("run_id")) != run_id
+        or str(record.reservation_owner.get("head_sha")) != head_sha
     ):
         return "not-owner"
     if record.transaction is not None and record.transaction.phase != "analysis":

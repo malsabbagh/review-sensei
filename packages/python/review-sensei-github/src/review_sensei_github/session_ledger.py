@@ -2204,4 +2204,6 @@ class GitHubIssueCommentSessionLedger:
         if owner is None:
             return False
         attestation = self._session_attestation or {}
-        return str(owner.get("run_id")) == str(attestation.get("run_id"))
+        return str(owner.get("run_id")) == str(attestation.get("run_id")) and str(
+            owner.get("head_sha")
+        ) == str(attestation.get("head_sha"))

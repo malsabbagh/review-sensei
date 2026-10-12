@@ -392,6 +392,33 @@ describe("token broker authorization", () => {
     expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
   });
 
+  it("rejects malformed release-only exchanges instead of widening authorization", async () => {
+    const { broker, github } = harness();
+    github.pullRequestHead.mockResolvedValue("c".repeat(40));
+    const session = {
+      repository_id: 987654321,
+      pull_request: 7,
+      head_sha: SHA,
+    };
+    for (const body of [
+      { oidc_token: "signed-jwt", capability: "review_session", release_only: false, session },
+      { oidc_token: "signed-jwt", capability: "review_session", release_only: "true", session },
+      {
+        oidc_token: "signed-jwt",
+        capability: "review_session",
+        release_only: true,
+        session,
+        session_attestation: { operation: "review" },
+      },
+      { oidc_token: "signed-jwt", capability: "review_publish", release_only: true },
+    ]) {
+      await expect(broker.exchange(body as never)).rejects.toThrow(
+        "broker_session_invalid",
+      );
+    }
+    expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
+  });
+
   it("issues an opaque grant only after deriving command actor authority from a live comment", async () => {
     const { broker, github } = harness();
     const attestation = {

@@ -1139,7 +1139,9 @@ jobs:
           review_pid=$!
           wait "$review_pid"
           review_status=$?
-          trap - TERM INT
+          # Ignore any further TERM/INT (GitHub escalation) so the wrapper
+          # survives to record outputs; Python has already unwound.
+          trap '' TERM INT
           if [[ -s review.json ]]; then
             echo 'result_ready=true' >> "$GITHUB_OUTPUT"
           fi
@@ -1675,7 +1677,9 @@ jobs:
           review_pid=$!
           wait "$review_pid"
           review_status=$?
-          trap - TERM INT
+          # Ignore any further TERM/INT (GitHub escalation) so the wrapper
+          # survives to record outputs; Python has already unwound.
+          trap '' TERM INT
           if [[ -s review.json ]]; then
             echo 'result_ready=true' >> "$GITHUB_OUTPUT"
           fi
