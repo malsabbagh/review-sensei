@@ -445,6 +445,24 @@ class SessionCommandTests(unittest.TestCase):
         self.assertIn("blocked by run 424242, still running", result.summary)
         self.assertNotIn("paused by maintainer", result.summary)
 
+    def test_status_without_pause_or_hold_emits_no_blocked_clause(self):
+        ledger = InMemorySessionLedger()
+        status = parse_maintainer_command("@sensei review status", actor="alice")
+        _record, result = apply_session_command(
+            ledger, IDENTITY, status, now=FIXED_NOW
+        )
+        self.assertIn("paused=False", result.summary)
+        self.assertIn("not paused", result.summary)
+        self.assertNotIn("blocked by", result.summary)
+
+        pause = parse_maintainer_command("@sensei review pause", actor="alice")
+        apply_session_command(ledger, IDENTITY, pause, now=FIXED_NOW)
+        _record, result = apply_session_command(
+            ledger, IDENTITY, status, now=FIXED_NOW
+        )
+        self.assertIn("paused by maintainer", result.summary)
+        self.assertNotIn("blocked by", result.summary)
+
     def test_status_composes_pause_and_known_owner_exactly(self):
         ledger = InMemorySessionLedger()
         ledger.initialize(IDENTITY, now=FIXED_NOW)
