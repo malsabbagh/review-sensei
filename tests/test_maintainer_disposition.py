@@ -418,6 +418,33 @@ class SessionCommandTests(unittest.TestCase):
         )
         self.assertIn(f"head={'a' * 40}", result.summary)
 
+    def test_status_distinguishes_paused_from_blocked_by_run(self):
+        # ADR 0079: the two blocked states must not read the same.
+        ledger = InMemorySessionLedger()
+        pause = parse_maintainer_command("@sensei review pause", actor="alice")
+        apply_session_command(ledger, IDENTITY, pause, now=FIXED_NOW)
+        status = parse_maintainer_command("@sensei review status", actor="alice")
+        _record, result = apply_session_command(ledger, IDENTITY, status, now=FIXED_NOW)
+        self.assertIn(
+            "paused by maintainer, comment @sensei review continue", result.summary
+        )
+
+        ledger = InMemorySessionLedger()
+        ledger.initialize(IDENTITY, now=FIXED_NOW)
+        ledger.replace(
+            IDENTITY,
+            lambda r: r.evolve(
+                reservation_id="abcd1234",
+                reserved_slot="initial",
+                reservation_owner={"run_id": "424242", "head_sha": "a" * 40},
+                now=FIXED_NOW,
+            ),
+            now=FIXED_NOW,
+        )
+        _record, result = apply_session_command(ledger, IDENTITY, status, now=FIXED_NOW)
+        self.assertIn("blocked by run 424242, still running", result.summary)
+        self.assertNotIn("paused by maintainer", result.summary)
+
     def test_disposition_is_not_a_verified_fix(self):
         ledger = InMemorySessionLedger()
         command = parse_maintainer_command(

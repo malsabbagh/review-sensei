@@ -113,12 +113,28 @@ required fixes.
 ## A valid session remains paused after a failed analysis
 
 A held reservation can block admission even when `operator_paused` is false.
-After the reviewed recovery runtime and workflow are installed, an authorized
-maintainer can comment `@reviewsensei review continue` on that PR. The command uses
-GitHub Actions reads to prove the originating run has completed, refuses an active
-owner run, rechecks ledger ownership and the current PR head, and charges
-one failed attempt to the abandoned head. Run a new review only after the
-command reports successful recovery; continuation itself performs no inference.
+Cancelled and killed reviews now release their own reservation: `SIGTERM`
+unwinds through the same cleanup as `SIGINT`, the owning run may release
+its own hold even after the PR head has moved, and an always-run workflow
+cleanup step repeats that owner-only release when the Python process
+could not. When a runner is lost entirely, the next review heals the
+leak at admission: it proves the owner run completed with GitHub Actions
+reads, charges one failed attempt to the abandoned head, and reviews the
+current head in the same job. A still-running owner is waited on briefly
+and then reported as `blocked by run X, still running`; unclear evidence
+stays blocked without mutation.
+
+`@sensei review status` tells the two blocked states apart:
+`paused by maintainer, comment @sensei review continue` means a
+maintainer paused the session — pushes and admission self-heal never
+clear it — while `blocked by run X, still running` means another run
+still owns the reservation. An authorized maintainer can still comment
+`@reviewsensei review continue` on that PR to unpause and recover a held
+reservation explicitly. The command uses GitHub Actions reads to prove
+the originating run has completed, refuses an active owner run, rechecks
+ledger ownership and the current PR head, and charges one failed attempt
+to the abandoned head. Run a new review only after the command reports
+successful recovery; continuation itself performs no inference.
 
 Old records without OIDC owner metadata can recover only when exact-head PR-run
 and failed analysis-job metadata uniquely identify the origin, and the record's

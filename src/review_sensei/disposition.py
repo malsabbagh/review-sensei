@@ -778,7 +778,7 @@ def apply_session_command(
             action="pause",
             applied=True,
             operator_paused=True,
-            summary="automated review paused pending maintainer continuation",
+            summary="paused by maintainer, comment @sensei review continue to resume",
         )
     if command.action == "verify":
         dispositions = session_dispositions(record)
@@ -842,6 +842,21 @@ def apply_session_command(
         )
     if command.action == "status":
         head_suffix = f" head={command.head_sha}" if command.head_sha else ""
+        # Tell the two blocked states apart (ADR 0079): a maintainer pause
+        # is only ever cleared by an explicit continue, while a held
+        # reservation names the run that owns it.
+        if paused:
+            state_clause = (
+                "paused by maintainer, comment @sensei review continue to resume"
+            )
+        elif record.reservation_id is not None:
+            owner = record.reservation_owner
+            if owner is not None:
+                state_clause = f"blocked by run {owner.get('run_id')}, still running"
+            else:
+                state_clause = "blocked by a held reservation, owner unknown"
+        else:
+            state_clause = "not paused"
         return record, MaintainerCommandResult(
             action="status",
             applied=False,
@@ -850,7 +865,7 @@ def apply_session_command(
                 f"initial={record.completed_initial_reviews} "
                 f"verification={record.completed_verification_rounds} "
                 f"failed_attempts={record.failed_attempts} "
-                f"paused={paused}{head_suffix}"
+                f"paused={paused}{head_suffix}; {state_clause}"
             ),
         )
     if not planned:
