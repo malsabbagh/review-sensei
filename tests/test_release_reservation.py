@@ -88,6 +88,53 @@ class ReleaseReservationTests(unittest.TestCase):
         self.assertEqual(self._release(http), "released")
         self.assertIn("PATCH", [method for method, _url, _data in calls])
 
+    def test_analysis_checkpoint_is_released_but_publication_is_not(self):
+        # Transaction mode always carries an analysis-phase transaction
+        # while the reservation is held; that checkpoint is not saved
+        # publication work, so the owner release still applies.
+        import json as _json
+
+        from review_sensei.convergence import ReviewConvergencePolicy
+        from review_sensei.session import (
+            InMemorySessionLedger,
+            prepare_review_transaction,
+        )
+
+        memory = InMemorySessionLedger()
+        prepared = prepare_review_transaction(
+            memory,
+            IDENTITY,
+            ReviewConvergencePolicy(mode="merge-focused"),
+            reservation_id="d" * 64,
+            base_sha="c" * 40,
+            head_sha="a" * 40,
+            configuration_digest="e" * 64,
+            evidence_digest="f" * 64,
+            now=FIXED_NOW,
+        )
+        reserved = prepared.record.evolve(
+            reservation_owner={"run_id": RUN_ID, "head_sha": "a" * 40},
+            now=FIXED_NOW,
+        )
+        state = {"body": _body(reserved)}
+
+        def _is_patch(request):
+            return request.method == "PATCH"
+
+        def _patch(request):
+            state["body"] = _json.loads(request.data)["body"]
+            return json_response({"id": 7, "body": state["body"]})
+
+        def _is_get(request):
+            return request.method == "GET"
+
+        def _get(request):
+            return json_response([{"id": 7, "body": state["body"]}])
+
+        http, calls = make_http([], routes=[(_is_patch, _patch), (_is_get, _get)])
+        self.assertEqual(self._release(http), "released")
+        self.assertIn("PATCH", [method for method, _url, _data in calls])
+
     def test_not_owner_is_a_noop(self):
         reserved = _reserved(owner_run_id="99999999999")
         http, calls = make_http([json_response([{"id": 7, "body": _body(reserved)}])])

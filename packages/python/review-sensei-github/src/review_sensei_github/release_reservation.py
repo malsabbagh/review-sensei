@@ -87,9 +87,12 @@ def release_own_reservation(
         or str(record.reservation_owner.get("run_id")) != run_id
     ):
         return "not-owner"
-    if record.transaction is not None:
-        # A checkpointed transaction is saved publication work. It is
-        # never reclaimed here; publication/recovery paths own it.
+    if record.transaction is not None and record.transaction.phase != "analysis":
+        # A transaction that reached publication is saved publication
+        # work. It is never reclaimed here; publication/recovery paths
+        # own it. An analysis-phase checkpoint is not publication work:
+        # abort discards it with the reservation, as ADR 0063 recovery
+        # does.
         return "publication-saved"
     ledger.abort(
         identity,
