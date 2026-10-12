@@ -845,18 +845,18 @@ def apply_session_command(
         # Tell the two blocked states apart (ADR 0079): a maintainer pause
         # is only ever cleared by an explicit continue, while a held
         # reservation names the run that owns it.
+        clauses = []
         if paused:
-            state_clause = (
+            clauses.append(
                 "paused by maintainer, comment @sensei review continue to resume"
             )
-        elif record.reservation_id is not None:
+        if record.reservation_id is not None:
             owner = record.reservation_owner
             if owner is not None:
-                state_clause = f"blocked by run {owner.get('run_id')}, still running"
+                clauses.append(f"blocked by run {owner.get('run_id')}, still running")
             else:
-                state_clause = "blocked by a held reservation, owner unknown"
-        else:
-            state_clause = "not paused"
+                clauses.append("blocked by a held reservation, owner unknown")
+        state_clause = "; ".join(clauses) if clauses else "not paused"
         return record, MaintainerCommandResult(
             action="status",
             applied=False,

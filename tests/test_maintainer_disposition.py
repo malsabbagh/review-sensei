@@ -445,6 +445,24 @@ class SessionCommandTests(unittest.TestCase):
         self.assertIn("blocked by run 424242, still running", result.summary)
         self.assertNotIn("paused by maintainer", result.summary)
 
+    def test_status_composes_pause_and_hold_and_names_unknown_owner(self):
+        ledger = InMemorySessionLedger()
+        ledger.initialize(IDENTITY, now=FIXED_NOW)
+        ledger.replace(
+            IDENTITY,
+            lambda r: r.evolve(
+                reservation_id="abcd1234",
+                reserved_slot="initial",
+                operator_paused=True,
+                now=FIXED_NOW,
+            ),
+            now=FIXED_NOW,
+        )
+        status = parse_maintainer_command("@sensei review status", actor="alice")
+        _record, result = apply_session_command(ledger, IDENTITY, status, now=FIXED_NOW)
+        self.assertIn("paused by maintainer", result.summary)
+        self.assertIn("blocked by a held reservation, owner unknown", result.summary)
+
     def test_disposition_is_not_a_verified_fix(self):
         ledger = InMemorySessionLedger()
         command = parse_maintainer_command(
