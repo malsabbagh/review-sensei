@@ -15,17 +15,19 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
-from review_sensei.hosting.github.http import GitHubHttp
-from review_sensei.hosting.github.operation_comments import (
+import review_sensei_github
+from review_sensei_github.commands import run_hosted_provider
+from review_sensei_github.http import GitHubHttp
+from review_sensei_github.operation_comments import (
     GitHubIssueCommentOperationPort,
 )
-from review_sensei.hosting.github.operation_entry import accepted_payload_matches
-from review_sensei.hosting.github.operation_host import (
+from review_sensei_github.operation_entry import accepted_payload_matches
+from review_sensei_github.operation_host import (
     OPERATION_COMMENT_MARKER,
     render_marked_comment,
 )
 
-from review_sensei import cli
+import review_sensei
 from review_sensei.models import ReviewRequest, ReviewResult
 from review_sensei.outcomes import RunOutcome
 from review_sensei.service import ReviewRun, ReviewService
@@ -111,10 +113,15 @@ class FakeAPI:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--expected-version", required=True)
+    p.add_argument("--expected-github-version", required=True)
     p.add_argument("--report", required=True, type=Path)
     a = p.parse_args()
     assert importlib.metadata.version("review-sensei") == a.expected_version
-    assert "site-packages" in cli.__file__
+    assert (
+        importlib.metadata.version("review-sensei-github") == a.expected_github_version
+    )
+    assert "site-packages" in review_sensei.__file__
+    assert "site-packages" in review_sensei_github.__file__
     a.report.mkdir(parents=True, exist_ok=True)
     rows = []
 
@@ -223,10 +230,10 @@ def main():
                             "pull_request": 11,
                             "trusted_head_sha": "a" * 40,
                         }
-                        first = cli._run_review_provider(
+                        first = run_hosted_provider(
                             Service(), ReviewRequest(diff="synthetic"), **kwargs
                         )
-                        second = cli._run_review_provider(
+                        second = run_hosted_provider(
                             Service(), ReviewRequest(diff="synthetic"), **kwargs
                         )
                     except Exception as e:
@@ -316,11 +323,11 @@ def main():
                         "pull_request": 11,
                         "trusted_head_sha": "a" * 40,
                     }
-                    first = cli._run_review_provider(
+                    first = run_hosted_provider(
                         IdentityService(), ReviewRequest(diff="synthetic"), **kwargs
                     )
                     changed = {**kwargs, field: new_value}
-                    second = cli._run_review_provider(
+                    second = run_hosted_provider(
                         IdentityService(), ReviewRequest(diff="synthetic"), **changed
                     )
                 except Exception as e:
@@ -342,7 +349,7 @@ def main():
         # Existing metadata token may read PR comments, but bot writes must retain
         # App-authored identity. A User token cannot become an operation store owner.
         fake = FakeAPI(user_type="User")
-        from review_sensei.hosting.github.operation_entry import (
+        from review_sensei_github.operation_entry import (
             analysis_payload,
             run_actions_analysis,
         )

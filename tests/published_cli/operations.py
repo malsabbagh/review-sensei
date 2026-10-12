@@ -14,9 +14,13 @@ from qualify import Runner
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--expected-version", required=True)
+    p.add_argument("--expected-github-version", required=True)
     p.add_argument("--report", required=True, type=Path)
     a = p.parse_args()
     assert importlib.metadata.version("review-sensei") == a.expected_version
+    assert (
+        importlib.metadata.version("review-sensei-github") == a.expected_github_version
+    )
     r = Runner(a)
     rows = []
     child = Path(__file__).with_name("operation_child.py").resolve()

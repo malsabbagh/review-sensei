@@ -21,10 +21,12 @@ from published_cli_release_gate import (
     release_identity,
 )
 from qualify_published_cli import (
+    HOSTED_MANIFEST,
     clean_environment,
     download_command,
     exact_version,
     propagation_download,
+    require_hosted_pin,
     require_installed_distribution,
     require_wheel_digest,
     validate_receipt,
@@ -136,6 +138,10 @@ class BootstrapContracts(unittest.TestCase):
     def test_download_binds_exact_public_wheel_and_ignores_pip_config(self):
         command = download_command("python", "0.6.20", Path("wheels"))
         self.assertEqual(command[-1], "review-sensei==0.6.20")
+        hosted = download_command(
+            "python", "0.1.1", Path("wheels"), "review-sensei-github"
+        )
+        self.assertEqual(hosted[-1], "review-sensei-github==0.1.1")
         for value in [
             "--isolated",
             "--no-deps",
@@ -143,6 +149,7 @@ class BootstrapContracts(unittest.TestCase):
             "https://pypi.org/simple",
         ]:
             self.assertIn(value, command)
+            self.assertIn(value, hosted)
 
     def test_propagation_stops_on_first_success_without_changing_command(self):
         calls, pauses = [], []
@@ -282,7 +289,7 @@ class BootstrapContracts(unittest.TestCase):
             with self.subTest(changed=changed), self.assertRaises(ValueError):
                 validate_receipt({**valid, **changed}, "0.6.20")
 
-    def run_gate(self, pages, manifest=None):
+    def run_gate(self, pages, manifest=None, hosted=None):
         run = {
             "repository": {"full_name": "owner/repo"},
             "head_repository": {"full_name": "owner/repo"},
@@ -298,6 +305,10 @@ class BootstrapContracts(unittest.TestCase):
             "size": 34,
             "content": base64.b64encode(b'[project]\nversion="0.6.20"\n').decode(),
         }
+        hosted = hosted or (
+            b'[project]\nname="review-sensei-github"\nversion="0.1.1"\n'
+            b'dependencies=["cryptography>=44,<51","review-sensei==0.6.20"]\n'
+        )
         urls = []
 
         def read(request, **kwargs):
@@ -305,6 +316,12 @@ class BootstrapContracts(unittest.TestCase):
             self.assertEqual(kwargs["timeout"], 15)
             if "/jobs?" in request.full_url:
                 data = pages[len(urls) - 1]
+            elif HOSTED_MANIFEST in request.full_url:
+                data = {
+                    "encoding": "base64",
+                    "size": len(hosted),
+                    "content": base64.b64encode(hosted).decode(),
+                }
             else:
                 data = manifest
             return io.BytesIO(json.dumps(data).encode())
@@ -344,9 +361,75 @@ class BootstrapContracts(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(receipt["release_attempt"], 3)
         self.assertEqual(receipt["publication_job_id"], 99)
-        self.assertEqual(output, "version=0.6.20\n")
+        self.assertEqual(output, "version=0.6.20\ngithub_version=0.1.1\n")
+        self.assertEqual(receipt["github_version"], "0.1.1")
         self.assertIn("runs/42/attempts/3/jobs?per_page=100&page=2", urls[1])
-        self.assertTrue(urls[-1].endswith("contents/pyproject.toml?ref=" + "a" * 40))
+        self.assertTrue(urls[-2].endswith("contents/pyproject.toml?ref=" + "a" * 40))
+        self.assertTrue(
+            urls[-1].endswith("contents/" + HOSTED_MANIFEST + "?ref=" + "a" * 40)
+        )
+
+    def test_full_gate_requires_hosted_manifest_to_pin_the_exact_engine(self):
+        job = {
+            "name": "Publish to PyPI with Trusted Publishing",
+            "id": 99,
+            "conclusion": "success",
+        }
+        for hosted in [
+            b'[project]\nname="review-sensei-github"\nversion="0.1.1"\n'
+            b'dependencies=["review-sensei==0.6.19"]\n',
+            b'[project]\nname="review-sensei-github"\nversion="0.1.1"\n'
+            b'dependencies=["review-sensei>=0.6.20"]\n',
+            b'[project]\nname="other"\nversion="0.1.1"\n'
+            b'dependencies=["review-sensei==0.6.20"]\n',
+            b'[project]\nname="review-sensei-github"\nversion="latest"\n'
+            b'dependencies=["review-sensei==0.6.20"]\n',
+        ]:
+            with self.subTest(hosted=hosted):
+                code, receipt, output, _ = self.run_gate(
+                    [{"jobs": [job]}], hosted=hosted
+                )
+                self.assertEqual(code, 1)
+                self.assertEqual(receipt["status"], "ERROR")
+                self.assertEqual(output, "")
+
+    def test_hosted_pin_is_exact_and_unique(self):
+        require_hosted_pin(["cryptography<51,>=44", "review-sensei==0.6.23"], "0.6.23")
+        for requires in [
+            None,
+            [],
+            ["review-sensei==0.6.22"],
+            ["review-sensei>=0.6.23"],
+            ["review_sensei==0.6.23", "review-sensei==0.6.23"],
+        ]:
+            with self.subTest(requires=requires), self.assertRaises(ValueError):
+                require_hosted_pin(requires, "0.6.23")
+
+    def test_manual_gate_requires_both_exact_versions(self):
+        for argv in [
+            ["--version", "0.6.23"],
+            ["--github-version", "0.1.1"],
+            ["--version", "0.6.23", "--github-version", "latest"],
+        ]:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                with (
+                    self.subTest(argv=argv),
+                    patch.dict(
+                        os.environ,
+                        {
+                            "GITHUB_EVENT_NAME": "workflow_dispatch",
+                            "GITHUB_OUTPUT": str(root / "output"),
+                        },
+                        clear=True,
+                    ),
+                    patch(
+                        "sys.argv", ["gate", *argv, "--report", str(root / "r.json")]
+                    ),
+                    patch("sys.stdout", new_callable=io.StringIO),
+                ):
+                    self.assertEqual(gate_main(), 1)
+                    self.assertFalse((root / "output").exists())
 
     def test_full_gate_exhausted_inventory_never_outputs_version(self):
         page = {"jobs": [{"name": "other"}] * 100}

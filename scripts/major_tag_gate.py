@@ -18,6 +18,7 @@ from pathlib import Path
 
 import check_release_version as versions
 import release_docs as docs
+from qualify_published_cli import HOSTED_MANIFEST, hosted_version
 
 MAJOR = re.compile(r"v(?:0|[1-9][0-9]*)\Z")
 DIGEST = re.compile(r"[a-f0-9]{64}\Z")
@@ -332,6 +333,7 @@ def qualify(selection, output, *, reserved=False):
     snapshot = output / "source-data"
     relatives = [
         "pyproject.toml",
+        HOSTED_MANIFEST,
         "docs/site/data/site-manifest.json",
         ".github/workflows/review-sensei-run.yml",
         ".github/workflows/review-sensei-review.yml",
@@ -353,6 +355,7 @@ def qualify(selection, output, *, reserved=False):
     docs.version_tuple("v" + version)
     if project.get("name") != "review-sensei":
         raise ValueError("tagged package manifest names a different distribution")
+    github_version = hosted_version((snapshot / HOSTED_MANIFEST).read_text(), version)
     facts = json.loads((snapshot / "docs/site/data/site-manifest.json").read_text())[
         "release_facts"
     ]
@@ -391,6 +394,7 @@ def qualify(selection, output, *, reserved=False):
     receipt = {
         **selected,
         "version": version,
+        "github_version": github_version,
         "release_tag": "v" + version,
         "release_tag_object": immutable_object,
         "release_run_id": binding["run_id"],
@@ -419,6 +423,7 @@ def workflow_outputs(receipt):
                 key: receipt[key]
                 for key in [
                     "version",
+                    "github_version",
                     "wheel_sha256",
                     "source_sha",
                     "tag_object",

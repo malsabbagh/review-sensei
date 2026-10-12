@@ -11,7 +11,7 @@ import tomllib
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from qualify_published_cli import exact_version
+from qualify_published_cli import HOSTED_MANIFEST, exact_version, hosted_version
 
 
 def release_identity(event, repository):
@@ -45,15 +45,26 @@ def published_job(jobs):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", help="manual dispatch: exact published version")
+    parser.add_argument(
+        "--github-version",
+        help="manual dispatch: exact published review-sensei-github version",
+    )
     parser.add_argument("--report", required=True, type=Path)
     args = parser.parse_args()
     report = {"status": "ERROR"}
     try:
-        if args.version:
+        if args.version or args.github_version:
             if os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch":
                 raise ValueError("manual version requires workflow_dispatch")
+            if not args.version or not args.github_version:
+                raise ValueError("manual dispatch requires both exact versions")
             version = exact_version(args.version)
-            report.update(mode="manual-exact-version", version=version)
+            github_version = exact_version(args.github_version)
+            report.update(
+                mode="manual-exact-version",
+                version=version,
+                github_version=github_version,
+            )
         else:
             if os.environ.get("GITHUB_EVENT_NAME") != "workflow_run":
                 raise ValueError("automatic publication gate requires workflow_run")
@@ -84,14 +95,20 @@ def main():
             else:
                 raise ValueError("Release job pagination exceeded the bounded gate")
             job_id = published_job(jobs)
-            manifest = get("contents/pyproject.toml?ref=" + run["head_sha"])
-            if manifest.get("encoding") != "base64" or manifest.get("size", 0) > 65536:
-                raise ValueError("unbounded or unsupported release manifest")
-            content = base64.b64decode(manifest["content"]).decode("utf-8")
+
+            def manifest(path):
+                data = get("contents/" + path + "?ref=" + run["head_sha"])
+                if data.get("encoding") != "base64" or data.get("size", 0) > 65536:
+                    raise ValueError("unbounded or unsupported release manifest")
+                return base64.b64decode(data["content"]).decode("utf-8")
+
+            content = manifest("pyproject.toml")
             version = exact_version(tomllib.loads(content)["project"]["version"])
+            github_version = hosted_version(manifest(HOSTED_MANIFEST), version)
             report.update(
                 mode="confirmed-pypi-publish",
                 version=version,
+                github_version=github_version,
                 source_sha=run["head_sha"],
                 release_run_id=run["id"],
                 release_attempt=run["run_attempt"],
@@ -100,6 +117,7 @@ def main():
         report["status"] = "PASS"
         with open(os.environ["GITHUB_OUTPUT"], "a") as output:
             output.write("version=" + version + "\n")
+            output.write("github_version=" + github_version + "\n")
     except Exception as error:
         report["error"] = type(error).__name__ + ": " + str(error)
     args.report.parent.mkdir(parents=True, exist_ok=True)
