@@ -30,6 +30,7 @@ from qualify_published_cli import (
     require_installed_distribution,
     require_wheel_digest,
     validate_receipt,
+    wheel_for,
 )
 
 
@@ -404,6 +405,50 @@ class BootstrapContracts(unittest.TestCase):
         ]:
             with self.subTest(requires=requires), self.assertRaises(ValueError):
                 require_hosted_pin(requires, "0.6.23")
+
+    def test_manual_gate_outputs_both_exact_versions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            argv = ["--version", "0.6.23", "--github-version", "0.1.1"]
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "GITHUB_EVENT_NAME": "workflow_dispatch",
+                        "GITHUB_OUTPUT": str(root / "output"),
+                    },
+                    clear=True,
+                ),
+                patch("sys.argv", ["gate", *argv, "--report", str(root / "r.json")]),
+                patch("published_cli_release_gate.urlopen") as urlopen,
+                patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                self.assertEqual(gate_main(), 0)
+            urlopen.assert_not_called()
+            self.assertEqual(
+                (root / "output").read_text(), "version=0.6.23\ngithub_version=0.1.1\n"
+            )
+            receipt = json.loads((root / "r.json").read_text())
+            self.assertEqual(
+                (receipt["status"], receipt["mode"], receipt["github_version"]),
+                ("PASS", "manual-exact-version", "0.1.1"),
+            )
+
+    def test_wheel_selection_matches_exact_name_and_version(self):
+        wheels = [
+            Path("review_sensei-0.6.23-py3-none-any.whl"),
+            Path("review_sensei_github-0.1.1-py3-none-any.whl"),
+        ]
+        self.assertEqual(wheel_for(wheels, "review-sensei", "0.6.23"), wheels[0])
+        self.assertEqual(wheel_for(wheels, "review-sensei-github", "0.1.1"), wheels[1])
+        for project, version in [
+            ("review-sensei", "0.1.1"),
+            ("review-sensei-github", "0.6.23"),
+            ("review-sensei", "0.6.2"),
+        ]:
+            with self.subTest(project=project, version=version):
+                with self.assertRaises(RuntimeError):
+                    wheel_for(wheels, project, version)
 
     def test_manual_gate_requires_both_exact_versions(self):
         for argv in [

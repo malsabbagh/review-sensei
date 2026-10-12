@@ -1045,8 +1045,12 @@ class FullGateTests(unittest.TestCase):
         self.assertEqual(receipt["release_binding"], binding())
         self.assertTrue(receipt["surface"]["data_only"])
         self.assertEqual(len(receipt["source_data_sha256"]), 11)
-        self.assertIn(installer.HOSTED_MANIFEST, receipt["source_data_sha256"])
-        hosted = tomllib.loads((ROOT / installer.HOSTED_MANIFEST).read_text())
+        manifest = (ROOT / installer.HOSTED_MANIFEST).read_bytes()
+        self.assertEqual(
+            receipt["source_data_sha256"][installer.HOSTED_MANIFEST],
+            hashlib.sha256(manifest).hexdigest(),
+        )
+        hosted = tomllib.loads(manifest.decode())
         self.assertEqual(receipt["github_version"], hosted["project"]["version"])
         self.wheel.assert_called_once()
 

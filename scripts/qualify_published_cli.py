@@ -71,8 +71,8 @@ def hosted_version(content, version):
 
 
 def wheel_for(wheels, project, version):
-    name = project.replace("-", "_") + "-" + version + "-"
-    matching = [w for w in wheels if w.name.startswith(name)]
+    identity = [project.replace("-", "_"), version]
+    matching = [w for w in wheels if w.name.split("-")[:2] == identity]
     if len(matching) != 1:
         raise RuntimeError("expected exactly one " + project + " wheel")
     return matching[0]
