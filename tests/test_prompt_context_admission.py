@@ -155,9 +155,21 @@ def service(provider, *, limits=None):
     )
 
 
+def unfinished_diff() -> str:
+    """A second hunk too large to review, so coverage stays partial."""
+
+    return (
+        DIFF
+        + "diff --git a/src/big.py b/src/big.py\n--- a/src/big.py\n+++ b/src/big.py\n@@ -1 +1 @@\n-old\n+"
+        + "x" * 60000
+        + "\n"
+    )
+
+
 def request(context=None, **kwargs):
+    diff = kwargs.pop("diff", DIFF)
     return ReviewRequest(
-        diff=DIFF,
+        diff=diff,
         repository="owner/repo",
         pull_request_number=146,
         base_sha="a" * 40,
@@ -265,12 +277,14 @@ class PromptContextAdmissionTests(unittest.TestCase):
                 fits=lambda prompt: len(prompt.encode()) < 100,
             )
 
-    def test_pr231_shaped_inventory_executes_and_keeps_partial_diagnostics(self):
+    def test_pr231_shaped_inventory_stays_complete_when_optional_context_is_trimmed(
+        self,
+    ):
         provider = Provider()
         original = request()
         run = service(provider).run(original)
         self.assertEqual(len(provider.calls), 1)
-        self.assertEqual(run.result.review_status, "partial")
+        self.assertEqual(run.result.review_status, "complete")
         self.assertTrue(run.result.coverage.fully_reviewed)
         prompt = provider.calls[0].prompt
         self.assertLessEqual(
@@ -295,6 +309,7 @@ class PromptContextAdmissionTests(unittest.TestCase):
             ],
         )
         self.assertGreater(diagnostics["batches"][0]["prompt_omitted"], 0)
+        self.assertFalse(diagnostics["batches"][0]["complete"])
         self.assertNotIn("zzzz", run.result.summary)
         self.assertNotEqual(
             diagnostics["batches"][0]["executed_selection_sha256"],
@@ -347,7 +362,10 @@ class PromptContextAdmissionTests(unittest.TestCase):
         reviewer = service(provider)
         cache = ReviewContextCache()
         reviewer.cache = cache
-        original = replace(request(), work_policy_digest=reviewer.work_policy_digest)
+        original = replace(
+            request(diff=unfinished_diff()),
+            work_policy_digest=reviewer.work_policy_digest,
+        )
         key = build_review_context_cache_key(
             original,
             provider_name=provider.name,
@@ -513,7 +531,8 @@ class PromptContextAdmissionTests(unittest.TestCase):
         self,
     ):
         provider = Provider(finding=True)
-        result = service(provider).run(request()).result
+        result = service(provider).run(request(diff=unfinished_diff())).result
+        self.assertEqual(result.review_status, "partial")
         self.assertTrue(result.comments)
         with tempfile.TemporaryDirectory() as directory:
             ledger = LocalSessionLedger(Path(directory))

@@ -314,6 +314,48 @@ class BrokerClientTests(unittest.TestCase):
                 session_attestation=request_attestation,
             )
 
+    def test_broker_requests_send_reviewsensei_user_agent(self):
+        attestation = {
+            "version": 1,
+            "repository": "acme/widgets",
+            "repository_id": 987654321,
+            "pull_request": 7,
+            "head_sha": "a" * 40,
+            "operation": "command",
+            "source_comment_id": 13579,
+            "run_id": "10000000001",
+            "issued_at": 1_700_000_000,
+            "concurrency_group": "reviewsensei-session-987654321-7",
+            "job_workflow_ref": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
+            "job_workflow_sha": "a" * 40,
+            "actor": "octocat",
+            "actor_type": "User",
+            "association": "OWNER",
+            "command_id": 13579,
+            "command_digest": "b" * 64,
+        }
+        grant = "sg1.1780000000000." + "c" * 43
+        client, calls = self.make_client(
+            [
+                (b'{"token":"ghs_capability"}', 200),
+                (json.dumps({"session_attestation": attestation}).encode(), 200),
+            ]
+        )
+        client.exchange("oidc.token")
+        client.verify_session_grant(grant, attestation)
+        self.assertEqual(
+            [url for _, url, _, _ in calls],
+            [
+                "https://broker.reviewsensei.dev/api/github/token",
+                "https://broker.reviewsensei.dev/api/github/session-grant",
+            ],
+        )
+        for _, _, headers, _ in calls:
+            self.assertEqual(
+                headers["User-agent"],
+                "ReviewSensei-GitHub-App/1.0 (+https://reviewsensei.dev)",
+            )
+
     def test_exchange_rejects_arbitrary_capability(self):
         client, calls = self.make_client((b'{"token":"ghs_capability"}', 200))
         with self.assertRaises(GitHubBrokerClientError):

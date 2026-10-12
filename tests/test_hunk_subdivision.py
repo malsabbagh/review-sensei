@@ -367,7 +367,9 @@ class DiscoverySubdivisionTests(unittest.TestCase):
         self.assertFalse(run.result.coverage.fully_reviewed)
         self.assertLessEqual(len(provider.requests), service.budget.max_provider_calls)
 
-    def test_document_omission_remains_partial_after_all_segments_are_reviewed(self):
+    def test_optional_document_omission_stays_recorded_after_all_segments_are_reviewed(
+        self,
+    ):
         from review_sensei.stages import ReviewCategory
 
         record, provider, service = self.fixture()
@@ -409,8 +411,11 @@ class DiscoverySubdivisionTests(unittest.TestCase):
         )
         run = service.run(ReviewRequest(diff=record.diff, lens_contexts=(context,)))
         self.assertTrue(run.result.coverage.fully_reviewed)
-        self.assertEqual(run.outcome.status, "partial")
+        self.assertEqual(run.result.review_status, "complete")
+        self.assertEqual(run.outcome.status, "reviewed")
+        self.assertIsNone(run.outcome.diagnostic)
         self.assertEqual(run.context_admission["original_inventories"][0]["omitted"], 1)
+        self.assertFalse(run.context_admission["batches"][0]["complete"])
 
 
 if __name__ == "__main__":
