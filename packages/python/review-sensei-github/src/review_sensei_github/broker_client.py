@@ -226,6 +226,58 @@ class BrokerClient:
             raise GitHubBrokerClientError("Broker session owner head was stale")
         return BrokerSession(token=token, state=state, reservation_owner=owner)
 
+    def open_session_release(
+        self,
+        oidc_token: str,
+        *,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+    ) -> BrokerSession:
+        """Obtain a release-only session capability for this run's own head.
+
+        The broker returns a capability token and the verified reservation
+        owner even when the PR head has since moved, because releasing a
+        reservation publishes nothing. It records no enrollment witness
+        and issues no mutation grant; the caller must still prove ledger
+        ownership before releasing.
+        """
+
+        if not isinstance(oidc_token, str) or not oidc_token.strip():
+            raise GitHubBrokerClientError("OIDC token is empty")
+        self._validate_session_scope(repository_id, pull_request, head_sha)
+        parsed = self._post(
+            {
+                "oidc_token": oidc_token,
+                "capability": "review_session",
+                "release_only": True,
+                "session": {
+                    "repository_id": repository_id,
+                    "pull_request": pull_request,
+                    "head_sha": head_sha,
+                },
+            }
+        )
+        token = parsed.get("token")
+        if not isinstance(token, str) or not token.strip():
+            raise GitHubBrokerClientError("Broker token response was invalid")
+        if parsed.get("capability") != "review_session":
+            raise GitHubBrokerClientError("Broker session response was invalid")
+        if parsed.get("release_only") is not True:
+            raise GitHubBrokerClientError("Broker session response was invalid")
+        if parsed.get("session_state") is not None or parsed.get("session_grant"):
+            raise GitHubBrokerClientError("Broker session response was invalid")
+        from review_sensei.errors import ReviewInputError
+        from review_sensei.session import _stored_reservation_owner
+
+        try:
+            owner = _stored_reservation_owner(parsed.get("reservation_owner"))
+        except ReviewInputError as exc:
+            raise GitHubBrokerClientError("Broker session owner was invalid") from exc
+        if owner is None or owner["head_sha"] != head_sha:
+            raise GitHubBrokerClientError("Broker session owner head was stale")
+        return BrokerSession(token=token, state="release", reservation_owner=owner)
+
     def authorize_session_mutation(
         self,
         oidc_token: str,

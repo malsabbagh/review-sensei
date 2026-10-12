@@ -82,6 +82,23 @@ class FakeRegistry:
 
 
 class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
+    def test_sigterm_is_normalized_to_cancellation_cleanup(self):
+        # GitHub cancellation escalates to SIGTERM. It must unwind through
+        # the same KeyboardInterrupt cleanup as SIGINT (exit 130) instead
+        # of killing the process before its reservation abort can run.
+        import signal
+
+        def _terminate(argv=None, *, hosted_hooks=None):
+            os.kill(os.getpid(), signal.SIGTERM)
+            return 0
+
+        with (
+            patch("review_sensei.cli._main", side_effect=_terminate),
+            redirect_stderr(io.StringIO()),
+        ):
+            status = main([])
+        self.assertEqual(status, 130)
+
     def test_unified_cli_receipts_restart_without_provider_calls_and_require_policy(
         self,
     ):

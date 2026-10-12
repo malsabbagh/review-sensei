@@ -2411,10 +2411,45 @@ def _delegate_moved_command(args_list: list[str]) -> int:
     return int(completed.returncode)
 
 
+def _sigterm_as_keyboard_interrupt():
+    """Context manager: deliver SIGTERM as KeyboardInterrupt.
+
+    GitHub Actions cancellation escalates to SIGTERM, whose default action
+    kills the process before reservation cleanup can run. Raising
+    KeyboardInterrupt unwinds through the same cleanup as SIGINT. Outside
+    the main thread (or on platforms without SIGTERM) this is a no-op.
+    """
+
+    import signal
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _manager():
+        if not hasattr(signal, "SIGTERM"):
+            yield
+            return
+
+        def _raise_interrupt(signum, frame):
+            raise KeyboardInterrupt
+
+        try:
+            previous = signal.signal(signal.SIGTERM, _raise_interrupt)
+        except (ValueError, OSError):
+            yield
+            return
+        try:
+            yield
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+
+    return _manager()
+
+
 def main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) -> int:
     """Normalize cancellation after command-specific cleanup has unwound."""
     try:
-        return _main(argv, hosted_hooks=hosted_hooks)
+        with _sigterm_as_keyboard_interrupt():
+            return _main(argv, hosted_hooks=hosted_hooks)
     except KeyboardInterrupt:
         print("review-sensei: cancelled", file=sys.stderr)
         return 130

@@ -361,6 +361,32 @@ describe("token broker authorization", () => {
     expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
   });
 
+  it("issues a release-only token for the owning run after the head moves", async () => {
+    const { broker, github } = harness();
+    github.pullRequestHead.mockResolvedValue("c".repeat(40));
+
+    const result = await broker.exchange({
+      oidc_token: "signed-jwt",
+      capability: "review_session",
+      release_only: true,
+      session: {
+        repository_id: 987654321,
+        pull_request: 7,
+        head_sha: SHA,
+      },
+    });
+
+    const { token: releaseToken, ...releaseRest } = result;
+    expect(releaseToken).toBeTruthy();
+    expect(releaseRest).toEqual({
+      capability: "review_session",
+      release_only: true,
+      reservation_owner: { run_id: "10000000001", head_sha: SHA },
+    });
+    // No enrollment witness and no grant: releasing publishes nothing.
+    expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
+  });
+
   it("issues an opaque grant only after deriving command actor authority from a live comment", async () => {
     const { broker, github } = harness();
     const attestation = {

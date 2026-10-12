@@ -1126,11 +1126,39 @@ jobs:
             configuration-context.json admission-context.json checkpoint-evidence.json checkpoint-diagnostics.json
           echo 'checkpoint_workspace_clean=true' >> "$GITHUB_OUTPUT"
           echo 'result_ready=false' >> "$GITHUB_OUTPUT"
+          # Forward cancellation to Python: GitHub escalates cancel to
+          # SIGTERM, and the bash wrapper must not swallow it before
+          # Python's cleanup (releasing this run's reservation) can run.
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" review "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
-            --output review.json --outcome outcome.json
+            --output review.json --outcome outcome.json &
+          review_pid=$!
+          trap 'kill -TERM "$review_pid" 2>/dev/null || true' TERM INT
+          wait "$review_pid"
+          review_status=$?
+          trap - TERM INT
           if [[ -s review.json ]]; then
             echo 'result_ready=true' >> "$GITHUB_OUTPUT"
+          fi
+          exit "$review_status"
+
+      # Runs even after cancellation or a review-step timeout: release this
+      # run's own reservation if the killed Python process could not. The
+      # command is owner-only and never touches saved publication work.
+      - name: Release this run's session reservation
+        if: always() && inputs.operation == 'review'
+        env:
+          REPOSITORY: ${{ inputs.repository }}
+          REPOSITORY_ID: ${{ inputs.repository_id }}
+          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          if [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ && "$RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" release-reservation \
+              --repository "$REPOSITORY" --repository-id "$REPOSITORY_ID" \
+              --pull-request "$PULL_REQUEST" --head-sha "$HEAD_SHA" \
+              --run-id "$RUN_ID" || echo '::warning::reservation release cleanup did not complete'
           fi
 
       # success() && !cancelled() skips a pointless API call after a failed
@@ -1629,11 +1657,39 @@ jobs:
             configuration-context.json admission-context.json checkpoint-evidence.json checkpoint-diagnostics.json
           echo 'checkpoint_workspace_clean=true' >> "$GITHUB_OUTPUT"
           echo 'result_ready=false' >> "$GITHUB_OUTPUT"
+          # Forward cancellation to Python: GitHub escalates cancel to
+          # SIGTERM, and the bash wrapper must not swallow it before
+          # Python's cleanup (releasing this run's reservation) can run.
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" review "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
-            --output review.json --outcome outcome.json
+            --output review.json --outcome outcome.json &
+          review_pid=$!
+          trap 'kill -TERM "$review_pid" 2>/dev/null || true' TERM INT
+          wait "$review_pid"
+          review_status=$?
+          trap - TERM INT
           if [[ -s review.json ]]; then
             echo 'result_ready=true' >> "$GITHUB_OUTPUT"
+          fi
+          exit "$review_status"
+
+      # Runs even after cancellation or a review-step timeout: release this
+      # run's own reservation if the killed Python process could not. The
+      # command is owner-only and never touches saved publication work.
+      - name: Release this run's session reservation
+        if: always() && inputs.operation == 'review'
+        env:
+          REPOSITORY: ${{ inputs.repository }}
+          REPOSITORY_ID: ${{ inputs.repository_id }}
+          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          if [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ && "$RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" release-reservation \
+              --repository "$REPOSITORY" --repository-id "$REPOSITORY_ID" \
+              --pull-request "$PULL_REQUEST" --head-sha "$HEAD_SHA" \
+              --run-id "$RUN_ID" || echo '::warning::reservation release cleanup did not complete'
           fi
 
       # success() && !cancelled() skips a pointless API call after a failed

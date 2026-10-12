@@ -963,7 +963,11 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         for job_id in ("hosted", "local"):
             job = _job_section(workflow, job_id)
-            self.assertEqual(job.count(pull_request_env), 4)
+            # Four review/publication steps plus the always-run reservation
+            # release cleanup step carry the pull-request env in each job.
+            self.assertEqual(job.count(pull_request_env), 5)
+            self.assertIn("Release this run's session reservation", job)
+            self.assertIn("release-reservation", job)
         for job_id in ("hosted", "local"):
             job = _job_section(workflow, job_id)
             self.assertIn(expected_permissions, job)

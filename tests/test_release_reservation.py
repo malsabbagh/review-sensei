@@ -1,0 +1,105 @@
+import unittest
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+from review_sensei_github.release_reservation import release_own_reservation
+from review_sensei_github.session_ledger import render_session_comment
+
+from review_sensei.session import SessionIdentity, SessionRecord
+
+try:
+    from fake_github_http import json_response, make_http
+except ImportError:
+    from tests.fake_github_http import json_response, make_http
+
+FIXED_NOW = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
+IDENTITY = SessionIdentity("owner/repo", 136, repository_id=99)
+RUN_ID = "10000000001"
+
+
+class _Broker:
+    def __init__(self, owner_run_id=RUN_ID):
+        self.owner_run_id = owner_run_id
+
+    def request_oidc_token(self):
+        return "oidc.token"
+
+    def open_session_release(
+        self, oidc_token, *, repository_id, pull_request, head_sha
+    ):
+        return SimpleNamespace(
+            token="ghs_session",
+            state="release",
+            reservation_owner={"run_id": self.owner_run_id, "head_sha": head_sha},
+        )
+
+
+def _reserved(owner_run_id=RUN_ID, *, transaction=False):
+    record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+    evolved = record.evolve(
+        now=FIXED_NOW,
+        generation=1,
+        reservation_id="abcd1234",
+        reserved_slot="initial",
+        reservation_owner={"run_id": owner_run_id, "head_sha": "a" * 40},
+    )
+    return evolved
+
+
+def _body(record):
+    return render_session_comment(repository_id=99, pull_request=136, record=record)
+
+
+class ReleaseReservationTests(unittest.TestCase):
+    def _release(self, http, **overrides):
+        kwargs = {
+            "broker": _Broker(),
+            "http": http,
+            "repository": "owner/repo",
+            "repository_id": 99,
+            "pull_request": 136,
+            "head_sha": "a" * 40,
+            "run_id": RUN_ID,
+            "oidc_token": "oidc.token",
+        }
+        kwargs.update(overrides)
+        return release_own_reservation(**kwargs)
+
+    def test_releases_own_reservation(self):
+        import json as _json
+
+        reserved = _reserved()
+        state = {"body": _body(reserved)}
+
+        def _is_patch(request):
+            return request.method == "PATCH"
+
+        def _patch(request):
+            state["body"] = _json.loads(request.data)["body"]
+            return json_response({"id": 7, "body": state["body"]})
+
+        def _is_get(request):
+            return request.method == "GET"
+
+        def _get(request):
+            return json_response([{"id": 7, "body": state["body"]}])
+
+        http, calls = make_http([], routes=[(_is_patch, _patch), (_is_get, _get)])
+        self.assertEqual(self._release(http), "released")
+        self.assertIn("PATCH", [method for method, _url, _data in calls])
+
+    def test_not_owner_is_a_noop(self):
+        reserved = _reserved(owner_run_id="99999999999")
+        http, calls = make_http([json_response([{"id": 7, "body": _body(reserved)}])])
+        self.assertEqual(self._release(http), "not-owner")
+        self.assertNotIn("PATCH", [method for method, _url, _data in calls])
+
+    def test_no_reservation_is_a_noop(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        http, calls = make_http([json_response([{"id": 7, "body": _body(record)}])])
+        self.assertEqual(self._release(http), "no-reservation")
+        self.assertNotIn("PATCH", [method for method, _url, _data in calls])
+
+
+if __name__ == "__main__":
+    unittest.main()

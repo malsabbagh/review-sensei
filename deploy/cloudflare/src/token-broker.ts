@@ -97,6 +97,7 @@ interface BrokerBody {
   capability?: unknown;
   session?: unknown;
   session_attestation?: unknown;
+  release_only?: unknown;
 }
 
 interface SessionScope {
@@ -534,6 +535,7 @@ export class TokenBroker {
     session_state?: SessionState;
     session_grant?: string;
     session_attestation?: SessionAttestation;
+    release_only?: true;
     reservation_owner?: { run_id: string; head_sha: string };
   }> {
     if (!isObject(body) || typeof body.oidc_token !== "string" || body.oidc_token.length === 0) {
@@ -541,6 +543,12 @@ export class TokenBroker {
     }
     const requested = capability(body.capability);
     if (requested !== "review_session" && body.session !== undefined) {
+      throw new Error("broker_session_invalid");
+    }
+    if (
+      body.release_only !== undefined
+      && (requested !== "review_session" || body.release_only !== true || body.session_attestation !== undefined)
+    ) {
       throw new Error("broker_session_invalid");
     }
     const claims = await verifyOidcAssertion(body.oidc_token, {
@@ -589,7 +597,34 @@ export class TokenBroker {
         token,
       );
       if (currentHead !== requestedSession.head_sha) {
+        // Narrow owner-only exception: a run releasing its own reservation
+        // publishes nothing, so a moved head cannot cause harm. The broker
+        // returns only the capability token and the verified owner identity;
+        // it records no enrollment witness and issues no mutation grant.
+        // The caller must still prove ledger ownership before releasing.
+        if (body.release_only === true) {
+          return {
+            token,
+            capability: requested,
+            release_only: true,
+            reservation_owner: {
+              run_id: claims.run_id,
+              head_sha: requestedSession.head_sha,
+            },
+          };
+        }
         throw new Error("broker_session_head_rejected");
+      }
+      if (body.release_only === true) {
+        return {
+          token,
+          capability: requested,
+          release_only: true,
+          reservation_owner: {
+            run_id: claims.run_id,
+            head_sha: requestedSession.head_sha,
+          },
+        };
       }
       // The enrollment witness is keyed by the current head, which the check
       // above just verified against the live pull request. A new head is a new
