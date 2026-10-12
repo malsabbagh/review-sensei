@@ -15,12 +15,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
-from review_sensei_github.http import GitHubHttp
-from review_sensei_github.operation_comments import (
+from review_sensei.hosting.github.http import GitHubHttp
+from review_sensei.hosting.github.operation_comments import (
     GitHubIssueCommentOperationPort,
 )
-from review_sensei_github.operation_entry import accepted_payload_matches
-from review_sensei_github.operation_host import (
+from review_sensei.hosting.github.operation_entry import accepted_payload_matches
+from review_sensei.hosting.github.operation_host import (
     OPERATION_COMMENT_MARKER,
     render_marked_comment,
 )
@@ -342,7 +342,7 @@ def main():
         # Existing metadata token may read PR comments, but bot writes must retain
         # App-authored identity. A User token cannot become an operation store owner.
         fake = FakeAPI(user_type="User")
-        from review_sensei_github.operation_entry import (
+        from review_sensei.hosting.github.operation_entry import (
             analysis_payload,
             run_actions_analysis,
         )

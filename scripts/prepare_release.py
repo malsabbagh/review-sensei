@@ -538,6 +538,14 @@ def render_hosted_only(
 ) -> dict[str, Any]:
     """Prepare a hosted release without bumping or tagging the engine."""
 
+    if docs.version_tuple("v" + version) <= docs.version_tuple(
+        "v" + versions.PRE_SEAM_ENGINE
+    ):
+        raise ValueError(
+            "hosted release must pin an engine released with hosted_hooks; "
+            f"{versions.PRE_SEAM_ENGINE} predates that seam, so the first hosted "
+            "release has to ship with a new engine version"
+        )
     if github_version == current_hosted:
         raise ValueError(
             "pass a new engine or hosted version; a current version skips that package"

@@ -43,6 +43,23 @@ _PUBLIC = (
     "evaluate-observed",
     "doctor",
 )
+_HELP = {
+    "review": "engine review plus hosted hooks",
+    "publish": "publish a prepared review",
+    "reply": "publish a reply",
+    "command": "run a maintainer command",
+    "host-plan": "resolve the hosted runner plan",
+    "resolve-hosted-openrouter": "resolve the hosted OpenRouter model",
+    "evaluate-observed": "evaluate an observed review",
+    "doctor": "run hosted diagnostics",
+}
+
+
+def _usage() -> str:
+    width = max(len(name) for name in _PUBLIC)
+    lines = ["usage: review-sensei-github <command> ..."]
+    lines.extend(f"  {name.ljust(width)}  {_HELP[name]}" for name in _PUBLIC)
+    return "\n".join(lines)
 
 
 def _normalize(argv: list[str]) -> list[str]:
@@ -115,10 +132,7 @@ def _resolve_openrouter(arguments: list[str]) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = _normalize(list(argv) if argv is not None else sys.argv[1:])
     if not args or args[0] in {"-h", "--help"}:
-        print(
-            "usage: review-sensei-github {" + ",".join(_PUBLIC) + "} ...",
-            file=sys.stderr,
-        )
+        print(_usage(), file=sys.stderr)
         return 0 if args and args[0] in {"-h", "--help"} else 2
     command, rest = args[0], args[1:]
     if command.startswith("-") or command in {"publish", "reply", "command"}:

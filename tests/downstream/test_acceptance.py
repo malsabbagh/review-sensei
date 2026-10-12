@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -473,6 +474,10 @@ class EngineAndPublicationAcceptanceTests(unittest.TestCase):
                     "review_sensei.cli.default_registry",
                     side_effect=AssertionError("provider must not be created"),
                 ),
+                patch(
+                    "review_sensei.cli.subprocess.run",
+                    return_value=subprocess.CompletedProcess([], 1),
+                ) as spawned,
             ):
                 status = main(
                     [
@@ -493,7 +498,11 @@ class EngineAndPublicationAcceptanceTests(unittest.TestCase):
                     ]
                 )
         self.assertEqual(status, 1)
-        self.assertIn("--allow-write", stderr.getvalue())
+        self.assertIn("moved to review-sensei-github", stderr.getvalue())
+        self.assertEqual(
+            spawned.call_args.args[0][:3],
+            [sys.executable, "-m", "review_sensei_github"],
+        )
 
 
 if __name__ == "__main__":

@@ -415,6 +415,10 @@ jobs:
             exit 1
           fi
           "$python_bin" -m pip check
+          if ! "$python_bin" -c 'import inspect; from review_sensei.cli import main; raise SystemExit(0 if "hosted_hooks" in inspect.signature(main).parameters else 1)'; then
+            echo "::error::Installed review-sensei==$installed_version has no hosted_hooks seam. Publish a newer engine with the hosted package before using this commit as the workflow source." >&2
+            exit 1
+          fi
           echo "Installed ReviewSensei $installed_version from $install_source."
           echo "Installed review-sensei-github $github_installed from $github_source."
 
@@ -681,6 +685,10 @@ jobs:
             exit 1
           fi
           "$python_bin" -m pip check
+          if ! "$python_bin" -c 'import inspect; from review_sensei.cli import main; raise SystemExit(0 if "hosted_hooks" in inspect.signature(main).parameters else 1)'; then
+            echo "::error::Installed review-sensei==$installed_version has no hosted_hooks seam. Publish a newer engine with the hosted package before using this commit as the workflow source." >&2
+            exit 1
+          fi
           echo "Installed ReviewSensei $installed_version from $install_source."
           echo "Installed review-sensei-github $github_installed from $github_source."
 
@@ -940,6 +948,10 @@ jobs:
             exit 1
           fi
           "$python_bin" -m pip check
+          if ! "$python_bin" -c 'import inspect; from review_sensei.cli import main; raise SystemExit(0 if "hosted_hooks" in inspect.signature(main).parameters else 1)'; then
+            echo "::error::Installed review-sensei==$installed_version has no hosted_hooks seam. Publish a newer engine with the hosted package before using this commit as the workflow source." >&2
+            exit 1
+          fi
           echo "Installed ReviewSensei $installed_version from $install_source."
           echo "Installed review-sensei-github $github_installed from $github_source."
 
@@ -1438,6 +1450,10 @@ jobs:
             exit 1
           fi
           "$python_bin" -m pip check
+          if ! "$python_bin" -c 'import inspect; from review_sensei.cli import main; raise SystemExit(0 if "hosted_hooks" in inspect.signature(main).parameters else 1)'; then
+            echo "::error::Installed review-sensei==$installed_version has no hosted_hooks seam. Publish a newer engine with the hosted package before using this commit as the workflow source." >&2
+            exit 1
+          fi
           echo "Installed ReviewSensei $installed_version from $install_source."
           echo "Installed review-sensei-github $github_installed from $github_source."
 

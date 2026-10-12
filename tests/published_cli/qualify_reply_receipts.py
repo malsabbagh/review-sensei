@@ -29,10 +29,9 @@ def child(case: str, report: Path, wheel: Path) -> None:
     # Test fixtures are repository data; never place src on the import path.
     root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(root))
-    import review_sensei_github as github
-
     import review_sensei
     from review_sensei import cli
+    from review_sensei.hosting import github
     from review_sensei.human_assessment import MAX_HUMAN_SOURCE_BYTES
     from tests.test_human_assessment import (
         APP,
@@ -192,7 +191,7 @@ def child(case: str, report: Path, wheel: Path) -> None:
                 with redirect_stdout(stdout), redirect_stderr(stderr):
                     if case == "exhausted":
                         with patch(
-                            "review_sensei_github.reply_budget.MAX_REPLY_PUBLICATION_REQUESTS",
+                            "review_sensei.hosting.github.reply_budget.MAX_REPLY_PUBLICATION_REQUESTS",
                             8,
                         ):
                             code = entry(arguments)

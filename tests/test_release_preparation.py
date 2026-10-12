@@ -302,7 +302,9 @@ class PreparationRenderingTests(unittest.TestCase):
         self.assertEqual(receipt["engine_tag"], "v" + VERSION)
         self.assertEqual(receipt["github_version"], "0.1.1")
         self.assertEqual(receipt["github_tag"], "github-v0.1.1")
-        self.assertNotEqual((self.root / PREP.HOSTED_PROJECT).read_bytes(), hosted_before)
+        self.assertNotEqual(
+            (self.root / PREP.HOSTED_PROJECT).read_bytes(), hosted_before
+        )
         self.assertEqual(PREP.validate_payload(self.root), receipt)
 
     def test_current_hosted_version_leaves_that_package_untagged(self):
@@ -319,26 +321,13 @@ class PreparationRenderingTests(unittest.TestCase):
         self.assertEqual(receipt["github_tag"], "")
         self.assertEqual(PREP.validate_payload(self.root), receipt)
 
-    def test_current_engine_version_prepares_only_the_hosted_package(self):
-        receipt = PREP.generate(
-            self.root, CURRENT, DATE, self.base, github_version="0.1.1"
-        )
-        version, pin = self.hosted_state()
-        changelog = (self.root / "CHANGELOG.md").read_text()
-        site = json.loads(
-            (self.root / "docs/site/data/site-manifest.json").read_text()
-        )
-        self.assertEqual(PREP.versions.project_version(self.root), CURRENT)
-        self.assertEqual(version, "0.1.1")
-        self.assertEqual(pin, CURRENT)
-        self.assertIn(f"## review-sensei-github 0.1.1 - {DATE}", changelog)
-        self.assertNotIn(f"## {CURRENT} - {DATE}", changelog)
-        self.assertEqual(site["release_facts"]["version"], CURRENT)
-        self.assertNotEqual(site["last_updated"], DATE)
-        self.assertEqual(receipt["version"], CURRENT)
-        self.assertEqual(receipt["engine_tag"], "")
-        self.assertEqual(receipt["github_tag"], "github-v0.1.1")
-        self.assertEqual(PREP.validate_payload(self.root), receipt)
+    def test_current_engine_version_cannot_publish_the_pre_seam_pin(self):
+        before = (self.root / "CHANGELOG.md").read_bytes()
+        hosted = (self.root / PREP.HOSTED_PROJECT).read_bytes()
+        with self.assertRaisesRegex(ValueError, "hosted_hooks"):
+            PREP.generate(self.root, CURRENT, DATE, self.base, github_version="0.1.1")
+        self.assertEqual((self.root / "CHANGELOG.md").read_bytes(), before)
+        self.assertEqual((self.root / PREP.HOSTED_PROJECT).read_bytes(), hosted)
 
     def test_current_engine_and_hosted_versions_prepare_nothing(self):
         before = (self.root / "CHANGELOG.md").read_bytes()

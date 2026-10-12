@@ -12,8 +12,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from review_sensei_github import GitHubApplication, GitHubHttp
+from review_sensei_github.cli import main as github_main
 
-from review_sensei.cli import main
 from review_sensei.session import InMemorySessionLedger, SessionIdentity
 
 HEAD = "b" * 40
@@ -140,7 +140,7 @@ class HostedOverrideMetadataTests(unittest.TestCase):
                 redirect_stdout(output),
                 redirect_stderr(output),
             ):
-                status = main(argv)
+                status = github_main(argv)
         return SimpleNamespace(
             status=status,
             output=output.getvalue(),

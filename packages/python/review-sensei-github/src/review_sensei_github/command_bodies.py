@@ -28,7 +28,7 @@ def _resolve_hosted_openrouter_parser() -> argparse.ArgumentParser:
         "--version",
         action="version",
         version=_package_version(),
-        help="Print the installed ReviewSensei version and exit",
+        help="Print the installed review-sensei-github version and exit",
     )
     return parser
 
@@ -954,6 +954,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 raise ReviewInputError(
                     "broader review requires unified mode and trusted full-review/write policy"
                 )
+            import review_sensei
             from review_sensei.stages import (
                 category_catalog_for_configured_stages,
                 load_stages_from_dir,
@@ -961,7 +962,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
 
             custom = customization_directories(work_configuration)
             stages = load_stages_from_dir(
-                custom.stages or Path(__file__).parent / "default_stages",
+                custom.stages or Path(review_sensei.__file__).parent / "default_stages",
                 category_catalog=category_catalog_for_configured_stages(
                     custom.categories
                 ),

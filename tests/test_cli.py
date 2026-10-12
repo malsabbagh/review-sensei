@@ -3,6 +3,8 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -10,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import review_sensei_github.cli  # noqa: F401  # in-process deprecation target
+from review_sensei_github.cli import main as github_main
 from review_sensei_github.commands import github_parser as _github_parser
 
 from review_sensei import ProviderResponse
@@ -180,7 +182,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 ConversationPublisher=lambda **kwargs: object(),
                 GitHubApplication=FakeApplication,
             ):
-                status = main(
+                status = github_main(
                     [
                         "github",
                         "review",
@@ -329,7 +331,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                     ConversationPublisher=lambda **kwargs: object(),
                     GitHubApplication=FakeApplication,
                 ):
-                    status = main(
+                    status = github_main(
                         [
                             "github",
                             "review",
@@ -410,7 +412,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             ):
                 with patch.dict("os.environ", {REVIEW_MODE_ENV: "legacy"}):
                     with redirect_stderr(stderr):
-                        status = main(
+                        status = github_main(
                             [
                                 "github",
                                 "review",
@@ -471,7 +473,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 GitHubApplication=FakeApplication,
             ):
                 with patch.dict("os.environ", {REVIEW_MODE_ENV: "legacy"}):
-                    status = main(
+                    status = github_main(
                         [
                             "github",
                             "reply",
@@ -562,7 +564,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                     redirect_stdout(stdout),
                     redirect_stderr(stderr),
                 ):
-                    status = main(
+                    status = github_main(
                         [
                             "github",
                             "reply",
@@ -635,7 +637,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                     redirect_stdout(stdout),
                     redirect_stderr(stderr),
                 ):
-                    status = main(
+                    status = github_main(
                         [
                             "github",
                             "reply",
@@ -689,7 +691,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 ConversationPublisher=lambda **kwargs: object(),
                 GitHubApplication=FakeApplication,
             ):
-                status = main(
+                status = github_main(
                     [
                         "github",
                         "reply",
@@ -845,7 +847,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
         with patch.dict("os.environ", {"OPENAI_TIMEOUT_SECONDS": "abc"}, clear=True):
             stderr = io.StringIO()
             with redirect_stderr(stderr):
-                status = main(
+                status = github_main(
                     [
                         "github",
                         "reply",
@@ -1468,7 +1470,13 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
 
     def test_github_commands_require_allow_write(self):
         stderr = io.StringIO()
-        with redirect_stderr(stderr):
+        with (
+            redirect_stderr(stderr),
+            patch(
+                "review_sensei.cli.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 1),
+            ) as spawned,
+        ):
             status = main(
                 [
                     "github",
@@ -1488,7 +1496,11 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 ]
             )
         self.assertEqual(status, 1)
-        self.assertIn("--allow-write", stderr.getvalue())
+        self.assertIn("moved to review-sensei-github", stderr.getvalue())
+        self.assertEqual(
+            spawned.call_args.args[0][:3],
+            [sys.executable, "-m", "review_sensei_github"],
+        )
 
     def test_github_command_uses_the_broker_backed_session_ledger(self):
         import review_sensei_github as github_module
@@ -1523,7 +1535,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             path = Path(temp_dir) / "attestation.json"
             path.write_text(json.dumps(attestation), encoding="utf-8")
             with patch.object(github_module, "GitHubApplication", FakeApplication):
-                status = main(
+                status = github_main(
                     [
                         "github",
                         "command",
@@ -1587,7 +1599,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 patch.object(github_module, "GitHubApplication", FakeApplication),
                 redirect_stderr(stderr),
             ):
-                status = main(
+                status = github_main(
                     [
                         "github",
                         "command",
@@ -1667,7 +1679,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 patch.object(github_module, "BrokerClient", FakeBroker),
                 redirect_stderr(stderr),
             ):
-                status = main(
+                status = github_main(
                     [
                         "github",
                         "command",
@@ -1721,7 +1733,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             with self.subTest(flag=flag), tempfile.TemporaryDirectory() as raw:
                 stderr = io.StringIO()
                 with redirect_stderr(stderr):
-                    status = main(
+                    status = github_main(
                         [
                             "github",
                             "command",
@@ -3351,7 +3363,7 @@ class HostedPublicationCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase
             ConversationPublisher=lambda **kwargs: object(),
             GitHubApplication=application or self.FakeApplication,
         ):
-            return main(
+            return github_main(
                 [
                     "github",
                     "review",

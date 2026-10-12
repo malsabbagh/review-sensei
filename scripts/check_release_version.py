@@ -15,6 +15,9 @@ GITHUB_TAG_PATTERN = re.compile(
     r"^github-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$"
 )
 HOSTED_PROJECT = Path("packages/python/review-sensei-github/pyproject.toml")
+# Last engine wheel published before cli.main grew hosted_hooks. Pinning a
+# hosted release to this version installs that wheel and the hosted CLI crashes.
+PRE_SEAM_ENGINE = "0.6.22"
 
 NPM_LAUNCHER_NAME = "@reviewsensei/cli"
 NPM_PUBLIC_REPOSITORY = {
@@ -141,6 +144,10 @@ def hosted_project(root: Path) -> tuple[str, str]:
     return version, pins[0].removeprefix("review-sensei==")
 
 
+def _version_key(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
 def validate_github_release_tag(tag: str, root: Path = Path(".")) -> str:
     """Validate a review-sensei-github tag and return its version."""
 
@@ -152,6 +159,12 @@ def validate_github_release_tag(tag: str, root: Path = Path(".")) -> str:
         raise ReleaseVersionError("hosted release tag does not match project metadata")
     if engine_pin != project_version(root):
         raise ReleaseVersionError("hosted package does not pin the current engine")
+    if _version_key(engine_pin) <= _version_key(PRE_SEAM_ENGINE):
+        raise ReleaseVersionError(
+            "hosted package must pin an engine released with hosted_hooks; "
+            f"{PRE_SEAM_ENGINE} predates that seam, so the first hosted release "
+            "has to ship with a new engine version"
+        )
     try:
         changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:

@@ -2,13 +2,37 @@
 
 from __future__ import annotations
 
+import importlib.metadata
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
 import review_sensei.cli as _engine
+from review_sensei.errors import ReviewInputError
 
 _SOURCE = Path(__file__).with_name("command_bodies.py").read_text(encoding="utf-8")
+
+
+def hosted_package_version() -> str:
+    """Return the installed hosted version, or the source project version."""
+
+    try:
+        return importlib.metadata.version("review-sensei-github")
+    except importlib.metadata.PackageNotFoundError:
+        project = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        try:
+            with project.open("rb") as handle:
+                version = tomllib.load(handle)["project"]["version"]
+        except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError) as exc:
+            raise ReviewInputError(
+                "review-sensei-github package metadata is unavailable"
+            ) from exc
+        if not isinstance(version, str) or not version:
+            raise ReviewInputError(
+                "review-sensei-github package metadata is unavailable"
+            )
+        return version
 
 
 class _EngineGlobals(dict[str, Any]):
@@ -29,6 +53,7 @@ class _EngineGlobals(dict[str, Any]):
 def _namespace() -> dict[str, Any]:
     namespace: dict[str, Any] = _EngineGlobals()
     namespace["__name__"] = "review_sensei_github.command_bodies"
+    namespace["_package_version"] = hosted_package_version
     exec(
         compile(_SOURCE, str(Path(__file__).with_name("command_bodies.py")), "exec"),
         namespace,

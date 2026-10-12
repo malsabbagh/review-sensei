@@ -189,13 +189,22 @@ def fixtures():
 def worker(source: Path, fixture: Path, legacy: bool):
     source = source.resolve()
     sys.path.insert(0, str(source))
-    from review_sensei_github.approval import ReviewApprovalEligibility
-    from review_sensei_github.errors import GitHubPublicationError
-    from review_sensei_github.http import GitHubHttp
-    from review_sensei_github.publication import ReviewApprovalFinalizer
-    from review_sensei_github.session_ledger import (
-        GitHubIssueCommentSessionLedger,
-    )
+    if legacy:
+        from review_sensei.hosting.github.approval import ReviewApprovalEligibility
+        from review_sensei.hosting.github.errors import GitHubPublicationError
+        from review_sensei.hosting.github.http import GitHubHttp
+        from review_sensei.hosting.github.publication import ReviewApprovalFinalizer
+        from review_sensei.hosting.github.session_ledger import (
+            GitHubIssueCommentSessionLedger,
+        )
+    else:
+        from review_sensei_github.approval import ReviewApprovalEligibility
+        from review_sensei_github.errors import GitHubPublicationError
+        from review_sensei_github.http import GitHubHttp
+        from review_sensei_github.publication import ReviewApprovalFinalizer
+        from review_sensei_github.session_ledger import (
+            GitHubIssueCommentSessionLedger,
+        )
 
     import review_sensei
     from review_sensei.baseline import baseline_from_history_document

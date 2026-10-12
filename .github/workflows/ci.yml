@@ -82,7 +82,7 @@ jobs:
         run: python -m compileall -q src
       - name: Branch coverage
         run: |
-          python -m coverage run --source=review_sensei --branch -m unittest discover -s tests -v
+          python -m coverage run --source=review_sensei,review_sensei_github --branch -m unittest discover -s tests -v
           python -m coverage report --precision=2 --show-missing --fail-under=80
 
   schemas:

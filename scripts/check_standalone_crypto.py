@@ -54,9 +54,13 @@ def safe_detail(text: str) -> str:
     return text[:4096]
 
 
-def find_binding(bundle: Path) -> Path:
+def find_binding(bundle: Path) -> Path | None:
     directory = bundle.resolve() / "_internal/cryptography/hazmat/bindings"
+    if not directory.is_dir():
+        return None
     bindings = [path for path in directory.glob("_rust*.so") if path.is_file()]
+    if not bindings:
+        return None
     if len(bindings) != 1:
         raise StandaloneCryptoError("bundle must contain one frozen Rust binding")
     return bindings[0].resolve()
@@ -78,6 +82,15 @@ def check_bundle(
     run=subprocess.run,
 ) -> dict:
     binding = find_binding(bundle)
+    if binding is None:
+        # The engine executable no longer imports cryptography. Nothing frozen
+        # means there is no OpenSSL collision to check.
+        return {
+            "check": "passed",
+            "binding": None,
+            "cryptography": "not-frozen",
+            "shared_openssl_dependencies": [],
+        }
     try:
         linked = run(
             ["otool", "-L", str(binding)],

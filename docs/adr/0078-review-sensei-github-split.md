@@ -97,12 +97,15 @@ import the broker diagnostic catalog.
 
 `release-github.yml` publishes `review-sensei-github` from a signed
 `github-vX.Y.Z` tag through the `pypi-github` environment. The reusable
-workflow installs `review-sensei-github==<version declared at the workflow
-commit>` from PyPI, which pulls the pinned engine. If that exact version is
-not on PyPI, it installs the engine from the workflow commit and the hosted
-package from the same commit's `packages/python/review-sensei-github`
-subdirectory without re-resolving dependencies. Any other PyPI failure
-refuses the fallback. `prepare-diff` stays on the engine binary.
+workflow installs `review-sensei==<pin>` from PyPI when that exact version
+exists, and uses the workflow commit for the engine only when PyPI has no
+such version. It then installs `review-sensei-github==<version declared at
+the workflow commit>` from PyPI, or, when that version is missing, from the
+same commit's `packages/python/review-sensei-github` subdirectory with
+`--no-deps`. The fallback does not replace the engine already installed. Any
+other PyPI failure refuses the fallback. The published `0.6.22` engine has
+no `hosted_hooks` parameter, so the first hosted release has to be prepared
+with a newer engine version. `prepare-diff` stays on the engine binary.
 
 Do not move `v5` until the engine pin and the hosted version in that commit
 are the versions you intend runners to install.
@@ -110,8 +113,9 @@ are the versions you intend runners to install.
 ## Consequences
 
 Local `pip install review-sensei` no longer installs GitHub publication or
-the broker client. Hosted runs install one extra distribution. A hosted-only
-fix no longer requires an engine release. The workflow commit must name both
+the broker client. Hosted runs install one extra distribution. After the
+first engine that provides `hosted_hooks` is published, a hosted-only fix
+does not require another engine release. The workflow commit must name both
 versions, and the hosted pin must match the engine version in the same commit.
 
 ## Scope

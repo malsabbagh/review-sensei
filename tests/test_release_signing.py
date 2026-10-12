@@ -370,6 +370,7 @@ class SigningOperationTests(unittest.TestCase):
                         },
                     )
                 )
+
             def sign():
                 return SIGN.sign(ROOT, SHA, VERSION, DATE, github_version)
 
@@ -442,7 +443,9 @@ class SigningOperationTests(unittest.TestCase):
     def test_current_hosted_version_signs_only_the_engine_tag(self):
         calls = self.exercise(github_version="0.1.0", sign_hosted=False)
         signed = [args for args in calls if "--sign" in args]
-        self.assertEqual([args[args.index("--sign") + 1] for args in signed], [f"v{VERSION}"])
+        self.assertEqual(
+            [args[args.index("--sign") + 1] for args in signed], [f"v{VERSION}"]
+        )
         self.assertEqual(
             [args[-1] for args in calls if "push" in args],
             [f"{TAG_OBJECT}:refs/tags/v{VERSION}"],

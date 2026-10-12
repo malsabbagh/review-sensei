@@ -2397,11 +2397,9 @@ def _delegate_moved_command(args_list: list[str]) -> int:
             forwarded = ["publish", *forwarded[1:]]
     if not forwarded:
         forwarded = ["--help"]
-    # Tests that already loaded the hosted CLI keep their patches. A normal
-    # engine process has not imported it, so this is not an engine import.
-    loaded = sys.modules.get("review_sensei_github.cli")
-    if loaded is not None:
-        return int(loaded.main(forwarded))
+    # Always a subprocess. An in-process call would depend on whether some
+    # earlier import had already loaded the hosted CLI, and patches in the
+    # parent would not apply to a child the same way.
     print(
         "review-sensei: this command moved to review-sensei-github",
         file=sys.stderr,

@@ -7,7 +7,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from review_sensei.cli import main
+from review_sensei_github.cli import main as github_main
+
 from review_sensei.configuration import (
     BACKEND_DEFAULTS,
     ConfigurationError,
@@ -277,7 +278,7 @@ class HostedPlanCliTests(unittest.TestCase):
         with patch.dict("os.environ", environ, clear=True):
             with redirect_stderr(stderr):
                 with redirect_stdout(stdout):
-                    status = main(arguments)
+                    status = github_main(arguments)
         return status, stdout.getvalue(), stderr.getvalue()
 
     def test_host_plan_prints_the_resolved_plan_and_exits_zero(self):

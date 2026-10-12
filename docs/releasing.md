@@ -229,11 +229,13 @@ gh workflow run prepare-release.yml --ref main \
   `review-sensei==0.6.23`. Signing pushes `v0.6.23` and `github-v0.1.1`.
 - Engine `0.6.23` and hosted `0.1.0` (the current hosted version) prepare the
   engine only. The pin stays `review-sensei==0.6.22`. Do not move `v5` onto
-  that commit: the workflow resolver installs the hosted package from that
-  commit, and its pin must equal the engine version declared there.
-- Engine `0.6.22` and hosted `0.1.1` prepare the hosted package only. The pin
-  stays on the current engine. Signing pushes `github-v0.1.1` and does not
-  push `v0.6.22`.
+  that commit: runners would install the already-published `0.6.22` wheel,
+  which has no `hosted_hooks` parameter.
+- A hosted release cannot pin `0.6.22`. That wheel is already on PyPI and
+  predates the seam, so `review-sensei-github review` would crash. The first
+  hosted tag ships in the same preparation as the new engine, where the pin
+  becomes `review-sensei==0.6.23`. After that engine is published, a later
+  hosted-only release can keep the pin on that engine.
 
 `prepare-github` still prints that identity and creates no tag. The first
 hosted publish needs the PyPI project `review-sensei-github` and a Trusted
