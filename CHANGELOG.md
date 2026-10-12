@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.22 - 2026-10-12
+
 - Supply the existing read-only GitHub token to hosted maintainer commands for
   actor and current-review metadata. Recognize GitHub's built-in maintain role
   when its legacy permission is `write`; ordinary write and custom write roles
