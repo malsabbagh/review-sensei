@@ -88,7 +88,7 @@ class ReleaseReservationTests(unittest.TestCase):
         self.assertEqual(self._release(http), "released")
         self.assertIn("PATCH", [method for method, _url, _data in calls])
 
-    def test_analysis_checkpoint_is_released_but_publication_is_not(self):
+    def test_analysis_checkpoint_is_released(self):
         # Transaction mode always carries an analysis-phase transaction
         # while the reservation is held; that checkpoint is not saved
         # publication work, so the owner release still applies.
@@ -134,6 +134,16 @@ class ReleaseReservationTests(unittest.TestCase):
         http, calls = make_http([], routes=[(_is_patch, _patch), (_is_get, _get)])
         self.assertEqual(self._release(http), "released")
         self.assertIn("PATCH", [method for method, _url, _data in calls])
+        # The persisted body is the aborted record, not just any PATCH:
+        # the hold and its owner metadata are actually cleared.
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        persisted = parse_session_comment(state["body"], identity=IDENTITY)
+        self.assertIsNotNone(persisted)
+        self.assertIsNone(persisted.reservation_id)
+        self.assertIsNone(persisted.reserved_slot)
+        self.assertIsNone(persisted.reservation_owner)
+        self.assertIsNone(persisted.transaction)
 
     def test_not_owner_is_a_noop(self):
         reserved = _reserved(owner_run_id="99999999999")
