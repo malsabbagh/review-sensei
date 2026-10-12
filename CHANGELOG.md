@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Send the ReviewSensei `User-Agent` on OIDC broker requests. Cloudflare's
+  browser integrity check rejected urllib's default agent on
+  `/github/session-grant` with error 1010 before the Worker ran, so every
+  hosted maintainer command failed with `broker_unknown`.
+
 ## 0.6.22 - 2026-10-12
 
 - Supply the existing read-only GitHub token to hosted maintainer commands for

@@ -18,6 +18,9 @@ from .feedback_attestation import parse_feedback_attestation
 
 MAX_BROKER_BODY_BYTES = 256 * 1024
 DEFAULT_BROKER_URL = "https://github.reviewsensei.dev/github/token"
+# Cloudflare's browser integrity check rejects urllib's default agent with
+# error 1010 before the Worker runs.
+BROKER_USER_AGENT = "ReviewSensei-GitHub-App/1.0 (+https://reviewsensei.dev)"
 SESSION_GRANT_PATTERN = re.compile(r"sg1\.[1-9][0-9]{10,15}\.[A-Za-z0-9_-]{43}\Z")
 Opener = Callable[..., Any]
 
@@ -403,7 +406,10 @@ class BrokerClient:
         request = Request(
             url or self.broker_url,
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": BROKER_USER_AGENT,
+            },
             method="POST",
         )
         try:
