@@ -544,6 +544,11 @@ class FindingDisposition:
         return expires > _aware_now(now)
 
 
+PAUSED_BY_MAINTAINER_SUMMARY = (
+    "paused by maintainer, comment @sensei review continue to resume"
+)
+
+
 @dataclass(frozen=True)
 class MaintainerCommandResult:
     """Outcome of applying one command. Never converts a withheld decision."""
@@ -778,7 +783,7 @@ def apply_session_command(
             action="pause",
             applied=True,
             operator_paused=True,
-            summary="paused by maintainer, comment @sensei review continue to resume",
+            summary=PAUSED_BY_MAINTAINER_SUMMARY,
         )
     if command.action == "verify":
         dispositions = session_dispositions(record)
@@ -847,9 +852,7 @@ def apply_session_command(
         # reservation names the run that owns it.
         clauses = []
         if paused:
-            clauses.append(
-                "paused by maintainer, comment @sensei review continue to resume"
-            )
+            clauses.append(PAUSED_BY_MAINTAINER_SUMMARY)
         if record.reservation_id is not None:
             owner = record.reservation_owner
             if owner is not None:

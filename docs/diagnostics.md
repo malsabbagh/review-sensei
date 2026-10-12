@@ -120,15 +120,26 @@ cleanup step repeats that owner-only release when the Python process
 could not. When a runner is lost entirely, the next review heals the
 leak at admission: it proves the owner run completed with GitHub Actions
 reads, charges one failed attempt to the abandoned head, and reviews the
-current head in the same job. A still-running owner is waited on briefly
-and then reported as `blocked by run X, still running`; unclear evidence
-stays blocked without mutation.
+current head in the same job. A still-running owner is briefly waited
+for and then reported as `blocked by run X, still running`; unclear
+evidence stays blocked without mutation.
 
-`@sensei review status` tells the two blocked states apart:
-`paused by maintainer, comment @sensei review continue` means a
-maintainer paused the session — pushes and admission self-heal never
-clear it — while `blocked by run X, still running` means another run
-still owns the reservation. An authorized maintainer can still comment
+`@sensei review status` tells the blocked states apart. It composes one
+clause per condition, in this order:
+
+- `paused by maintainer, comment @sensei review continue to resume` —
+  a maintainer paused the session; pushes and admission self-heal never
+  clear it, only an explicit `continue` does.
+- `blocked by run X, still running` — run X still owns the reservation;
+  wait for it to finish, after which admission self-heal or a later
+  review proceeds.
+- `blocked by a held reservation, owner unknown` — a legacy record
+  without OIDC owner metadata holds the reservation. It stays blocked
+  until the ADR 0063 legacy proof identifies the origin or an authorized
+  maintainer runs `continue`; do not wait for a run that may not exist.
+
+A paused session that also holds a reservation reports both clauses,
+pause first. An authorized maintainer can still comment
 `@reviewsensei review continue` on that PR to unpause and recover a held
 reservation explicitly. The command uses GitHub Actions reads to prove
 the originating run has completed, refuses an active owner run, rechecks

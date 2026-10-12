@@ -3,7 +3,7 @@
 Status: Proposed
 Date: 2026-10-12
 GitHub Issue: Pending triage
-Pull Request: [#292](https://github.com/malsabbagh/review-sensei/pull/292), [#293](https://github.com/malsabbagh/review-sensei/pull/293)
+Pull Request: [#292](https://github.com/malsabbagh/review-sensei/pull/292), [#293](https://github.com/malsabbagh/review-sensei/pull/293), [#294](https://github.com/malsabbagh/review-sensei/pull/294)
 Owners/Reviewers: Maintainers
 Approved by: not applicable
 
@@ -24,7 +24,10 @@ later review until session expiry or a maintainer command.
 
 ## Decision
 
-Prevent leaks first, then heal the rest at admission:
+Prevent leaks first, then heal the rest at admission. The mechanism is
+implemented across the three stacked pull requests listed above: leak
+prevention (#292), admission self-heal (#293), and pause/resume clarity
+plus this record (#294).
 
 - `SIGTERM` is delivered as `KeyboardInterrupt` in the engine and hosted
   entry points, so cancellation unwinds through the existing abort
