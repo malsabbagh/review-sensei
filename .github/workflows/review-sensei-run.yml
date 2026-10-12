@@ -1137,8 +1137,8 @@ jobs:
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --output review.json --outcome outcome.json &
           review_pid=$!
-          wait "$review_pid"
-          review_status=$?
+          review_status=0
+          wait "$review_pid" || review_status=$?
           # Ignore any further TERM/INT (GitHub escalation) so the wrapper
           # survives to record outputs; Python has already unwound.
           trap '' TERM INT
@@ -1675,8 +1675,8 @@ jobs:
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --output review.json --outcome outcome.json &
           review_pid=$!
-          wait "$review_pid"
-          review_status=$?
+          review_status=0
+          wait "$review_pid" || review_status=$?
           # Ignore any further TERM/INT (GitHub escalation) so the wrapper
           # survives to record outputs; Python has already unwound.
           trap '' TERM INT
