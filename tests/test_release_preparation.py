@@ -24,6 +24,11 @@ finally:
 CURRENT = PREP.versions.project_version(ROOT)
 PARTS = PREP.docs.version_tuple("v" + CURRENT)
 VERSION = ".".join(str(value) for value in (*PARTS[:2], PARTS[2] + 1))
+HOSTED_CURRENT = tomllib.loads((ROOT / PREP.HOSTED_PROJECT).read_text())["project"][
+    "version"
+]
+HOSTED_PARTS = PREP.docs.version_tuple("v" + HOSTED_CURRENT)
+HOSTED_NEXT = ".".join(str(value) for value in (*HOSTED_PARTS[:2], HOSTED_PARTS[2] + 1))
 DATE = "2026-10-08"
 SHA = "a" * 40
 
@@ -287,21 +292,21 @@ class PreparationRenderingTests(unittest.TestCase):
     def test_new_engine_and_hosted_versions_prepare_both_packages(self):
         hosted_before = (self.root / PREP.HOSTED_PROJECT).read_bytes()
         receipt = PREP.generate(
-            self.root, VERSION, DATE, self.base, github_version="0.1.1"
+            self.root, VERSION, DATE, self.base, github_version=HOSTED_NEXT
         )
         version, pin = self.hosted_state()
         changelog = (self.root / "CHANGELOG.md").read_text()
         engine_notes = PREP.released_notes(changelog, VERSION, DATE)
-        hosted_notes = PREP.hosted_released_notes(changelog, "0.1.1", DATE)
+        hosted_notes = PREP.hosted_released_notes(changelog, HOSTED_NEXT, DATE)
         self.assertEqual(PREP.versions.project_version(self.root), VERSION)
-        self.assertEqual(version, "0.1.1")
+        self.assertEqual(version, HOSTED_NEXT)
         self.assertEqual(pin, VERSION)
         self.assertIn("Synthetic reviewed release notes.", engine_notes)
         self.assertNotIn("Synthetic reviewed release notes.", hosted_notes)
         self.assertIn(f"review-sensei=={VERSION}", hosted_notes)
         self.assertEqual(receipt["engine_tag"], "v" + VERSION)
-        self.assertEqual(receipt["github_version"], "0.1.1")
-        self.assertEqual(receipt["github_tag"], "github-v0.1.1")
+        self.assertEqual(receipt["github_version"], HOSTED_NEXT)
+        self.assertEqual(receipt["github_tag"], "github-v" + HOSTED_NEXT)
         self.assertNotEqual(
             (self.root / PREP.HOSTED_PROJECT).read_bytes(), hosted_before
         )
@@ -310,30 +315,47 @@ class PreparationRenderingTests(unittest.TestCase):
     def test_current_hosted_version_leaves_that_package_untagged(self):
         before = (self.root / PREP.HOSTED_PROJECT).read_bytes()
         receipt = PREP.generate(
-            self.root, VERSION, DATE, self.base, github_version="0.1.0"
+            self.root, VERSION, DATE, self.base, github_version=HOSTED_CURRENT
         )
         changelog = (self.root / "CHANGELOG.md").read_text()
         self.assertEqual((self.root / PREP.HOSTED_PROJECT).read_bytes(), before)
-        self.assertNotIn("## review-sensei-github 0.1.0 - ", changelog)
+        self.assertNotIn(
+            f"## review-sensei-github {HOSTED_CURRENT} - {DATE}", changelog
+        )
         self.assertIn(f"## {VERSION} - {DATE}", changelog)
         self.assertEqual(receipt["engine_tag"], "v" + VERSION)
-        self.assertEqual(receipt["github_version"], "0.1.0")
+        self.assertEqual(receipt["github_version"], HOSTED_CURRENT)
         self.assertEqual(receipt["github_tag"], "")
         self.assertEqual(PREP.validate_payload(self.root), receipt)
 
     def test_current_engine_version_cannot_publish_the_pre_seam_pin(self):
         before = (self.root / "CHANGELOG.md").read_bytes()
         hosted = (self.root / PREP.HOSTED_PROJECT).read_bytes()
-        with self.assertRaisesRegex(ValueError, "hosted_hooks"):
-            PREP.generate(self.root, CURRENT, DATE, self.base, github_version="0.1.1")
-        self.assertEqual((self.root / "CHANGELOG.md").read_bytes(), before)
-        self.assertEqual((self.root / PREP.HOSTED_PROJECT).read_bytes(), hosted)
+        pre_seam = PREP.docs.version_tuple("v" + CURRENT) <= PREP.docs.version_tuple(
+            "v" + PREP.versions.PRE_SEAM_ENGINE
+        )
+        if pre_seam:
+            with self.assertRaisesRegex(ValueError, "hosted_hooks"):
+                PREP.generate(
+                    self.root, CURRENT, DATE, self.base, github_version=HOSTED_NEXT
+                )
+            self.assertEqual((self.root / "CHANGELOG.md").read_bytes(), before)
+            self.assertEqual((self.root / PREP.HOSTED_PROJECT).read_bytes(), hosted)
+            return
+        receipt = PREP.generate(
+            self.root, CURRENT, DATE, self.base, github_version=HOSTED_NEXT
+        )
+        self.assertEqual(receipt["version"], CURRENT)
+        self.assertEqual(receipt["engine_tag"], "")
+        self.assertEqual(receipt["github_tag"], "github-v" + HOSTED_NEXT)
 
     def test_current_engine_and_hosted_versions_prepare_nothing(self):
         before = (self.root / "CHANGELOG.md").read_bytes()
         receipt = (self.root / PREP.RECEIPT).read_bytes()
         with self.assertRaisesRegex(ValueError, "current version skips that package"):
-            PREP.generate(self.root, CURRENT, DATE, self.base, github_version="0.1.0")
+            PREP.generate(
+                self.root, CURRENT, DATE, self.base, github_version=HOSTED_CURRENT
+            )
         self.assertEqual((self.root / "CHANGELOG.md").read_bytes(), before)
         self.assertEqual((self.root / PREP.RECEIPT).read_bytes(), receipt)
 
