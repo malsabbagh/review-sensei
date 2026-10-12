@@ -58,15 +58,91 @@ def version_tuple(tag: str) -> tuple[int, ...]:
     return tuple(int(part) for part in match.groups())
 
 
+def gh_run(command: list[str], stage: str, *, timeout: int = 60, text: bool = False):
+    """Keep GitHub authority fixed and report failures without raw diagnostics."""
+    env = {
+        **os.environ,
+        "GH_HOST": "github.com",
+        "GH_PAGER": "cat",
+        "GH_PROMPT_DISABLED": "1",
+    }
+    env.pop("GH_DEBUG", None)
+    try:
+        result = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=text,
+            timeout=timeout,
+            env=env,
+        )
+        if result.returncode:
+            raise subprocess.CalledProcessError(result.returncode, command)
+        return result
+    except subprocess.CalledProcessError as error:
+        raise ValueError(
+            f"{stage} failed (exit {error.returncode}); raw diagnostics withheld"
+        ) from None
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"{stage} timed out; raw diagnostics withheld") from None
+    except OSError:
+        raise ValueError(
+            f"{stage} could not start; check the installed GitHub CLI"
+        ) from None
+
+
 def api(path: str) -> Any:
     """Use gh's authenticated GitHub API, never URLs supplied by artifacts."""
-    result = subprocess.run(
-        ["gh", "api", f"repos/{REPOSITORY}/{path}"],
-        check=True,
-        capture_output=True,
+    kind = path.split("/", 1)[0]
+    kind = (
+        kind
+        if kind in {"git", "contents", "releases", "actions", "compare"}
+        else "repository"
+    )
+    result = gh_run(
+        ["gh", "api", f"repos/{REPOSITORY}/{path}", "--hostname", "github.com"],
+        f"GitHub {kind} metadata read",
         text=True,
     )
     return json.loads(result.stdout)
+
+
+def api_first_page(path: str) -> tuple[Any, bool]:
+    """Read one bounded inventory page and expose advertised continuation."""
+    result = gh_run(
+        [
+            "gh",
+            "api",
+            f"repos/{REPOSITORY}/{path}",
+            "--hostname",
+            "github.com",
+            "--include",
+        ],
+        "GitHub asset inventory read",
+        text=True,
+    )
+    raw = result.stdout
+    if not isinstance(raw, str) or len(raw.encode("utf-8")) > 512 * 1024:
+        raise ValueError("GitHub asset inventory response exceeds its bound")
+    headers, separator, body = raw.replace("\r\n", "\n").partition("\n\n")
+    lines = headers.splitlines()
+    if (
+        not separator
+        or not lines
+        or not re.fullmatch(r"HTTP/\S+ 200(?: .*)?", lines[0])
+    ):
+        raise ValueError("GitHub asset inventory response headers are unavailable")
+    links = []
+    for line in lines[1:]:
+        name, colon, value = line.partition(":")
+        if not colon:
+            raise ValueError("GitHub asset inventory response headers are malformed")
+        if name.lower() == "link":
+            links.append(value)
+    # Do not follow artifact- or server-provided URLs. Any continuation refuses
+    # eligibility; this inventory must be complete in one bounded response.
+    has_next = any(re.search(r'\brel\s*=\s*"?next\b', value, re.I) for value in links)
+    return json.loads(body), has_next
 
 
 def api_pages(path: str, key: str | None = None) -> list[dict[str, Any]]:

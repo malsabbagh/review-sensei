@@ -1,0 +1,157 @@
+name: Validate promoted major channel
+
+on:
+  push:
+    # Globs are not regexes. The gate admits only canonical lowercase vN tags;
+    # creating a tag and force-moving it both produce push events.
+    tags: ["v*"]
+  workflow_dispatch:
+    # Needed for historical target commits lacking this new workflow, and for
+    # GITHUB_TOKEN pushes whose ordinary push events do not recurse into Actions.
+    inputs:
+      channel:
+        description: Exact lowercase numeric-major channel (for example v5)
+        required: true
+        type: string
+      tag_object:
+        description: Exact signed annotated major-tag object SHA after promotion
+        required: true
+        type: string
+      source_sha:
+        description: Exact peeled released commit SHA after promotion
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: major-channel-validation-${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.channel) || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Bind major event, signature, release and workflow surface
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      attestations: read
+    outputs:
+      eligible: ${{ steps.gate.outputs.eligible }}
+      version: ${{ steps.gate.outputs.version }}
+      wheel_sha256: ${{ steps.gate.outputs.wheel_sha256 }}
+      validator_sha: ${{ steps.validator.outputs.sha }}
+      channel: ${{ steps.gate.outputs.channel }}
+      tag_object: ${{ steps.gate.outputs.tag_object }}
+      source_sha: ${{ steps.gate.outputs.source_sha }}
+    steps:
+      - name: Check out protected default-branch validation code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - id: validator
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install bounded workflow-data parser
+        run: python -m pip install --disable-pip-version-check -r requirements/major-tag-validation.txt
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/major_tag_gate.py --output "$RUNNER_TEMP/major-channel"
+      - name: Retain signed release and workflow-data receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: major-channel-gate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/major-channel/gate.json
+          if-no-files-found: error
+          retention-days: 30
+
+  qualify:
+    name: Exact PyPI ${{ needs.gate.outputs.version }} / ${{ matrix.os }} / Python ${{ matrix.python }}
+    needs: gate
+    if: needs.gate.outputs.eligible == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.gate.outputs.validator_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Test installer contracts
+        run: python -m unittest discover -s tests/published_cli -p test_bootstrap.py
+      - name: Qualify the attested exact released wheel through the installed CLI
+        env:
+          PUBLISHED_VERSION: ${{ needs.gate.outputs.version }}
+          EXPECTED_WHEEL_SHA256: ${{ needs.gate.outputs.wheel_sha256 }}
+        run: >-
+          python scripts/qualify_published_cli.py
+          --version "$PUBLISHED_VERSION"
+          --expected-wheel-sha256 "$EXPECTED_WHEEL_SHA256"
+          --output "$RUNNER_TEMP/major-installed-cli"
+      - name: Retain sanitized process, limits and failure evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: major-channel-cli-${{ matrix.os }}-py${{ matrix.python }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/major-installed-cli/summary.json
+            ${{ runner.temp }}/major-installed-cli/*.txt
+            ${{ runner.temp }}/major-installed-cli/qualify/results.json
+            ${{ runner.temp }}/major-installed-cli/qualify/matrix.csv
+            ${{ runner.temp }}/major-installed-cli/transports/results.json
+            ${{ runner.temp }}/major-installed-cli/seam_boundaries/results.json
+            ${{ runner.temp }}/major-installed-cli/operations/results.json
+            ${{ runner.temp }}/major-installed-cli/operation_state/results.json
+          if-no-files-found: error
+          retention-days: 30
+
+  current:
+    name: Require passing CLI lanes and unchanged promoted identity
+    needs: [gate, qualify]
+    if: always() && needs.gate.outputs.eligible == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.gate.outputs.validator_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: major-channel-gate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/accepted-major
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --disable-pip-version-check -r requirements/major-tag-validation.txt
+      - name: Recheck exact signed identity and propagate all lane failures
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_RESULT: ${{ needs.qualify.result }}
+        run: |
+          python scripts/major_tag_gate.py --recheck "$RUNNER_TEMP/accepted-major/gate.json" --output "$RUNNER_TEMP/major-current"
+          test "$CLI_RESULT" = success
+      - name: Retain final identity check
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: major-channel-current-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/major-current/gate.json
+          if-no-files-found: error
+          retention-days: 30

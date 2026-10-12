@@ -25,11 +25,80 @@ from qualify_published_cli import (
     download_command,
     exact_version,
     propagation_download,
+    require_installed_distribution,
+    require_wheel_digest,
     validate_receipt,
 )
 
 
 class BootstrapContracts(unittest.TestCase):
+    def test_real_symlink_escape_is_rejected_after_resolution(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            environment = root / "environment"
+            environment.mkdir()
+            outside = root / "outside/site-packages/review_sensei"
+            outside.mkdir(parents=True)
+            (outside / "__init__.py").write_text("")
+            link = environment / "linked"
+            try:
+                link.symlink_to(root / "outside", target_is_directory=True)
+            except OSError as error:
+                self.skipTest("symlink creation unavailable: " + type(error).__name__)
+            with self.assertRaises(ValueError):
+                require_installed_distribution(
+                    {
+                        "version": "0.6.21",
+                        "origin": str(link / "site-packages/review_sensei/__init__.py"),
+                    },
+                    "0.6.21",
+                    environment,
+                )
+
+    def test_missing_empty_or_wrong_type_origin_has_explicit_identity_error(self):
+        for identity in [
+            None,
+            {"version": "0.6.21"},
+            {"version": "0.6.21", "origin": None},
+            {"version": "0.6.21", "origin": 123},
+            {"version": "0.6.21", "origin": ""},
+        ]:
+            with (
+                self.subTest(identity=identity),
+                self.assertRaisesRegex(ValueError, "origin"),
+            ):
+                require_installed_distribution(
+                    identity, "0.6.21", Path("/isolated/environment")
+                )
+
+    def test_origin_must_be_inside_the_new_environment_not_a_source_checkout(self):
+        environment = Path("/isolated/environment")
+        valid = {
+            "version": "0.6.21",
+            "origin": str(
+                environment / "lib/python3.14/site-packages/review_sensei/__init__.py"
+            ),
+        }
+        require_installed_distribution(valid, "0.6.21", environment)
+        for origin in [
+            "/source/review_sensei/__init__.py",
+            "/source/site-packages/review_sensei/__init__.py",
+            "/isolated/environment-other/lib/site-packages/review_sensei/__init__.py",
+            "/isolated/environment/not-site-packages/review_sensei/__init__.py",
+        ]:
+            with self.subTest(origin=origin), self.assertRaises(ValueError):
+                require_installed_distribution(
+                    {**valid, "origin": origin}, "0.6.21", environment
+                )
+        with self.assertRaises(ValueError):
+            require_installed_distribution(valid, "0.6.20", environment)
+
+    def test_expected_release_digest_is_optional_but_exact_when_supplied(self):
+        require_wheel_digest("a" * 64, None)
+        require_wheel_digest("a" * 64, "a" * 64)
+        with self.assertRaises(ValueError):
+            require_wheel_digest("a" * 64, "b" * 64)
+
     def test_exact_version_never_accepts_latest_or_ranges_or_shell_text(self):
         for value in [
             "latest",

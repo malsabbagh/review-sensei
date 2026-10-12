@@ -4,3 +4,4 @@ cryptography==50.0.2
 jsonschema==4.26.0
 mypy==2.4.0
 ruff==0.16.10
+-r major-tag-validation.txt

@@ -1,0 +1,74 @@
+name: Major-channel validator regression
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/major-tag-validation*.yml"
+      - "scripts/major_tag*.py"
+      - "scripts/dispatch_major_tag_validation.py"
+      - "scripts/qualify_published_cli.py"
+      - "tests/test_major_tag_validation.py"
+      - "tests/published_cli/**"
+      - "requirements/major-tag-validation.txt"
+      - "requirements/ci.txt"
+      - "scripts/release_docs.py"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/major-tag-validation*.yml"
+      - "scripts/major_tag*.py"
+      - "scripts/dispatch_major_tag_validation.py"
+      - "scripts/qualify_published_cli.py"
+      - "tests/test_major_tag_validation.py"
+      - "tests/published_cli/**"
+      - "requirements/major-tag-validation.txt"
+      - "requirements/ci.txt"
+      - "scripts/release_docs.py"
+
+permissions:
+  contents: read
+
+jobs:
+  installed-cli:
+    name: Released-wheel regression / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --disable-pip-version-check -r requirements/major-tag-validation.txt
+      - name: Check mocked event, release, race, artifact and failure contracts
+        run: |
+          python -m unittest discover -s tests -p test_major_tag_validation.py
+          python -m unittest discover -s tests/published_cli -p test_bootstrap.py
+      - name: Run the actual isolated installed-CLI harness against its immutable baseline
+        # This is a fixed regression baseline, never a claim about the current
+        # floating major tag or a future not-yet-published project version.
+        run: >-
+          python scripts/qualify_published_cli.py --version 0.6.21
+          --expected-wheel-sha256 58f9ed48e8df2434c2136ba9e57c260e606fd550e396cd422ee2efd1d4d4ef31
+          --output "$RUNNER_TEMP/major-validator-regression"
+      - name: Retain sanitized installed-process evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: major-validator-regression-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/major-validator-regression/summary.json
+            ${{ runner.temp }}/major-validator-regression/*.txt
+            ${{ runner.temp }}/major-validator-regression/qualify/results.json
+            ${{ runner.temp }}/major-validator-regression/qualify/matrix.csv
+            ${{ runner.temp }}/major-validator-regression/transports/results.json
+            ${{ runner.temp }}/major-validator-regression/seam_boundaries/results.json
+            ${{ runner.temp }}/major-validator-regression/operations/results.json
+            ${{ runner.temp }}/major-validator-regression/operation_state/results.json
+          if-no-files-found: error
+          retention-days: 30
