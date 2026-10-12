@@ -41,6 +41,7 @@ jobs:
     outputs:
       eligible: ${{ steps.gate.outputs.eligible }}
       version: ${{ steps.gate.outputs.version }}
+      github_version: ${{ steps.gate.outputs.github_version }}
       wheel_sha256: ${{ steps.gate.outputs.wheel_sha256 }}
       validator_sha: ${{ steps.validator.outputs.sha }}
       channel: ${{ steps.gate.outputs.channel }}
@@ -96,10 +97,12 @@ jobs:
       - name: Qualify the attested exact released wheel through the installed CLI
         env:
           PUBLISHED_VERSION: ${{ needs.gate.outputs.version }}
+          PUBLISHED_GITHUB_VERSION: ${{ needs.gate.outputs.github_version }}
           EXPECTED_WHEEL_SHA256: ${{ needs.gate.outputs.wheel_sha256 }}
         run: >-
           python scripts/qualify_published_cli.py
           --version "$PUBLISHED_VERSION"
+          --github-version "$PUBLISHED_GITHUB_VERSION"
           --expected-wheel-sha256 "$EXPECTED_WHEEL_SHA256"
           --output "$RUNNER_TEMP/major-installed-cli"
       - name: Retain sanitized process, limits and failure evidence

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install one exact PyPI version and qualify it without provider credentials."""
+"""Install exact PyPI engine and hosted wheels and qualify them without credentials."""
 
 import argparse
 import hashlib
@@ -9,10 +9,16 @@ import re
 import subprocess
 import sys
 import time
+import tomllib
 import venv
 from pathlib import Path
 
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:rc[0-9]+)?\Z")
+ENGINE = "review-sensei"
+HOSTED = "review-sensei-github"
+HOSTED_MANIFEST = "packages/python/review-sensei-github/pyproject.toml"
+# Suites that exercise the hosted runtime also verify its exact version.
+HOSTED_SUITES = frozenset({"qualify", "operations", "operation_state"})
 
 
 def wheel_sha256(value):
@@ -46,6 +52,32 @@ def require_installed_distribution(identity, version, environment):
         )
 
 
+def require_hosted_pin(requires, version):
+    """The hosted wheel must pin exactly the engine version being qualified."""
+    pins = [
+        r for r in requires or [] if re.match(r"review[-_.]sensei\s*[=<>!~(]", r, re.I)
+    ]
+    if pins != [ENGINE + "==" + version]:
+        raise ValueError(HOSTED + " does not pin " + ENGINE + "==" + version)
+
+
+def hosted_version(content, version):
+    """Return the hosted version a released source manifest pins to the engine."""
+    project = tomllib.loads(content)["project"]
+    if project.get("name") != HOSTED:
+        raise ValueError("hosted release manifest names a different distribution")
+    require_hosted_pin(project.get("dependencies"), version)
+    return exact_version(project["version"])
+
+
+def wheel_for(wheels, project, version):
+    identity = [project.replace("-", "_"), version]
+    matching = [w for w in wheels if w.name.split("-")[:2] == identity]
+    if len(matching) != 1:
+        raise RuntimeError("expected exactly one " + project + " wheel")
+    return matching[0]
+
+
 def exact_version(value):
     if not VERSION.fullmatch(value):
         raise argparse.ArgumentTypeError(
@@ -68,7 +100,7 @@ def clean_environment(home):
     return env
 
 
-def download_command(python, version, destination):
+def download_command(python, version, destination, project=ENGINE):
     return [
         str(python),
         "-I",
@@ -88,7 +120,7 @@ def download_command(python, version, destination):
         "15",
         "--dest",
         str(destination),
-        "review-sensei==" + exact_version(version),
+        project + "==" + exact_version(version),
     ]
 
 
@@ -148,8 +180,10 @@ def validate_receipt(data, version):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True, type=exact_version)
+    parser.add_argument("--github-version", required=True, type=exact_version)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--expected-wheel-sha256", type=wheel_sha256)
+    parser.add_argument("--expected-github-wheel-sha256", type=wheel_sha256)
     args = parser.parse_args()
     root = args.output.resolve()
     if root.exists():
@@ -160,7 +194,8 @@ def main():
     env = clean_environment(home)
     report = {
         "requested_version": args.version,
-        "source": "exact PyPI wheel",
+        "requested_github_version": args.github_version,
+        "source": "exact PyPI wheels",
         "credential_free": True,
         "status": "NOT_EXECUTED",
         "suites": [],
@@ -181,23 +216,37 @@ def main():
         )
         wheels = root / "wheels"
         wheels.mkdir()
-        ok, report["propagation_attempts"] = propagation_download(
-            download_command(python, args.version, wheels), root, env
-        )
-        if not ok:
-            raise RuntimeError(
-                "exact PyPI wheel unavailable after bounded propagation attempts"
+        for project, version, key in (
+            (ENGINE, args.version, "propagation_attempts"),
+            (HOSTED, args.github_version, "github_propagation_attempts"),
+        ):
+            ok, report[key] = propagation_download(
+                download_command(python, version, wheels, project), root, env
             )
+            if not ok:
+                raise RuntimeError(
+                    "exact PyPI " + project + " wheel unavailable after bounded "
+                    "propagation attempts"
+                )
         wheel_files = list(wheels.glob("*.whl"))
-        if len(wheel_files) != 1:
-            raise RuntimeError("expected exactly one requested wheel")
-        wheel = wheel_files[0]
+        if len(wheel_files) != 2:
+            raise RuntimeError("expected exactly the two requested wheels")
+        wheel = wheel_for(wheel_files, ENGINE, args.version)
+        github_wheel = wheel_for(wheel_files, HOSTED, args.github_version)
         report["wheel"] = {
             "name": wheel.name,
             "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
         }
+        report["github_wheel"] = {
+            "name": github_wheel.name,
+            "sha256": hashlib.sha256(github_wheel.read_bytes()).hexdigest(),
+        }
         require_wheel_digest(report["wheel"]["sha256"], args.expected_wheel_sha256)
+        require_wheel_digest(
+            report["github_wheel"]["sha256"], args.expected_github_wheel_sha256
+        )
         report["expected_wheel_sha256"] = args.expected_wheel_sha256
+        report["expected_github_wheel_sha256"] = args.expected_github_wheel_sha256
         command = [
             str(python),
             "-I",
@@ -214,6 +263,7 @@ def main():
             "--timeout",
             "15",
             str(wheel),
+            str(github_wheel),
         ]
         installed = subprocess.run(
             command, cwd=root, env=env, capture_output=True, text=True, timeout=180
@@ -227,6 +277,15 @@ def main():
         )
         report["installed"] = json.loads(identity)
         require_installed_distribution(report["installed"], args.version, environment)
+        inspect = "import importlib.metadata,json,review_sensei_github;print(json.dumps({'version':importlib.metadata.version('review-sensei-github'),'origin':review_sensei_github.__file__,'requires':importlib.metadata.requires('review-sensei-github')}))"
+        identity = subprocess.check_output(
+            [str(python), "-I", "-c", inspect], cwd=root, env=env, text=True, timeout=15
+        )
+        report["installed_github"] = json.loads(identity)
+        require_installed_distribution(
+            report["installed_github"], args.github_version, environment
+        )
+        require_hosted_pin(report["installed_github"].get("requires"), args.version)
         scripts = Path(__file__).resolve().parents[1] / "tests/published_cli"
         for name in (
             "qualify",
@@ -244,6 +303,8 @@ def main():
                 "--report",
                 str(destination),
             ]
+            if name in HOSTED_SUITES:
+                command += ["--expected-github-version", args.github_version]
             try:
                 proc = subprocess.run(
                     command, cwd=root, env=env, capture_output=True, timeout=300
