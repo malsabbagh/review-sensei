@@ -20,6 +20,11 @@ from .document_context import DocumentSelectionReport
 from .errors import ReviewFormatError, ReviewInputError
 from .evidence import EvidenceBundle, EvidenceRecord, EvidenceSnapshot, evidence_digest
 from .execution import CompletedBatch, execute_plan
+from .hunk_subdivision import (
+    HUNK_SUBDIVISION_POLICY,
+    SubdivisionAllowance,
+    subdivide_hunk,
+)
 from .models import (
     LearningProposal,
     ProviderRequest,
@@ -187,6 +192,7 @@ def discover(
             evidence_confirmed=(),
         )
 
+    subdivision_allowance = SubdivisionAllowance()
     for stage in service.stages:
         categories = tuple(
             category
@@ -309,14 +315,52 @@ def discover(
                         provenance="discovery-hunk",
                         supplied_complete=False,
                     )
-                    evidence.append(fragment)
-                    requirements.append(
-                        WorkRequirement(
-                            f"hunk:{hunk.index}:{fragment.path}",
-                            (fragment.evidence_id,),
-                            (hunk.index,),
+
+                    def fragment_requirement(piece: EvidenceRecord) -> WorkRequirement:
+                        identity = f"hunk:{hunk.index}:{piece.path}"
+                        if piece.fragment is not None:
+                            identity += ":segment:" + evidence_digest(
+                                piece.fragment.to_dict()
+                            )
+                        return WorkRequirement(
+                            identity, (piece.evidence_id,), (hunk.index,)
                         )
-                    )
+
+                    def admit_fragment(piece: EvidenceRecord) -> bool:
+                        try:
+                            check_deadline()
+                        except PromptContextDeadline:
+                            return False
+                        return bool(
+                            plan_work(
+                                "discovery",
+                                EvidenceBundle(
+                                    snapshot, (piece,), analysis.enumeration_complete
+                                ),
+                                (fragment_requirement(piece),),
+                                budgets=budgets,
+                                render=render,
+                                correction=_PROVIDER_OUTPUT_CORRECTION,
+                            ).batches
+                        )
+
+                    # Preserve existing hunk identities when they already fit.
+                    # Subdivision admission uses the exact renderer, including
+                    # mandatory documents, framing and correction reserve.
+                    parts: tuple[EvidenceRecord, ...]
+                    if admit_fragment(fragment):
+                        parts = (fragment,)
+                    else:
+                        parts = subdivide_hunk(
+                            record,
+                            hunk,
+                            snapshot,
+                            admit=admit_fragment,
+                            before_probe=check_deadline,
+                            allowance=subdivision_allowance,
+                        )
+                    evidence.extend(parts)
+                    requirements.extend(fragment_requirement(piece) for piece in parts)
         bundle = EvidenceBundle(
             snapshot, tuple(evidence), analysis.enumeration_complete
         )
@@ -339,6 +383,7 @@ def discover(
                     "categories": tuple(category.id for category in categories),
                     "cache": asdict(current_key) if current_key is not None else None,
                     "context_policy": PROMPT_CONTEXT_POLICY,
+                    "hunk_subdivision_policy": HUNK_SUBDIVISION_POLICY,
                     "context_inventories": [
                         context.to_prompt_dict() for context in request.lens_contexts
                     ],

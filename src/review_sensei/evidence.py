@@ -77,6 +77,55 @@ def patch_diff(path: str, patch: str, *, old_path: str | None = None) -> str:
 
 
 @dataclass(frozen=True)
+class HunkFragment:
+    """Canonical source-body range, bound to its entire current file identity.
+
+    This is an integrity descriptor, not a complete-file or assessment receipt.
+    The owning splitter verifies the exhaustive ordered partition before use.
+    """
+
+    source_evidence_id: str
+    source_hunk_sha256: str
+    source_hunk_index: int
+    body_start: int
+    body_end: int
+    body_bytes: int
+    body_sha256: str
+
+    def __post_init__(self) -> None:
+        for digest in (
+            self.source_evidence_id,
+            self.source_hunk_sha256,
+            self.body_sha256,
+        ):
+            if (
+                not isinstance(digest, str)
+                or re.fullmatch(r"[a-f0-9]{64}", digest) is None
+            ):
+                raise ReviewInputError("hunk fragment digest is invalid")
+        values = (
+            self.source_hunk_index,
+            self.body_start,
+            self.body_end,
+            self.body_bytes,
+        )
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) for value in values
+        ) or not (
+            1 <= self.source_hunk_index <= DEFAULT_TOTAL_WORK_BUDGET.max_total_hunks
+            and 0
+            <= self.body_start
+            < self.body_end
+            <= self.body_bytes
+            <= DEFAULT_TOTAL_WORK_BUDGET.max_total_diff_bytes
+        ):
+            raise ReviewInputError("hunk fragment range is invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        return dict(self.__dict__)
+
+
+@dataclass(frozen=True)
 class EvidenceRecord:
     path: str
     patch: str
@@ -87,6 +136,7 @@ class EvidenceRecord:
     original_diff: str | None = None
     expected_additions: int | None = None
     expected_deletions: int | None = None
+    fragment: HunkFragment | None = None
 
     def __post_init__(self) -> None:
         validate_repository_path(
@@ -104,6 +154,13 @@ class EvidenceRecord:
             )
         if self.provenance not in {"github-files", "canonical-diff", "discovery-hunk"}:
             raise ReviewInputError("evidence record provenance is invalid")
+        if self.fragment is not None and (
+            not isinstance(self.fragment, HunkFragment)
+            or self.provenance != "discovery-hunk"
+            or self.supplied_complete
+            or self.original_diff is None
+        ):
+            raise ReviewInputError("hunk fragment cannot be complete file evidence")
         for count in (self.expected_additions, self.expected_deletions):
             if count is not None and (
                 isinstance(count, bool)
@@ -196,7 +253,7 @@ class EvidenceRecord:
         return evidence_digest({"domain": "reviewsensei:evidence:v1", **self.to_dict()})
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "path": self.path,
             "old_path": self.old_path,
             "patch_sha256": self.patch_sha256,
@@ -207,6 +264,9 @@ class EvidenceRecord:
             "expected_additions": self.expected_additions,
             "expected_deletions": self.expected_deletions,
         }
+        if self.fragment is not None:
+            value["fragment"] = self.fragment.to_dict()
+        return value
 
     @classmethod
     def from_diff_record(
@@ -282,6 +342,17 @@ class EvidenceBundle:
 
     def by_id(self) -> Mapping[str, EvidenceRecord]:
         return {record.evidence_id: record for record in self.records}
+
+
+def evidence_order(record: EvidenceRecord) -> tuple[str, int, int, str]:
+    """Retain historic ordering for ordinary records; order segments by source."""
+    fragment = record.fragment
+    return (
+        record.path,
+        fragment.source_hunk_index if fragment is not None else 0,
+        fragment.body_start if fragment is not None else 0,
+        record.evidence_id,
+    )
 
 
 @dataclass(frozen=True)

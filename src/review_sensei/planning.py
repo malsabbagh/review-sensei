@@ -21,7 +21,13 @@ from .coverage import (
 from .dependencies import lockfile_kind
 from .diff import DiffAnalysis, DiffFileRecord, DiffHunk, analyze_diff
 from .errors import ReviewInputError
-from .evidence import EvidenceBundle, EvidenceRecord, EvidenceSnapshot, evidence_digest
+from .evidence import (
+    EvidenceBundle,
+    EvidenceRecord,
+    EvidenceSnapshot,
+    evidence_digest,
+    evidence_order,
+)
 from .validation import (
     DEFAULT_REVIEW_LIMITS,
     DEFAULT_TOTAL_WORK_BUDGET,
@@ -245,7 +251,9 @@ def plan_work(
             key=lambda item: (
                 tuple(
                     sorted(
-                        records[key].path if key in records else key
+                        evidence_order(records[key])
+                        if key in records
+                        else (key, 0, 0, key)
                         for key in item.evidence_ids
                     )
                 ),
@@ -264,7 +272,7 @@ def plan_work(
         selected = tuple(
             sorted(
                 (records[key] for key in ids),
-                key=lambda record: (record.path, record.evidence_id),
+                key=evidence_order,
             )
         )
         return WorkBatch(mode, candidates, selected)

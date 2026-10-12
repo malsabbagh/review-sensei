@@ -301,7 +301,7 @@ class ExhaustiveAcquisitionTests(unittest.TestCase):
 
 
 class ExhaustiveGroupTests(unittest.TestCase):
-    def test_discovery_cannot_certify_repeated_or_oversized_atomic_hunks(self):
+    def test_discovery_rejects_repeated_hunks_and_keeps_indivisible_lines_pending(self):
         class Provider:
             name = "fixture"
             model = "fixture"
@@ -318,7 +318,10 @@ class ExhaustiveGroupTests(unittest.TestCase):
             prompt_template="Review {diff}",
             outputs=("summary", "comments"),
         )
-        for patch in (PATCH + PATCH, "@@ -1 +1 @@\n-old\n+" + "x" * 1000 + "\n"):
+        for patch, expected_calls in (
+            (PATCH + PATCH, 0),
+            ("@@ -1 +1 @@\n-old\n+" + "x" * 1000 + "\n", 1),
+        ):
             provider = Provider()
             service = ReviewService(
                 provider,
@@ -326,8 +329,11 @@ class ExhaustiveGroupTests(unittest.TestCase):
                 work_budgets=ReviewWorkBudgets(mode="unified", batch_diff_bytes=250),
             )
             run = service.run(ReviewRequest(diff=self.record(patch=patch).diff))
-            self.assertEqual(provider.calls, 0)
+            # The small deletion range may now be reviewed independently, but
+            # neither overlap nor an unvisited giant added line is complete.
+            self.assertEqual(provider.calls, expected_calls)
             self.assertFalse(run.result.coverage.fully_reviewed)
+            self.assertEqual(run.outcome.status, "partial")
 
     def record(self, path="src/a.py", patch=PATCH):
         return EvidenceRecord(
