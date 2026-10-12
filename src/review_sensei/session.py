@@ -1846,6 +1846,21 @@ def prepare_session_round(
     if record.operator_paused:
         flags.setdefault("paused", True)
     held = record.reservation_id
+    if held is not None and not record.operator_paused:
+        # Admission self-heal (ADR 0064): a leaked reservation from a lost
+        # runner must not block this review until expiry when the owner
+        # run provably completed. A maintainer pause is checked first and
+        # is never cleared here. Any recovery failure keeps today's
+        # blocked behavior exactly.
+        recover = getattr(ledger, "recover_abandoned_analysis", None)
+        if callable(recover):
+            try:
+                recovered = recover(identity, now=now)
+            except Exception:
+                recovered = None
+            if recovered is not None and recovered.reservation_id is None:
+                record = recovered
+                held = None
     if held is not None:
         flags.setdefault("paused", True)
     elif record.last_committed_reservation_id == reservation_id and held is None:

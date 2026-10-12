@@ -515,3 +515,166 @@ class PreProviderFailureCleanupTests(IsolatedWorkingDirectoryMixin, unittest.Tes
                 else:
                     self.assertIsNone(loaded.record.reservation_id)
                     self.assertEqual(loaded.record.failed_attempts, 1)
+
+
+class AdmissionSelfHealTests(unittest.TestCase):
+    """Step 3: a review that finds a held reservation heals or reports."""
+
+    def _admission_harness(self, record=None):
+        h = Harness(record if record is not None else analysis_record())
+        h.record = h.record.evolve(operator_paused=False, now=NOW)
+        h.ledger._session_attestation = {**h.attestation, "operation": "review"}
+        return h
+
+    def test_completed_owner_is_healed_and_charged_to_the_old_head(self):
+        h = self._admission_harness()
+        before = h.record
+        record = h.ledger.recover_abandoned_analysis(
+            IDENTITY, now=NOW, wait_attempts=1, sleeper=lambda _s: None
+        )
+        self.assertIsNone(record.reservation_id)
+        self.assertIsNone(record.reservation_owner)
+        self.assertEqual(record.failed_attempts, 1)
+        self.assertEqual(record.failed_attempts_head_sha, HEAD)
+        self.assertFalse(record.operator_paused)
+        self.assertEqual(h.patches, 1)
+        self.assertEqual(
+            record.completed_initial_reviews, before.completed_initial_reviews
+        )
+
+    def test_still_running_owner_waits_briefly_then_reports_blocked(self):
+        h = self._admission_harness()
+        h.run["status"] = "in_progress"
+        sleeps = []
+        with self.assertRaisesRegex(
+            ReviewInputError, r"held by run 123 \(still running\)"
+        ):
+            h.ledger.recover_abandoned_analysis(
+                IDENTITY,
+                now=NOW,
+                wait_attempts=3,
+                wait_seconds=5,
+                sleeper=sleeps.append,
+            )
+        self.assertEqual(sleeps, [5, 5])
+        self.assertEqual(h.patches, 0)
+
+    def test_unclear_evidence_stays_blocked_without_mutation(self):
+        record = analysis_record(owner=False).evolve(
+            transaction=None, operator_paused=False, now=NOW
+        )
+        h = self._admission_harness(record)
+        with self.assertRaisesRegex(ReviewInputError, "no provable"):
+            h.ledger.recover_abandoned_analysis(
+                IDENTITY, now=NOW, wait_attempts=1, sleeper=lambda _s: None
+            )
+        self.assertEqual(h.patches, 0)
+
+    def test_publication_work_is_never_reclaimed_at_admission(self):
+        h = self._admission_harness()
+        tx = h.record.transaction.with_result("e" * 64)
+        h.record = h.record.evolve(
+            reservation_id=None,
+            reserved_slot=None,
+            reservation_owner=None,
+            last_committed_reservation_id=tx.reservation_id,
+            transaction=tx,
+            now=NOW,
+        )
+        record = h.ledger.recover_abandoned_analysis(
+            IDENTITY, now=NOW, wait_attempts=1, sleeper=lambda _s: None
+        )
+        self.assertEqual(record.transaction, tx)
+        self.assertEqual(h.patches, 0)
+
+
+class AdmissionHookTests(unittest.TestCase):
+    """prepare_session_round: paused gate first, self-heal second."""
+
+    def _held_ledger(self, *, paused: bool, recoverable: bool):
+        ledger = InMemorySessionLedger()
+        identity = SessionIdentity("owner/repo", 7, 99)
+        prepare_review_transaction(
+            ledger,
+            identity,
+            ReviewConvergencePolicy(mode="merge-focused"),
+            reservation_id="d" * 64,
+            base_sha="c" * 40,
+            head_sha=HEAD,
+            configuration_digest="e" * 64,
+            evidence_digest="f" * 64,
+            now=NOW,
+        )
+        if paused:
+            ledger.replace(
+                identity,
+                lambda r: r.evolve(operator_paused=True, now=NOW),
+                now=NOW,
+            )
+        calls = []
+
+        def _recover(_identity, *, now=None):
+            calls.append("recover")
+            if not recoverable:
+                raise ReviewInputError(
+                    "session reservation is held by run 123 (still running)"
+                )
+            return ledger.replace(
+                _identity,
+                lambda r: r.evolve(
+                    reservation_id=None,
+                    reserved_slot=None,
+                    transaction=None,
+                    last_committed_reservation_id="d" * 64,
+                    now=now,
+                ),
+                now=now,
+            )
+
+        ledger.recover_abandoned_analysis = _recover  # type: ignore[attr-defined]
+        return ledger, identity, calls
+
+    def test_paused_session_never_attempts_recovery(self):
+        from review_sensei.session import prepare_session_round
+
+        ledger, identity, calls = self._held_ledger(paused=True, recoverable=True)
+        prepared = prepare_session_round(
+            ledger,
+            identity,
+            ReviewConvergencePolicy(mode="merge-focused"),
+            reservation_id="1" * 64,
+            now=NOW,
+            head_sha=HEAD,
+        )
+        self.assertEqual(calls, [])
+        self.assertFalse(prepared.decision.admit)
+
+    def test_unpaused_held_session_heals_then_admits_current_head(self):
+        from review_sensei.session import prepare_session_round
+
+        ledger, identity, calls = self._held_ledger(paused=False, recoverable=True)
+        prepared = prepare_session_round(
+            ledger,
+            identity,
+            ReviewConvergencePolicy(mode="merge-focused"),
+            reservation_id="1" * 64,
+            now=NOW,
+            head_sha=HEAD,
+        )
+        self.assertEqual(calls, ["recover"])
+        self.assertTrue(prepared.decision.admit)
+
+    def test_failed_recovery_stays_blocked_as_today(self):
+        from review_sensei.session import prepare_session_round
+
+        ledger, identity, calls = self._held_ledger(paused=False, recoverable=False)
+        prepared = prepare_session_round(
+            ledger,
+            identity,
+            ReviewConvergencePolicy(mode="merge-focused"),
+            reservation_id="1" * 64,
+            now=NOW,
+            head_sha=HEAD,
+        )
+        self.assertEqual(calls, ["recover"])
+        self.assertFalse(prepared.decision.admit)

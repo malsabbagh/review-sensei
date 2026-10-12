@@ -2036,7 +2036,50 @@ class GitHubIssueCommentSessionLedger:
         self, identity: SessionIdentity, *, now: datetime | None = None
     ) -> SessionRecord:
         """One broker grant, one CAS replacement, live Actions proof twice."""
+        return self._recover_abandoned_analysis(
+            identity, now=now, operation="command", unpause=True
+        )
+
+    def recover_abandoned_analysis(
+        self,
+        identity: SessionIdentity,
+        *,
+        now: datetime | None = None,
+        wait_attempts: int = 3,
+        wait_seconds: float = 5.0,
+        sleeper=None,
+    ) -> SessionRecord:
+        """Admission self-heal for a leaked reservation (ADR 0064).
+
+        Same evidence and CAS seam as maintainer continuation, but driven
+        by the review's own grant and never unpausing: the caller checks
+        the operator pause first. A still-running owner is waited on
+        briefly (bounded) before being reported as blocking this review.
+        """
+
+        return self._recover_abandoned_analysis(
+            identity,
+            now=now,
+            operation="review",
+            unpause=False,
+            wait_attempts=wait_attempts,
+            wait_seconds=wait_seconds,
+            sleeper=sleeper,
+        )
+
+    def _recover_abandoned_analysis(
+        self,
+        identity: SessionIdentity,
+        *,
+        now: datetime | None = None,
+        operation: str,
+        unpause: bool,
+        wait_attempts: int = 1,
+        wait_seconds: float = 0.0,
+        sleeper=None,
+    ) -> SessionRecord:
         import hashlib
+        import time
 
         from review_sensei.session import MAX_FAILED_ATTEMPTS, _failed_attempt_scope
 
@@ -2050,11 +2093,19 @@ class GitHubIssueCommentSessionLedger:
                 and self._actions_token_provider is None
             )
         ):
+            if operation == "command":
+                raise ReviewInputError(
+                    "reservation recovery requires an authenticated maintainer grant and Actions reads"
+                )
             raise ReviewInputError(
-                "reservation recovery requires an authenticated maintainer grant and Actions reads"
+                "reservation recovery requires an authenticated review grant and Actions reads"
             )
-        if self._session_attestation.get("operation") != "command":
-            raise ReviewInputError("reservation recovery requires a maintainer command")
+        if self._session_attestation.get("operation") != operation:
+            if operation == "command":
+                raise ReviewInputError(
+                    "reservation recovery requires a maintainer command"
+                )
+            raise ReviewInputError("reservation recovery requires a review grant")
         loaded = self.load(identity, now=now)
         if loaded.status != "ok" or loaded.record is None:
             raise ReviewInputError(f"session ledger load failed: {loaded.status}")
@@ -2071,7 +2122,27 @@ class GitHubIssueCommentSessionLedger:
             token=actions_token,
             command_run_id=str(self._session_attestation["run_id"]),
         )
-        proof = evidence.verify(identity, expected)
+        sleep = sleeper if sleeper is not None else time.sleep
+        attempts = max(1, wait_attempts)
+        proof = None
+        for attempt in range(attempts):
+            try:
+                proof = evidence.verify(identity, expected)
+                break
+            except ReviewInputError as exc:
+                owner_active = "reservation owner run is active" in str(exc)
+                if not owner_active or attempt == attempts - 1:
+                    if owner_active and attempts > 1:
+                        owner_run = (
+                            str(expected.reservation_owner["run_id"])
+                            if expected.reservation_owner is not None
+                            else "unknown"
+                        )
+                        raise ReviewInputError(
+                            f"session reservation is held by run {owner_run} (still running)"
+                        ) from exc
+                    raise
+                sleep(wait_seconds)
 
         def recover(current: SessionRecord) -> SessionRecord:
             if (
@@ -2110,7 +2181,7 @@ class GitHubIssueCommentSessionLedger:
                 last_committed_reservation_id=hashlib.sha256(
                     f"{current.reservation_id}|failed-attempt".encode()
                 ).hexdigest(),
-                operator_paused=False,
+                operator_paused=False if unpause else current.operator_paused,
                 **scope,
             )
 
