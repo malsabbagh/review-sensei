@@ -2,8 +2,6 @@
 
 ## Unreleased
 
-## 0.6.23 - 2026-10-12
-
 - Split the hosted GitHub runtime into the `review-sensei-github` distribution.
   The `review-sensei` engine no longer imports the broker, OIDC, or GitHub
   publication code. `review-sensei github`, `host-plan`, and
@@ -21,10 +19,6 @@
   browser integrity check rejected urllib's default agent on
   `/github/session-grant` with error 1010 before the Worker ran, so every
   hosted maintainer command failed with `broker_unknown`.
-
-## review-sensei-github 0.1.1 - 2026-10-12
-
-- Pin `review-sensei==0.6.23`.
 
 ## 0.6.22 - 2026-10-12
 
