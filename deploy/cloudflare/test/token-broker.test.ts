@@ -383,6 +383,11 @@ describe("token broker authorization", () => {
       release_only: true,
       reservation_owner: { run_id: "10000000001", head_sha: SHA },
     });
+    // No mutation grant and no enrollment state: a release-only token
+    // cannot be replayed into authorize_session_mutation, which requires
+    // a signed session grant this exchange never issues.
+    expect(result.session_grant).toBeUndefined();
+    expect(result.session_state).toBeUndefined();
     // No enrollment witness and no grant: releasing publishes nothing.
     expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
   });

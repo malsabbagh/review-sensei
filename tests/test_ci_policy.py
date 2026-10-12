@@ -968,6 +968,12 @@ class ActionPinPolicyTests(unittest.TestCase):
             self.assertEqual(job.count(pull_request_env), 5)
             self.assertIn("Release this run's session reservation", job)
             self.assertIn("release-reservation", job)
+            # The cleanup step must run even after cancellation or a
+            # review-step timeout, in both provider jobs.
+            self.assertEqual(
+                job.count("if: always() && inputs.operation == 'review'"), 1
+            )
+            self.assertIn("reservation release skipped", job)
         for job_id in ("hosted", "local"):
             job = _job_section(workflow, job_id)
             self.assertIn(expected_permissions, job)

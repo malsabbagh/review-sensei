@@ -1157,11 +1157,13 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           RUN_ID: ${{ github.run_id }}
         run: |
-          if [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ && "$RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+          if [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ && "$RUN_ID" =~ ^[1-9][0-9]*$ && "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]; then
             "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" release-reservation \
               --repository "$REPOSITORY" --repository-id "$REPOSITORY_ID" \
               --pull-request "$PULL_REQUEST" --head-sha "$HEAD_SHA" \
               --run-id "$RUN_ID" || echo '::warning::reservation release cleanup did not complete'
+          else
+            echo '::warning::reservation release skipped: pull request, head, or run identity unavailable'
           fi
 
       # success() && !cancelled() skips a pointless API call after a failed
@@ -1691,11 +1693,13 @@ jobs:
           HEAD_SHA: ${{ inputs.head_sha }}
           RUN_ID: ${{ github.run_id }}
         run: |
-          if [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ && "$RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+          if [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ && "$RUN_ID" =~ ^[1-9][0-9]*$ && "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]; then
             "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" release-reservation \
               --repository "$REPOSITORY" --repository-id "$REPOSITORY_ID" \
               --pull-request "$PULL_REQUEST" --head-sha "$HEAD_SHA" \
               --run-id "$RUN_ID" || echo '::warning::reservation release cleanup did not complete'
+          else
+            echo '::warning::reservation release skipped: pull request, head, or run identity unavailable'
           fi
 
       # success() && !cancelled() skips a pointless API call after a failed

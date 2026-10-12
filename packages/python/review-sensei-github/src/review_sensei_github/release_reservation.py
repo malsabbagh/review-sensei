@@ -77,8 +77,15 @@ def release_own_reservation(
         repository_id=repository_id,
     )
     loaded = ledger.load(identity)
-    if loaded.status != "ok" or loaded.record is None:
+    if loaded.status == "missing":
         return "no-reservation"
+    if loaded.status != "ok" or loaded.record is None:
+        # A load failure (expired, integrity, conflict) is not an absence:
+        # surface it so the cleanup step warns instead of reporting a
+        # successful no-op while the reservation stays held.
+        raise ReviewInputError(
+            f"reservation release could not load the session: {loaded.status}"
+        )
     record = loaded.record
     if record.reservation_id is None:
         return "no-reservation"

@@ -141,6 +141,23 @@ class ReleaseReservationTests(unittest.TestCase):
         self.assertEqual(self._release(http), "not-owner")
         self.assertNotIn("PATCH", [method for method, _url, _data in calls])
 
+    def test_load_failure_is_not_reported_as_absence(self):
+        # An expired session is a load failure, not "no reservation":
+        # it must surface so the cleanup step warns instead of silently
+        # leaving the reservation held.
+        from datetime import timedelta
+
+        from review_sensei.errors import ReviewInputError
+
+        record = SessionRecord.create(
+            IDENTITY,
+            now=FIXED_NOW - timedelta(days=40),
+            expires_at=FIXED_NOW - timedelta(days=10),
+        )
+        http, _calls = make_http([json_response([{"id": 7, "body": _body(record)}])])
+        with self.assertRaises(ReviewInputError):
+            self._release(http)
+
     def test_no_reservation_is_a_noop(self):
         record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
         http, calls = make_http([json_response([{"id": 7, "body": _body(record)}])])
