@@ -232,6 +232,19 @@ jobs:
           PY
           "$wheel_venv/bin/python" -m pip install --disable-pip-version-check --no-deps \
             "$GITHUB_WORKSPACE/packages/python/review-sensei-github"
+          "$wheel_venv/bin/python" - <<'PY' > "$RUNNER_TEMP/hosted-runtime-deps.txt"
+          import importlib.metadata
+          reqs = importlib.metadata.requires("review-sensei-github") or []
+          deps = []
+          for req in reqs:
+              clause = req.split(";", 1)[0].strip()
+              if clause and not clause.startswith("review-sensei"):
+                  deps.append(clause)
+          print("\n".join(deps), end="")
+          PY
+          if [[ -s "$RUNNER_TEMP/hosted-runtime-deps.txt" ]]; then
+            "$wheel_venv/bin/python" -m pip install --disable-pip-version-check -r "$RUNNER_TEMP/hosted-runtime-deps.txt"
+          fi
           sdist_root="$RUNNER_TEMP/review-sensei-sdist"
           mkdir -p "$sdist_root"
           tar -xzf "$GITHUB_WORKSPACE"/dist/*.tar.gz -C "$sdist_root"

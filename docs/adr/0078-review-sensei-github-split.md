@@ -31,7 +31,9 @@ Ship a second distribution, `review-sensei-github`, from this repository.
 - Console script: `review-sensei-github`.
 - Source: `packages/python/review-sensei-github`.
 - Dependency: `review-sensei` pinned to the exact engine version the hosted
-  package was tested with.
+  package was tested with, plus `cryptography` for GitHub App JWT signing and
+  OIDC verification. The engine distribution does not depend on
+  `cryptography`.
 - Distribution: PyPI only. There is no npm package. The tool runs on Actions
   runners, not on developer machines.
 - Versions are independent. A hosted-only fix releases `review-sensei-github`
@@ -68,6 +70,13 @@ engine, and the Worker keeps its existing schema path.
 `hosted.py` planning stays in the engine as library code. Only the
 `host-plan` command moves.
 
+The command implementations live in `command_bodies.py` and are executed by
+`commands.py`, with missing names read from `review_sensei.cli` at call time.
+That lets the hosted commands share engine helpers and see tests' patches
+without the engine importing the hosted package. The file is outside mypy and
+ruff's undefined-name check. Those private names are a maintainability
+boundary, not a second runtime.
+
 ### Review seam
 
 `review_sensei.cli.main` accepts hosted hooks supplied by the caller. The
@@ -102,7 +111,9 @@ exists, and uses the workflow commit for the engine only when PyPI has no
 such version. It then installs `review-sensei-github==<version declared at
 the workflow commit>` from PyPI, or, when that version is missing, from the
 same commit's `packages/python/review-sensei-github` subdirectory with
-`--no-deps`. The fallback does not replace the engine already installed. Any
+`--no-deps`, then installs that package's requirements other than
+`review-sensei`. The fallback does not replace the engine already installed,
+and it still installs `cryptography` from the hosted package. Any
 other PyPI failure refuses the fallback. The published `0.6.22` engine has
 no `hosted_hooks` parameter, so the first hosted release has to be prepared
 with a newer engine version. `prepare-diff` stays on the engine binary.
@@ -112,8 +123,9 @@ are the versions you intend runners to install.
 
 ## Consequences
 
-Local `pip install review-sensei` no longer installs GitHub publication or
-the broker client. Hosted runs install one extra distribution. After the
+Local `pip install review-sensei` no longer installs GitHub publication,
+the broker client, or `cryptography`. Hosted runs install one extra
+distribution, and that distribution installs `cryptography` itself. After the
 first engine that provides `hosted_hooks` is published, a hosted-only fix
 does not require another engine release. The workflow commit must name both
 versions, and the hosted pin must match the engine version in the same commit.

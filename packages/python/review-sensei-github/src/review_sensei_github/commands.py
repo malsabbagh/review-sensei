@@ -1,4 +1,10 @@
-"""Load hosted command bodies against the engine CLI's helper names."""
+"""Load hosted command bodies against the engine CLI's helper names.
+
+``command_bodies.py`` is executed rather than imported. Names it does not
+define are read from ``review_sensei.cli`` when the command runs, so tests
+can patch that module and the engine never imports this package. The file is
+excluded from mypy and from ruff's undefined-name check for that reason.
+"""
 
 from __future__ import annotations
 

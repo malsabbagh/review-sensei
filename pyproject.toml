@@ -24,7 +24,6 @@ classifiers = [
 ]
 dependencies = [
   "certifi>=2024.8.30",
-  "cryptography>=44,<51",
   "jsonschema>=4.18,<5",
 ]
 

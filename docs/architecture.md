@@ -174,7 +174,8 @@ allowlists, cross-file references, and bounded values. Schema documents,
 workflow text, diffs, comments, and model output remain untrusted input. CI tool
 versions are direct, exact pins in `requirements/ci.txt`; the packaged runtime
 depends on the pinned-compatible `jsonschema` library for public contract
-validation and `cryptography` for GitHub App JWT signing.
+validation. `review-sensei-github` depends on `cryptography` for GitHub App JWT
+signing and OIDC verification.
 
 The shared `validation.py` module owns the provider-neutral untrusted-input
 boundary. Its frozen `ReviewLimits` profile defaults to 1,048,576 bytes/50,000

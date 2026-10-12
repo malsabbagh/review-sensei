@@ -69,7 +69,10 @@ class PackageBoundaryTests(unittest.TestCase):
             ).read_text(encoding="utf-8")
         )
         version = engine["project"]["version"]
-        self.assertIn(f"review-sensei=={version}", hosted["project"]["dependencies"])
+        hosted_dependencies = hosted["project"]["dependencies"]
+        self.assertIn(f"review-sensei=={version}", hosted_dependencies)
+        self.assertIn("cryptography>=44,<51", hosted_dependencies)
+        self.assertNotIn("cryptography>=44,<51", engine["project"]["dependencies"])
 
 
 if __name__ == "__main__":

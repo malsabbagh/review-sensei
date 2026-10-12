@@ -404,6 +404,19 @@ jobs:
             echo "::warning::review-sensei-github==$github_expected is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_COMMIT."
             "$python_bin" -m pip install --disable-pip-version-check --no-deps \
               "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_COMMIT#subdirectory=packages/python/review-sensei-github"
+            "$python_bin" - <<'PY' > "$RUNNER_TEMP/hosted-runtime-deps.txt"
+          import importlib.metadata
+          reqs = importlib.metadata.requires("review-sensei-github") or []
+          deps = []
+          for req in reqs:
+              clause = req.split(";", 1)[0].strip()
+              if clause and not clause.startswith("review-sensei"):
+                  deps.append(clause)
+          print("\n".join(deps), end="")
+          PY
+            if [[ -s "$RUNNER_TEMP/hosted-runtime-deps.txt" ]]; then
+              "$python_bin" -m pip install --disable-pip-version-check -r "$RUNNER_TEMP/hosted-runtime-deps.txt"
+            fi
             github_source="GitHub@$REVIEW_SENSEI_WORKFLOW_COMMIT"
           else
             echo "::error::PyPI installation failed for review-sensei-github==$github_expected for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
@@ -674,6 +687,19 @@ jobs:
             echo "::warning::review-sensei-github==$github_expected is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_COMMIT."
             "$python_bin" -m pip install --disable-pip-version-check --no-deps \
               "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_COMMIT#subdirectory=packages/python/review-sensei-github"
+            "$python_bin" - <<'PY' > "$RUNNER_TEMP/hosted-runtime-deps.txt"
+          import importlib.metadata
+          reqs = importlib.metadata.requires("review-sensei-github") or []
+          deps = []
+          for req in reqs:
+              clause = req.split(";", 1)[0].strip()
+              if clause and not clause.startswith("review-sensei"):
+                  deps.append(clause)
+          print("\n".join(deps), end="")
+          PY
+            if [[ -s "$RUNNER_TEMP/hosted-runtime-deps.txt" ]]; then
+              "$python_bin" -m pip install --disable-pip-version-check -r "$RUNNER_TEMP/hosted-runtime-deps.txt"
+            fi
             github_source="GitHub@$REVIEW_SENSEI_WORKFLOW_COMMIT"
           else
             echo "::error::PyPI installation failed for review-sensei-github==$github_expected for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
@@ -937,6 +963,19 @@ jobs:
             echo "::warning::review-sensei-github==$github_expected is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_COMMIT."
             "$python_bin" -m pip install --disable-pip-version-check --no-deps \
               "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_COMMIT#subdirectory=packages/python/review-sensei-github"
+            "$python_bin" - <<'PY' > "$RUNNER_TEMP/hosted-runtime-deps.txt"
+          import importlib.metadata
+          reqs = importlib.metadata.requires("review-sensei-github") or []
+          deps = []
+          for req in reqs:
+              clause = req.split(";", 1)[0].strip()
+              if clause and not clause.startswith("review-sensei"):
+                  deps.append(clause)
+          print("\n".join(deps), end="")
+          PY
+            if [[ -s "$RUNNER_TEMP/hosted-runtime-deps.txt" ]]; then
+              "$python_bin" -m pip install --disable-pip-version-check -r "$RUNNER_TEMP/hosted-runtime-deps.txt"
+            fi
             github_source="GitHub@$REVIEW_SENSEI_WORKFLOW_COMMIT"
           else
             echo "::error::PyPI installation failed for review-sensei-github==$github_expected for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
@@ -1439,6 +1478,19 @@ jobs:
             echo "::warning::review-sensei-github==$github_expected is unavailable on PyPI; installing the verified ReviewSensei workflow commit $REVIEW_SENSEI_WORKFLOW_COMMIT."
             "$python_bin" -m pip install --disable-pip-version-check --no-deps \
               "git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_COMMIT#subdirectory=packages/python/review-sensei-github"
+            "$python_bin" - <<'PY' > "$RUNNER_TEMP/hosted-runtime-deps.txt"
+          import importlib.metadata
+          reqs = importlib.metadata.requires("review-sensei-github") or []
+          deps = []
+          for req in reqs:
+              clause = req.split(";", 1)[0].strip()
+              if clause and not clause.startswith("review-sensei"):
+                  deps.append(clause)
+          print("\n".join(deps), end="")
+          PY
+            if [[ -s "$RUNNER_TEMP/hosted-runtime-deps.txt" ]]; then
+              "$python_bin" -m pip install --disable-pip-version-check -r "$RUNNER_TEMP/hosted-runtime-deps.txt"
+            fi
             github_source="GitHub@$REVIEW_SENSEI_WORKFLOW_COMMIT"
           else
             echo "::error::PyPI installation failed for review-sensei-github==$github_expected for a reason other than an unavailable distribution; refusing the GitHub fallback." >&2
