@@ -2168,6 +2168,11 @@ def _override_facts(
     )
     if permission_status != 200 or not isinstance(permission, str):
         raise ReviewInputError("collaborator permission is unavailable")
+    # GitHub projects the built-in maintain role onto legacy permission=write.
+    # Only that exact pair supplies maintain authority; ordinary write and
+    # custom roles retain their legacy permission and the existing denial.
+    if permission == "write" and permission_body.get("role_name") == "maintain":
+        permission = "maintain"
     status, reviews = http.request(  # type: ignore[attr-defined]
         "GET",
         http.repository_path(  # type: ignore[attr-defined]

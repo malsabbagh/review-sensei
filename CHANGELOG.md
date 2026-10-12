@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Supply the existing read-only GitHub token to hosted maintainer commands for
+  actor and current-review metadata. Recognize GitHub's built-in maintain role
+  when its legacy permission is `write`; ordinary write and custom write roles
+  remain unauthorized for overrides. Session writes still use the OIDC broker grant.
+
 ## 0.6.21 - 2026-10-11
 
 Changes since [v0.6.20](https://github.com/malsabbagh/review-sensei/releases/tag/v0.6.20), from [37e2d0c121fda31af4e48911ab29a0fc3bd0b4dc](https://github.com/malsabbagh/review-sensei/commit/37e2d0c121fda31af4e48911ab29a0fc3bd0b4dc) through [0b06914f9c934dccd03ffd2287441f5f1d54f73c](https://github.com/malsabbagh/review-sensei/commit/0b06914f9c934dccd03ffd2287441f5f1d54f73c).
