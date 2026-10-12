@@ -15,6 +15,15 @@ from packaging_guard import assert_distribution_import  # noqa: E402
 
 assert_distribution_import()
 
+from review_sensei_github.conversation import PreparedConversation  # noqa: E402
+from review_sensei_github.errors import (  # noqa: E402
+    GitHubHTTPResponseTooLargeError,
+)
+from review_sensei_github.human_assessment import (  # noqa: E402
+    FeedbackBudgetHttp,
+    HumanAssessmentPublisher,
+)
+
 from review_sensei.bounded_evidence import EvidenceReadBudget  # noqa: E402
 from review_sensei.errors import ReviewInputError  # noqa: E402
 from review_sensei.feedback import (  # noqa: E402
@@ -24,14 +33,6 @@ from review_sensei.feedback import (  # noqa: E402
     FeedbackSelection,
     FeedbackSelector,
     FeedbackSource,
-)
-from review_sensei.hosting.github.conversation import PreparedConversation  # noqa: E402
-from review_sensei.hosting.github.errors import (  # noqa: E402
-    GitHubHTTPResponseTooLargeError,
-)
-from review_sensei.hosting.github.human_assessment import (  # noqa: E402
-    FeedbackBudgetHttp,
-    HumanAssessmentPublisher,
 )
 from review_sensei.models import ConversationContext  # noqa: E402
 

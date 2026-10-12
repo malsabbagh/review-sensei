@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 
-from review_sensei.hosting.openrouter_workflow import emit_hosted_openrouter_resolution
+from review_sensei_github.openrouter_workflow import emit_hosted_openrouter_resolution
 
 
 def main() -> int:

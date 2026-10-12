@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Split the hosted GitHub runtime into the `review-sensei-github` distribution.
+  The `review-sensei` engine no longer imports the broker, OIDC, or GitHub
+  publication code. `review-sensei github`, `host-plan`, and
+  `resolve-hosted-openrouter` print a move notice and run
+  `review-sensei-github` when it is installed. The reusable workflow installs
+  the hosted package pinned at the workflow commit and keeps `prepare-diff` on
+  the engine. This change does not publish either package or move `v5`.
+
 - Keep a review complete when optional document context is trimmed to the
   file or prompt budget. Those omissions stay on the context-admission
   record. Required documents that do not fit, unfinished diff coverage, and

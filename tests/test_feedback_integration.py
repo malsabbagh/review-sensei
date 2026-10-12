@@ -4,6 +4,9 @@ import unittest
 from copy import deepcopy
 from dataclasses import replace
 
+from review_sensei_github.errors import GitHubConversationError
+from review_sensei_github.human_assessment import HumanAssessmentPublisher
+
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
 from review_sensei.feedback import (
@@ -11,8 +14,6 @@ from review_sensei.feedback import (
     FeedbackReference,
     FeedbackSelector,
 )
-from review_sensei.hosting.github.errors import GitHubConversationError
-from review_sensei.hosting.github.human_assessment import HumanAssessmentPublisher
 from review_sensei.human_assessment import HumanAssessmentService
 from tests.test_human_assessment import APP, HUMAN, Provider, State, response_for
 

@@ -9,10 +9,11 @@ import textwrap
 import unittest
 from pathlib import Path
 
+from review_sensei_github.setup import _tagged_workflow
+
 from review_sensei.configuration import parse_configuration_text
 from review_sensei.errors import ReviewInputError
 from review_sensei.hosted import hosted_plan_outputs, plan_hosted_execution
-from review_sensei.hosting.github.setup import _tagged_workflow
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "check_action_pins.py"
 _SPEC = importlib.util.spec_from_file_location("check_action_pins", _SCRIPT)
@@ -628,7 +629,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         self.assertEqual(text.count("host-plan"), 1)
         self.assertIn(
-            '"$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" host-plan \\',
+            '"$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" host-plan \\',
             text,
         )
         self.assertIn('--github-output "$GITHUB_OUTPUT"', text)
@@ -692,8 +693,8 @@ class ActionPinPolicyTests(unittest.TestCase):
             "if: github.event_name != 'pull_request' || github.event.pull_request.draft != true",
             text,
         )
-        self.assertEqual(text.count("github reply \\\n"), 2)
-        self.assertEqual(text.count("github review \\\n"), 2)
+        self.assertEqual(text.count('review-sensei-github" reply \\\n'), 2)
+        self.assertEqual(text.count('review-sensei-github" publish \\\n'), 2)
         self.assertEqual(text.count("--outcome outcome.json"), 2)
         self.assertEqual(text.count("--outcome publication-outcome.json"), 2)
         self.assertEqual(text.count("recovery-artifact.json"), 6)
@@ -980,7 +981,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             self.assertNotIn("auto_approve_args", reply)
             self.assertNotIn("--enable-auto-approve", reply)
             self.assertNotIn("--no-auto-approve", reply)
-            self.assertIn("github reply \\", reply)
+            self.assertIn('review-sensei-github" reply \\', reply)
             self.assertIn("reply_exit=$?", reply)
             self.assertIn("grep -E '^(replied_and_resolved|", reply)
             self.assertIn("Verify mention reply completed", job)
@@ -1251,7 +1252,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             job = _job_section(text, job_id)
             for name in _named_steps(job):
                 for run in _run_blocks(_step_block(job, name)):
-                    if "github review \\" not in run:
+                    if 'review-sensei-github" publish \\' not in run:
                         continue
                     sites.add((job_id, name))
                     self.assertIn("--github-session-ledger", run)
@@ -1554,7 +1555,13 @@ class ActionPinPolicyTests(unittest.TestCase):
             )
         )
         self.assertEqual(
-            identity, {"package_version", "workflow_commit", "policy_commit"}
+            identity,
+            {
+                "package_version",
+                "github_package_version",
+                "workflow_commit",
+                "policy_commit",
+            },
         )
         # Every output a provider job consumes is one bootstrap declared.
         consumed = {
@@ -1850,7 +1857,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
 
     def test_setup_v4_run_name_matches_worker_template(self):
-        from review_sensei.hosting.github.setup import _resolve_trigger_workflow
+        from review_sensei_github.setup import _resolve_trigger_workflow
 
         root = Path(__file__).resolve().parents[1]
         python_line = next(
@@ -2078,7 +2085,9 @@ class ReusablePublishGuardTests(unittest.TestCase):
                 with self.subTest(job=job_id, result=produces_result):
                     with tempfile.TemporaryDirectory() as temporary:
                         root = Path(temporary)
-                        executable = root / "review-sensei-venv/bin/review-sensei"
+                        executable = (
+                            root / "review-sensei-venv/bin/review-sensei-github"
+                        )
                         executable.parent.mkdir(parents=True)
                         executable.write_text(
                             "#!/bin/bash\n"
@@ -2207,7 +2216,7 @@ class ReusablePublishGuardTests(unittest.TestCase):
                 self.assertNotIn("/github/token", revalidate)
                 self.assertNotIn("id-token", revalidate)
                 self.assertNotIn("OLLAMA_API_KEY", revalidate)
-                self.assertIn("github review", publish)
+                self.assertIn('review-sensei-github" publish', publish)
                 upload = _step_block(job, upload_name)
                 self.assertIn(upload_if, upload)
                 self.assertIn("if-no-files-found: error", upload)

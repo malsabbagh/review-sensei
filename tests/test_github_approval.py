@@ -1,7 +1,8 @@
 import unittest
 
+from review_sensei_github.approval import evaluate_auto_approval
+
 from review_sensei.coverage import CoverageManifest, FileCoverage
-from review_sensei.hosting.github.approval import evaluate_auto_approval
 from review_sensei.models import ReviewComment, ReviewResult
 
 

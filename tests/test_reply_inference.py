@@ -7,7 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from review_sensei.cli import main
+from review_sensei_github.cli import main as github_main
+
 from review_sensei.errors import ProviderError
 from review_sensei.providers.registry import ProviderRegistry
 
@@ -35,7 +36,7 @@ class ReplyInferenceTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
         factory_error=None,
         reply_error=None,
     ):
-        from review_sensei.hosting import github as github_module
+        import review_sensei_github as github_module
 
         settings = []
         calls = []
@@ -104,7 +105,7 @@ class ReplyInferenceTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             )
             stack.enter_context(redirect_stdout(stdout))
             stack.enter_context(redirect_stderr(stderr))
-            status = main(argv)
+            status = github_main(argv)
         return status, settings, calls, stdout.getvalue(), stderr.getvalue()
 
     def test_workflow_backend_names_reach_registered_ollama_adapter(self):

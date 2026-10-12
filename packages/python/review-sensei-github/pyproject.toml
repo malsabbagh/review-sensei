@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "review-sensei-github"
+version = "0.1.0"
+description = "GitHub Actions runtime for ReviewSensei: broker, session ledger, and publication."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Mohamad Alsabbagh" }]
+keywords = ["code-review", "github", "reviewsensei"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+]
+dependencies = [
+  "cryptography>=44,<51",
+  "review-sensei==0.6.22",
+]
+
+[project.urls]
+Homepage = "https://github.com/malsabbagh/review-sensei"
+Source = "https://github.com/malsabbagh/review-sensei"
+Changelog = "https://github.com/malsabbagh/review-sensei/blob/main/CHANGELOG.md"
+
+[project.scripts]
+review-sensei-github = "review_sensei_github.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+review_sensei_github = ["fixtures/*.yml"]

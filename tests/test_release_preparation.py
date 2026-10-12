@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -272,6 +273,77 @@ class PreparationRenderingTests(unittest.TestCase):
         self.assertEqual(
             PREP.verify_commit(self.root, self.commit_generated())["base_sha"], new_base
         )
+
+    def hosted_state(self) -> tuple[str, str]:
+        project = tomllib.loads((self.root / PREP.HOSTED_PROJECT).read_text())
+        version = project["project"]["version"]
+        pin = next(
+            item.removeprefix("review-sensei==")
+            for item in project["project"]["dependencies"]
+            if item.startswith("review-sensei==")
+        )
+        return version, pin
+
+    def test_new_engine_and_hosted_versions_prepare_both_packages(self):
+        hosted_before = (self.root / PREP.HOSTED_PROJECT).read_bytes()
+        receipt = PREP.generate(
+            self.root, VERSION, DATE, self.base, github_version="0.1.1"
+        )
+        version, pin = self.hosted_state()
+        changelog = (self.root / "CHANGELOG.md").read_text()
+        engine_notes = PREP.released_notes(changelog, VERSION, DATE)
+        hosted_notes = PREP.hosted_released_notes(changelog, "0.1.1", DATE)
+        self.assertEqual(PREP.versions.project_version(self.root), VERSION)
+        self.assertEqual(version, "0.1.1")
+        self.assertEqual(pin, VERSION)
+        self.assertIn("Synthetic reviewed release notes.", engine_notes)
+        self.assertNotIn("Synthetic reviewed release notes.", hosted_notes)
+        self.assertIn(f"review-sensei=={VERSION}", hosted_notes)
+        self.assertEqual(receipt["engine_tag"], "v" + VERSION)
+        self.assertEqual(receipt["github_version"], "0.1.1")
+        self.assertEqual(receipt["github_tag"], "github-v0.1.1")
+        self.assertNotEqual(
+            (self.root / PREP.HOSTED_PROJECT).read_bytes(), hosted_before
+        )
+        self.assertEqual(PREP.validate_payload(self.root), receipt)
+
+    def test_current_hosted_version_leaves_that_package_untagged(self):
+        before = (self.root / PREP.HOSTED_PROJECT).read_bytes()
+        receipt = PREP.generate(
+            self.root, VERSION, DATE, self.base, github_version="0.1.0"
+        )
+        changelog = (self.root / "CHANGELOG.md").read_text()
+        self.assertEqual((self.root / PREP.HOSTED_PROJECT).read_bytes(), before)
+        self.assertNotIn("## review-sensei-github 0.1.0 - ", changelog)
+        self.assertIn(f"## {VERSION} - {DATE}", changelog)
+        self.assertEqual(receipt["engine_tag"], "v" + VERSION)
+        self.assertEqual(receipt["github_version"], "0.1.0")
+        self.assertEqual(receipt["github_tag"], "")
+        self.assertEqual(PREP.validate_payload(self.root), receipt)
+
+    def test_current_engine_version_cannot_publish_the_pre_seam_pin(self):
+        before = (self.root / "CHANGELOG.md").read_bytes()
+        hosted = (self.root / PREP.HOSTED_PROJECT).read_bytes()
+        with self.assertRaisesRegex(ValueError, "hosted_hooks"):
+            PREP.generate(self.root, CURRENT, DATE, self.base, github_version="0.1.1")
+        self.assertEqual((self.root / "CHANGELOG.md").read_bytes(), before)
+        self.assertEqual((self.root / PREP.HOSTED_PROJECT).read_bytes(), hosted)
+
+    def test_current_engine_and_hosted_versions_prepare_nothing(self):
+        before = (self.root / "CHANGELOG.md").read_bytes()
+        receipt = (self.root / PREP.RECEIPT).read_bytes()
+        with self.assertRaisesRegex(ValueError, "current version skips that package"):
+            PREP.generate(self.root, CURRENT, DATE, self.base, github_version="0.1.0")
+        self.assertEqual((self.root / "CHANGELOG.md").read_bytes(), before)
+        self.assertEqual((self.root / PREP.RECEIPT).read_bytes(), receipt)
+
+    def test_hosted_decrease_stops_before_writing(self):
+        before = (self.root / "CHANGELOG.md").read_bytes()
+        receipt = (self.root / PREP.RECEIPT).read_bytes()
+        with self.assertRaisesRegex(ValueError, "hosted release cannot decrease"):
+            PREP.generate(self.root, VERSION, DATE, self.base, github_version="0.0.1")
+        self.assertEqual((self.root / "CHANGELOG.md").read_bytes(), before)
+        self.assertEqual((self.root / PREP.RECEIPT).read_bytes(), receipt)
 
     def test_changed_payload_outside_allowlist_and_git_filters_are_rejected(self):
         self.generated()
@@ -759,7 +831,13 @@ class PreparationWorkflowTests(unittest.TestCase):
             "gh release",
         ):
             self.assertNotIn(forbidden, text)
-        for key in ("RELEASE_VERSION", "RELEASE_DATE", "SOURCE_SHA", "PREPARED_SHA"):
+        for key in (
+            "RELEASE_VERSION",
+            "GITHUB_VERSION",
+            "RELEASE_DATE",
+            "SOURCE_SHA",
+            "PREPARED_SHA",
+        ):
             self.assertIn(f'"${key}"', text)
 
     def test_all_release_build_lanes_depend_on_prepared_source_gate(self):

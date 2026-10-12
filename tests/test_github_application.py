@@ -5,13 +5,7 @@ from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import patch
 
-from review_sensei import ProviderResponse
-from review_sensei.baseline import ReviewBaseline, baseline_history_document
-from review_sensei.context import ReviewContextCacheKey, finding_lifecycle_for_comment
-from review_sensei.convergence import BlockerCandidate, ReviewConvergencePolicy
-from review_sensei.disposition import apply_session_command, parse_maintainer_command
-from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github import (
+from review_sensei_github import (
     GitHubApplication,
     GitHubPublicationError,
     GitHubWriteOptions,
@@ -19,9 +13,16 @@ from review_sensei.hosting.github import (
     PublicationResult,
     ReplyResult,
 )
-from review_sensei.hosting.github.application import _command_from_broker_attestation
-from review_sensei.hosting.github.operation_comments import ResultPartStore
-from review_sensei.hosting.github.operation_host import GitHubCommentOperationStore
+from review_sensei_github.application import _command_from_broker_attestation
+from review_sensei_github.operation_comments import ResultPartStore
+from review_sensei_github.operation_host import GitHubCommentOperationStore
+
+from review_sensei import ProviderResponse
+from review_sensei.baseline import ReviewBaseline, baseline_history_document
+from review_sensei.context import ReviewContextCacheKey, finding_lifecycle_for_comment
+from review_sensei.convergence import BlockerCandidate, ReviewConvergencePolicy
+from review_sensei.disposition import apply_session_command, parse_maintainer_command
+from review_sensei.errors import ReviewInputError
 from review_sensei.models import (
     ConversationContext,
     ConversationMessage,
@@ -1119,7 +1120,7 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(legacy_reviewer.calls[0]["evidence_confirmed_concerns"], ())
 
         with patch(
-            "review_sensei.hosting.github.application.read_session_baseline",
+            "review_sensei_github.application.read_session_baseline",
             side_effect=ReviewInputError("corrupt persisted baseline"),
         ):
             malformed = application.publish_review(**publish_kwargs)

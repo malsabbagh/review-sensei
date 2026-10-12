@@ -6,14 +6,14 @@ from itertools import count
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
-from review_sensei.hosting.github import (
+from review_sensei_github import (
     GitHubHTTPError,
     GitHubHTTPResponseTooLargeError,
     GitHubLearningProposalError,
     GitHubLearningProposalTransientError,
     LearningPRPublisher,
 )
-from review_sensei.hosting.github.learning_pr import (
+from review_sensei_github.learning_pr import (
     _branch_for_pr,
     _decode_base64,
     _has_marker,
@@ -32,6 +32,7 @@ from review_sensei.hosting.github.learning_pr import (
     learning_path,
     proposal_digest,
 )
+
 from review_sensei.models import LearningProposal
 
 
@@ -1158,7 +1159,7 @@ class LearningPRPublisherTests(unittest.TestCase):
 
     def test_additional_boundaries_and_ownership_checks_are_fail_closed(self):
         with patch(
-            "review_sensei.hosting.github.learning_pr.proposal_digest",
+            "review_sensei_github.learning_pr.proposal_digest",
             return_value="a" * 64,
         ):
             with self.assertRaises(GitHubLearningProposalError):

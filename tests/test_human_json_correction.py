@@ -334,7 +334,7 @@ class HumanJsonCorrectionTests(unittest.TestCase):
         self.assertEqual(len(provider.calls), 1)
 
     def test_public_application_legacy_fallback_shares_existing_tracker(self):
-        from review_sensei.hosting.github.human_assessment import (
+        from review_sensei_github.human_assessment import (
             HumanAssessmentPublisher,
         )
 
@@ -358,8 +358,8 @@ class HumanJsonCorrectionTests(unittest.TestCase):
         self.assertEqual(broker.capabilities, ["issue_reply", "review_publish"])
 
     def test_public_application_exhausted_call_budget_never_writes(self):
-        from review_sensei.hosting.github.application import GitHubApplication
-        from review_sensei.hosting.github.human_assessment import (
+        from review_sensei_github.application import GitHubApplication
+        from review_sensei_github.human_assessment import (
             HumanAssessmentPublisher,
         )
 

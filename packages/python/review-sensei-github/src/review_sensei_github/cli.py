@@ -1,0 +1,156 @@
+"""Command line for the hosted GitHub runtime."""
+
+from __future__ import annotations
+
+import sys
+
+from review_sensei.cli import (
+    _apply_provider_defaults,
+    _doctor_parser,
+    _explicit_cli_options,
+    _print_offline_error,
+    _run_evaluate_convergence_command,
+)
+from review_sensei.cli import (
+    main as engine_main,
+)
+from review_sensei.diagnostics import (
+    DOCTOR_ACTION_REQUIRED,
+    DOCTOR_UNKNOWN,
+    render_diagnostic,
+    run_doctor,
+)
+from review_sensei.errors import ReviewSenseiError
+from review_sensei_github.commands import (
+    github_parser,
+    report_broker_failure,
+    resolve_hosted_openrouter_parser,
+    run_github,
+    run_host_plan,
+)
+from review_sensei_github.doctor import with_github_checks
+from review_sensei_github.observed import run_observed_review_sequence
+from review_sensei_github.openrouter_workflow import emit_hosted_openrouter_resolution
+from review_sensei_github.review_hooks import GitHubReviewHooks
+
+_PUBLIC = (
+    "review",
+    "publish",
+    "reply",
+    "command",
+    "host-plan",
+    "resolve-hosted-openrouter",
+    "evaluate-observed",
+    "doctor",
+)
+_HELP = {
+    "review": "engine review plus hosted hooks",
+    "publish": "publish a prepared review",
+    "reply": "publish a reply",
+    "command": "run a maintainer command",
+    "host-plan": "resolve the hosted runner plan",
+    "resolve-hosted-openrouter": "resolve the hosted OpenRouter model",
+    "evaluate-observed": "evaluate an observed review",
+    "doctor": "run hosted diagnostics",
+}
+
+
+def _usage() -> str:
+    width = max(len(name) for name in _PUBLIC)
+    lines = ["usage: review-sensei-github <command> ..."]
+    lines.extend(f"  {name.ljust(width)}  {_HELP[name]}" for name in _PUBLIC)
+    return "\n".join(lines)
+
+
+def _normalize(argv: list[str]) -> list[str]:
+    """Accept the retired `github review` spelling as `publish`."""
+
+    args = list(argv)
+    if args and args[0] == "github":
+        args = args[1:]
+        if args and args[0] == "review":
+            args = ["publish", *args[1:]]
+    return args
+
+
+def _publication(args: list[str]) -> int:
+    parser = github_parser()
+    parsed = parser.parse_args(args)
+    parsed._explicit_cli_options = _explicit_cli_options(
+        parser, args, subcommand=parsed.command
+    )
+    try:
+        if getattr(parsed, "command", None) == "reply":
+            _apply_provider_defaults(parsed, args)
+        return run_github(parsed, argv=args)
+    except (OSError, ValueError, ReviewSenseiError) as exc:
+        if not report_broker_failure(exc, parsed):
+            print(f"review-sensei: {exc}", file=sys.stderr)
+        return 1
+
+
+def _doctor(arguments: list[str]) -> int:
+    parsed = _doctor_parser().parse_args(arguments)
+    try:
+        report = with_github_checks(
+            run_doctor(
+                config=parsed.config,
+                stages_dir=parsed.stages_dir,
+                categories_dir=parsed.categories_dir,
+                context_root=parsed.context_root,
+                include_network=parsed.network,
+                review_mode=parsed.review_mode,
+                repository=parsed.repository,
+                profile=parsed.profile,
+                provider=parsed.provider,
+                base_url=parsed.base_url,
+                allow_custom_endpoint=parsed.allow_custom_endpoint,
+                model=parsed.model,
+                api_key_env=parsed.api_key_env,
+                compatibility_manifest=parsed.compatibility_manifest,
+                allow_data_egress=parsed.allow_data_egress,
+                session_ledger=parsed.session_ledger,
+                pull_request=parsed.pull_request,
+            )
+        )
+        sys.stdout.write(render_diagnostic(report, as_json=parsed.as_json))
+        if report["status"] == "action":
+            return DOCTOR_ACTION_REQUIRED
+        if report["status"] == "unknown":
+            return DOCTOR_UNKNOWN
+        return 0
+    except (OSError, ValueError, TypeError, ReviewSenseiError) as exc:
+        _print_offline_error(exc)
+        return 2
+
+
+def _resolve_openrouter(arguments: list[str]) -> int:
+    parsed = resolve_hosted_openrouter_parser().parse_args(arguments)
+    return emit_hosted_openrouter_resolution(parsed.action)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _normalize(list(argv) if argv is not None else sys.argv[1:])
+    if not args or args[0] in {"-h", "--help"}:
+        print(_usage(), file=sys.stderr)
+        return 0 if args and args[0] in {"-h", "--help"} else 2
+    command, rest = args[0], args[1:]
+    if command.startswith("-") or command in {"publish", "reply", "command"}:
+        return _publication(args)
+    if command == "review":
+        return engine_main(rest, hosted_hooks=GitHubReviewHooks())
+    if command == "host-plan":
+        return run_host_plan(rest)
+    if command == "resolve-hosted-openrouter":
+        return _resolve_openrouter(rest)
+    if command == "evaluate-observed":
+        return _run_evaluate_convergence_command(
+            ["--observed", *rest], observed_runner=run_observed_review_sequence
+        )
+    if command == "doctor":
+        return _doctor(rest)
+    print(
+        f"review-sensei: unknown command {command}",
+        file=sys.stderr,
+    )
+    return 2

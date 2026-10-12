@@ -3,7 +3,7 @@ import hmac
 import json
 import unittest
 
-from review_sensei.hosting.github import (
+from review_sensei_github import (
     EnvWebhookSecretSource,
     GitHubWebhookError,
     GitHubWebhookSignatureError,

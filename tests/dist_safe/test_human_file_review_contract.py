@@ -13,11 +13,12 @@ from packaging_guard import assert_distribution_import  # noqa: E402
 
 assert_distribution_import()
 
-from review_sensei.coverage import CoverageManifest, FileCoverage  # noqa: E402
-from review_sensei.errors import ReviewInputError  # noqa: E402
-from review_sensei.hosting.github.human_file_review import (  # noqa: E402
+from review_sensei_github.human_file_review import (  # noqa: E402
     HumanFileReviewPolicy,
 )
+
+from review_sensei.coverage import CoverageManifest, FileCoverage  # noqa: E402
+from review_sensei.errors import ReviewInputError  # noqa: E402
 from review_sensei.human_file_review import (  # noqa: E402
     FileReviewReceipt,
     FileReviewRequest,

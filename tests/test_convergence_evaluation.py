@@ -12,12 +12,25 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from review_sensei_github import GitHubApplication, GitHubWriteOptions
+from review_sensei_github.cli import main as _github_main
+from review_sensei_github.observed import (
+    _admitted_material_ids,
+    _ObservedHTTPResponse,
+    _ObservedProvider,
+    observed_cutover_gaps,
+    observed_publication_configuration,
+    restored_compatible_baseline,
+    run_observed_review_sequence,
+)
+from review_sensei_github.publication import PublicationResult
+
 from review_sensei.baseline import (
     BaselineFinding,
     ReviewBaseline,
     baseline_history_document,
 )
-from review_sensei.cli import main
+from review_sensei.cli import main as _engine_main
 from review_sensei.context import ReviewContextCacheKey
 from review_sensei.convergence import (
     DEFAULT_REVIEW_MODE,
@@ -31,17 +44,6 @@ from review_sensei.convergence import (
 )
 from review_sensei.diagnostics import build_plan, render_diagnostic, run_doctor
 from review_sensei.errors import ReviewInputError, ReviewModeRetiredError
-from review_sensei.hosting.github import GitHubApplication, GitHubWriteOptions
-from review_sensei.hosting.github.observed import (
-    _admitted_material_ids,
-    _ObservedHTTPResponse,
-    _ObservedProvider,
-    observed_cutover_gaps,
-    observed_publication_configuration,
-    restored_compatible_baseline,
-    run_observed_review_sequence,
-)
-from review_sensei.hosting.github.publication import PublicationResult
 from review_sensei.models import (
     ReviewResult,
     ReviewTransaction,
@@ -65,6 +67,16 @@ from review_sensei.session import (
     SessionIdentity,
     SessionRecord,
 )
+
+
+def main(argv: list[str]) -> int:
+    """Observed evidence is a hosted command; other convergence flags stay local."""
+
+    if argv and argv[0] == "evaluate-convergence" and "--observed" in argv:
+        rest = [item for item in argv[1:] if item != "--observed"]
+        return _github_main(["evaluate-observed", *rest])
+    return _engine_main(argv)
+
 
 DIFF = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py
@@ -1256,7 +1268,7 @@ class PublicExportTests(unittest.TestCase):
         self.assertFalse(hasattr(review_sensei, "run_observed_review_sequence"))
         self.assertFalse(hasattr(sequence, "run_observed_review_sequence"))
         self.assertNotIn("hosting.github", inspect.getsource(sequence))
-        import review_sensei.hosting.github.observed as observed_harness
+        import review_sensei_github.observed as observed_harness
 
         self.assertIs(
             observed_harness.run_observed_review_sequence,

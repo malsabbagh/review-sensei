@@ -1,6 +1,5 @@
 """Regressions for public CLI behavior found in installed 0.6.20 qualification."""
 
-import importlib.metadata
 import io
 import json
 import os
@@ -190,6 +189,9 @@ class EntryPointTests(unittest.TestCase):
             )
 
     def test_helper_version_does_not_require_action_or_read_hosted_settings(self):
+        from review_sensei_github.cli import main as github_main
+        from review_sensei_github.commands import hosted_package_version
+
         stdout = io.StringIO()
         with (
             patch.dict(
@@ -198,11 +200,9 @@ class EntryPointTests(unittest.TestCase):
             redirect_stdout(stdout),
         ):
             with self.assertRaises(SystemExit) as caught:
-                main(["resolve-hosted-openrouter", "--version"])
+                github_main(["resolve-hosted-openrouter", "--version"])
         self.assertEqual(caught.exception.code, 0)
-        self.assertEqual(
-            stdout.getvalue().strip(), importlib.metadata.version("review-sensei")
-        )
+        self.assertEqual(stdout.getvalue().strip(), hosted_package_version())
 
     def test_cancellation_unwinds_command_before_returning_130(self):
         events = []

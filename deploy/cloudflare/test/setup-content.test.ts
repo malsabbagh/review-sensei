@@ -287,7 +287,7 @@ describe("setup-v4 public boundary", () => {
     const fixture = (name: string) =>
       readFileSync(
         new URL(
-          `../../../src/review_sensei/hosting/github/fixtures/${name}`,
+          `../../../packages/python/review-sensei-github/src/review_sensei_github/fixtures/${name}`,
           import.meta.url,
         ),
         "utf8",

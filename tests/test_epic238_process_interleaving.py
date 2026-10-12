@@ -17,9 +17,10 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from urllib.parse import urlparse
 
-from review_sensei.hosting.github import GitHubHttp
-from review_sensei.hosting.github.human_assessment import HumanAssessmentPublisher
-from review_sensei.hosting.github.publication import approval_eligibility_from_body
+from review_sensei_github import GitHubHttp
+from review_sensei_github.human_assessment import HumanAssessmentPublisher
+from review_sensei_github.publication import approval_eligibility_from_body
+
 from review_sensei.human_assessment import HumanAssessmentService
 from review_sensei.models import ProviderResponse
 from tests import test_human_assessment as host

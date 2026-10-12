@@ -14,23 +14,23 @@ from tempfile import TemporaryDirectory
 from typing import Any, Literal, Mapping, Sequence, cast
 from urllib.parse import urlparse
 
-from ...baseline import (
+from review_sensei.baseline import (
     ReviewBaseline,
     baseline_from_history_document,
     baseline_from_review,
     evaluate_baseline_compatibility,
 )
-from ...context import ReviewContextCacheKey, build_review_context_cache_key
-from ...convergence import ReviewConvergencePolicy, derive_blocker_candidate
-from ...errors import ReviewInputError
-from ...models import (
+from review_sensei.context import ReviewContextCacheKey, build_review_context_cache_key
+from review_sensei.convergence import ReviewConvergencePolicy, derive_blocker_candidate
+from review_sensei.errors import ReviewInputError
+from review_sensei.models import (
     ProviderResponse,
     ReviewRequest,
     ReviewTransaction,
     build_transaction_configuration_context,
     transaction_stage_identity,
 )
-from ...sequence import (
+from review_sensei.sequence import (
     UNAVAILABLE_EVIDENCE_IDENTITY,
     ObservedEvidenceIdentity,
     ObservedExecutionMetrics,
@@ -41,8 +41,8 @@ from ...sequence import (
     compare_sequence_policies,
     identity_is_unavailable,
 )
-from ...service import ReviewService
-from ...session import (
+from review_sensei.service import ReviewService
+from review_sensei.session import (
     InMemorySessionLedger,
     LocalSessionLedger,
     SessionIdentity,
@@ -54,6 +54,7 @@ from ...session import (
     session_reservation_id,
     should_skip_automation,
 )
+
 from .application import GitHubApplication, GitHubWriteOptions
 from .http import GitHubHttp
 from .publication import ReviewPublisher, prepare_publication_review

@@ -5,10 +5,13 @@ import json
 import unittest
 from unittest.mock import patch
 
-from review_sensei.cli import _require_accepted_result
+from review_sensei_github.commands import (
+    require_accepted_result as _require_accepted_result,
+)
+from review_sensei_github.http import MAX_PAGINATION_PAGES
+from review_sensei_github.operation_host import OPERATION_COMMENT_MARKER
+
 from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github.http import MAX_PAGINATION_PAGES
-from review_sensei.hosting.github.operation_host import OPERATION_COMMENT_MARKER
 from review_sensei.models import ReviewResult
 
 
@@ -41,7 +44,7 @@ class OperationPublicationGuardTests(unittest.TestCase):
                 "socket.socket.connect", side_effect=AssertionError("network forbidden")
             ),
             patch(
-                "review_sensei.hosting.github.http.GitHubHttp.request",
+                "review_sensei_github.http.GitHubHttp.request",
                 side_effect=pages,
             ) as request,
         ):

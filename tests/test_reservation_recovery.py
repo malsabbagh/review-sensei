@@ -9,15 +9,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from review_sensei.cli import main
-from review_sensei.convergence import ReviewConvergencePolicy
-from review_sensei.disposition import MaintainerCommand, apply_session_command
-from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github.session_ledger import (
+from review_sensei_github.session_ledger import (
     GitHubIssueCommentSessionLedger,
     parse_session_comment,
     render_session_comment,
 )
+
+from review_sensei.cli import main
+from review_sensei.convergence import ReviewConvergencePolicy
+from review_sensei.disposition import MaintainerCommand, apply_session_command
+from review_sensei.errors import ReviewInputError
 from review_sensei.session import (
     InMemorySessionLedger,
     LocalSessionLedger,

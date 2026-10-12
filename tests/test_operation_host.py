@@ -7,7 +7,7 @@ import unittest
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
-from review_sensei.hosting.github.operation_host import (
+from review_sensei_github.operation_host import (
     CONTROL_DEADLINE_MS,
     ORDINARY_DISPATCH_LIMIT,
     TOTAL_DISPATCH_LIMIT,

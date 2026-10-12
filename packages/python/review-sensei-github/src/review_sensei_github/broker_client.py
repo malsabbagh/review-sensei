@@ -12,7 +12,8 @@ from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from ...broker_diagnostics import parse_broker_diagnostic
+from review_sensei.broker_diagnostics import parse_broker_diagnostic
+
 from .errors import GitHubBrokerClientError, GitHubHTTPTransientError
 from .feedback_attestation import parse_feedback_attestation
 
@@ -214,8 +215,8 @@ class BrokerClient:
         state = parsed.get("session_state")
         if state not in {"enrolled", "known"}:
             raise GitHubBrokerClientError("Broker session response was invalid")
-        from ...errors import ReviewInputError
-        from ...session import _stored_reservation_owner
+        from review_sensei.errors import ReviewInputError
+        from review_sensei.session import _stored_reservation_owner
 
         try:
             owner = _stored_reservation_owner(parsed.get("reservation_owner"))

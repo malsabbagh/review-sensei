@@ -30,6 +30,12 @@ def marker(document):
 
 def fixtures():
     sys.path.insert(0, str(ROOT / "src"))
+    from review_sensei_github.approval import (
+        ApprovalFacts,
+        ReviewApprovalEligibility,
+    )
+    from review_sensei_github.session_ledger import render_session_comment
+
     from review_sensei.baseline import (
         BaselineFinding,
         ReviewBaseline,
@@ -37,11 +43,6 @@ def fixtures():
     )
     from review_sensei.bounded_evidence import decode_evidence, encode_evidence
     from review_sensei.context import ReviewContextCacheKey
-    from review_sensei.hosting.github.approval import (
-        ApprovalFacts,
-        ReviewApprovalEligibility,
-    )
-    from review_sensei.hosting.github.session_ledger import render_session_comment
     from review_sensei.human_assessment import HumanReviewFinding, PendingHumanReview
     from review_sensei.models import build_transaction_configuration_context
     from review_sensei.session import SessionIdentity, SessionRecord
@@ -188,16 +189,26 @@ def fixtures():
 def worker(source: Path, fixture: Path, legacy: bool):
     source = source.resolve()
     sys.path.insert(0, str(source))
+    if legacy:
+        from review_sensei.hosting.github.approval import ReviewApprovalEligibility
+        from review_sensei.hosting.github.errors import GitHubPublicationError
+        from review_sensei.hosting.github.http import GitHubHttp
+        from review_sensei.hosting.github.publication import ReviewApprovalFinalizer
+        from review_sensei.hosting.github.session_ledger import (
+            GitHubIssueCommentSessionLedger,
+        )
+    else:
+        from review_sensei_github.approval import ReviewApprovalEligibility
+        from review_sensei_github.errors import GitHubPublicationError
+        from review_sensei_github.http import GitHubHttp
+        from review_sensei_github.publication import ReviewApprovalFinalizer
+        from review_sensei_github.session_ledger import (
+            GitHubIssueCommentSessionLedger,
+        )
+
     import review_sensei
     from review_sensei.baseline import baseline_from_history_document
     from review_sensei.errors import ReviewInputError
-    from review_sensei.hosting.github.approval import ReviewApprovalEligibility
-    from review_sensei.hosting.github.errors import GitHubPublicationError
-    from review_sensei.hosting.github.http import GitHubHttp
-    from review_sensei.hosting.github.publication import ReviewApprovalFinalizer
-    from review_sensei.hosting.github.session_ledger import (
-        GitHubIssueCommentSessionLedger,
-    )
     from review_sensei.models import ReviewTransaction
     from review_sensei.planning import MAX_RELATED_PATHS
     from review_sensei.session import (

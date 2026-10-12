@@ -11,6 +11,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from review_sensei_github import GitHubHttp
+from review_sensei_github.session_ledger import GitHubIssueCommentSessionLedger
+
 from review_sensei.baseline import (
     admission_context_document,
     admission_context_from_document,
@@ -31,8 +34,6 @@ from review_sensei.bounded_evidence import (
     validate_manifest,
 )
 from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github import GitHubHttp
-from review_sensei.hosting.github.session_ledger import GitHubIssueCommentSessionLedger
 from review_sensei.session import (
     LocalSessionLedger,
     checkpoint_review_analysis,

@@ -4,7 +4,7 @@ import unittest
 from unittest import mock
 from urllib.error import HTTPError, URLError
 
-from review_sensei.hosting.github import (
+from review_sensei_github import (
     BrokerClient,
     GitHubBrokerClientError,
     GitHubHTTPTransientError,

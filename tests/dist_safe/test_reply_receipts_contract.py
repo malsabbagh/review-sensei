@@ -14,13 +14,14 @@ from packaging_guard import assert_distribution_import  # noqa: E402
 
 assert_distribution_import()
 
-from review_sensei.hosting.github.approval import (  # noqa: E402
+from review_sensei_github.approval import (  # noqa: E402
     approval_eligibility_from_result,
 )
-from review_sensei.hosting.github.human_assessment import (  # noqa: E402
+from review_sensei_github.human_assessment import (  # noqa: E402
     HumanAssessmentPublisher,
 )
-from review_sensei.hosting.github.pending import pending_reply_pages  # noqa: E402
+from review_sensei_github.pending import pending_reply_pages  # noqa: E402
+
 from review_sensei.human_assessment import (  # noqa: E402
     MAX_HUMAN_SOURCE_BYTES,
     HumanReviewFinding,

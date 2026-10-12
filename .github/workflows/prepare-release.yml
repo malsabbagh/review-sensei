@@ -1,11 +1,15 @@
 name: Prepare release
-run-name: Prepare ReviewSensei ${{ inputs.version }}
+run-name: Prepare ReviewSensei ${{ inputs.version }} / review-sensei-github ${{ inputs.github_version }}
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Unpublished X.Y.Z version; use authored notes or generate exact merged-source notes
+        description: Engine X.Y.Z. Pass the current version to leave that package untagged.
+        required: true
+        type: string
+      github_version:
+        description: Hosted X.Y.Z. Pass the current version to leave that package untagged.
         required: true
         type: string
       release_date:
@@ -13,7 +17,7 @@ on:
         required: true
         type: string
       sign_tag:
-        description: Create the dedicated-key signed tag after CI (complete readers-first qualification before dispatch)
+        description: Sign each package whose version changed after CI (complete readers-first qualification before dispatch)
         required: true
         type: boolean
         default: false
@@ -92,12 +96,14 @@ jobs:
           RELEASE_DOCS_APP_ID: ${{ vars.RELEASE_DOCS_APP_ID }}
           RELEASE_DOCS_APP_SLUG: ${{ steps.release-token.outputs.app-slug }}
           RELEASE_VERSION: ${{ inputs.version }}
+          GITHUB_VERSION: ${{ inputs.github_version }}
           RELEASE_DATE: ${{ inputs.release_date }}
           SOURCE_SHA: ${{ github.sha }}
           GIT_TERMINAL_PROMPT: "0"
         run: >-
           python scripts/prepare_release.py prepare
-          --version "$RELEASE_VERSION" --date "$RELEASE_DATE" --base-sha "$SOURCE_SHA"
+          --version "$RELEASE_VERSION" --github-version "$GITHUB_VERSION"
+          --date "$RELEASE_DATE" --base-sha "$SOURCE_SHA"
 
   qualify-prepared:
     name: Qualify exact generated commit before signing
@@ -178,8 +184,10 @@ jobs:
           RELEASE_SIGNING_EMAIL: ${{ vars.RELEASE_SIGNING_EMAIL }}
           PREPARED_SHA: ${{ needs.prepare.outputs.source_sha }}
           RELEASE_VERSION: ${{ inputs.version }}
+          GITHUB_VERSION: ${{ inputs.github_version }}
           RELEASE_DATE: ${{ inputs.release_date }}
           GIT_TERMINAL_PROMPT: "0"
         run: >-
           python scripts/sign_release.py --root "$GITHUB_WORKSPACE/prepared-source"
-          --sha "$PREPARED_SHA" --version "$RELEASE_VERSION" --date "$RELEASE_DATE"
+          --sha "$PREPARED_SHA" --version "$RELEASE_VERSION"
+          --github-version "$GITHUB_VERSION" --date "$RELEASE_DATE"

@@ -14,35 +14,36 @@ from dataclasses import replace
 from unittest.mock import patch
 from urllib.parse import urlparse
 
-from review_sensei.context import finding_lifecycle_for_comment
-from review_sensei.convergence import ReviewConvergencePolicy
-from review_sensei.errors import ReviewFormatError, ReviewInputError
-from review_sensei.hosting.github import (
+from review_sensei_github import (
     GitHubApplication,
     GitHubHttp,
     GitHubWriteOptions,
     ReviewPublisher,
 )
-from review_sensei.hosting.github.approval import (
+from review_sensei_github.approval import (
     ReviewApprovalEligibility,
     approval_eligibility_from_result,
 )
-from review_sensei.hosting.github.conversation import (
+from review_sensei_github.conversation import (
     ConversationPublisher,
     HumanAssessmentDiffContext,
     PreparedConversation,
 )
-from review_sensei.hosting.github.errors import (
+from review_sensei_github.errors import (
     GitHubConversationError,
     GitHubPublicationError,
     GitHubPublicationTransientError,
 )
-from review_sensei.hosting.github.human_assessment import HumanAssessmentPublisher
-from review_sensei.hosting.github.publication import (
+from review_sensei_github.human_assessment import HumanAssessmentPublisher
+from review_sensei_github.publication import (
     ReviewApprovalFinalizer,
     approval_eligibility_from_body,
     approval_eligibility_marker,
 )
+
+from review_sensei.context import finding_lifecycle_for_comment
+from review_sensei.convergence import ReviewConvergencePolicy
+from review_sensei.errors import ReviewFormatError, ReviewInputError
 from review_sensei.human_assessment import (
     HumanAssessmentReply,
     HumanAssessmentService,

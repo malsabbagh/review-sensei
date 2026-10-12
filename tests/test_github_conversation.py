@@ -3,15 +3,14 @@ import json
 import unittest
 from urllib.error import URLError
 
-from review_sensei.conversation import ConversationService
-from review_sensei.hosting.github import (
+from review_sensei_github import (
     ConversationPublisher,
     GitHubConversationError,
     GitHubConversationTransientError,
     GitHubPublicationError,
 )
-from review_sensei.hosting.github.approval import approval_eligibility_from_result
-from review_sensei.hosting.github.conversation import (
+from review_sensei_github.approval import approval_eligibility_from_result
+from review_sensei_github.conversation import (
     CONVERSATION_COMMENT_PAGE_SIZES,
     MAX_CONTEXT_DIFF_BYTES,
     PreparedConversation,
@@ -21,7 +20,9 @@ from review_sensei.hosting.github.conversation import (
     has_standalone_sensei_mention,
     reply_marker,
 )
-from review_sensei.hosting.github.publication import approval_eligibility_marker
+from review_sensei_github.publication import approval_eligibility_marker
+
+from review_sensei.conversation import ConversationService
 from review_sensei.models import ConversationReply, ReviewResult
 
 try:

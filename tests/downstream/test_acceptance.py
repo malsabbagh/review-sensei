@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -19,6 +20,19 @@ from packaging_guard import assert_distribution_import  # noqa: E402
 assert_distribution_import()
 
 from fake_github_http import make_http  # noqa: E402
+from review_sensei_github import (  # noqa: E402
+    GitHubApplication,
+    GitHubWriteOptions,
+    SetupPlanBuilder,
+)
+from review_sensei_github.conversation import ReplyResult  # noqa: E402
+from review_sensei_github.learning_pr import LearningPRResult  # noqa: E402
+from review_sensei_github.publication import PublicationResult  # noqa: E402
+from review_sensei_github.setup import (  # noqa: E402
+    CONFIG_PATH,
+    UNINSTALL_WORKFLOW_PATH,
+    WORKFLOW_PATH,
+)
 
 from review_sensei.baseline import (  # noqa: E402
     ReviewBaseline,
@@ -29,19 +43,6 @@ from review_sensei.cli import main  # noqa: E402
 from review_sensei.concurrency import ReviewConcurrencyPlan  # noqa: E402
 from review_sensei.context import ReviewContextCacheKey  # noqa: E402
 from review_sensei.convergence import ReviewConvergencePolicy  # noqa: E402
-from review_sensei.hosting.github import (  # noqa: E402
-    GitHubApplication,
-    GitHubWriteOptions,
-    SetupPlanBuilder,
-)
-from review_sensei.hosting.github.conversation import ReplyResult  # noqa: E402
-from review_sensei.hosting.github.learning_pr import LearningPRResult  # noqa: E402
-from review_sensei.hosting.github.publication import PublicationResult  # noqa: E402
-from review_sensei.hosting.github.setup import (  # noqa: E402
-    CONFIG_PATH,
-    UNINSTALL_WORKFLOW_PATH,
-    WORKFLOW_PATH,
-)
 from review_sensei.models import (  # noqa: E402
     ProviderResponse,
     ReviewRequest,
@@ -473,6 +474,10 @@ class EngineAndPublicationAcceptanceTests(unittest.TestCase):
                     "review_sensei.cli.default_registry",
                     side_effect=AssertionError("provider must not be created"),
                 ),
+                patch(
+                    "review_sensei.cli.subprocess.run",
+                    return_value=subprocess.CompletedProcess([], 1),
+                ) as spawned,
             ):
                 status = main(
                     [
@@ -493,7 +498,11 @@ class EngineAndPublicationAcceptanceTests(unittest.TestCase):
                     ]
                 )
         self.assertEqual(status, 1)
-        self.assertIn("--allow-write", stderr.getvalue())
+        self.assertIn("moved to review-sensei-github", stderr.getvalue())
+        self.assertEqual(
+            spawned.call_args.args[0][:3],
+            [sys.executable, "-m", "review_sensei_github"],
+        )
 
 
 if __name__ == "__main__":

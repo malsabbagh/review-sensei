@@ -15,7 +15,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
-from review_sensei import cli
 from review_sensei.hosting.github.http import GitHubHttp
 from review_sensei.hosting.github.operation_comments import (
     GitHubIssueCommentOperationPort,
@@ -25,6 +24,8 @@ from review_sensei.hosting.github.operation_host import (
     OPERATION_COMMENT_MARKER,
     render_marked_comment,
 )
+
+from review_sensei import cli
 from review_sensei.models import ReviewRequest, ReviewResult
 from review_sensei.outcomes import RunOutcome
 from review_sensei.service import ReviewRun, ReviewService

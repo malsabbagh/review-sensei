@@ -9,6 +9,16 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+from review_sensei_github import ReviewPublisher
+from review_sensei_github.approval import (
+    ReviewApprovalEligibility,
+    evaluate_approval_facts,
+)
+from review_sensei_github.publication import (
+    ReviewApprovalFinalizer,
+    approval_eligibility_from_body,
+)
+
 from review_sensei.budgets import ProviderCapabilities, ReviewWorkBudgets
 from review_sensei.context import (
     PROMPT_CONTEXT_POLICY,
@@ -23,15 +33,6 @@ from review_sensei.convergence import derive_blocker_candidate
 from review_sensei.document_context import DocumentDecision, DocumentSelectionReport
 from review_sensei.errors import ReviewInputError
 from review_sensei.evidence import evidence_digest
-from review_sensei.hosting.github import ReviewPublisher
-from review_sensei.hosting.github.approval import (
-    ReviewApprovalEligibility,
-    evaluate_approval_facts,
-)
-from review_sensei.hosting.github.publication import (
-    ReviewApprovalFinalizer,
-    approval_eligibility_from_body,
-)
 from review_sensei.human_assessment import (
     HumanAssessmentDecision,
     validate_assessment_evidence,

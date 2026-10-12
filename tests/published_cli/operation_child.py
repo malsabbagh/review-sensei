@@ -10,11 +10,12 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
-from review_sensei import cli
-from review_sensei.hosting import github
 from review_sensei.hosting.github.http import GitHubHttp
 from review_sensei.hosting.github.operation_host import OPERATION_COMMENT_MARKER
 from review_sensei.hosting.github.publication import PublicationResult
+
+from review_sensei import cli
+from review_sensei.hosting import github
 from review_sensei.models import ReviewResult
 
 assert "site-packages" in cli.__file__

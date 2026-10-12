@@ -9,9 +9,7 @@ from urllib.error import HTTPError
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-
-from review_sensei.errors import ReviewSenseiError
-from review_sensei.hosting.github import (
+from review_sensei_github import (
     EnvPrivateKeySource,
     FilePrivateKeySource,
     GitHubAppAuth,
@@ -25,7 +23,9 @@ from review_sensei.hosting.github import (
     RequestedPermissions,
     decode_jwt_parts,
 )
-from review_sensei.hosting.github.jwt import verify_rs256_signature
+from review_sensei_github.jwt import verify_rs256_signature
+
+from review_sensei.errors import ReviewSenseiError
 
 
 def make_key_pair():

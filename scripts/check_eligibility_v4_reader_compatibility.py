@@ -21,9 +21,9 @@ READERS = (
 
 def worker(source: Path, fixture: Path) -> None:
     sys.path.insert(0, str(source))
-    from review_sensei.hosting.github.errors import GitHubPublicationError
-    from review_sensei.hosting.github.http import GitHubHttp
-    from review_sensei.hosting.github.publication import ReviewApprovalFinalizer
+    from review_sensei_github.errors import GitHubPublicationError
+    from review_sensei_github.http import GitHubHttp
+    from review_sensei_github.publication import ReviewApprovalFinalizer
 
     class Response:
         status = 200
@@ -66,8 +66,9 @@ def main() -> int:
         worker(Path(sys.argv[2]), Path(sys.argv[3]))
         return 0
     sys.path[:0] = [str(ROOT / "src"), str(ROOT)]
-    from review_sensei.hosting.github.approval import approval_eligibility_from_result
-    from review_sensei.hosting.github.publication import approval_eligibility_marker
+    from review_sensei_github.approval import approval_eligibility_from_result
+    from review_sensei_github.publication import approval_eligibility_marker
+
     from review_sensei.models import ReviewResult
     from tests.test_partitioned_eligibility_reader import Bundle
 

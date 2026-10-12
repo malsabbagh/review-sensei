@@ -6,14 +6,15 @@ import re
 import unittest
 from pathlib import Path
 
+from review_sensei_github.setup import (
+    _setup_pull_request_body,
+)
+
 from review_sensei.configuration import (
     MAX_CONFIG_BYTES,
     RETIRED_FIELDS,
     import_legacy_setup_configuration,
     parse_configuration_text,
-)
-from review_sensei.hosting.github.setup import (
-    _setup_pull_request_body,
 )
 
 ROOT = Path(__file__).resolve().parents[1]

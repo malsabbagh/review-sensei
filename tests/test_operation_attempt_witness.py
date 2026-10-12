@@ -4,13 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from review_sensei_github.operation_host import OperationHandle
+
 from review_sensei.bounded_evidence import (
     ActivationTailPlan,
     EvidenceReadBudget,
     NonResumableActivationError,
     TailDispatch,
 )
-from review_sensei.hosting.github.operation_host import OperationHandle
 from review_sensei.session import LocalSessionLedger
 from tests import test_review_transaction as fixture
 from tests.test_activation_tail import (
@@ -192,9 +193,10 @@ class LocalLedgerWitnessTests(unittest.TestCase):
 
 class GitHubLedgerWitnessTests(unittest.TestCase):
     def test_restored_ledger_accepts_handle_and_refuses_snapshots(self):
-        from review_sensei.hosting.github.session_ledger import (
+        from review_sensei_github.session_ledger import (
             GitHubIssueCommentSessionLedger,
         )
+
         from tests.test_activation_tail import HostedTailTests
 
         host = HostedTailTests()

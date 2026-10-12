@@ -14,14 +14,15 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ...errors import ReviewInputError
+from review_sensei.errors import ReviewInputError
+from review_sensei.operation_witness import operation_handle_witness  # noqa: F401
+
 from .operation_comments import ResultPartStore
 from .operation_host import (
     REVIEW_TRIGGERS,
     AdmissionProof,
     ExecutionResult,
     InMemoryOperationStore,
-    OperationHandle,
     OperationHost,
     OperationRefusal,
     OperationRequest,
@@ -519,14 +520,3 @@ def call_operation_trigger(
     if admitted.replay_payload is None:
         raise ReviewInputError("operation entry refused: result_missing")
     return decode(admitted.replay_payload)
-
-
-def operation_handle_witness(handle: object) -> str | None:
-    """Return the reservation witness for an operation handle, never a snapshot.
-
-    A mapping, a digest string, or any other snapshot returns ``None``.
-    """
-
-    if not isinstance(handle, OperationHandle):
-        return None
-    return handle.binding

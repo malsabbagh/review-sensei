@@ -9,6 +9,14 @@ from copy import deepcopy
 from dataclasses import replace
 from urllib.parse import parse_qs, urlsplit
 
+from review_sensei_github.http import (
+    MAX_GITHUB_RESPONSE_BYTES,
+    GitHubHttp,
+    GitHubHTTPError,
+    GitHubHTTPPaginationLimitError,
+    GitHubHTTPResponseTooLargeError,
+)
+
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.budgets import ReviewWorkBudgets
 from review_sensei.errors import ReviewInputError
@@ -17,13 +25,6 @@ from review_sensei.evidence import (
     EvidenceGroup,
     EvidenceRecord,
     EvidenceSnapshot,
-)
-from review_sensei.hosting.github.http import (
-    MAX_GITHUB_RESPONSE_BYTES,
-    GitHubHttp,
-    GitHubHTTPError,
-    GitHubHTTPPaginationLimitError,
-    GitHubHTTPResponseTooLargeError,
 )
 from review_sensei.models import ProviderRequest, ProviderResponse, ReviewRequest
 from review_sensei.outcomes import ResourceBudget

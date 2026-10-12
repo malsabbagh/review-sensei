@@ -11,6 +11,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from review_sensei_github.approval import (
+    approval_facts_from_result,
+    evaluate_approval_facts,
+)
+from review_sensei_github.publication import prepare_publication_review
+
 from review_sensei.baseline import (
     admission_context_from_document,
     baseline_from_history_document,
@@ -18,11 +24,6 @@ from review_sensei.baseline import (
 )
 from review_sensei.cli import main
 from review_sensei.convergence import ReviewConvergencePolicy
-from review_sensei.hosting.github.approval import (
-    approval_facts_from_result,
-    evaluate_approval_facts,
-)
-from review_sensei.hosting.github.publication import prepare_publication_review
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.outcomes import ResourceBudget
 from review_sensei.planning import MAX_RELATED_PATHS, related_paths_for_change

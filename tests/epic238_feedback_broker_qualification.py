@@ -21,10 +21,11 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request
 
+from review_sensei_github.errors import GitHubBrokerClientError
+
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
 from review_sensei.evidence import evidence_digest
-from review_sensei.hosting.github.errors import GitHubBrokerClientError
 from tests.epic238_public_dispatch_support import (
     PhysicalDispatchTrace,
     ProductionBrokerBridge,

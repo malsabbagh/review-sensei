@@ -20,7 +20,8 @@ from datetime import datetime, timezone
 from typing import NoReturn, cast
 from urllib.parse import quote
 
-from ...models import LearningEntry, LearningProposal
+from review_sensei.models import LearningEntry, LearningProposal
+
 from .errors import (
     GitHubHTTPResponseTooLargeError,
     GitHubHTTPTransientError,

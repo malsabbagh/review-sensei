@@ -8,10 +8,10 @@ from dataclasses import dataclass, replace
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
-from ...baseline import ReviewBaseline
-from ...budgets import ReviewWorkBudgets
-from ...context import ReviewContextCacheKey, finding_lifecycle_for_comment
-from ...convergence import (
+from review_sensei.baseline import ReviewBaseline
+from review_sensei.budgets import ReviewWorkBudgets
+from review_sensei.context import ReviewContextCacheKey, finding_lifecycle_for_comment
+from review_sensei.convergence import (
     OPERATOR_REVIEW_MODES,
     BlockerCandidate,
     ReviewConvergencePolicy,
@@ -19,27 +19,31 @@ from ...convergence import (
     detect_no_progress,
     observe_shadow_admission,
 )
-from ...conversation import ConversationService
-from ...coverage import coverage_approval_state
-from ...diff import analyze_diff
-from ...disposition import MaintainerCommand
-from ...errors import ReviewInputError
-from ...human_assessment import (
+from review_sensei.conversation import ConversationService
+from review_sensei.coverage import coverage_approval_state
+from review_sensei.diff import analyze_diff
+from review_sensei.disposition import MaintainerCommand
+from review_sensei.errors import ReviewInputError
+from review_sensei.human_assessment import (
     HumanAssessmentDecision,
     HumanAssessmentReply,
     HumanAssessmentService,
 )
-from ...models import ConversationReply, ReviewResult, ReviewTransaction
-from ...outcomes import RecoveryArtifact, ResourceBudget, ResourceBudgetTracker
-from ...planning import related_paths_for_change
-from ...providers.base import ReviewProvider
-from ...reassessment_work import HumanAssessmentWork, reassess
-from ...scope import ContextRequest
+from review_sensei.models import ConversationReply, ReviewResult, ReviewTransaction
+from review_sensei.outcomes import (
+    RecoveryArtifact,
+    ResourceBudget,
+    ResourceBudgetTracker,
+)
+from review_sensei.planning import related_paths_for_change
+from review_sensei.providers.base import ReviewProvider
+from review_sensei.reassessment_work import HumanAssessmentWork, reassess
+from review_sensei.scope import ContextRequest
 
 if TYPE_CHECKING:
-    from ...service import ReviewService
-    from ...work_recovery import WorkRecoveryStore
-from ...session import (
+    from review_sensei.service import ReviewService
+    from review_sensei.work_recovery import WorkRecoveryStore
+from review_sensei.session import (
     SessionIdentity,
     SessionLedger,
     admission_diagnostic,
@@ -56,7 +60,8 @@ from ...session import (
     session_reservation_id,
     should_skip_automation,
 )
-from ...verifier import CandidateFinding, PublishableReview
+from review_sensei.verifier import CandidateFinding, PublishableReview
+
 from .approval import (
     ReviewApprovalEligibility,
     has_blocking_findings,
@@ -200,7 +205,7 @@ def _approval_from_bytes(payload: bytes) -> object:
 
 
 def _command_bytes(value: object) -> bytes:
-    from ...disposition import MaintainerCommandResult
+    from review_sensei.disposition import MaintainerCommandResult
 
     if not isinstance(value, MaintainerCommandResult):
         return b""
@@ -217,7 +222,7 @@ def _command_bytes(value: object) -> bytes:
 
 
 def _command_from_bytes(payload: bytes) -> object:
-    from ...disposition import MaintainerCommandResult
+    from review_sensei.disposition import MaintainerCommandResult
 
     loaded = json.loads(payload)
     if not isinstance(loaded, dict):
@@ -634,7 +639,7 @@ class GitHubApplication:
         durable_baseline = baseline
         baseline_recovery_required = False
         if ledger is not None:
-            from ...disposition import session_dispositions
+            from review_sensei.disposition import session_dispositions
 
             if prepared is not None:
                 authorized_dispositions = session_dispositions(prepared.record)
@@ -1095,7 +1100,7 @@ class GitHubApplication:
         only an untrusted routing hint and never authorizes a remote write.
         """
 
-        from ...disposition import (
+        from review_sensei.disposition import (
             MaintainerCommandResult,
             apply_session_command,
             authorized_maintainer,
@@ -2317,7 +2322,10 @@ def _command_from_broker_attestation(
 ) -> MaintainerCommand:
     """Build a persisted command only from broker-attested GitHub identity."""
 
-    from ...disposition import authorized_maintainer, parse_maintainer_command
+    from review_sensei.disposition import (
+        authorized_maintainer,
+        parse_maintainer_command,
+    )
 
     if not isinstance(attestation, Mapping):
         raise GitHubPublicationError("broker command attestation was invalid")

@@ -54,7 +54,7 @@ Run outcomes record only closed diagnostic tokens, identities, and counters.
 ## GitHub App authentication
 
 If you enable optional GitHub App-identity comments or reviews, the
-`review_sensei.hosting.github` auth adapter handles App JWTs and installation
+`review_sensei_github` auth adapter handles App JWTs and installation
 access tokens. The private key is loaded through an injectable
 `PrivateKeySource` and is never read from committed configuration. JWTs,
 installation tokens, authorization headers, and API bodies are redacted from

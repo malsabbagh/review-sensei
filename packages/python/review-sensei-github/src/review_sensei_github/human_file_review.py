@@ -17,8 +17,8 @@ from dataclasses import dataclass, replace
 from typing import Any, cast
 from urllib.parse import quote
 
-from ...errors import ReviewInputError
-from ...human_file_review import (
+from review_sensei.errors import ReviewInputError
+from review_sensei.human_file_review import (
     MAX_DOCUMENT_BYTES,
     MAX_FILES,
     MAX_SOURCE_BYTES,
@@ -33,8 +33,9 @@ from ...human_file_review import (
     sha,
     validate_inventory,
 )
-from ...mixed_coverage import BinaryConfirmation, evaluate_mixed_coverage
-from ...models import ReviewResult
+from review_sensei.mixed_coverage import BinaryConfirmation, evaluate_mixed_coverage
+from review_sensei.models import ReviewResult
+
 from .approval import (
     AutoApprovalDecision,
     ReviewApprovalEligibility,

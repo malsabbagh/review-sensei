@@ -7,6 +7,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from review_sensei_github import (
+    GitHubApplication,
+    GitHubWriteOptions,
+    PublicationResult,
+)
+from review_sensei_github.publication import (
+    PUBLICATION_RESULT_STATUSES,
+    outcome_from_publication,
+)
+
 from review_sensei import (
     ReviewRun,
     ReviewService,
@@ -15,15 +25,6 @@ from review_sensei import (
 )
 from review_sensei.cli import main
 from review_sensei.errors import ProviderError, ReviewFormatError, ReviewInputError
-from review_sensei.hosting.github import (
-    GitHubApplication,
-    GitHubWriteOptions,
-    PublicationResult,
-)
-from review_sensei.hosting.github.publication import (
-    PUBLICATION_RESULT_STATUSES,
-    outcome_from_publication,
-)
 from review_sensei.models import ProviderResponse, ReviewRequest, ReviewResult
 from review_sensei.outcomes import (
     PUBLIC_DIAGNOSTICS,

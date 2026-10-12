@@ -5,28 +5,29 @@ import copy
 import unittest
 from dataclasses import replace
 
+from review_sensei_github.approval import (
+    ReviewApprovalEligibility,
+    approval_eligibility_from_result,
+)
+from review_sensei_github.eligibility_parts import (
+    PartitionedEligibilityContext,
+    visible_result_document,
+)
+from review_sensei_github.errors import GitHubPublicationError
+from review_sensei_github.publication import (
+    APPROVAL_ELIGIBILITY_MARKER_PREFIX,
+    ReviewApprovalFinalizer,
+    approval_eligibility_from_body,
+    review_result_digest,
+)
+from review_sensei_github.publication_parts import prepare_finding_prose_parts
+
 from review_sensei.bounded_evidence import (
     canonical_bytes,
     read_partitioned_evidence,
     stage_partitioned_evidence,
 )
 from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github.approval import (
-    ReviewApprovalEligibility,
-    approval_eligibility_from_result,
-)
-from review_sensei.hosting.github.eligibility_parts import (
-    PartitionedEligibilityContext,
-    visible_result_document,
-)
-from review_sensei.hosting.github.errors import GitHubPublicationError
-from review_sensei.hosting.github.publication import (
-    APPROVAL_ELIGIBILITY_MARKER_PREFIX,
-    ReviewApprovalFinalizer,
-    approval_eligibility_from_body,
-    review_result_digest,
-)
-from review_sensei.hosting.github.publication_parts import prepare_finding_prose_parts
 from review_sensei.human_assessment import HumanInventoryResolution
 from review_sensei.human_inventory import (
     inventory_result_document,

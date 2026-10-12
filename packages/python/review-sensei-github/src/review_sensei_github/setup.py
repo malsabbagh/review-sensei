@@ -23,10 +23,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-from ...configuration import (
+from review_sensei.configuration import (
     LegacySetupImport,
     import_legacy_setup_configuration,
 )
+
 from .errors import (
     GitHubSetupError,
     GitHubSetupTransientError,
@@ -823,7 +824,7 @@ def _released_runner_switch_v4_caller_bytes() -> str:
     from importlib.resources import files
 
     content = (
-        files("review_sensei.hosting.github.fixtures")
+        files("review_sensei_github.fixtures")
         .joinpath("released-v4-resolve-trigger-runner-switch.yml")
         .read_text(encoding="utf-8")
     )
@@ -841,7 +842,7 @@ def _sensei_only_v5_caller_bytes() -> str:
     from importlib.resources import files
 
     content = (
-        files("review_sensei.hosting.github.fixtures")
+        files("review_sensei_github.fixtures")
         .joinpath("sensei-only-v5-caller.yml")
         .read_text(encoding="utf-8")
     )
@@ -1537,7 +1538,7 @@ def _merge_focused_v4_caller_bytes() -> str:
     from importlib.resources import files
 
     content = (
-        files("review_sensei.hosting.github.fixtures")
+        files("review_sensei_github.fixtures")
         .joinpath("merge-focused-v4-caller.yml")
         .read_text(encoding="utf-8")
     )
@@ -1734,7 +1735,7 @@ def _v4_with_review_mode_config_file() -> str:
     from importlib.resources import files
 
     content = (
-        files("review_sensei.hosting.github.fixtures")
+        files("review_sensei_github.fixtures")
         .joinpath("merge-focused-v4-config.yml")
         .read_text(encoding="utf-8")
     )
@@ -1866,7 +1867,7 @@ def _historical_v4_uninstall_workflow() -> str:
     from importlib.resources import files
 
     content = (
-        files("review_sensei.hosting.github.fixtures")
+        files("review_sensei_github.fixtures")
         .joinpath("historical-v4-uninstall.yml")
         .read_text(encoding="utf-8")
     )

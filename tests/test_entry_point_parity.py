@@ -25,13 +25,14 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from review_sensei.cli import main
-from review_sensei.coverage import coverage_approval_state
-from review_sensei.hosting.github.approval import (
+from review_sensei_github.approval import (
     approval_eligibility_from_result,
     has_blocking_findings,
 )
-from review_sensei.hosting.github.checks import check_outcome_for_result
+from review_sensei_github.checks import check_outcome_for_result
+
+from review_sensei.cli import main
+from review_sensei.coverage import coverage_approval_state
 from review_sensei.models import ReviewRequest, ReviewResult
 from review_sensei.providers.fixture import FixtureProvider
 from review_sensei.schemas import validate_public_document

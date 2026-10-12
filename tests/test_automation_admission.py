@@ -9,14 +9,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from review_sensei_github import GitHubApplication, GitHubWriteOptions
+from review_sensei_github.publication import PublicationResult
+
 from review_sensei.baseline import ReviewBaseline
 from review_sensei.cli import main
 from review_sensei.context import ReviewContextCacheKey
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.diagnostics import run_doctor
 from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github import GitHubApplication, GitHubWriteOptions
-from review_sensei.hosting.github.publication import PublicationResult
 from review_sensei.models import ReviewResult
 from review_sensei.outcomes import PUBLIC_DIAGNOSTICS
 from review_sensei.session import (

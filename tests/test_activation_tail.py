@@ -381,7 +381,8 @@ class ConsumingBroker:
     def __init__(self):
         import json
 
-        from review_sensei.hosting.github.broker_client import BrokerClient
+        from review_sensei_github.broker_client import BrokerClient
+
         from tests.fake_github_http import json_response
 
         self.calls = []
@@ -507,10 +508,11 @@ def feedback_request(record, budget, *, reason="admission"):
 
 class HostedTailTests(unittest.TestCase):
     def setup_host(self, *, clock=None, feedback=False, callback=False):
-        from review_sensei.hosting.github import GitHubHttp
-        from review_sensei.hosting.github.session_ledger import (
+        from review_sensei_github import GitHubHttp
+        from review_sensei_github.session_ledger import (
             GitHubIssueCommentSessionLedger,
         )
+
         from tests.fake_github_http import json_response
         from tests.test_authenticated_partitions import GitHubState
 
@@ -680,7 +682,7 @@ class HostedTailTests(unittest.TestCase):
                     )
                 # Parser itself refuses a changed source actor inconsistent with
                 # returned broker actor_id; other references parse then bind refuses.
-                from review_sensei.hosting.github.errors import GitHubBrokerClientError
+                from review_sensei_github.errors import GitHubBrokerClientError
 
                 with self.assertRaises(
                     ReviewInputError if fault != "actor" else GitHubBrokerClientError
@@ -692,7 +694,7 @@ class HostedTailTests(unittest.TestCase):
                 )
 
     def test_v2_fractional_trigger_identity_refuses_before_authority_issue(self):
-        from review_sensei.hosting.github.errors import GitHubBrokerClientError
+        from review_sensei_github.errors import GitHubBrokerClientError
 
         state, broker, ledger = self.setup_host(feedback=True, callback=True)
         broker.request["feedback"]["trigger"]["comment_id"] = 123.0
@@ -792,7 +794,7 @@ class HostedTailTests(unittest.TestCase):
                     self.activate(ledger)
 
     def test_new_ledger_same_budget_cannot_rebind_original_live_proof(self):
-        from review_sensei.hosting.github.session_ledger import (
+        from review_sensei_github.session_ledger import (
             GitHubIssueCommentSessionLedger,
         )
 
@@ -850,7 +852,7 @@ class HostedTailTests(unittest.TestCase):
                 with patch.object(
                     ledger.evidence_budget, "reserve_tail", side_effect=capture
                 ):
-                    from review_sensei.hosting.github.errors import (
+                    from review_sensei_github.errors import (
                         GitHubPublicationTransientError,
                     )
 
@@ -873,7 +875,8 @@ class HostedTailTests(unittest.TestCase):
                     self.activate(ledger)
 
     def test_committed_but_lost_patch_response_keeps_readable_prepaid_root(self):
-        from review_sensei.hosting.github.errors import GitHubPublicationTransientError
+        from review_sensei_github.errors import GitHubPublicationTransientError
+
         from tests.fake_github_http import json_response
 
         state, broker, ledger = self.setup_host(feedback=True, callback=True)

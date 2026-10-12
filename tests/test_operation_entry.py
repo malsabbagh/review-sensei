@@ -5,8 +5,8 @@ from __future__ import annotations
 import hashlib
 import unittest
 
-from review_sensei.hosting.github.operation_comments import ResultPartStore
-from review_sensei.hosting.github.operation_entry import (
+from review_sensei_github.operation_comments import ResultPartStore
+from review_sensei_github.operation_entry import (
     accepted_payload_matches,
     analysis_payload,
     consume_recorded_grant,
@@ -17,7 +17,7 @@ from review_sensei.hosting.github.operation_entry import (
     run_admitted_trigger,
     run_hosted_provider,
 )
-from review_sensei.hosting.github.operation_host import (
+from review_sensei_github.operation_host import (
     OPERATION_COMMENT_MARKER,
     AdmissionProof,
     ExecutionResult,
@@ -73,7 +73,7 @@ class MemoryComments:
         return tuple(self.comments.values())
 
     def create(self, body: str):
-        from review_sensei.hosting.github.operation_host import OperationComment
+        from review_sensei_github.operation_host import OperationComment
 
         self.requests += 2
         comment = OperationComment(self.next_id, body, 42, "Bot")
@@ -82,7 +82,7 @@ class MemoryComments:
         return comment
 
     def update(self, comment_id: int, body: str):
-        from review_sensei.hosting.github.operation_host import OperationComment
+        from review_sensei_github.operation_host import OperationComment
 
         self.requests += 2
         comment = OperationComment(comment_id, body, 42, "Bot")

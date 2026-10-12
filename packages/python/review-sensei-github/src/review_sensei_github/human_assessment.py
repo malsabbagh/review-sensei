@@ -10,10 +10,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
-from ...budgets import ReviewWorkBudgets
-from ...errors import ReviewInputError
-from ...evidence import EvidenceBundle, evidence_digest
-from ...feedback import (
+from review_sensei.budgets import ReviewWorkBudgets
+from review_sensei.errors import ReviewInputError
+from review_sensei.evidence import EvidenceBundle, evidence_digest
+from review_sensei.feedback import (
     MAX_FEEDBACK_BYTES,
     FeedbackAdmissionError,
     FeedbackReference,
@@ -23,15 +23,16 @@ from ...feedback import (
     validate_feedback_context,
     validate_feedback_references,
 )
-from ...human_assessment import (
+from review_sensei.human_assessment import (
     HUMAN_ASSESSMENT_EVIDENCE_DIAGNOSTICS,
     MAX_HUMAN_SOURCE_BYTES,
     HumanAssessmentReply,
     validate_assessment_evidence,
 )
-from ...models import ConversationReply
-from ...outcomes import ResourceBudgetTracker
-from ...reassessment_work import HumanAssessmentWork, validate_work
+from review_sensei.models import ConversationReply
+from review_sensei.outcomes import ResourceBudgetTracker
+from review_sensei.reassessment_work import HumanAssessmentWork, validate_work
+
 from .approval import ReviewApprovalEligibility
 from .conversation import (
     ConversationPublisher,

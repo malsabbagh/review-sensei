@@ -11,6 +11,13 @@ import tomllib
 from pathlib import Path
 
 TAG_PATTERN = re.compile(r"^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$")
+GITHUB_TAG_PATTERN = re.compile(
+    r"^github-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$"
+)
+HOSTED_PROJECT = Path("packages/python/review-sensei-github/pyproject.toml")
+# Last engine wheel published before cli.main grew hosted_hooks. Pinning a
+# hosted release to this version installs that wheel and the hosted CLI crashes.
+PRE_SEAM_ENGINE = "0.6.22"
 
 NPM_LAUNCHER_NAME = "@reviewsensei/cli"
 NPM_PUBLIC_REPOSITORY = {
@@ -110,6 +117,67 @@ def validate_npm_manifests(root: Path, expected_version: str) -> None:
             )
 
 
+def hosted_project(root: Path) -> tuple[str, str]:
+    """Return the hosted version and the exact engine pin it declares."""
+
+    path = root / HOSTED_PROJECT
+    try:
+        with path.open("rb") as handle:
+            project = tomllib.load(handle).get("project", {})
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ReleaseVersionError("hosted project metadata could not be read") from exc
+    if not isinstance(project, dict):
+        raise ReleaseVersionError("hosted project metadata is invalid")
+    version = project.get("version")
+    dependencies = project.get("dependencies")
+    if not isinstance(version, str) or not version:
+        raise ReleaseVersionError("hosted project version is missing")
+    if not isinstance(dependencies, list):
+        raise ReleaseVersionError("hosted project dependencies are missing")
+    pins = [
+        item
+        for item in dependencies
+        if isinstance(item, str) and item.startswith("review-sensei==")
+    ]
+    if len(pins) != 1:
+        raise ReleaseVersionError("hosted project must pin exactly one engine version")
+    return version, pins[0].removeprefix("review-sensei==")
+
+
+def _version_key(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
+def validate_github_release_tag(tag: str, root: Path = Path(".")) -> str:
+    """Validate a review-sensei-github tag and return its version."""
+
+    if not GITHUB_TAG_PATTERN.fullmatch(tag):
+        raise ReleaseVersionError("hosted release tag must match github-vX.Y.Z")
+    expected_version = tag.removeprefix("github-v")
+    version, engine_pin = hosted_project(root)
+    if version != expected_version:
+        raise ReleaseVersionError("hosted release tag does not match project metadata")
+    if engine_pin != project_version(root):
+        raise ReleaseVersionError("hosted package does not pin the current engine")
+    if _version_key(engine_pin) <= _version_key(PRE_SEAM_ENGINE):
+        raise ReleaseVersionError(
+            "hosted package must pin an engine released with hosted_hooks; "
+            f"{PRE_SEAM_ENGINE} predates that seam, so the first hosted release "
+            "has to ship with a new engine version"
+        )
+    try:
+        changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ReleaseVersionError("changelog could not be read") from exc
+    heading = re.compile(
+        rf"^##\s+review-sensei-github {re.escape(expected_version)}\s+-\s+\d{{4}}-\d{{2}}-\d{{2}}\s*$",
+        re.MULTILINE,
+    )
+    if not heading.search(changelog):
+        raise ReleaseVersionError("matching dated hosted changelog heading is missing")
+    return expected_version
+
+
 def validate_release_tag(tag: str, root: Path = Path(".")) -> str:
     """Validate *tag* and return its unprefixed project version."""
 
@@ -139,13 +207,23 @@ def _parser() -> argparse.ArgumentParser:
         "--tag", required=True, help="annotated release tag, for example v0.1.0"
     )
     parser.add_argument("--root", type=Path, default=Path("."), help="repository root")
+    parser.add_argument(
+        "--package",
+        choices=("engine", "github"),
+        default="engine",
+        help="distribution the tag publishes",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        version = validate_release_tag(args.tag, args.root.resolve())
+        root = args.root.resolve()
+        if args.package == "github":
+            version = validate_github_release_tag(args.tag, root)
+        else:
+            version = validate_release_tag(args.tag, root)
     except ReleaseVersionError as exc:
         print(f"release version check failed: {exc}", file=sys.stderr)
         return 1

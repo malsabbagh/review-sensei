@@ -16,7 +16,8 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 
-from review_sensei.hosting.github.broker_client import BrokerClient
+from review_sensei_github.broker_client import BrokerClient
+
 from tests.fake_github_http import json_response
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -10,16 +10,16 @@ import hashlib
 from dataclasses import dataclass
 from typing import Sequence
 
-from ...context import finding_lifecycle_for_comment
-from ...errors import ReviewInputError
-from ...human_assessment import finding_instance_fingerprint
-from ...models import ReviewComment
-from ...presentation import (
+from review_sensei.context import finding_lifecycle_for_comment
+from review_sensei.errors import ReviewInputError
+from review_sensei.human_assessment import finding_instance_fingerprint
+from review_sensei.models import ReviewComment
+from review_sensei.presentation import (
     assign_finding_identifiers,
     build_finding_view,
     render_finding,
 )
-from ...validation import validate_bounded_text, validate_repository_path
+from review_sensei.validation import validate_bounded_text, validate_repository_path
 
 PROSE_PART_VERSION = "1"
 MAX_PROSE_PART_BYTES = 65_536

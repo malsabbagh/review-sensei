@@ -206,6 +206,47 @@ project-scoped upload credential. It is still critical to protect the trusted
 workflow and environment: a contributor who can change and run that workflow
 can affect the package identity.
 
+## review-sensei-github
+
+The hosted GitHub runtime is a second PyPI distribution,
+`review-sensei-github`, in `packages/python/review-sensei-github`. Its version
+is independent of the engine. The published wheel's `review-sensei==` pin is
+immutable, so the pin moves only when that same preparation also publishes a
+new hosted version.
+
+`prepare-release.yml` prepares whichever package receives a new version. Pass
+a package's current version to leave it unchanged and untagged. `sign_tag=true`
+signs `vX.Y.Z` only when the engine version is new, and `github-vX.Y.Z` only
+when the hosted version is new.
+
+```bash
+gh workflow run prepare-release.yml --ref main \
+  -f version=0.6.23 -f github_version=0.1.1 \
+  -f release_date=2026-10-12 -f sign_tag=true
+```
+
+- Engine `0.6.23` and hosted `0.1.1` prepare both. The hosted pin becomes
+  `review-sensei==0.6.23`. Signing pushes `v0.6.23` and `github-v0.1.1`.
+- Engine `0.6.23` and hosted `0.1.0` (the current hosted version) prepare the
+  engine only. The pin stays `review-sensei==0.6.22`. Do not move `v5` onto
+  that commit: runners would install the already-published `0.6.22` wheel,
+  which has no `hosted_hooks` parameter.
+- A hosted release cannot pin `0.6.22`. That wheel is already on PyPI and
+  predates the seam, so `review-sensei-github review` would crash. The first
+  hosted tag ships in the same preparation as the new engine, where the pin
+  becomes `review-sensei==0.6.23`. After that engine is published, a later
+  hosted-only release can keep the pin on that engine.
+
+`prepare-github` still prints that identity and creates no tag. The first
+hosted publish needs the PyPI project `review-sensei-github` and a Trusted
+Publisher for workflow `release-github.yml` and environment `pypi-github`.
+Create that protected environment before signing a hosted tag; publication
+waits for Mo's approval there. Move `v5` last, only onto a commit whose
+declared engine and hosted versions are already published and whose pin
+matches the engine. `review-sensei github`, `host-plan`, and
+`resolve-hosted-openrouter` remain subprocess stubs for one engine release.
+Remove them in the following release.
+
 ## Prepare main before signing and building
 
 The normal complete Python/npm release uses `prepare-release.yml` before the
@@ -227,8 +268,12 @@ changes the main metadata through the dedicated App; tagging an unchanged
 
    ```bash
    gh workflow run prepare-release.yml --ref main \
-     -f version=0.6.17 -f release_date=2026-10-08
+     -f version=0.6.17 -f github_version=0.1.0 -f release_date=2026-10-08
    ```
+
+   `github_version` is the hosted package version. Pass its current version,
+   as above, to prepare the engine only. Pass the engine's current version to
+   prepare the hosted package only. See [review-sensei-github](#review-sensei-github).
 
 3. Preparation requires full terminal-success **push/main CI on the dispatch SHA**
    before writes. It executes trusted dispatch code and integrates a clean
@@ -248,9 +293,10 @@ changes the main metadata through the dedicated App; tagging an unchanged
    or ambiguous ancestry, an unchanged source or history beyond the bounded
    256-commit / 256 KiB allowance stops preparation. Maintainers can supply authored
    notes for an exceptional range. Routine empty Unreleased sections require no
-   notes PR. Generated notes are recomputed from source during commit validation;
-   their digest remains bound to the existing preparation receipt. No receipt
-   schema or App permission changes are needed. See [ADR 0071](adr/0071-generated-release-notes.md).
+   notes PR.    Generated notes are recomputed from source during commit validation;
+   their digest remains bound to the preparation receipt. The receipt also
+   records `engine_tag` and `github_tag`; an empty tag means that package is
+   unchanged and will not be signed. App permissions are unchanged. See [ADR 0071](adr/0071-generated-release-notes.md).
    Historical examples outside markers and the `@v5` channel stay unchanged.
    `PAYLOAD_PATHS` in `scripts/prepare_release.py` lists the complete allowlist.
    Runtime source, configs, tests, workflows, credentials and protection policy

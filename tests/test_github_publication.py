@@ -8,22 +8,16 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-import review_sensei
-from review_sensei.convergence import (
-    REVIEW_MODE_ENV,
-    ReviewConvergencePolicy,
-    derive_blocker_candidate,
-)
-from review_sensei.coverage import CoverageManifest, FileCoverage
-from review_sensei.hosting.github import (
+import review_sensei_github
+from review_sensei_github import (
     GitHubPublicationError,
     GitHubPublicationTransientError,
     ReviewPublisher,
 )
-from review_sensei.hosting.github.approval import (
+from review_sensei_github.approval import (
     approval_eligibility_from_result,
 )
-from review_sensei.hosting.github.publication import (
+from review_sensei_github.publication import (
     ReviewApprovalFinalizer,
     approval_eligibility_from_body,
     approval_eligibility_marker,
@@ -35,6 +29,14 @@ from review_sensei.hosting.github.publication import (
     finding_marker,
     review_marker,
 )
+
+import review_sensei
+from review_sensei.convergence import (
+    REVIEW_MODE_ENV,
+    ReviewConvergencePolicy,
+    derive_blocker_candidate,
+)
+from review_sensei.coverage import CoverageManifest, FileCoverage
 from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.presentation import build_finding_view, render_body_findings
 from review_sensei.validation import ReviewLimits
@@ -825,7 +827,7 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertTrue(finding_declares_blocking(marker))
 
     def test_disabled_review_requests_no_write(self):
-        from review_sensei.hosting.github import GitHubApplication, GitHubWriteOptions
+        from review_sensei_github import GitHubApplication, GitHubWriteOptions
 
         broker_calls = []
 
@@ -2304,7 +2306,7 @@ class ReviewPublisherTests(unittest.TestCase):
     def test_out_of_diff_comment_is_retained_in_the_summary(self):
         """Unanchored findings are summary-only by design: no inline thread is created."""
 
-        from review_sensei.hosting.github.approval import has_blocking_findings
+        from review_sensei_github.approval import has_blocking_findings
 
         bad = ReviewResult(
             summary="done",
@@ -2645,49 +2647,68 @@ deleted file mode 100644
         # (CLI or GitHubApplication) may reach it, so the identifier must stay
         # confined to the publication module that declares it.
         root = Path(__file__).resolve().parents[1]
-        declaring = root / "src/review_sensei/hosting/github/publication.py"
+        declaring = (
+            root
+            / "packages/python/review-sensei-github/src/review_sensei_github/publication.py"
+        )
         self.assertTrue(declaring.is_file())
-        for path in sorted((root / "src/review_sensei").rglob("*.py")):
-            if path == declaring:
-                continue
-            with self.subTest(path=path.name):
-                self.assertNotIn(
-                    "allow_retired_legacy_policy",
-                    path.read_text(encoding="utf-8"),
-                )
+        trees = (
+            root / "src" / "review_sensei",
+            root
+            / "packages"
+            / "python"
+            / "review-sensei-github"
+            / "src"
+            / "review_sensei_github",
+        )
+        for tree in trees:
+            for path in sorted(tree.rglob("*.py")):
+                if path == declaring:
+                    continue
+                with self.subTest(path=path.relative_to(root).as_posix()):
+                    self.assertNotIn(
+                        "allow_retired_legacy_policy",
+                        path.read_text(encoding="utf-8"),
+                    )
         # The textual check above cannot see an internal re-export that
         # accepts the flag dynamically, so pin the signature side too: any
         # route that could let production code opt in needs the parameter in a
         # signature, and only the publisher's own keyword-only parameter may
         # declare it.
         declaring_signatures = set()
-        for module_info in pkgutil.walk_packages(
-            review_sensei.__path__, prefix="review_sensei."
-        ):
-            module = importlib.import_module(module_info.name)
-            members = []
-            for member in vars(module).values():
-                if getattr(member, "__module__", None) != module_info.name:
-                    continue
-                if inspect.isclass(member):
-                    members.extend(vars(member).values())
-                else:
-                    members.append(member)
-            for member in members:
-                if not callable(member):
-                    continue
-                try:
-                    signature = inspect.signature(member)
-                except (TypeError, ValueError):  # pragma: no cover - builtins
-                    continue
-                parameter = signature.parameters.get("allow_retired_legacy_policy")
-                if parameter is None:
-                    continue
-                declaring_signatures.add(f"{member.__module__}.{member.__qualname__}")
-                self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
+        packages = (
+            (review_sensei, "review_sensei."),
+            (review_sensei_github, "review_sensei_github."),
+        )
+        for package, prefix in packages:
+            module_infos = pkgutil.walk_packages(package.__path__, prefix=prefix)
+            for module_info in module_infos:
+                module = importlib.import_module(module_info.name)
+                members = []
+                for member in vars(module).values():
+                    if getattr(member, "__module__", None) != module_info.name:
+                        continue
+                    if inspect.isclass(member):
+                        members.extend(vars(member).values())
+                    else:
+                        members.append(member)
+                for member in members:
+                    if not callable(member):
+                        continue
+                    try:
+                        signature = inspect.signature(member)
+                    except (TypeError, ValueError):  # pragma: no cover - builtins
+                        continue
+                    parameter = signature.parameters.get("allow_retired_legacy_policy")
+                    if parameter is None:
+                        continue
+                    declaring_signatures.add(
+                        f"{member.__module__}.{member.__qualname__}"
+                    )
+                    self.assertEqual(parameter.kind, inspect.Parameter.KEYWORD_ONLY)
         self.assertEqual(
             declaring_signatures,
-            {"review_sensei.hosting.github.publication.ReviewPublisher.publish"},
+            {"review_sensei_github.publication.ReviewPublisher.publish"},
         )
 
     def test_coverage_digest_and_unanchored_findings_can_fail_summary_limit(self):

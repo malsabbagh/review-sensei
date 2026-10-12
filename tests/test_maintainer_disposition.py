@@ -8,6 +8,10 @@ from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
+from review_sensei_github import GitHubApplication, GitHubWriteOptions
+from review_sensei_github.errors import GitHubPublicationError
+from review_sensei_github.trigger import resolve_issue_comment
+
 from review_sensei.cli import main
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.disposition import (
@@ -22,9 +26,6 @@ from review_sensei.disposition import (
     session_dispositions,
 )
 from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github import GitHubApplication, GitHubWriteOptions
-from review_sensei.hosting.github.errors import GitHubPublicationError
-from review_sensei.hosting.github.trigger import resolve_issue_comment
 from review_sensei.session import (
     InMemorySessionLedger,
     LocalSessionLedger,

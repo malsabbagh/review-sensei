@@ -12,6 +12,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from review_sensei_github.cli import main as github_main
+
 from review_sensei.cli import main
 from review_sensei.providers.openai_compatible import OpenAICompatibleProvider
 
@@ -92,7 +94,8 @@ class OpenAIConfigurationTests(IsolatedWorkingDirectoryMixin, unittest.TestCase)
             redirect_stdout(stdout),
             redirect_stderr(stderr),
         ):
-            status = main(args)
+            entry = github_main if args and args[0] == "host-plan" else main
+            status = entry(args)
         self.assertNotIn(KEY, stdout.getvalue() + stderr.getvalue())
         return status, stdout.getvalue(), stderr.getvalue()
 

@@ -98,7 +98,12 @@ class LocalReviewHarness:
             redirect_stdout(stdout),
             redirect_stderr(stderr),
         ):
-            status = main(argv)
+            if "--github-session-ledger" in argv:
+                from review_sensei_github.cli import main as github_main
+
+                status = github_main(["review", *argv])
+            else:
+                status = main(argv)
         return status, stdout.getvalue(), stderr.getvalue()
 
     def base_arguments(self, response: dict[str, object]) -> list[object]:

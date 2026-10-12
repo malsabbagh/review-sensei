@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from review_sensei.hosting.github import GitHubHttp
+from review_sensei_github import GitHubHttp
 
 
 class FakeHTTPResponse:

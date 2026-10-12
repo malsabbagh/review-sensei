@@ -8,6 +8,12 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+from review_sensei_github.publication import prepare_publication_review
+from review_sensei_github.session_ledger import (
+    parse_session_comment,
+    render_session_comment,
+)
+
 import review_sensei.baseline as baseline_module
 import review_sensei.session as session_module
 from review_sensei.baseline import (
@@ -23,11 +29,6 @@ from review_sensei.baseline import (
 )
 from review_sensei.convergence import ReviewConvergencePolicy, admit_review_result
 from review_sensei.errors import ReviewInputError
-from review_sensei.hosting.github.publication import prepare_publication_review
-from review_sensei.hosting.github.session_ledger import (
-    parse_session_comment,
-    render_session_comment,
-)
 from review_sensei.models import ReviewResult
 from review_sensei.schemas import validate_public_document
 from review_sensei.session import (
