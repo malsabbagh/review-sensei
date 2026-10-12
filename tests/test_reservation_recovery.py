@@ -678,3 +678,27 @@ class AdmissionHookTests(unittest.TestCase):
         )
         self.assertEqual(calls, ["recover"])
         self.assertFalse(prepared.decision.admit)
+
+    def test_real_github_ledger_heals_at_admission(self):
+        # The hook against the production adapter, not a stub: the held
+        # analysis reservation is recovered through the Actions-evidence
+        # seam, then the current head is admitted in the same call.
+        from review_sensei.session import prepare_session_round
+
+        h = Harness()
+        h.record = h.record.evolve(operator_paused=False, now=NOW)
+        h.ledger._session_attestation = {**h.attestation, "operation": "review"}
+        prepared = prepare_session_round(
+            h.ledger,
+            IDENTITY,
+            ReviewConvergencePolicy(mode="merge-focused"),
+            reservation_id="1" * 64,
+            now=NOW,
+            head_sha=LIVE_HEAD,
+        )
+        self.assertTrue(prepared.decision.admit)
+        self.assertEqual(prepared.reservation_id, "1" * 64)
+        # Two writes: the recovery release, then the new reservation. The
+        # failed-attempt charge to the old head is asserted at the ledger
+        # level; reserving for the new head starts its own budget.
+        self.assertEqual(h.patches, 2)

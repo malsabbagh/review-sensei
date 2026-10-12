@@ -59,7 +59,7 @@ from .convergence import (
     evaluate_round_admission,
 )
 from .coverage import FileCoverage, HunkCoverage
-from .errors import ReviewInputError
+from .errors import ReviewInputError, ReviewSenseiError
 from .history_association import (
     HistoryAssociation,
     _read_history_child,
@@ -1856,9 +1856,15 @@ def prepare_session_round(
         if callable(recover):
             try:
                 recovered = recover(identity, now=now)
-            except Exception:
+            except (ReviewSenseiError, OSError):
                 recovered = None
-            if recovered is not None and recovered.reservation_id is None:
+            if (
+                recovered is not None
+                and recovered.reservation_id is None
+                and recovered.repository == identity.repository
+                and recovered.pull_request == identity.pull_request
+                and recovered.repository_id == identity.repository_id
+            ):
                 record = recovered
                 held = None
     if held is not None:

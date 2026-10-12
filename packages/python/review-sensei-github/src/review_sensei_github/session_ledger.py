@@ -2083,7 +2083,10 @@ class GitHubIssueCommentSessionLedger:
 
         from review_sensei.session import MAX_FAILED_ATTEMPTS, _failed_attempt_scope
 
-        from .reservation_recovery import ActionsReservationEvidence
+        from .reservation_recovery import (
+            ActionsReservationEvidence,
+            ReservationOwnerActiveError,
+        )
 
         if (
             self._broker is None
@@ -2130,7 +2133,7 @@ class GitHubIssueCommentSessionLedger:
                 proof = evidence.verify(identity, expected)
                 break
             except ReviewInputError as exc:
-                owner_active = "reservation owner run is active" in str(exc)
+                owner_active = isinstance(exc, ReservationOwnerActiveError)
                 if not owner_active or attempt == attempts - 1:
                     if owner_active and attempts > 1:
                         owner_run = (
