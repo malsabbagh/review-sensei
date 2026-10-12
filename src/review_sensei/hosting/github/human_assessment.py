@@ -43,6 +43,7 @@ from .conversation import (
 from .errors import GitHubConversationError, GitHubPublicationError
 from .http import GitHubHttp
 from .publication import ReviewApprovalFinalizer, approval_eligibility_marker
+from .reply_budget import bounded_reply_publication
 
 
 class FeedbackBudgetHttp(GitHubHttp):
@@ -716,6 +717,7 @@ class HumanAssessmentPublisher:
             feedback=feedback,
         )
 
+    @bounded_reply_publication
     def publish(
         self,
         *,
@@ -850,7 +852,62 @@ class HumanAssessmentPublisher:
         resuming = current == refreshed and (
             updated_inventory != inventory or not inventory.pending
         )
-        outcome = self.conversation.publish(
+
+        def pending_fence() -> str | None:
+            if not self.source_fence(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                prepared=prepared,
+                app_slug=app_slug,
+            ):
+                return "skipped_edited_source"
+            latest = self.finalizer.load_eligibility(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=conversation.head_sha,
+                app_slug=app_slug,
+            )
+            if latest not in (original, refreshed):
+                return "skipped_stale_head"
+            live = self.finalizer._preflight(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=conversation.head_sha,
+                app_slug=app_slug,
+            )
+            if live.result is not None:
+                return live.result.status
+            if live.app_authored or live.base_sha != inventory.base_sha:
+                return "skipped_stale_base"
+            return None
+
+        outcome = self.conversation.publish_pending(
+            eligibility=refreshed,
+            fence=pending_fence,
+            authority_digest=hashlib.sha256(
+                json.dumps(
+                    [
+                        prepared.source_body,
+                        prepared.source_actor,
+                        prepared.source_metadata_digest,
+                    ],
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+            diagnostic=prepared.evidence_diagnostic,
+            decision_reasons={
+                item.fingerprint: item.rationale for item in reply.decisions
+            },
+            assessment_digest=hashlib.sha256(
+                json.dumps(
+                    [item.to_dict() for item in reply.decisions],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
             token=token,
             repository=repository,
             pull_request=pull_request,

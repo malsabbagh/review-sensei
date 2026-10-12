@@ -395,7 +395,7 @@ remaining allowance. YAML timeout has a 3,600 s ceiling, and YAML calls accept
 | Approved learning files / feedback | 100 files, 64 KiB/file; feedback 256 KiB/file, 256 records; finding identity 256 B, note 512 B | Repository loaders reject oversized or invalid inputs; feedback is not automatically approved learning |
 | Conversation | 20 messages; 64 KiB serialized context/prompt; 16 KiB reply | Chat context can be bounded/clipped; not complete reassessment evidence |
 | Hosted conversation selection | 1 KiB/message, 2 KiB PR title, 4 KiB PR body, 512 B/finding, 6 KiB learnings, 12 KiB diff | Tighter than model-level conversation fields (8 KiB PR body / 16 KiB diff) |
-| Legacy human reply | Source 4 KiB; whole evidence diff 12 KiB; prompt 48 KiB; response 16 KiB | Required complete evidence overflow/missing/conflict keeps inventory pending |
+| Single-source human reply | Source 32 KiB; whole evidence diff 12 KiB; prompt 48 KiB; response 16 KiB | Admission preserves original UTF-8; required complete rendered evidence overflow/missing/conflict keeps inventory pending |
 | Assessment reply / decisions | Reply body 4 KiB; at most 20 decisions/request; rationale 1 KiB, human/diff citation 512 B each; at most 7 related-path citations of 512 B each | Resolution requires a rationale and exact-source human citation of at least 20 stripped characters, and exact-path diff citations of at least 10; valid JSON alone cannot resolve an obligation |
 | REST | 512 KiB response; at most 1,000 list items | Failed/incomplete authority scan is not a clean lookup |
 | Review threads | 10 pages × 100 threads | Incomplete pagination withholds authority/approval |

@@ -34,7 +34,8 @@ MAX_HUMAN_FINDINGS = 20  # Per provider request, never the whole inventory.
 MAX_HUMAN_INVENTORY_FINDINGS = DEFAULT_REVIEW_LIMITS.max_comments
 MAX_HUMAN_DECODED_BYTES = DEFAULT_REVIEW_LIMITS.max_result_bytes
 MAX_HUMAN_REVIEW_BYTES = 24 * 1024
-MAX_HUMAN_SOURCE_BYTES = 4096
+# Complete UTF-8 source admission, independent of model reply and prompt limits.
+MAX_HUMAN_SOURCE_BYTES = 32 * 1024
 MAX_HUMAN_INVENTORY_PATHS = MAX_HUMAN_INVENTORY_FINDINGS * 8
 _JSON_CORRECTION = (
     "The previous response was not valid JSON. Return a fresh strict JSON object "

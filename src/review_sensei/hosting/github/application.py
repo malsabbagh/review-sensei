@@ -1697,7 +1697,8 @@ class GitHubApplication:
             oidc_token or self.broker.request_oidc_token(),
             capability=capability,
         )
-        return self.replier.publish(
+        publish = getattr(self.replier, "publish_current", self.replier.publish)
+        return publish(
             token=token,
             repository=repository,
             pull_request=pull_request,
@@ -2168,7 +2169,8 @@ class GitHubApplication:
             )
             if not isinstance(reply, ConversationReply):
                 raise ReviewInputError("operation entry refused: result_missing")
-            return self.replier.publish(
+            publish = getattr(self.replier, "publish_current", self.replier.publish)
+            return publish(
                 token=capability_token,
                 repository=repository,
                 pull_request=pull_request,

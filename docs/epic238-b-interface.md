@@ -109,7 +109,8 @@ within one original selected source. Generated metadata and adjacent source
 concatenation cannot provide that evidence. Base/head and available context PR
 identity are checked; explicit selected targets must contain the current batch.
 The authenticated caller/C still binds repository and the entire ordered target
-tuple and feedback digest. Legacy single-source admission remains 4 KiB.
+tuple and feedback digest. Default single-source admission is 32 KiB; the rich
+selection ceilings remain independent of the effective rendered prompt limit.
 
 `human_inventory.stage_human_inventory/read_human_inventory` wrap A's strict
 codec with purpose `human-inventory`, exact trusted binding, actual manifest

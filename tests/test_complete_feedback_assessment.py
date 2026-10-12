@@ -184,14 +184,14 @@ class CompleteFeedbackAssessmentTests(unittest.TestCase):
         )
         self.assertTrue(pending.apply(result.decisions).pending)
 
-    def test_legacy_single_source_4096_byte_limit_is_unchanged(self):
+    def test_single_source_32768_byte_limit_refuses_before_inference(self):
         eligibility = prior()
         provider = Provider(response_for(eligibility))
         with self.assertRaises(ReviewInputError):
             HumanAssessmentService(provider).reply(
                 context=State(eligibility).prepared().context,
                 pending=eligibility.human_review,
-                source_body="a" * 4097,
+                source_body="a" * 32769,
             )
         self.assertEqual(provider.calls, [])
 

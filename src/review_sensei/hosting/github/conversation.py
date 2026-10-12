@@ -7,6 +7,7 @@ import binascii
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Sequence
 from urllib.parse import quote
@@ -31,10 +32,12 @@ from .errors import (
     GitHubPublicationTransientError,
 )
 from .http import GitHubHttp
+from .pending import PendingReplyPage, pending_reply_pages
 from .publication import (
     ReviewApprovalFinalizer,
     finding_declares_blocking,
 )
+from .reply_budget import bounded_reply_publication
 
 MAX_THREAD_MESSAGES = 20
 MAX_REPLY_BYTES = 16 * 1024
@@ -1194,6 +1197,7 @@ class ConversationPublisher:
         app_slug: str,
         root_comment_id: int,
         source_kind: str = "inline",
+        pending_page: PendingReplyPage | None = None,
     ) -> ReplyResult:
         if not GIT_SHA_HEX.fullmatch(head_sha):
             raise GitHubConversationError("reply head sha is invalid")
@@ -1205,6 +1209,20 @@ class ConversationPublisher:
             pull_request=pull_request,
             head_sha=head_sha,
         )
+        if pending_page is not None:
+            if not isinstance(pending_page, PendingReplyPage):
+                raise GitHubConversationError("pending reply page is invalid")
+            marker = marker[:-4] + (
+                f" report={pending_page.report_digest} "
+                f"part={pending_page.index + 1}/{pending_page.count} "
+                f"content={_digest(append_response_instructions(pending_page.body))} -->"
+            )
+        body = (
+            f"{append_response_instructions(pending_page.body if pending_page else reply.body)}"
+            f"\n\n{marker}"
+        )
+        if len(body.encode("utf-8")) > MAX_REPLY_BYTES:
+            raise GitHubConversationError("reply body exceeds the configured limit")
         if source_kind not in {"inline", "issue"}:
             raise GitHubConversationError("reply source kind is invalid")
         source_path = (
@@ -1290,6 +1308,7 @@ class ConversationPublisher:
             marker=marker,
             app_slug=app_slug,
             source_kind=source_kind,
+            expected_body=body if pending_page is not None else None,
         )
         if existing is not None:
             if reply.resolve and root_is_app_authored:
@@ -1342,9 +1361,6 @@ class ConversationPublisher:
         ):
             return ReplyResult(status="skipped_fork")
 
-        body = f"{append_response_instructions(reply.body)}\n\n{marker}"
-        if len(body.encode("utf-8")) > MAX_REPLY_BYTES:
-            raise GitHubConversationError("reply body exceeds the configured limit")
         request_body: dict[str, object] = {"body": body}
         target = (
             f"/pulls/{pull_request}/comments/{resolved_root}/replies"
@@ -1366,6 +1382,7 @@ class ConversationPublisher:
                 marker=marker,
                 app_slug=app_slug,
                 source_kind=source_kind,
+                expected_body=body if pending_page is not None else None,
             )
             if existing_after is not None:
                 return ReplyResult(status="already_replied", comment_id=existing_after)
@@ -1374,7 +1391,21 @@ class ConversationPublisher:
             ) from exc
         if status == 201 and isinstance(created, dict):
             comment_id = created.get("id")
-            if isinstance(comment_id, int):
+            if type(comment_id) is int and comment_id > 0:
+                if pending_page is not None:
+                    confirmed = self._find_existing(
+                        token=token,
+                        repository=repository,
+                        pull_request=pull_request,
+                        marker=marker,
+                        app_slug=app_slug,
+                        source_kind=source_kind,
+                        expected_body=body,
+                    )
+                    if confirmed != comment_id:
+                        raise GitHubConversationTransientError(
+                            "pending reply page readback was not confirmed"
+                        )
                 if reply.resolve and root_is_app_authored:
                     self._resolve_and_finalize(
                         token=token,
@@ -1399,6 +1430,7 @@ class ConversationPublisher:
                 marker=marker,
                 app_slug=app_slug,
                 source_kind=source_kind,
+                expected_body=body if pending_page is not None else None,
             )
             if existing_after is not None:
                 if reply.resolve and root_is_app_authored:
@@ -1431,6 +1463,246 @@ class ConversationPublisher:
                 "reply publication failed temporarily"
             )
         raise GitHubConversationError("reply publication was rejected")
+
+    @bounded_reply_publication
+    def publish_pending(
+        self,
+        *,
+        eligibility,
+        fence: Callable[[], str | None],
+        authority_digest: str = "",
+        diagnostic: str | None = None,
+        decision_reasons=None,
+        assessment_digest: str = "",
+        **arguments,
+    ) -> ReplyResult:
+        """Confirm every bounded page before allowing caller authority updates.
+
+        Use the same transport and caller fence for the entire report. A retry
+        reconciles exact App-authored bodies under head/source/report-bound
+        markers; neither another source nor a changed result can reuse pages.
+        No per-page execution or feedback allowance is created here.
+        """
+        if not callable(fence):
+            raise GitHubConversationError("pending reply fence is missing")
+        reply = arguments.get("reply")
+        if not isinstance(reply, ConversationReply):
+            raise GitHubConversationError("reply is invalid")
+        pages = pending_reply_pages(
+            body=reply.body,
+            head_sha=arguments["head_sha"],
+            eligibility=eligibility,
+            authority_digest=authority_digest,
+            diagnostic=diagnostic,
+            decision_reasons=decision_reasons,
+            assessment_digest=assessment_digest,
+        )
+        failure = fence()
+        if failure is not None:
+            return ReplyResult(
+                status=failure, assessment_status="pending_delivery_incomplete"
+            )
+        previous = self._completed_pending_report(
+            token=arguments["token"],
+            repository=arguments["repository"],
+            pull_request=arguments["pull_request"],
+            source_kind=arguments.get("source_kind", "inline"),
+            source_comment_id=arguments["source_comment_id"],
+            source_updated_at=arguments["source_updated_at"],
+            head_sha=arguments["head_sha"],
+            report_digest=pages[0].report_digest,
+            pages=pages,
+            app_slug=arguments["app_slug"],
+        )
+        if previous is not None:
+            failure = fence()
+            return ReplyResult(
+                status=failure or "already_replied",
+                comment_id=previous,
+                assessment_status="pending_delivery_incomplete" if failure else None,
+            )
+        # Resolution is a distinct operation. Never resolve/finalize during a
+        # partial receipt, even when ordinary conversation inference asked to.
+        page_arguments = {**arguments, "reply": ConversationReply(reply.body, False)}
+        last = ReplyResult(status="pending_delivery_incomplete")
+        created = False
+        for page in pages:
+            failure = fence()
+            if failure is not None:
+                return ReplyResult(
+                    status=failure,
+                    comment_id=last.comment_id,
+                    assessment_status="pending_delivery_incomplete",
+                )
+            last = self.publish(**page_arguments, pending_page=page)
+            if last.status not in {"replied", "already_replied"}:
+                return ReplyResult(
+                    status=last.status,
+                    comment_id=last.comment_id,
+                    assessment_status="pending_delivery_incomplete",
+                )
+            created = created or last.status == "replied"
+        failure = fence()
+        if failure is not None:
+            return ReplyResult(
+                status=failure,
+                comment_id=last.comment_id,
+                assessment_status="pending_delivery_incomplete",
+            )
+        return ReplyResult(
+            status="replied" if created else "already_replied",
+            comment_id=last.comment_id,
+        )
+
+    def _completed_pending_report(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        source_kind: str,
+        source_comment_id: int,
+        source_updated_at: str,
+        head_sha: str,
+        report_digest: str,
+        pages: tuple[PendingReplyPage, ...],
+        app_slug: str,
+    ) -> int | None:
+        """Reconcile complete earlier delivery for the same authoritative state."""
+        marker = (
+            reply_marker(
+                source_comment_id=source_comment_id,
+                source_updated_digest=_digest(source_updated_at),
+                pull_request=pull_request,
+                head_sha=head_sha,
+            )[:-4]
+            + f" report={report_digest} part="
+        )
+        path = self.http.repository_path(
+            repository,
+            f"/pulls/{pull_request}/comments"
+            if source_kind == "inline"
+            else f"/issues/{pull_request}/comments",
+        )
+        comments = self.http.paginate(
+            path=path, token=token, page_sizes=CONVERSATION_COMMENT_PAGE_SIZES
+        )
+        found: dict[int, int] = {}
+        counts: set[int] = set()
+        for comment in comments:
+            if not isinstance(comment, dict):
+                continue
+            user, body = comment.get("user"), comment.get("body")
+            if (
+                not isinstance(user, dict)
+                or user.get("login") != app_slug
+                or not isinstance(body, str)
+                or marker not in body
+            ):
+                continue
+            content, separator, tail = body.rpartition("\n\n" + marker)
+            parsed = re.fullmatch(r"(\d+)/(\d+) content=([a-f0-9]{64}) -->", tail)
+            if (
+                not separator
+                or parsed is None
+                or user.get("type") != "Bot"
+                or len(body.encode("utf-8")) > MAX_REPLY_BYTES
+                or type(comment.get("id")) is not int
+                or comment["id"] < 1
+            ):
+                raise GitHubConversationError("pending reply receipt conflicts")
+            index, count = int(parsed[1]), int(parsed[2])
+            if (
+                not 1 <= index <= count == len(pages)
+                or index in found
+                or comment["id"] in found.values()
+                or _digest(content) != parsed[3]
+            ):
+                raise GitHubConversationError("pending reply receipt conflicts")
+            expected_content = append_response_instructions(pages[index - 1].body)
+            if content != expected_content:
+                raise GitHubConversationError("pending reply receipt conflicts")
+            found[index] = comment["id"]
+            counts.add(count)
+        if len(counts) > 1:
+            raise GitHubConversationError("pending reply receipt conflicts")
+        if counts and set(found) == set(range(1, next(iter(counts)) + 1)):
+            return found[max(found)]
+        return None
+
+    @bounded_reply_publication
+    def publish_current(self, **arguments) -> ReplyResult:
+        """Ordinary replies also show trusted current-head pending state."""
+        eligibility = self.finalizer.load_eligibility(
+            token=arguments["token"],
+            repository=arguments["repository"],
+            pull_request=arguments["pull_request"],
+            head_sha=arguments["head_sha"],
+            app_slug=arguments["app_slug"],
+        )
+
+        def fence() -> str | None:
+            source_kind = arguments.get("source_kind", "inline")
+            suffix = "pulls" if source_kind == "inline" else "issues"
+            status, source = self.http.request(
+                "GET",
+                self.http.repository_path(
+                    arguments["repository"],
+                    f"/{suffix}/comments/{arguments['source_comment_id']}",
+                ),
+                token=arguments["token"],
+            )
+            if status == 404:
+                return "skipped_source_gone"
+            if status != 200 or not isinstance(source, dict):
+                raise GitHubConversationError("reply source lookup failed")
+            self._require_comment_association(
+                comment=source,
+                repository=arguments["repository"],
+                pull_request=arguments["pull_request"],
+                source_kind=source_kind,
+            )
+            if not authorized_human_comment(source, app_slug=arguments["app_slug"]):
+                return "skipped_unauthorized"
+            if not has_standalone_sensei_mention(source.get("body")):
+                return "skipped_no_mention"
+            if source.get("updated_at") != arguments["source_updated_at"]:
+                return "skipped_edited_source"
+            current = self.finalizer.load_eligibility(
+                token=arguments["token"],
+                repository=arguments["repository"],
+                pull_request=arguments["pull_request"],
+                head_sha=arguments["head_sha"],
+                app_slug=arguments["app_slug"],
+            )
+            if current != eligibility:
+                return "skipped_stale_head"
+            preflight = self.finalizer._preflight(
+                token=arguments["token"],
+                repository=arguments["repository"],
+                pull_request=arguments["pull_request"],
+                head_sha=arguments["head_sha"],
+                app_slug=arguments["app_slug"],
+            )
+            return preflight.result.status if preflight.result is not None else None
+
+        outcome = self.publish_pending(
+            eligibility=eligibility, fence=fence, **arguments
+        )
+        # Keep the existing resolver/finalizer, but enter only after a complete
+        # pending receipt. Its own live head/thread/eligibility guards still run.
+        if arguments["reply"].resolve and outcome.status in {
+            "replied",
+            "already_replied",
+        }:
+            last_page = pending_reply_pages(
+                body=arguments["reply"].body,
+                head_sha=arguments["head_sha"],
+                eligibility=eligibility,
+            )[-1]
+            resolved = self.publish(**arguments, pending_page=last_page)
+            return resolved
+        return outcome
 
     def _resolve_and_finalize(
         self,
@@ -1741,6 +2013,7 @@ class ConversationPublisher:
         marker: str,
         app_slug: str,
         source_kind: str = "inline",
+        expected_body: str | None = None,
     ) -> int | None:
         path = self.http.repository_path(
             repository,
@@ -1762,6 +2035,7 @@ class ConversationPublisher:
             ) from exc
         except GitHubHTTPError as exc:
             raise GitHubConversationError("reply reconciliation failed") from exc
+        found: list[int] = []
         for comment in payload:
             if not isinstance(comment, dict):
                 continue
@@ -1773,7 +2047,15 @@ class ConversationPublisher:
                 and isinstance(user, dict)
                 and user.get("login") == app_slug
             ):
+                if expected_body is not None and (
+                    body != expected_body or user.get("type") != "Bot"
+                ):
+                    raise GitHubConversationError("pending reply page conflicts")
                 number = comment.get("id")
-                if isinstance(number, int):
-                    return number
-        return None
+                if type(number) is int and number > 0:
+                    if expected_body is None:
+                        return number
+                    found.append(number)
+        if len(found) > 1:
+            raise GitHubConversationError("pending reply page is duplicated")
+        return found[0] if found else None

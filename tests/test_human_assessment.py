@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import traceback
@@ -236,7 +237,7 @@ class State:
                 self.reply_count += 1
                 self.replies.append(
                     {
-                        "id": 30,
+                        "id": 30 + len(self.replies),
                         "body": body["body"],
                         "created_at": "created",
                         "updated_at": "replied",
@@ -244,7 +245,7 @@ class State:
                         "issue_url": self.source["issue_url"],
                     }
                 )
-                return json_response({"id": 30}, 201)
+                return json_response({"id": self.replies[-1]["id"]}, 201)
             if path.endswith("/issues/comments/10/reactions"):
                 return json_response({"id": 99}, 201)
             if path.endswith("/pulls/1/reviews"):
@@ -698,10 +699,22 @@ class HumanAssessmentTests(unittest.TestCase):
             state.eligibility.facts,
         )
         replay_provider = Provider({})
+        before_replay = state.reply_count
         replay, _ = state.application_reply(replay_provider)
-        self.assertEqual(replay.status, "already_replied")
+        self.assertEqual(replay.status, "replied")
+        self.assertEqual(state.reply_count, before_replay + 1)
+        receipt = state.replies[-1]["body"]
+        self.assertIn("No pending human-assessment findings in this inventory", receipt)
+        self.assertIn(f"Reviewed head: `{HEAD}`", receipt)
+        content, marker = receipt.rsplit("\n\n<!-- reviewsensei:", 1)
+        self.assertIn(f"content={hashlib.sha256(content.encode()).hexdigest()}", marker)
         self.assertFalse(replay_provider.calls)
         self.assertEqual(state.events(), ["COMMENT", "COMMENT", "APPROVE"])
+        again, _ = state.application_reply(replay_provider)
+        self.assertEqual(again.status, "already_replied")
+        self.assertEqual(state.reply_count, before_replay + 1)
+        self.assertEqual(state.replies[-1]["body"], receipt)
+        self.assertFalse(replay_provider.calls)
 
     def test_retry_after_durable_reassessment_resumes_approval_without_inference(self):
         state = State()
@@ -717,13 +730,17 @@ class HumanAssessmentTests(unittest.TestCase):
         self.assertEqual(state.events(), ["COMMENT"])
         retry_provider = Provider({})
         outcome, broker = state.application_reply(retry_provider)
-        self.assertEqual(outcome.status, "already_replied")
+        self.assertEqual(outcome.status, "replied")
         self.assertEqual(outcome.approval_status, "approved")
         self.assertEqual(state.events(), ["COMMENT", "APPROVE"])
         self.assertFalse(retry_provider.calls)
         self.assertEqual(broker.capabilities, ["issue_reply", "review_publish"])
         self.assertIs(ReviewApprovalFinalizer.finalize, finalize)
-        self.assertEqual(state.reply_count, 1)
+        self.assertEqual(state.reply_count, 2)
+        again, _ = state.application_reply(retry_provider)
+        self.assertEqual(again.status, "already_replied")
+        self.assertEqual(state.reply_count, 2)
+        self.assertFalse(retry_provider.calls)
 
     def test_resolved_inventory_new_mention_is_acknowledged_before_finalizing(self):
         original = prior()
@@ -1188,7 +1205,9 @@ class HumanAssessmentTests(unittest.TestCase):
                 self.assertEqual(broker.capabilities, ["issue_reply"])
                 self.assertEqual(state.events(), [])
                 self.assertEqual(state.reviews[0]["body"], original)
-                self.assertNotIn("src/", state.replies[-1]["body"])
+                self.assertNotIn(DIFF, state.replies[-1]["body"])
+                for finding in state.eligibility.human_review.pending:
+                    self.assertIn(finding.fingerprint, state.replies[-1]["body"])
                 replay, _ = state.application_reply(provider)
                 self.assertEqual(replay.status, "already_replied")
                 self.assertEqual(state.reply_count, 1)

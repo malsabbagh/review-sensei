@@ -132,8 +132,8 @@ class PublicFeedbackTests(unittest.TestCase):
         self.assertEqual(self.state.events(), [])
         self.assertTrue(self.prepared.eligibility.human_review.pending)
 
-    def test_rich_route_requires_budget_and_legacy_limit_is_preserved(self):
-        self.setup_rich()
+    def test_rich_route_requires_budget_and_single_source_limit_is_enforced(self):
+        self.setup_rich(length=32769)
         legacy = HumanAssessmentPublisher(http=self.state.http)
         with self.assertRaises(GitHubConversationError):
             legacy.prepare(
