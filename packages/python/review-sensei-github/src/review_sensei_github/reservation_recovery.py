@@ -31,6 +31,10 @@ _TERMINAL_CONCLUSIONS = frozenset(
 _LEGACY_CALLER = ".github/workflows/review-sensei-review.yml"
 
 
+class ReservationOwnerActiveError(ReviewInputError):
+    """The reservation owner run has not reached a terminal state."""
+
+
 def _stamp(value: object) -> datetime:
     if not isinstance(value, str):
         raise ReviewInputError("reservation recovery timestamp is invalid")
@@ -102,7 +106,7 @@ class ActionsReservationEvidence:
             or not isinstance(run.get("run_attempt"), int)
             or run["run_attempt"] < 1
         ):
-            raise ReviewInputError(
+            raise ReservationOwnerActiveError(
                 "reservation owner run is active or its identity is invalid"
             )
         return run
