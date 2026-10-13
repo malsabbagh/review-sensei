@@ -10,15 +10,15 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import cast
 
 from .errors import ReviewInputError
 from .session import (
-    MAX_DISPOSITIONS_PER_HEAD,
     MAX_DISPOSITION_BYTES,
+    MAX_DISPOSITIONS_PER_HEAD,
     MAX_UNHEADED_DISPOSITIONS,
     SessionIdentity,
     SessionLedger,
@@ -238,7 +238,10 @@ class MaintainerCommand:
             )
             if references and fingerprints:
                 raise ReviewInputError("finding reference is invalid")
-            if len(references) > MAX_OVERRIDE_IDS or len(fingerprints) > MAX_OVERRIDE_IDS:
+            if (
+                len(references) > MAX_OVERRIDE_IDS
+                or len(fingerprints) > MAX_OVERRIDE_IDS
+            ):
                 raise ReviewInputError(
                     "maintainer override accepts at most 10 finding ids"
                 )
@@ -440,11 +443,7 @@ def resolve_finding_identity(
 
     assigned = assign_finding_identifiers(item.instance for item in inventory)
     wanted = f"RS-{body.upper()}"
-    matches = [
-        item
-        for item in inventory
-        if assigned[item.instance].upper() == wanted
-    ]
+    matches = [item for item in inventory if assigned[item.instance].upper() == wanted]
     if len(matches) > 1:
         raise ReviewInputError("finding id is ambiguous")
     if len(matches) == 1:
@@ -660,9 +659,7 @@ def _plan_override(
                 head_sha=command.head_sha,
             )
         )
-        receipts.append(
-            OverrideReceipt(fingerprint, fingerprint, "recorded")
-        )
+        receipts.append(OverrideReceipt(fingerprint, fingerprint, "recorded"))
     if failed:
         frozen = tuple(
             OverrideReceipt(
@@ -679,9 +676,8 @@ def _plan_override(
         if any(item.detail == "needs the current review" for item in frozen):
             message = "finding id needs the current review"
         else:
-            message = (
-                "Nothing was recorded because one ID could not be applied"
-                + (f": {names}" if names else "")
+            message = "Nothing was recorded because one ID could not be applied" + (
+                f": {names}" if names else ""
             )
         raise OverrideRejected(message, frozen)
     return tuple(planned), tuple(receipts)
@@ -867,14 +863,16 @@ def apply_session_command(
             ledger, identity, record, planned, head_sha=command.head_sha, now=now
         )
     receipts: list[OverrideReceipt] = []
-    for item in planned_receipts:
-        key = (item.fingerprint, command.head_sha)
-        if item.outcome == "recorded" and key in before:
+    for receipt in planned_receipts:
+        key = (receipt.fingerprint, command.head_sha)
+        if receipt.outcome == "recorded" and key in before:
             receipts.append(
-                OverrideReceipt(item.reference, item.fingerprint, "already-recorded")
+                OverrideReceipt(
+                    receipt.reference, receipt.fingerprint, "already-recorded"
+                )
             )
         else:
-            receipts.append(item)
+            receipts.append(receipt)
     stored = session_dispositions(record)
     return record, MaintainerCommandResult(
         action=command.action,
@@ -885,7 +883,8 @@ def apply_session_command(
         dispositions=tuple(
             item
             for item in stored
-            if (item.fingerprint, item.head_sha) in {(d.fingerprint, d.head_sha) for d in planned}
+            if (item.fingerprint, item.head_sha)
+            in {(d.fingerprint, d.head_sha) for d in planned}
         )
         or planned,
         receipts=tuple(receipts),
@@ -1020,9 +1019,7 @@ def _append_dispositions(
     def mutate(current: SessionRecord) -> SessionRecord:
         if current.generation != record.generation:
             raise ReviewInputError("session generation conflict")
-        return _evolve_dispositions(
-            current, dispositions, head_sha=head_sha, now=now
-        )
+        return _evolve_dispositions(current, dispositions, head_sha=head_sha, now=now)
 
     return replace(identity, mutate, now=now)
 

@@ -5,17 +5,11 @@ import unittest
 from dataclasses import replace
 from unittest.mock import Mock
 
+from review_sensei_github.commands import _COMMANDS
+from review_sensei_github.publication import ReviewApprovalFinalizer
+
 from review_sensei.convergence import ReviewConvergencePolicy, derive_blocker_candidate
 from review_sensei.coverage import CoverageManifest, FileCoverage
-from review_sensei.models import ReviewComment, ReviewResult
-from review_sensei_github.publication import ReviewApprovalFinalizer
-from tests.fake_github_http import json_response, make_http
-from tests.test_github_publication import (
-    DIFF,
-    graphql_review_threads_response,
-    pr_payload,
-)
-
 from review_sensei.disposition import (
     FindingDisposition,
     FindingIdentity,
@@ -26,7 +20,11 @@ from review_sensei.disposition import (
     parse_maintainer_command,
 )
 from review_sensei.errors import ReviewInputError
-from review_sensei.presentation import assign_finding_identifiers, render_command_receipt
+from review_sensei.models import ReviewComment, ReviewResult
+from review_sensei.presentation import (
+    assign_finding_identifiers,
+    render_command_receipt,
+)
 from review_sensei.session import (
     MAX_DISPOSITION_BYTES,
     MAX_SESSION_COMMENT_BYTES,
@@ -35,14 +33,21 @@ from review_sensei.session import (
     SessionRecord,
     disposition_array_bytes,
 )
-from review_sensei_github.commands import _COMMANDS
+from tests.fake_github_http import json_response, make_http
+from tests.test_github_publication import (
+    DIFF,
+    graphql_review_threads_response,
+    pr_payload,
+)
 
 HEAD = "a" * 40
 OTHER = "b" * 40
 IDENTITY = SessionIdentity(repository="owner/repo", pull_request=1)
 
 
-def _identity(instance: str, concern: str, *, overridable: bool = True) -> FindingIdentity:
+def _identity(
+    instance: str, concern: str, *, overridable: bool = True
+) -> FindingIdentity:
     return FindingIdentity(
         instance=instance,
         concern=concern,
@@ -157,9 +162,7 @@ class OverrideStabilityTests(unittest.TestCase):
             ),
             finding_inventory=inventory,
         )
-        self.assertEqual(
-            [item["head_sha"] for item in moved.dispositions], [OTHER]
-        )
+        self.assertEqual([item["head_sha"] for item in moved.dispositions], [OTHER])
         self.assertEqual(moved.generation, first.generation + 1)
 
     def test_long_reasons_stop_at_the_byte_budget(self):
@@ -193,41 +196,39 @@ class OverrideStabilityTests(unittest.TestCase):
             MAX_DISPOSITION_BYTES,
         )
 
-    def test_byte_budget_binds_before_the_per_head_count(self):
+    def test_thirty_two_short_dispositions_fit_under_the_byte_budget(self):
         import json
 
-        fitting: list[dict[str, object]] = []
-        for index in range(32):
-            item = FindingDisposition(
+        dispositions = tuple(
+            FindingDisposition(
                 fingerprint=f"{index:02x}" + "cd" * 31,
                 action="accept-risk",
                 reason="acceptable risk",
                 actor="alice",
                 head_sha=HEAD,
             ).to_dict()
-            if disposition_array_bytes([*fitting, item]) > MAX_DISPOSITION_BYTES:
-                break
-            fitting.append(item)
-        record = SessionRecord.create(IDENTITY).evolve(dispositions=tuple(fitting))
-        self.assertGreater(len(record.dispositions), 4)
-        self.assertLess(len(record.dispositions), 32)
+            for index in range(32)
+        )
+        self.assertLessEqual(
+            disposition_array_bytes(dispositions), MAX_DISPOSITION_BYTES
+        )
+        record = SessionRecord.create(IDENTITY).evolve(dispositions=dispositions)
+        self.assertEqual(len(record.dispositions), 32)
         self.assertLessEqual(
             len(json.dumps(record.to_dict()).encode("utf-8")),
             MAX_SESSION_COMMENT_BYTES,
         )
         with self.assertRaisesRegex(ReviewInputError, "configured bound"):
             SessionRecord.create(IDENTITY).evolve(
-                dispositions=tuple(
-                    [
-                        *fitting,
-                        FindingDisposition(
-                            fingerprint="ff" + "cd" * 31,
-                            action="accept-risk",
-                            reason="acceptable risk",
-                            actor="alice",
-                            head_sha=HEAD,
-                        ).to_dict(),
-                    ]
+                dispositions=(
+                    *dispositions,
+                    FindingDisposition(
+                        fingerprint="ff" + "cd" * 31,
+                        action="accept-risk",
+                        reason="acceptable risk",
+                        actor="alice",
+                        head_sha=HEAD,
+                    ).to_dict(),
                 )
             )
 
@@ -338,7 +339,10 @@ class OverrideStabilityTests(unittest.TestCase):
         }
 
         def matches(request):
-            return "/pulls/2/reviews" in request.full_url and "/comments" not in request.full_url
+            return (
+                "/pulls/2/reviews" in request.full_url
+                and "/comments" not in request.full_url
+            )
 
         def respond(request):
             if request.method == "PATCH":
@@ -363,7 +367,9 @@ class OverrideStabilityTests(unittest.TestCase):
             actor="alice",
             head_sha=head,
         )
-        outcome = ReviewApprovalFinalizer(http=finalizer_http).refinalize_with_dispositions(
+        outcome = ReviewApprovalFinalizer(
+            http=finalizer_http
+        ).refinalize_with_dispositions(
             token="token",
             check_token=None,
             repository="owner/repo",
@@ -372,7 +378,11 @@ class OverrideStabilityTests(unittest.TestCase):
             head_sha=head,
             app_slug="reviewsensei[bot]",
             actor="alice",
-            finding_ids=(assign_finding_identifiers((index.entries[0].instance,))[index.entries[0].instance],),
+            finding_ids=(
+                assign_finding_identifiers((index.entries[0].instance,))[
+                    index.entries[0].instance
+                ],
+            ),
             dispositions=(disposition,),
         )
         self.assertEqual(outcome.status, "approved", outcome.diagnostic)

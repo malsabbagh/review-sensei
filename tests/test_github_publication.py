@@ -1637,7 +1637,9 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertIsNotNone(index)
         self.assertEqual(len(index.entries), 1)
         entry = index.entries[0]
-        self.assertEqual(entry.instance, eligibility.human_review.pending[0].fingerprint)
+        self.assertEqual(
+            entry.instance, eligibility.human_review.pending[0].fingerprint
+        )
         self.assertTrue(entry.needs_human)
         self.assertTrue(entry.overridable)
         self.assertTrue(entry.body_placed)

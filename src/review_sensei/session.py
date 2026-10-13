@@ -151,7 +151,10 @@ def _operator_paused(value: object) -> bool:
 MAX_STORED_DISPOSITIONS = 4
 MAX_DISPOSITIONS_PER_HEAD = 32
 MAX_UNHEADED_DISPOSITIONS = 4
-MAX_DISPOSITION_BYTES = 6144
+# Four maximum-size dispositions are about 9845 canonical bytes once non-ASCII
+# reasons and actors are escaped. The bound stays above that historical record
+# so an existing four-item ledger still loads.
+MAX_DISPOSITION_BYTES = 10240
 MAX_DISPOSITION_ITEMS = 256
 MAX_DISPOSITION_REASON_BYTES = 512
 MAX_DISPOSITION_ACTOR_BYTES = 256
@@ -469,7 +472,11 @@ def disposition_array_bytes(items: object) -> int:
     """Canonical JSON size of a dispositions array."""
 
     return len(
-        json.dumps(list(items), sort_keys=True, separators=(",", ":")).encode("utf-8")  # type: ignore[arg-type]
+        json.dumps(
+            list(items),  # type: ignore[call-overload]
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
     )
 
 

@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from hashlib import sha256
-from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
 
 from review_sensei.baseline import ReviewBaseline
 from review_sensei.budgets import ReviewWorkBudgets
@@ -237,7 +237,7 @@ def _command_from_bytes(payload: bytes) -> object:
     from review_sensei.disposition import OverrideReceipt
 
     raw_receipts = loaded.get("receipts", ())
-    receipts = ()
+    receipts: tuple[OverrideReceipt, ...] = ()
     if isinstance(raw_receipts, list):
         receipts = tuple(
             OverrideReceipt(
@@ -1128,11 +1128,17 @@ class GitHubApplication:
         """
 
         from review_sensei.disposition import (
+            FindingIdentity,
             MaintainerCommandResult,
             apply_session_command,
             authorized_maintainer,
             authorized_override,
             parse_maintainer_command,
+        )
+
+        typed_inventory = cast(Sequence[FindingIdentity] | None, finding_inventory)
+        typed_priors = cast(
+            Sequence[tuple[str, Sequence[FindingIdentity]]], prior_inventories
         )
 
         # Parse only the command spelling before choosing an authority path.
@@ -1456,8 +1462,8 @@ class GitHubApplication:
                     identity,
                     command,
                     finding_fingerprints=finding_fingerprints,
-                    finding_inventory=finding_inventory,
-                    prior_inventories=prior_inventories,
+                    finding_inventory=typed_inventory,
+                    prior_inventories=typed_priors,
                 )[1],
                 encode=_command_bytes,
                 decode=_command_from_bytes,
@@ -1468,7 +1474,7 @@ class GitHubApplication:
                 and isinstance(produced, MaintainerCommandResult)
             ):
                 loaded = ledger.load(identity)
-                produced = self._refinalize_command(
+                refinalized = self._refinalize_command(
                     produced,
                     oidc_token=oidc_token,
                     repository=repository,
@@ -1479,14 +1485,16 @@ class GitHubApplication:
                     actor=command.actor,
                     record=loaded.record,
                 )
+                if isinstance(refinalized, MaintainerCommandResult):
+                    produced = refinalized
             return produced
         _record, result = apply_session_command(
             ledger,
             identity,
             command,
             finding_fingerprints=finding_fingerprints,
-            finding_inventory=finding_inventory,
-            prior_inventories=prior_inventories,
+            finding_inventory=typed_inventory,
+            prior_inventories=typed_priors,
         )
         if (
             options.github_writes
@@ -1494,7 +1502,7 @@ class GitHubApplication:
             and command.action in {"verify", "accept-risk", "dismiss", "defer"}
             and (result.applied or command.action == "verify")
         ):
-            result = self._refinalize_command(
+            refinalized = self._refinalize_command(
                 result,
                 oidc_token=oidc_token,
                 repository=repository,
@@ -1505,6 +1513,8 @@ class GitHubApplication:
                 actor=command.actor,
                 record=_record,
             )
+            if isinstance(refinalized, MaintainerCommandResult):
+                result = refinalized
         return result
 
     def _check_capability_token(self, exchange_input: str) -> str | None:
@@ -1915,10 +1925,9 @@ class GitHubApplication:
     ) -> object:
         """Re-check approval after a hosted override. A failed check leaves the ledger write."""
 
-        from review_sensei.disposition import MaintainerCommandResult, session_dispositions
-        from review_sensei_github.errors import (
-            GitHubPublicationError,
-            GitHubPublicationTransientError,
+        from review_sensei.disposition import (
+            MaintainerCommandResult,
+            session_dispositions,
         )
 
         if not isinstance(result, MaintainerCommandResult):
@@ -1934,10 +1943,18 @@ class GitHubApplication:
         try:
             review_token = self.broker.exchange(oidc_token, capability="review_publish")
             try:
-                check_token = self.broker.exchange(oidc_token, capability="check_publish")
+                check_token = self.broker.exchange(
+                    oidc_token, capability="check_publish"
+                )
             except (GitHubBrokerClientError, GitHubHTTPTransientError, OSError):
                 check_token = None
-            dispositions = session_dispositions(record) if record is not None else ()
+            from review_sensei.session import SessionRecord
+
+            dispositions = (
+                session_dispositions(record)
+                if isinstance(record, SessionRecord)
+                else ()
+            )
             finding_ids = tuple(
                 item.reference
                 for item in result.receipts

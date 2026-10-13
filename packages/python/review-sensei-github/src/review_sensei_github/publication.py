@@ -156,9 +156,7 @@ _FINDING_INDEX_BLOCKING = 0x01
 _FINDING_INDEX_NEEDS_HUMAN = 0x02
 _FINDING_INDEX_BODY = 0x04
 _FINDING_INDEX_OPTIONAL = 0x08
-FINDING_INDEX_LIMITATION = (
-    "Finding IDs cannot be overridden by comment on this review."
-)
+FINDING_INDEX_LIMITATION = "Finding IDs cannot be overridden by comment on this review."
 _FINDING_INDEX_RE = re.compile(
     r"<!-- reviewsensei:finding-index:v1 repo=(?P<repository_id>[1-9][0-9]*) "
     r"pr=(?P<pull_request>[1-9][0-9]*) head=(?P<head_sha>[a-f0-9]{40}) "
@@ -299,7 +297,9 @@ def parse_finding_index(
     )
 
 
-def override_provenance_marker(*, actor: str, head_sha: str, finding_ids: Sequence[str]) -> str:
+def override_provenance_marker(
+    *, actor: str, head_sha: str, finding_ids: Sequence[str]
+) -> str:
     """Record who overrode which displayed IDs on this head."""
 
     if not re.fullmatch(r"[A-Za-z0-9-]{1,39}", actor):
@@ -491,6 +491,25 @@ def _framed_review_body(
     return f"{body}\n\n{eligibility_marker}"
 
 
+def _framed_body_fits(
+    summary: str,
+    *,
+    review_marker: str,
+    index_marker: str | None,
+    eligibility_marker: str,
+    summary_limit: int | None,
+) -> bool:
+    if summary_limit is not None and len(summary.encode("utf-8")) > summary_limit:
+        return False
+    framed = _framed_review_body(
+        summary,
+        review_marker=review_marker,
+        index_marker=index_marker,
+        eligibility_marker=eligibility_marker,
+    )
+    return len(framed.encode("utf-8")) <= MAX_PUBLISHED_REVIEW_BODY_BYTES
+
+
 def _index_marker_for_budget(
     entries: Sequence[IndexedFinding],
     *,
@@ -502,33 +521,39 @@ def _index_marker_for_budget(
     head_sha: str,
     base_sha: str,
     result_digest: str,
+    summary_limit: int | None = None,
 ) -> tuple[str | None, str]:
-    """Return the index marker when it fits, otherwise a visible limitation."""
+    """Return the index marker when it fits, otherwise a visible limitation.
 
-    limited = (
-        summary
-        if FINDING_INDEX_LIMITATION in summary
-        else f"{summary}\n\n{FINDING_INDEX_LIMITATION}"
-    )
-    if len(entries) > MAX_INDEXED_FINDINGS:
-        return None, limited
-    marker = finding_index_marker(
-        repository_id=repository_id,
-        pull_request=pull_request,
-        head_sha=head_sha,
-        base_sha=base_sha,
-        result_digest=result_digest,
-        entries=entries,
-    )
-    framed = _framed_review_body(
-        summary,
-        review_marker=review_marker,
-        index_marker=marker,
-        eligibility_marker=eligibility_marker,
-    )
-    if len(framed.encode("utf-8")) <= MAX_PUBLISHED_REVIEW_BODY_BYTES:
-        return marker, summary
-    return None, limited
+    A review that cannot hold the index is still published. The limitation line
+    is added only when it fits both the summary budget and the review body.
+    """
+
+    def fits(text: str, marker: str | None) -> bool:
+        return _framed_body_fits(
+            text,
+            review_marker=review_marker,
+            index_marker=marker,
+            eligibility_marker=eligibility_marker,
+            summary_limit=summary_limit,
+        )
+
+    if len(entries) <= MAX_INDEXED_FINDINGS:
+        marker = finding_index_marker(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            base_sha=base_sha,
+            result_digest=result_digest,
+            entries=entries,
+        )
+        if fits(summary, marker):
+            return marker, summary
+    if FINDING_INDEX_LIMITATION in summary or not fits(
+        f"{summary}\n\n{FINDING_INDEX_LIMITATION}", None
+    ):
+        return None, summary
+    return None, f"{summary}\n\n{FINDING_INDEX_LIMITATION}"
 
 
 def _published_summary_byte_limit(result: ReviewResult) -> int:
@@ -2345,7 +2370,11 @@ class ReviewPublisher:
         if write_preflight.result is not None:
             return write_preflight.result
         continuation_body_parts: (
-            tuple[list[tuple[ReviewComment, str, str, str]], str, tuple[IndexedFinding, ...]]
+            tuple[
+                list[tuple[ReviewComment, str, str, str]],
+                str,
+                tuple[IndexedFinding, ...],
+            ]
             | None
         ) = None
         if retained_eligibility is not None:
@@ -2395,9 +2424,7 @@ class ReviewPublisher:
             preflight_eligibility = approval_eligibility_marker(
                 replace(
                     prospective_eligibility,
-                    facts=replace(
-                        prospective_eligibility.facts, check_published=False
-                    ),
+                    facts=replace(prospective_eligibility.facts, check_published=False),
                 )
             )
             preflight_index, continuation_summary = _index_marker_for_budget(
@@ -2410,6 +2437,7 @@ class ReviewPublisher:
                 head_sha=head_sha,
                 base_sha=base_sha,
                 result_digest=review_result_digest(result),
+                summary_limit=_published_summary_byte_limit(result),
             )
             continuation_body_parts = (
                 prepared_comments,
@@ -2505,6 +2533,7 @@ class ReviewPublisher:
                 head_sha=head_sha,
                 base_sha=base_sha,
                 result_digest=review_result_digest(result),
+                summary_limit=_published_summary_byte_limit(result),
             )
             validate_bounded_text(
                 summary,
@@ -2967,7 +2996,9 @@ class ReviewPublisher:
         pull_request: int,
         head_sha: str,
         base_sha: str,
-    ) -> tuple[list[tuple[ReviewComment, str, str, str]], str]:
+    ) -> tuple[
+        list[tuple[ReviewComment, str, str, str]], str, tuple[IndexedFinding, ...]
+    ]:
         """Plan placement and render one coherent review body.
 
         Every finding is rendered through the shared typed renderers and gets

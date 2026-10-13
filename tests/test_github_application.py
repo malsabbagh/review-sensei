@@ -1340,8 +1340,7 @@ class GitHubApplicationTests(unittest.TestCase):
                     ConversationMessage(
                         author="alice",
                         body=(
-                            "@reviewsensei override RS-AAAAAA RS-BBBBBB "
-                            "acceptable risk"
+                            "@reviewsensei override RS-AAAAAA RS-BBBBBB acceptable risk"
                         ),
                         created_at="updated",
                     ),

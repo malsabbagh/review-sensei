@@ -612,9 +612,7 @@ class InlineCallerResolverTests(unittest.TestCase):
                 f"{separator}{alias} review pause",
             )
         )
-        expected.add(
-            "@reviewsensei override RS-AAAAAA\u00a0RS-BBBBBB acceptable risk"
-        )
+        expected.add("@reviewsensei override RS-AAAAAA\u00a0RS-BBBBBB acceptable risk")
         self.assertEqual(over_accepted, expected)
 
     def test_command_corpus_covers_every_maintainer_action(self):

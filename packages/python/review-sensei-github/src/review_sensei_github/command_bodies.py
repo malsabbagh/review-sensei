@@ -400,9 +400,18 @@ class OverrideFacts:
         self.prior_heads = prior_heads
 
 
-def _legacy_inventory(http: object, *, token: str, repository: str, pull_request: int, review: dict[str, Any]):
+def _legacy_inventory(
+    http: object,
+    *,
+    token: str,
+    repository: str,
+    pull_request: int,
+    review: dict[str, Any],
+):
     """Eligibility needs-human IDs, plus inline instance/lifecycle pairs."""
 
+    from review_sensei_github.errors import GitHubHTTPError
+    from review_sensei_github.http import MAX_PAGINATION_PAGES
     from review_sensei_github.publication import (
         APPROVAL_ELIGIBILITY_MARKER_PREFIX,
         IndexedFinding,
@@ -410,8 +419,6 @@ def _legacy_inventory(http: object, *, token: str, repository: str, pull_request
         finding_fingerprint_from_body,
         finding_instance_from_body,
     )
-    from review_sensei_github.errors import GitHubHTTPError
-    from review_sensei_github.http import MAX_PAGINATION_PAGES
 
     body = review.get("body")
     entries: list[IndexedFinding] = []
@@ -459,7 +466,9 @@ def _legacy_inventory(http: object, *, token: str, repository: str, pull_request
         if not isinstance(instance, str) or instance in seen or lifecycle is None:
             continue
         seen.add(instance)
-        blocking = "blocking=true" in comment_body if isinstance(comment_body, str) else False
+        blocking = (
+            "blocking=true" in comment_body if isinstance(comment_body, str) else False
+        )
         entries.append(
             IndexedFinding(
                 instance=instance,
@@ -876,7 +885,8 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     operation_entry=command_configuration.github.operation_entry,
                     app_id=_actions_app_id(),
                     run_id=os.environ.get("GITHUB_RUN_ID", "").strip() or None,
-                    run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT", "1").strip() or "1",
+                    run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT", "1").strip()
+                    or "1",
                 )
             except OverrideRejected as exc:
                 _post_command_receipt(
