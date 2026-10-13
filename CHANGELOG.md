@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.0 - 2026-10-13
+
 - Prevented cancelled or killed reviews from leaking their session
   reservation (ADR 0079): `SIGTERM` now unwinds through the same cleanup
   as `SIGINT`, the owning run may release its own reservation even after
@@ -14,6 +16,10 @@
   automatically and status messages now distinguish "paused by
   maintainer" from "blocked by held reservation, owner run X". Deploy the
   broker before relying on the new exchange.
+
+## review-sensei-github 0.2.0 - 2026-10-13
+
+- Pin `review-sensei==0.7.0`.
 
 ## 0.6.23 - 2026-10-12
 
