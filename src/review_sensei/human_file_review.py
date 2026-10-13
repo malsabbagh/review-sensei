@@ -272,8 +272,8 @@ class FileReviewRequest:
                 "",
                 "Reply with this exact sentence to approve every file in this request:",
                 "`@reviewsensei I reviewed the media files and I approve`",
-                "A maintainer or admin may also name one finding, for example "
-                "`@reviewsensei override RS-ABCDEF acceptable risk`.",
+                "A maintainer or admin may also name one or more findings, for example "
+                "`@reviewsensei override RS-ABCDEF RS-123456 acceptable risk`.",
                 "This confirms human file review only. Text findings and other approval checks remain open.",
                 "Any snapshot or review-result change requires a fresh confirmation.",
             ]

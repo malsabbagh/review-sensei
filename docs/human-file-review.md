@@ -94,7 +94,8 @@ accepted. To confirm another subset, use a new comment. The blanket sentence
 requires GitHub permission `maintain` or `admin`. Write access can still
 confirm a named subset. A maintainer or admin can also record one finding as
 acceptable risk, for example `@reviewsensei override RS-ABCDEF acceptable risk`
-or `@reviewsensei RS-ABCDEF is acceptable risk`. That records the existing
+or `@reviewsensei RS-ABCDEF is acceptable risk`. Several IDs can be named in
+one comment, separated by spaces or commas, up to 10. That records the existing
 accept-risk disposition on the GitHub session comment. It is not a verified fix.
 One source comment cannot be edited into a new confirmation or rebound to a new
 snapshot. The source must be a live issue comment on the same PR, with exact

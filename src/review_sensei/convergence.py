@@ -1018,11 +1018,17 @@ def admit_review_result(
             )
         if authorized_dispositions:
             from .disposition import disposition_honors_fingerprint
+            from .human_assessment import finding_instance_fingerprint
 
-            fingerprint = finding_lifecycle_for_comment(comment).fingerprint
+            lifecycle = finding_lifecycle_for_comment(comment).fingerprint
+            instance = finding_instance_fingerprint(comment)
             if disposition_honors_fingerprint(
                 typed_dispositions,
-                fingerprint,
+                instance,
+                head_sha=current_head_sha,
+            ) or disposition_honors_fingerprint(
+                typed_dispositions,
+                lifecycle,
                 head_sha=current_head_sha,
             ):
                 candidate = replace(candidate, has_authorized_disposition=True)

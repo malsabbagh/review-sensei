@@ -1320,6 +1320,59 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(skipped.status, "skipped_no_mention")
         self.assertEqual(self.broker.exchanges, [])
 
+    def test_command_routed_to_reply_posts_guidance_without_calling_the_provider(self):
+        provider = RecordingProvider()
+        calls = []
+
+        def complete(request):
+            calls.append(request)
+            raise AssertionError("provider must not run")
+
+        provider.complete = complete  # type: ignore[method-assign]
+        self.replier.prepare_context = lambda **kwargs: PreparedConversation(
+            source_kind="issue",
+            source_comment_id=10,
+            source_updated_at="updated",
+            head_sha="a" * 40,
+            root_comment_id=10,
+            context=ConversationContext(
+                messages=(
+                    ConversationMessage(
+                        author="alice",
+                        body=(
+                            "@reviewsensei override RS-AAAAAA RS-BBBBBB "
+                            "acceptable risk"
+                        ),
+                        created_at="updated",
+                    ),
+                ),
+                pull_request_number=1,
+                head_sha="a" * 40,
+            ),
+        )
+        outcome = self.application.generate_and_publish_reply(
+            options=GitHubWriteOptions(github_writes=True, mention_replies=True),
+            oidc_token="provided-oidc",
+            read_token="read-token",
+            repository="owner/repo",
+            pull_request=1,
+            source_comment_id=10,
+            source_updated_at="updated",
+            expected_head_sha=None,
+            reply_provider=provider,
+            model="fixture-model",
+            app_slug="review-sensei[bot]",
+            root_comment_id=10,
+            source_kind="issue",
+        )
+        self.assertEqual(outcome.status, "replied")
+        self.assertEqual(calls, [])
+        self.assertEqual(self.replier.reaction_calls, [])
+        self.assertIn(
+            "predates multi-finding overrides",
+            self.replier.calls[0]["reply"].body,
+        )
+
     def test_generated_reply_authorizes_then_uses_reply_capability(self):
         options = GitHubWriteOptions(github_writes=True, mention_replies=True)
         outcome = self.application.generate_and_publish_reply(

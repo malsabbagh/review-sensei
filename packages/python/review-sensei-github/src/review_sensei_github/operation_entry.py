@@ -422,6 +422,21 @@ _V2_FINGERPRINT = re.compile(
 )
 
 
+def finding_inventory_for_head(
+    body: str, *, repository_id: int, pull_request: int, head_sha: str
+):
+    """Finding index for this head, or None when the review predates the index."""
+
+    from .publication import parse_finding_index
+
+    return parse_finding_index(
+        body,
+        repository_id=repository_id,
+        pull_request=pull_request,
+        head_sha=head_sha,
+    )
+
+
 def fingerprints_for_head(
     body: str, *, repository_id: int, pull_request: int, head_sha: str
 ) -> tuple[str, ...]:

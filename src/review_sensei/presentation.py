@@ -42,8 +42,9 @@ A maintainer or admin handles this review with one comment. Copy a command exact
 
 - Approve the media files without listing each file: `@reviewsensei I reviewed the media files and I approve`
 - Override one finding by its id: `@reviewsensei override RS-ABCDEF acceptable risk` or `@reviewsensei RS-ABCDEF is acceptable risk`. Replace `RS-ABCDEF` with the finding id in this review.
+- Override several findings at once: `@reviewsensei override RS-ABCDEF RS-123456 acceptable risk` (up to 10 IDs, separated by spaces or commas).
 
-After an override, comment `@reviewsensei verify` to apply it. An override applies to the current commit only. A new push needs a new override.
+An override re-checks approval on this commit without a new AI review. Comment `@reviewsensei verify` to retry that check. An override applies to the current commit only. A new push needs a new override.
 
 The override is stored on this pull request as an acceptable-risk decision. The AI review stays partial. Write access alone cannot use these commands.\
 """
@@ -106,6 +107,37 @@ def escape_markdown_label(value: str) -> str:
     # label from ever changing the surrounding Markdown line structure.
     escaped = _MARKDOWN_LABEL_CHARS.sub(r"\\\1", value)
     return escaped.replace("\r", r"\r").replace("\n", r"\n")
+
+
+def render_command_receipt(
+    *,
+    actor: str,
+    source_comment_id: int,
+    command_digest: str,
+    receipts: tuple[object, ...],
+    ledger_written: bool,
+) -> str:
+    """Render one override receipt. Failure receipts never claim a write."""
+
+    lines = ["### ReviewSensei command receipt", ""]
+    if not ledger_written:
+        lines.append("The ledger was not written.")
+        lines.append("")
+    lines.append(f"Actor: {escape_markdown_label(actor)}")
+    lines.append("")
+    for item in receipts:
+        reference = escape_markdown_label(str(getattr(item, "reference", "")))
+        outcome = escape_markdown_label(str(getattr(item, "outcome", "")))
+        detail = str(getattr(item, "detail", "") or "")
+        line = f"- `{reference}`: {outcome}"
+        if detail:
+            line += f" ({escape_markdown_label(detail)})"
+        lines.append(line)
+    marker = (
+        "<!-- reviewsensei:command-receipt:v1 "
+        f"source={source_comment_id} digest={command_digest} -->"
+    )
+    return "\n".join(lines) + "\n\n" + marker + "\n"
 
 
 def render_check_permission_warning(*, concise: bool = False) -> str:

@@ -23,10 +23,22 @@ IDENTITY = SessionIdentity("owner/repo", 136, repository_id=99)
 
 
 def _marker(*, head=HEAD, repository_id=99, pull_request=136):
-    return (
-        f"<!-- reviewsensei:finding:v2 repo={repository_id} pr={pull_request} "
-        f"head={head} base={'c' * 40} fingerprint={FINGERPRINT} "
-        "state=new blocking=true -->"
+    from review_sensei_github.publication import IndexedFinding, finding_index_marker
+
+    return finding_index_marker(
+        repository_id=repository_id,
+        pull_request=pull_request,
+        head_sha=head,
+        base_sha="c" * 40,
+        result_digest="d" * 64,
+        entries=(
+            IndexedFinding(
+                instance=FINGERPRINT,
+                lifecycle="e" * 64,
+                blocking=True,
+                needs_human=False,
+            ),
+        ),
     )
 
 
@@ -57,12 +69,22 @@ class HostedOverrideMetadataTests(unittest.TestCase):
     ):
         """Run the public CLI and real handler with synthetic external seams."""
         http = GitHubHttp()
-        reads = Mock(
-            side_effect=[
-                (permission_status, permission),
-                (review_status, [_review()] if reviews is None else reviews),
-            ]
-        )
+        review_page = [_review()] if reviews is None else reviews
+        calls = []
+
+        def respond(method, url, token=None, **kwargs):
+            calls.append(unittest.mock.call(method, url, token=token))
+            if "/collaborators/" in url:
+                return permission_status, permission
+            if "/comments" in url:
+                return 200, []
+            if "/reviews" in url:
+                if review_status != 200:
+                    return review_status, {"message": "no"}
+                return 200, review_page
+            return 404, {}
+
+        reads = Mock(side_effect=respond)
         attestation = {
             "version": 1,
             "repository": "owner/repo",
@@ -170,18 +192,22 @@ class HostedOverrideMetadataTests(unittest.TestCase):
                     self.assertEqual(record.dispositions[0]["fingerprint"], FINGERPRINT)
                     self.assertEqual(record.dispositions[0]["head_sha"], HEAD)
                     self.assertEqual(record.dispositions[0]["actor"], "alice")
+                    observed = [
+                        (call.args[0], call.args[1], call.kwargs.get("token"))
+                        for call in result.reads.call_args_list[:2]
+                    ]
                     self.assertEqual(
-                        result.reads.call_args_list,
+                        observed,
                         [
-                            unittest.mock.call(
+                            (
                                 "GET",
                                 "/repos/owner/repo/collaborators/alice/permission",
-                                token="synthetic-read-token",
+                                "synthetic-read-token",
                             ),
-                            unittest.mock.call(
+                            (
                                 "GET",
-                                "/repos/owner/repo/pulls/136/reviews?per_page=100",
-                                token="synthetic-read-token",
+                                "/repos/owner/repo/pulls/136/reviews?per_page=100&page=1",
+                                "synthetic-read-token",
                             ),
                         ],
                     )
@@ -200,7 +226,14 @@ class HostedOverrideMetadataTests(unittest.TestCase):
                         result.ledger_factory.call_args.kwargs["session_grant"],
                         "synthetic-one-use-grant",
                     )
-                    result.broker.exchange.assert_not_called()
+                    capabilities = [
+                        call.kwargs.get("capability")
+                        for call in result.broker.exchange.call_args_list
+                    ]
+                    self.assertTrue(
+                        set(capabilities)
+                        <= {"review_publish", "check_publish", "issue_reply"}
+                    )
 
     def test_missing_or_blank_tokens_fail_before_metadata_or_broker_calls(self):
         for environment in ({}, {"GITHUB_TOKEN": " "}, {"GH_TOKEN": "\t"}):

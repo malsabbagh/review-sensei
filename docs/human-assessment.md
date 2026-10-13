@@ -84,7 +84,7 @@ commands are `review status`, `review pause`, `review continue`, `review reenrol
 `override <RS-id> acceptable risk` or `<RS-id> is acceptable risk`, each
 preceded by the standalone mention. The media sentence and the `RS-` override
 require a maintainer or admin. The published review repeats those commands.
-After an override, comment `@reviewsensei verify` to apply it. An override
+An override re-checks approval on this commit without a new AI review. Comment `@reviewsensei verify` to retry that check. An override
 applies to the current commit only. A new push needs a new override.
 Disposition reasons have a 512-byte limit.
 `review continue` unpauses the session; it does not replenish an assessment

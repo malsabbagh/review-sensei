@@ -1,6 +1,7 @@
 """Hosted command bodies. Loaded with the engine CLI globals, not imported."""
 
 import argparse
+from typing import Any
 
 from review_sensei.baseline import admission_context_from_document
 from review_sensei.configuration import customization_directories
@@ -378,6 +379,100 @@ def _require_accepted_result(
         )
 
 
+def _identity_from_indexed(item: Any) -> Any:
+    from review_sensei.disposition import FindingIdentity
+
+    return FindingIdentity(
+        instance=item.instance,
+        concern=item.lifecycle,
+        blocking=bool(item.blocking),
+        needs_human=bool(item.needs_human),
+        overridable=bool(item.overridable),
+    )
+
+
+class OverrideFacts:
+    """Permission plus the current head's finding inventory and older heads."""
+
+    def __init__(self, permission, inventory, prior_heads) -> None:
+        self.permission = permission
+        self.inventory = inventory
+        self.prior_heads = prior_heads
+
+
+def _legacy_inventory(http: object, *, token: str, repository: str, pull_request: int, review: dict[str, Any]):
+    """Eligibility needs-human IDs, plus inline instance/lifecycle pairs."""
+
+    from review_sensei_github.publication import (
+        APPROVAL_ELIGIBILITY_MARKER_PREFIX,
+        IndexedFinding,
+        approval_eligibility_from_body,
+        finding_fingerprint_from_body,
+        finding_instance_from_body,
+    )
+    from review_sensei_github.errors import GitHubHTTPError
+    from review_sensei_github.http import MAX_PAGINATION_PAGES
+
+    body = review.get("body")
+    entries: list[IndexedFinding] = []
+    seen: set[str] = set()
+    if isinstance(body, str) and APPROVAL_ELIGIBILITY_MARKER_PREFIX in body:
+        eligibility = approval_eligibility_from_body(body)
+        if eligibility is None or eligibility.partitioned_root is not None:
+            raise ReviewInputError("current review inventory is incomplete")
+        human = None if eligibility is None else eligibility.human_review
+        if human is not None:
+            for item in human.findings:
+                if item.fingerprint in seen:
+                    continue
+                seen.add(item.fingerprint)
+                entries.append(
+                    IndexedFinding(
+                        instance=item.fingerprint,
+                        lifecycle=None,
+                        blocking=False,
+                        needs_human=True,
+                        body_placed=True,
+                        overridable=True,
+                    )
+                )
+    review_id = review.get("id")
+    if isinstance(review_id, bool) or not isinstance(review_id, int):
+        return tuple(entries)
+    try:
+        comments = http.paginate(  # type: ignore[attr-defined]
+            path=http.repository_path(  # type: ignore[attr-defined]
+                repository, f"/pulls/{pull_request}/reviews/{review_id}/comments"
+            ),
+            token=token,
+            max_requests=MAX_PAGINATION_PAGES,
+            timeout_seconds=60,
+        )
+    except GitHubHTTPError as exc:
+        raise ReviewInputError("current review inventory is incomplete") from exc
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        comment_body = comment.get("body")
+        instance = finding_instance_from_body(comment_body)
+        lifecycle = finding_fingerprint_from_body(comment_body)
+        if not isinstance(instance, str) or instance in seen or lifecycle is None:
+            continue
+        seen.add(instance)
+        blocking = "blocking=true" in comment_body if isinstance(comment_body, str) else False
+        entries.append(
+            IndexedFinding(
+                instance=instance,
+                lifecycle=lifecycle,
+                blocking=blocking,
+                needs_human=False,
+                body_placed=False,
+                overridable=True,
+            )
+        )
+    return tuple(entries)
+
+
 def _override_facts(
     http: object,
     *,
@@ -388,14 +483,17 @@ def _override_facts(
     head_sha: str,
     actor: str,
     app_slug: str,
-) -> tuple[str, tuple[str, ...]]:
-    """Read collaborator permission and the current App review fingerprints.
+) -> OverrideFacts:
+    """Read collaborator permission and the current App review inventory.
 
-    The command does not accept a caller-supplied review file. Fingerprints
-    come from the latest App review on this head.
+    The command does not accept a caller-supplied review file. Identities come
+    from the latest App review on this head. Older heads are returned only so
+    a receipt can name the commit that last displayed an unknown ID.
     """
 
-    from review_sensei_github.operation_entry import fingerprints_for_head
+    from review_sensei_github.errors import GitHubHTTPError
+    from review_sensei_github.http import MAX_PAGINATION_PAGES
+    from review_sensei_github.operation_entry import finding_inventory_for_head
 
     if not re.fullmatch(r"[A-Za-z0-9-]{1,39}", actor):
         raise ReviewInputError("maintainer actor is invalid")
@@ -416,17 +514,21 @@ def _override_facts(
     # custom roles retain their legacy permission and the existing denial.
     if permission == "write" and permission_body.get("role_name") == "maintain":
         permission = "maintain"
-    status, reviews = http.request(  # type: ignore[attr-defined]
-        "GET",
-        http.repository_path(  # type: ignore[attr-defined]
-            repository, f"/pulls/{pull_request}/reviews?per_page=100"
-        ),
-        token=token,
-    )
-    if status != 200 or not isinstance(reviews, list):
+    try:
+        reviews = http.paginate(  # type: ignore[attr-defined]
+            path=http.repository_path(  # type: ignore[attr-defined]
+                repository, f"/pulls/{pull_request}/reviews"
+            ),
+            token=token,
+            max_requests=MAX_PAGINATION_PAGES,
+            timeout_seconds=60,
+        )
+    except GitHubHTTPError as exc:
+        raise ReviewInputError("current review fingerprints are unavailable") from exc
+    if not isinstance(reviews, list):
         raise ReviewInputError("current review fingerprints are unavailable")
-    latest_body = ""
-    latest_id = -1
+    latest: dict[str, Any] | None = None
+    prior: dict[str, dict[str, Any]] = {}
     for review in reviews:
         if not isinstance(review, dict):
             continue
@@ -434,24 +536,58 @@ def _override_facts(
         login = user.get("login") if isinstance(user, dict) else None
         if not isinstance(login, str) or login.lower() != app_slug.lower():
             continue
-        if review.get("commit_id") != head_sha:
-            continue
         review_id = review.get("id")
-        body = review.get("body")
+        commit_id = review.get("commit_id")
         if (
-            isinstance(review_id, int)
-            and not isinstance(review_id, bool)
-            and review_id >= latest_id
-            and isinstance(body, str)
+            isinstance(review_id, bool)
+            or not isinstance(review_id, int)
+            or not isinstance(commit_id, str)
         ):
-            latest_id = review_id
-            latest_body = body
-    return permission, fingerprints_for_head(
-        latest_body,
-        repository_id=repository_id,
-        pull_request=pull_request,
-        head_sha=head_sha,
-    )
+            continue
+        if commit_id == head_sha:
+            if latest is None or review_id >= int(latest["id"]):
+                latest = review
+            continue
+        previous = prior.get(commit_id)
+        if previous is None or review_id >= int(previous["id"]):
+            prior[commit_id] = review
+    inventory: tuple[Any, ...] = ()
+    if latest is not None and isinstance(latest.get("body"), str):
+        try:
+            index = finding_inventory_for_head(
+                latest["body"],
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+            )
+        except ReviewInputError:
+            raise
+        if index is not None:
+            inventory = index.entries
+        else:
+            inventory = _legacy_inventory(
+                http,
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                review=latest,
+            )
+    prior_heads: list[tuple[str, tuple[Any, ...]]] = []
+    for commit_id, review in prior.items():
+        if not isinstance(review.get("body"), str):
+            continue
+        try:
+            index = finding_inventory_for_head(
+                review["body"],
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=commit_id,
+            )
+        except ReviewInputError:
+            continue
+        if index is not None:
+            prior_heads.append((commit_id, index.entries))
+    return OverrideFacts(permission, inventory, tuple(prior_heads))
 
 
 def _bind_hosted_command_attestation(
@@ -486,6 +622,83 @@ def _bind_hosted_command_attestation(
         raise ReviewInputError(
             "session attestation does not match the hosted command identity"
         )
+
+
+def _write_step_summary(text: str) -> None:
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not isinstance(path, str) or not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(text if text.endswith("\n") else text + "\n")
+    except OSError:
+        return
+
+
+def _post_command_receipt(
+    http: object,
+    broker: object,
+    *,
+    oidc_token: str | None,
+    repository: str,
+    pull_request: int,
+    source_comment_id: int,
+    comment_body: str,
+    actor: str,
+    receipts: tuple[object, ...],
+    ledger_written: bool,
+) -> None:
+    """Post one receipt comment. A failed post does not undo a recorded command."""
+
+    if not receipts or not isinstance(source_comment_id, int) or source_comment_id <= 0:
+        return
+    import hashlib
+
+    from review_sensei.presentation import render_command_receipt
+    from review_sensei_github.http import MAX_PAGINATION_PAGES
+
+    digest = hashlib.sha256(comment_body.encode("utf-8")).hexdigest()
+    text = render_command_receipt(
+        actor=actor,
+        source_comment_id=source_comment_id,
+        command_digest=digest,
+        receipts=receipts,
+        ledger_written=ledger_written,
+    )
+    marker = (
+        "<!-- reviewsensei:command-receipt:v1 "
+        f"source={source_comment_id} digest={digest} -->"
+    )
+    try:
+        token = broker.exchange(  # type: ignore[attr-defined]
+            oidc_token or broker.request_oidc_token(),  # type: ignore[attr-defined]
+            capability="issue_reply",
+        )
+        if not isinstance(token, str) or not token.strip():
+            raise ReviewInputError("issue reply capability is unavailable")
+        comments = http.paginate(  # type: ignore[attr-defined]
+            path=http.repository_path(  # type: ignore[attr-defined]
+                repository, f"/issues/{pull_request}/comments"
+            ),
+            token=token.strip(),
+            max_requests=MAX_PAGINATION_PAGES,
+            timeout_seconds=60,
+        )
+        for comment in comments:
+            if isinstance(comment, dict) and marker in str(comment.get("body") or ""):
+                return
+        status, _payload = http.request(  # type: ignore[attr-defined]
+            "POST",
+            http.repository_path(  # type: ignore[attr-defined]
+                repository, f"/issues/{pull_request}/comments"
+            ),
+            token=token.strip(),
+            body={"body": text},
+        )
+        if status not in {200, 201}:
+            _write_step_summary(text)
+    except Exception:
+        _write_step_summary(text)
 
 
 def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
@@ -596,7 +809,13 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             http = GitHubHttp()
             actor_permission = None
             finding_fingerprints = None
-            if parsed.action == "approve-media" or parsed.finding_reference:
+            finding_inventory = None
+            prior_inventories = ()
+            if (
+                parsed.action == "approve-media"
+                or parsed.finding_reference
+                or parsed.finding_references
+            ):
                 read_token = os.environ.get("GITHUB_TOKEN") or os.environ.get(
                     "GH_TOKEN"
                 )
@@ -604,7 +823,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     raise ReviewInputError(
                         "maintainer override requires GitHub metadata access"
                     )
-                actor_permission, finding_fingerprints = _override_facts(
+                facts = _override_facts(
                     http,
                     token=read_token.strip(),
                     repository=args.repository,
@@ -614,6 +833,14 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     actor=args.actor,
                     app_slug=args.app_slug,
                 )
+                actor_permission = facts.permission
+                finding_inventory = tuple(
+                    _identity_from_indexed(item) for item in facts.inventory
+                )
+                prior_inventories = tuple(
+                    (head, tuple(_identity_from_indexed(item) for item in entries))
+                    for head, entries in facts.prior_heads
+                )
             application = GitHubApplication(
                 broker=BrokerClient(),
                 http=http,
@@ -622,31 +849,62 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 replier=ConversationPublisher(http=http),
             )
             command_configuration = load_configuration(getattr(args, "config", None))
-            result = application.apply_maintainer_command(
-                options=GitHubWriteOptions(
-                    github_writes=args.allow_write,
-                    github_session_ledger=True,
-                ),
+            from review_sensei.disposition import OverrideRejected
+
+            try:
+                result = application.apply_maintainer_command(
+                    options=GitHubWriteOptions(
+                        github_writes=args.allow_write,
+                        github_session_ledger=True,
+                    ),
+                    oidc_token=getattr(args, "oidc_token", None),
+                    repository=args.repository,
+                    repository_id=args.repository_id,
+                    pull_request=args.pull_request,
+                    head_sha=args.head_sha,
+                    body=args.comment_body,
+                    actor_login=args.actor,
+                    actor_type=args.actor_type,
+                    association=args.association,
+                    app_slug=args.app_slug,
+                    source_comment_id=source_comment_id,
+                    session_attestation=session_attestation,
+                    actor_permission=actor_permission,
+                    finding_fingerprints=finding_fingerprints,
+                    finding_inventory=finding_inventory,
+                    prior_inventories=prior_inventories,
+                    operation_entry=command_configuration.github.operation_entry,
+                    app_id=_actions_app_id(),
+                    run_id=os.environ.get("GITHUB_RUN_ID", "").strip() or None,
+                    run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT", "1").strip() or "1",
+                )
+            except OverrideRejected as exc:
+                _post_command_receipt(
+                    http,
+                    application.broker,
+                    oidc_token=getattr(args, "oidc_token", None),
+                    repository=args.repository,
+                    pull_request=args.pull_request,
+                    source_comment_id=source_comment_id,
+                    comment_body=args.comment_body,
+                    actor=args.actor,
+                    receipts=exc.receipts,
+                    ledger_written=False,
+                )
+                raise
+            print(result.summary)
+            _post_command_receipt(
+                http,
+                application.broker,
                 oidc_token=getattr(args, "oidc_token", None),
                 repository=args.repository,
-                repository_id=args.repository_id,
                 pull_request=args.pull_request,
-                head_sha=args.head_sha,
-                body=args.comment_body,
-                actor_login=args.actor,
-                actor_type=args.actor_type,
-                association=args.association,
-                app_slug=args.app_slug,
                 source_comment_id=source_comment_id,
-                session_attestation=session_attestation,
-                actor_permission=actor_permission,
-                finding_fingerprints=finding_fingerprints,
-                operation_entry=command_configuration.github.operation_entry,
-                app_id=_actions_app_id(),
-                run_id=os.environ.get("GITHUB_RUN_ID", "").strip() or None,
-                run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT", "1").strip() or "1",
+                comment_body=args.comment_body,
+                actor=args.actor,
+                receipts=tuple(getattr(result, "receipts", ()) or ()),
+                ledger_written=bool(getattr(result, "applied", False)),
             )
-            print(result.summary)
             return 0
         for flag, value in (
             ("--repository-id", getattr(args, "repository_id", None)),
