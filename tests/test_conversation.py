@@ -230,8 +230,9 @@ class ConversationContractTests(unittest.TestCase):
         self.assertIn("bare dismissal", prompt)
         self.assertIn("I reviewed the media files and I approve", prompt)
         self.assertIn("override <RS-id> acceptable risk", prompt)
+        self.assertIn("Up to 10 finding IDs can be named in that same comment", prompt)
         self.assertIn(
-            "After an override, comment `@reviewsensei verify` to apply it.",
+            "An override re-checks approval on this commit without a new AI review.",
             prompt,
         )
         self.assertIn(

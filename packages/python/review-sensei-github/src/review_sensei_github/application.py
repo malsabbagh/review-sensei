@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from hashlib import sha256
-from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
 
 from review_sensei.baseline import ReviewBaseline
 from review_sensei.budgets import ReviewWorkBudgets
@@ -209,16 +209,23 @@ def _command_bytes(value: object) -> bytes:
 
     if not isinstance(value, MaintainerCommandResult):
         return b""
-    return json.dumps(
-        {
-            "action": value.action,
-            "applied": value.applied,
-            "operator_paused": value.operator_paused,
-            "summary": value.summary,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    payload = {
+        "action": value.action,
+        "applied": value.applied,
+        "operator_paused": value.operator_paused,
+        "summary": value.summary,
+    }
+    if value.receipts:
+        payload["receipts"] = [
+            {
+                "reference": item.reference,
+                "fingerprint": item.fingerprint,
+                "outcome": item.outcome,
+                "detail": item.detail,
+            }
+            for item in value.receipts
+        ]
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def _command_from_bytes(payload: bytes) -> object:
@@ -227,11 +234,29 @@ def _command_from_bytes(payload: bytes) -> object:
     loaded = json.loads(payload)
     if not isinstance(loaded, dict):
         raise ReviewInputError("operation entry refused: result_missing")
+    from review_sensei.disposition import OverrideReceipt
+
+    raw_receipts = loaded.get("receipts", ())
+    receipts: tuple[OverrideReceipt, ...] = ()
+    if isinstance(raw_receipts, list):
+        receipts = tuple(
+            OverrideReceipt(
+                reference=str(item.get("reference", "")),
+                fingerprint=item.get("fingerprint")
+                if isinstance(item.get("fingerprint"), str)
+                else None,
+                outcome=str(item.get("outcome", "unknown")),
+                detail=str(item.get("detail", "")),
+            )
+            for item in raw_receipts
+            if isinstance(item, dict)
+        )
     return MaintainerCommandResult(
         action=str(loaded.get("action", "")),
         applied=loaded.get("applied") is True,
         operator_paused=loaded.get("operator_paused") is True,
         summary=str(loaded.get("summary", "")),
+        receipts=receipts,
     )
 
 
@@ -1082,6 +1107,8 @@ class GitHubApplication:
         session_attestation: Mapping[str, object] | None = None,
         actor_permission: str | None = None,
         finding_fingerprints: Sequence[str] | None = None,
+        finding_inventory: Sequence[object] | None = None,
+        prior_inventories: Sequence[tuple[str, Sequence[object]]] = (),
         media_publisher: object | None = None,
         review_result: object | None = None,
         request_comment_id: int | None = None,
@@ -1101,11 +1128,17 @@ class GitHubApplication:
         """
 
         from review_sensei.disposition import (
+            FindingIdentity,
             MaintainerCommandResult,
             apply_session_command,
             authorized_maintainer,
             authorized_override,
             parse_maintainer_command,
+        )
+
+        typed_inventory = cast(Sequence[FindingIdentity] | None, finding_inventory)
+        typed_priors = cast(
+            Sequence[tuple[str, Sequence[FindingIdentity]]], prior_inventories
         )
 
         # Parse only the command spelling before choosing an authority path.
@@ -1207,7 +1240,11 @@ class GitHubApplication:
                 )
         if command is None:
             raise GitHubPublicationError("maintainer command reconstruction failed")
-        if command.action == "approve-media" or command.finding_reference:
+        if (
+            command.action == "approve-media"
+            or command.finding_reference
+            or command.finding_references
+        ):
             attested_association = association
             if hosted_mutation and isinstance(broker_attestation, Mapping):
                 attested = broker_attestation.get("association")
@@ -1425,17 +1462,59 @@ class GitHubApplication:
                     identity,
                     command,
                     finding_fingerprints=finding_fingerprints,
+                    finding_inventory=typed_inventory,
+                    prior_inventories=typed_priors,
                 )[1],
                 encode=_command_bytes,
                 decode=_command_from_bytes,
             )
+            if (
+                options.github_writes
+                and oidc_token
+                and isinstance(produced, MaintainerCommandResult)
+            ):
+                loaded = ledger.load(identity)
+                refinalized = self._refinalize_command(
+                    produced,
+                    oidc_token=oidc_token,
+                    repository=repository,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                    actor=command.actor,
+                    record=loaded.record,
+                )
+                if isinstance(refinalized, MaintainerCommandResult):
+                    produced = refinalized
             return produced
         _record, result = apply_session_command(
             ledger,
             identity,
             command,
             finding_fingerprints=finding_fingerprints,
+            finding_inventory=typed_inventory,
+            prior_inventories=typed_priors,
         )
+        if (
+            options.github_writes
+            and oidc_token
+            and command.action in {"verify", "accept-risk", "dismiss", "defer"}
+            and (result.applied or command.action == "verify")
+        ):
+            refinalized = self._refinalize_command(
+                result,
+                oidc_token=oidc_token,
+                repository=repository,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                actor=command.actor,
+                record=_record,
+            )
+            if isinstance(refinalized, MaintainerCommandResult):
+                result = refinalized
         return result
 
     def _check_capability_token(self, exchange_input: str) -> str | None:
@@ -1831,6 +1910,82 @@ class GitHubApplication:
             parts=parts,
         )
 
+    def _refinalize_command(
+        self,
+        result: object,
+        *,
+        oidc_token: str,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        app_slug: str,
+        actor: str,
+        record: object,
+    ) -> object:
+        """Re-check approval after a hosted override. A failed check leaves the ledger write."""
+
+        from review_sensei.disposition import (
+            MaintainerCommandResult,
+            session_dispositions,
+        )
+
+        if not isinstance(result, MaintainerCommandResult):
+            return result
+        finalizer = getattr(self.reviewer, "finalizer", None)
+        refinalize = getattr(finalizer, "refinalize_with_dispositions", None)
+        if not callable(refinalize):
+            return result
+        failed = (
+            result.summary
+            + "; recorded; gate re-evaluation failed, comment `@reviewsensei verify` to retry"
+        )
+        try:
+            review_token = self.broker.exchange(oidc_token, capability="review_publish")
+            try:
+                check_token = self.broker.exchange(
+                    oidc_token, capability="check_publish"
+                )
+            except (GitHubBrokerClientError, GitHubHTTPTransientError, OSError):
+                check_token = None
+            from review_sensei.session import SessionRecord
+
+            dispositions = (
+                session_dispositions(record)
+                if isinstance(record, SessionRecord)
+                else ()
+            )
+            finding_ids = tuple(
+                item.reference
+                for item in result.receipts
+                if item.outcome in {"recorded", "already-recorded"}
+                and item.reference.startswith("RS-")
+            )
+            publication = refinalize(
+                token=review_token,
+                check_token=check_token,
+                repository=repository,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                actor=actor,
+                finding_ids=finding_ids,
+                dispositions=dispositions,
+            )
+        except Exception:
+            return replace(result, summary=failed)
+        if getattr(publication, "status", None) == "gate_reevaluation_failed":
+            return replace(result, summary=failed)
+        if getattr(publication, "status", None) in {"approved", "already_approved"}:
+            return replace(result, summary=result.summary + "; approval submitted")
+        diagnostic = getattr(publication, "diagnostic", None)
+        if diagnostic:
+            return replace(
+                result, summary=result.summary + f"; approval withheld ({diagnostic})"
+            )
+        return result
+
     def generate_and_publish_reply(
         self,
         *,
@@ -1888,6 +2043,40 @@ class GitHubApplication:
         )
         if not isinstance(prepared, PreparedConversation):
             return prepared
+        source_body = (
+            prepared.context.messages[-1].body if prepared.context.messages else ""
+        )
+        from review_sensei.disposition import parse_maintainer_command
+
+        command = parse_maintainer_command(source_body, actor="maintainer")
+        if command is not None and len(command.finding_references) > 1:
+            capability_token = self.broker.exchange(
+                oidc_token or self.broker.request_oidc_token(),
+                capability=(
+                    "inline_reply"
+                    if prepared.source_kind == "inline"
+                    else "issue_reply"
+                ),
+            )
+            return self.replier.publish(
+                token=capability_token,
+                repository=repository,
+                pull_request=pull_request,
+                source_comment_id=prepared.source_comment_id,
+                source_updated_at=prepared.source_updated_at,
+                head_sha=prepared.head_sha,
+                reply=ConversationReply(
+                    body=(
+                        "This is a maintainer command, but this repository's "
+                        "ReviewSensei caller workflow predates multi-finding "
+                        "overrides, so it was not applied. Re-run setup to update "
+                        "the caller, or post one override per comment."
+                    )
+                ),
+                app_slug=app_slug,
+                root_comment_id=prepared.root_comment_id,
+                source_kind=prepared.source_kind,
+            )
         capability_token = self.broker.exchange(
             oidc_token or self.broker.request_oidc_token(),
             capability=(
