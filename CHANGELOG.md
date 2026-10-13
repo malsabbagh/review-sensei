@@ -12,7 +12,7 @@
   charged to the old head, after which that same review proceeds on
   the current head — while a maintainer pause is never cleared
   automatically and status messages now distinguish "paused by
-  maintainer" from "blocked by run X, still running". Deploy the
+  maintainer" from "blocked by held reservation, owner run X". Deploy the
   broker before relying on the new exchange.
 
 ## 0.6.23 - 2026-10-12

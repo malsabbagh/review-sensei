@@ -442,7 +442,7 @@ class SessionCommandTests(unittest.TestCase):
             now=FIXED_NOW,
         )
         _record, result = apply_session_command(ledger, IDENTITY, status, now=FIXED_NOW)
-        self.assertIn("blocked by run 424242, still running", result.summary)
+        self.assertIn("blocked by held reservation, owner run 424242", result.summary)
         self.assertNotIn("paused by maintainer", result.summary)
 
     def test_status_without_pause_or_hold_emits_no_blocked_clause(self):
@@ -480,7 +480,7 @@ class SessionCommandTests(unittest.TestCase):
         # distinguishable as one composed string (ADR 0079).
         self.assertIn(
             "paused by maintainer, comment @sensei review continue to resume; "
-            "blocked by run 424242, still running",
+            "blocked by held reservation, owner run 424242",
             result.summary,
         )
 

@@ -77,11 +77,14 @@ maintainer `continue`. The pause contract is unchanged and stricter:
   workflow, and admission self-heal already makes the next triggered
   review recover without a maintainer.
 - Status messages tell the cases apart: "paused by maintainer,
-  comment @sensei review continue to resume", "blocked by run X, still
-  running", and "blocked by a held reservation, owner unknown" for
-  legacy records. When several conditions hold at once the clauses
-  compose in that order (pause first) instead of hiding one another;
-  `docs/diagnostics.md` enumerates every form with operator guidance.
+  comment @sensei review continue to resume", "blocked by held
+  reservation, owner run X", and "blocked by a held reservation, owner
+  unknown" for legacy records. The status command has no liveness
+  evidence, so the held-reservation clauses name the recorded owner
+  without claiming that run is still active. When several conditions
+  hold at once the clauses compose in that order (pause first) instead
+  of hiding one another; `docs/diagnostics.md` enumerates every form
+  with operator guidance.
 
 ## Consequences
 

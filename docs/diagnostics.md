@@ -121,7 +121,7 @@ could not. When a runner is lost entirely, the next review heals the
 leak at admission: it proves the owner run completed with GitHub Actions
 reads, charges one failed attempt to the abandoned head, and reviews the
 current head in the same job. A still-running owner is briefly waited
-for and then reported as `blocked by run X, still running`; unclear
+for and then reported as blocked by that run; unclear
 evidence stays blocked without mutation.
 
 `@sensei review status` tells the blocked states apart. It composes one
@@ -130,9 +130,10 @@ clause per condition, in this order:
 - `paused by maintainer, comment @sensei review continue to resume` —
   a maintainer paused the session; pushes and admission self-heal never
   clear it, only an explicit `continue` does.
-- `blocked by run X, still running` — run X still owns the reservation;
-  wait for it to finish, after which admission self-heal or a later
-  review proceeds.
+- `blocked by held reservation, owner run X` — the reservation is
+  recorded against run X. The status command has no liveness evidence:
+  X may still be running, or it may have finished and leaked the hold,
+  in which case admission self-heal on the next review clears it.
 - `blocked by a held reservation, owner unknown` — a legacy record
   without OIDC owner metadata holds the reservation. It stays blocked
   until the ADR 0063 legacy proof identifies the origin or an authorized
