@@ -726,8 +726,9 @@ class HumanAssessmentTests(unittest.TestCase):
             "finalize",
             side_effect=GitHubPublicationTransientError("interrupted"),
         ):
-            with self.assertRaises(GitHubPublicationTransientError):
-                state.application_reply(provider)
+            interrupted, _ = state.application_reply(provider)
+            self.assertEqual(interrupted.status, "replied")
+            self.assertEqual(interrupted.approval_status, "approval_withheld")
         self.assertEqual(state.events(), ["COMMENT"])
         retry_provider = Provider({})
         outcome, broker = state.application_reply(retry_provider)
@@ -873,16 +874,17 @@ class HumanAssessmentTests(unittest.TestCase):
             "finalize",
             side_effect=GitHubPublicationTransientError("interrupted"),
         ):
-            with self.assertRaises(GitHubPublicationTransientError):
-                publisher.publish(
-                    token="issue",
-                    review_token="review",
-                    repository="owner/repo",
-                    pull_request=1,
-                    prepared=prepared,
-                    reply=reply,
-                    app_slug=APP,
-                )
+            interrupted = publisher.publish(
+                token="issue",
+                review_token="review",
+                repository="owner/repo",
+                pull_request=1,
+                prepared=prepared,
+                reply=reply,
+                app_slug=APP,
+            )
+            self.assertEqual(interrupted.status, "replied")
+            self.assertEqual(interrupted.approval_status, "approval_withheld")
         self.assertEqual(state.events(), ["COMMENT"])
         for _ in range(2):
             outcome = publisher.publish(

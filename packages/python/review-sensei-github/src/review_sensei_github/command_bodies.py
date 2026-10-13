@@ -1293,6 +1293,12 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 ),
                 file=sys.stderr,
             )
+        resolution_status = getattr(reply_outcome, "resolution_status", None)
+        if resolution_status is not None:
+            print(
+                f"review-sensei: thread_resolution={resolution_status}; comment @reviewsensei verify to retry",
+                file=sys.stderr,
+            )
         approval_status = getattr(reply_outcome, "approval_status", None)
         if approval_status is not None:
             reply_approval_diagnostic = getattr(

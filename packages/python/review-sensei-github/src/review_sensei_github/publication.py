@@ -1108,6 +1108,7 @@ class PublicationResult:
     review_id: int | None = None
     diagnostic: str | None = None
     shadow: Mapping[str, object] | None = None
+    thread_resolution: str | None = None
     # A terminal no-progress handoff exposes the durable identity so an
     # at-least-once caller can distinguish persisted suppression from retryable
     # publication failure.
@@ -1494,6 +1495,8 @@ class ReviewApprovalFinalizer:
                 or not isinstance(body, str)
             ):
                 continue
+            if APPROVAL_ELIGIBILITY_MARKER_PREFIX not in body:
+                continue
             if chosen is None or review_id >= int(chosen["id"]):
                 chosen = review
         if chosen is None:
@@ -1512,13 +1515,15 @@ class ReviewApprovalFinalizer:
                 status="approval_withheld", diagnostic="approval_withheld"
             )
         try:
-            index = parse_finding_index(
-                body,
+            index = self.finding_index_from_reviews(
+                reviews,
                 repository_id=repository_id,
                 pull_request=pull_request,
                 head_sha=head_sha,
+                app_slug=app_slug,
+                eligibility=eligibility,
             )
-        except ReviewInputError:
+        except (ReviewInputError, GitHubPublicationError):
             return PublicationResult(
                 status="gate_reevaluation_failed",
                 diagnostic="gate_reevaluation_failed",
@@ -1588,6 +1593,34 @@ class ReviewApprovalFinalizer:
             )
             if provenance not in new_body:
                 new_body = f"{new_body}\n\n{provenance}"
+        live = self._preflight(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            app_slug=app_slug,
+        )
+        if live.result is not None:
+            return live.result
+        if live.base_sha != index.base_sha or live.repository_id != repository_id:
+            return PublicationResult(status="skipped_stale_base")
+        if (
+            self.load_eligibility(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            != eligibility
+        ):
+            return PublicationResult(
+                status="approval_withheld", diagnostic="approval_withheld"
+            )
+        if len(new_body.encode("utf-8")) > MAX_PUBLISHED_REVIEW_BODY_BYTES:
+            return PublicationResult(
+                status="gate_reevaluation_failed", diagnostic="gate_reevaluation_failed"
+            )
         try:
             status, _payload = self.http.request(
                 "PATCH",
@@ -1622,15 +1655,55 @@ class ReviewApprovalFinalizer:
                 )
             except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
                 pass
-        return self.finalize(
+        if (
+            self.load_eligibility(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            != adjusted
+        ):
+            return PublicationResult(
+                status="gate_reevaluation_failed", diagnostic="gate_reevaluation_failed"
+            )
+        resolution = self.reconcile_decided_threads(
             token=token,
             repository=repository,
+            repository_id=repository_id,
             pull_request=pull_request,
             head_sha=head_sha,
             app_slug=app_slug,
             eligibility=adjusted,
-            require_persisted=True,
+            index=index,
+            reviews=reviews,
             honored_instances=honored_instances,
+        )
+        try:
+            finalized = self.finalize(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                eligibility=adjusted,
+                require_persisted=True,
+                honored_instances=honored_instances,
+            )
+        except (GitHubHTTPError, GitHubPublicationError):
+            finalized = PublicationResult(
+                status="approval_withheld", diagnostic="approval_withheld"
+            )
+        return replace(
+            finalized,
+            thread_resolution=(
+                "unconfirmed"
+                if resolution.unconfirmed
+                else "resolved"
+                if resolution.resolved
+                else None
+            ),
         )
 
     def _post_head_review(
@@ -1760,6 +1833,253 @@ class ReviewApprovalFinalizer:
             app_authored=author["login"] == app_slug,
         )
 
+    def finding_index_from_reviews(
+        self,
+        reviews: Sequence[Any],
+        *,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        app_slug: str,
+        eligibility: ReviewApprovalEligibility | None = None,
+    ) -> FindingIndex | None:
+        """Find the original inventory bound to the latest eligibility result.
+
+        Assessment and approval receipts need not repeat the index. They cannot
+        erase an earlier inventory, or reveal an inventory for another result.
+        """
+        if eligibility is None:
+            eligibility = self._eligibility_from_reviews(
+                list(reviews),
+                head_sha=head_sha,
+                app_slug=app_slug,
+                require_valid=True,
+            )
+        indexes = []
+        for review in reversed(reviews):
+            if (
+                not isinstance(review, dict)
+                or review.get("commit_id") != head_sha
+                or str(review.get("user", {}).get("login", "")).casefold()
+                != app_slug.casefold()
+            ):
+                continue
+            body = review.get("body")
+            if not isinstance(body, str) or FINDING_INDEX_MARKER_PREFIX not in body:
+                continue
+            if body.count(FINDING_INDEX_MARKER_PREFIX) != 1:
+                raise GitHubPublicationError("finding index is ambiguous")
+            index = parse_finding_index(
+                body,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+            )
+            if index is None:
+                raise GitHubPublicationError("finding index scope is invalid")
+            indexes.append(index)
+        if not indexes:
+            return None
+        if eligibility is None:
+            # Without eligibility there is no permission to change the inventory.
+            return indexes[0]
+        matching = [
+            item for item in indexes if item.result_digest == eligibility.result_digest
+        ]
+        if not matching or any(item != matching[0] for item in matching):
+            raise GitHubPublicationError(
+                "finding index does not match current eligibility"
+            )
+        return matching[0]
+
+    def reconcile_decided_threads(
+        self,
+        *,
+        token: str,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        app_slug: str,
+        eligibility: ReviewApprovalEligibility,
+        index: FindingIndex | None,
+        reviews: Sequence[Any],
+        honored_instances: frozenset[str] = frozenset(),
+    ):
+        """Retry durable override, assessment and addressed decisions without AI."""
+        from .thread_resolution import (
+            FindingThreadResolver,
+            ThreadResolutionResult,
+            resolution_records,
+        )
+
+        if index is None:
+            return ThreadResolutionResult()
+        try:
+            durable_records = resolution_records(reviews, app_slug)
+        except GitHubPublicationError:
+            return ThreadResolutionResult(
+                unconfirmed=tuple(
+                    entry.instance for entry in index.entries if not entry.body_placed
+                )
+            )
+        records = tuple(
+            record
+            for record in durable_records
+            if (
+                record["repo"],
+                record["pr"],
+                record["head"],
+                record["base"],
+                record["result"],
+            )
+            == (
+                repository_id,
+                pull_request,
+                head_sha,
+                index.base_sha,
+                eligibility.result_digest,
+            )
+        )
+        assessed = (
+            set(eligibility.human_review.resolved)
+            if eligibility.human_review
+            else set()
+        )
+        addressed = {record["instance"] for record in records}
+        instances = frozenset(
+            entry.instance
+            for entry in index.entries
+            if not entry.body_placed
+            and (
+                entry.instance in honored_instances
+                or entry.instance in addressed
+                or (entry.needs_human and entry.instance in assessed)
+            )
+        )
+        if not instances:
+            return ThreadResolutionResult()
+
+        def fence() -> bool:
+            live_reviews = self._load_head_reviews(
+                token=token, repository=repository, pull_request=pull_request
+            )
+            current = self._eligibility_from_reviews(
+                live_reviews, head_sha=head_sha, app_slug=app_slug, require_valid=True
+            )
+            current_index = self.finding_index_from_reviews(
+                live_reviews,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                eligibility=current,
+            )
+            live_records = resolution_records(live_reviews, app_slug)
+            if current_index != index or any(
+                record not in live_records for record in records
+            ):
+                return False
+            live = self._preflight(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            return (
+                current == eligibility
+                and live.result is None
+                and live.repository_id == repository_id
+                and live.base_sha == index.base_sha
+                and not live.app_authored
+            )
+
+        try:
+            return FindingThreadResolver(self.http).resolve(
+                token=token,
+                repository=repository,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=index.base_sha,
+                app_slug=app_slug,
+                instances=instances,
+                records=records,
+                fence=fence,
+            )
+        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+            return ThreadResolutionResult(unconfirmed=tuple(sorted(instances)))
+
+    def finalize_recorded_decisions(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        head_sha: str,
+        app_slug: str,
+        eligibility: ReviewApprovalEligibility,
+    ) -> PublicationResult:
+        """Keep a recorded decision successful when a later host operation fails."""
+        resolution = None
+        try:
+            live = self._preflight(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            if live.result is not None:
+                return live.result
+            assert live.repository_id is not None
+            reviews = self._load_head_reviews(
+                token=token, repository=repository, pull_request=pull_request
+            )
+            index = self.finding_index_from_reviews(
+                reviews,
+                repository_id=live.repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                eligibility=eligibility,
+            )
+            resolution = self.reconcile_decided_threads(
+                token=token,
+                repository=repository,
+                repository_id=live.repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                eligibility=eligibility,
+                index=index,
+                reviews=reviews,
+            )
+            result = self.finalize(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                eligibility=eligibility,
+                require_persisted=True,
+            )
+        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+            result = PublicationResult(
+                status="approval_withheld", diagnostic="approval_withheld"
+            )
+        return replace(
+            result,
+            thread_resolution=(
+                "unconfirmed"
+                if resolution is None or resolution.unconfirmed
+                else "resolved"
+                if resolution.resolved
+                else None
+            ),
+        )
+
     def _inline_obligations_resolved(
         self,
         reviews: Sequence[Any],
@@ -1779,39 +2099,19 @@ class ReviewApprovalFinalizer:
         that obligation stays on the eligibility facts.
         """
 
-        body: str | None = None
-        chosen_id = -1
-        for review in reviews:
-            if not isinstance(review, dict) or review.get("commit_id") != head_sha:
-                continue
-            user = review.get("user")
-            login = user.get("login") if isinstance(user, dict) else None
-            review_id = review.get("id")
-            review_body = review.get("body")
-            if (
-                not isinstance(login, str)
-                or login.casefold() != app_slug.casefold()
-                or isinstance(review_id, bool)
-                or not isinstance(review_id, int)
-                or not isinstance(review_body, str)
-            ):
-                continue
-            if review_id >= chosen_id:
-                chosen_id = review_id
-                body = review_body
-        if body is None or FINDING_INDEX_MARKER_PREFIX not in body:
-            return True
         try:
-            index = parse_finding_index(
-                body,
+            index = self.finding_index_from_reviews(
+                reviews,
                 repository_id=repository_id,
                 pull_request=pull_request,
                 head_sha=head_sha,
+                app_slug=app_slug,
             )
-        except ReviewInputError:
+        except (ReviewInputError, GitHubPublicationError):
             return False
         if index is None:
-            return False
+            # Compatibility only for histories without any finding index.
+            return True
         required = {
             entry.instance
             for entry in index.entries
@@ -3055,6 +3355,14 @@ class ReviewPublisher:
                     token=token,
                     threads=suppression.superseded_threads,
                     confirmed_review_id=review_id,
+                    repository=repository,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    app_slug=app_slug,
+                    eligibility=eligibility,
+                    replacements=prepared_comments,
                 )
                 return self._finalize_after_publication(
                     token=token,
@@ -3269,48 +3577,81 @@ class ReviewPublisher:
         token: str,
         threads: Sequence[tuple[str, str]],
         confirmed_review_id: int,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        base_sha: str,
+        app_slug: str,
+        eligibility: ReviewApprovalEligibility,
+        replacements: Sequence[tuple[ReviewComment, str, str, str]],
     ) -> None:
-        """Resolve older threads only after the replacement review is confirmed.
+        from .thread_resolution import FindingThreadResolver
 
-        A failed or uncertain mutation leaves the old thread open. Supersession
-        does not mark the current finding addressed and does not move an override.
-        """
-
-        if not isinstance(confirmed_review_id, int) or confirmed_review_id < 1:
+        replacement_concerns = {item[1] for item in replacements}
+        matching = {
+            thread: concern
+            for thread, concern in threads
+            if concern in replacement_concerns
+        }
+        if (
+            not matching
+            or type(confirmed_review_id) is not int
+            or confirmed_review_id < 1
+        ):
             return
-        mutation = """
-mutation ResolveReviewThread($input: ResolveReviewThreadInput!) {
-  resolveReviewThread(input: $input) {
-    thread { id isResolved }
-  }
-}
-""".strip()
-        for thread_id, _concern in threads:
-            try:
-                status, payload = self.http.request(
-                    "POST",
-                    "/graphql",
+        try:
+
+            def fence() -> bool:
+                if not self._inline_findings_persisted(
                     token=token,
-                    body={
-                        "operationName": "ResolveReviewThread",
-                        "query": mutation,
-                        "variables": {"input": {"threadId": thread_id}},
-                    },
+                    repository=repository,
+                    pull_request=pull_request,
+                    app_slug=app_slug,
+                    repository_id=repository_id,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    instances=tuple(
+                        finding_instance_fingerprint(item[0]) for item in replacements
+                    ),
+                ):
+                    return False
+                current = self.finalizer.load_eligibility(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
                 )
-            except (GitHubHTTPError, GitHubHTTPTransientError):
-                return
-            if status != 200 or not isinstance(payload, dict):
-                return
-            resolved = (
-                payload.get("data", {})
-                .get("resolveReviewThread", {})
-                .get("thread", {})
-                .get("isResolved")
-                if isinstance(payload.get("data"), dict)
-                else None
+                live = self.finalizer._preflight(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                )
+                return (
+                    current == eligibility
+                    and live.result is None
+                    and live.repository_id == repository_id
+                    and live.base_sha == base_sha
+                    and not live.app_authored
+                )
+
+            FindingThreadResolver(self.http).resolve(
+                token=token,
+                repository=repository,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                app_slug=app_slug,
+                instances=frozenset(),
+                supersede=matching,
+                fence=fence,
             )
-            if resolved is not True:
-                return
+        except (GitHubHTTPError, GitHubPublicationError):
+            return
 
     def _published_finding_suppression(
         self,

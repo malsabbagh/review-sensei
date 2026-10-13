@@ -1975,6 +1975,17 @@ class GitHubApplication:
             )
         except Exception:
             return replace(result, summary=failed)
+        thread_status = getattr(publication, "thread_resolution", None)
+        if thread_status:
+            result = replace(
+                result,
+                summary=result.summary
+                + (
+                    "; matching threads resolved"
+                    if thread_status == "resolved"
+                    else "; decision recorded; thread resolution unconfirmed, comment `@reviewsensei verify` to retry"
+                ),
+            )
         if getattr(publication, "status", None) == "gate_reevaluation_failed":
             return replace(result, summary=failed)
         if getattr(publication, "status", None) in {"approved", "already_approved"}:
@@ -2386,6 +2397,13 @@ class GitHubApplication:
                     root_comment_id=prepared.root_comment_id,
                     source_kind=prepared.source_kind,
                 )
+            try:
+                resolution_token = self.broker.exchange(
+                    oidc_token or self.broker.request_oidc_token(),
+                    capability="review_publish",
+                )
+            except (GitHubBrokerClientError, GitHubHTTPTransientError, OSError):
+                resolution_token = None
             return publish(
                 token=capability_token,
                 repository=repository,
@@ -2397,7 +2415,9 @@ class GitHubApplication:
                 app_slug=app_slug,
                 root_comment_id=prepared.root_comment_id,
                 source_kind=prepared.source_kind,
+                resolution_token=resolution_token,
                 resolution_evidence=resolution_evidence,
+                resolution_base_sha=prepared.context.base_sha,
             )
         finally:
             self.replier.remove_processing_reaction(

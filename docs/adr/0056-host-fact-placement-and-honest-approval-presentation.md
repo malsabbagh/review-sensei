@@ -194,3 +194,28 @@ the acceptance matrix that cites these fixtures.
 - [ADR 0032](0032-blocking-finding-classification-for-approvals.md)
 - [ADR 0035](0035-request-changes-for-blocking-findings.md)
 - [ADR 0055](0055-merge-focused-default-and-legacy-retirement.md)
+
+### Thread-decision reconciliation (PR #297)
+
+The hosted adapter confirms an addressed reply in a separate App-authored
+`resolution:v2` COMMENT review before mutating its thread. The record binds the
+repository ID, PR, base/head, reviewed result, instance, root/source comment,
+source timestamp/body digest and actor, and current-diff evidence digest.
+It is independent of paged reply bodies and cannot be omitted for reply size.
+Writing this record and finalizing approval use the `review_publish` capability;
+ordinary reply delivery continues to use `issue_reply`.
+
+Overrides, validated human reassessments and `verify` share bounded thread
+reconciliation. Each mutation rechecks the App root, current decision/index,
+source authority where applicable, and exact open/non-draft/non-fork PR scope.
+A full ten-page-bounded discovery precedes mutations. Ambiguous mutation
+responses receive a readback; unconfirmed resolution preserves the durable
+decision and remains retryable. Successful resolution remains successful when
+approval subsequently fails. Receipts expose resolution and approval separately.
+
+Later assessment, addressed-decision and approval receipts cannot hide the
+original finding index: the finalizer retrieves the inventory for the current
+eligibility result. A conflicting or unmatched inventory withholds approval.
+Legacy histories without any index retain their conservative existing gates.
+Old-head thread supersession requires a confirmed same-concern replacement and
+fresh scope checks; unrelated historical threads are left untouched.

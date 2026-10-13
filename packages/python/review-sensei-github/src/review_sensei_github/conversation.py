@@ -34,7 +34,6 @@ from .errors import (
     GitHubHTTPError,
     GitHubHTTPTransientError,
     GitHubPublicationError,
-    GitHubPublicationTransientError,
 )
 from .http import GitHubHttp
 from .pending import PendingReplyPage, pending_reply_pages
@@ -42,6 +41,7 @@ from .publication import (
     ReviewApprovalFinalizer,
     finding_declares_blocking,
     finding_instance_from_body,
+    finding_publication_scope,
 )
 from .reply_budget import bounded_reply_publication
 
@@ -69,41 +69,6 @@ DIFF_HUNK_HEADER = re.compile(
     r"\+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@"
 )
 MARKER_PREFIX = "<!-- reviewsensei:reply:v1"
-
-_REVIEW_THREADS_FOR_RESOLUTION_QUERY = """
-query ResolveReviewThreadLookup($owner: String!, $name: String!, $number: Int!, $after: String) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) {
-      reviewThreads(first: 100, after: $after) {
-        nodes {
-          id
-          isResolved
-          comments(first: 1) {
-            nodes {
-              databaseId
-            }
-          }
-        }
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
-      }
-    }
-  }
-}
-""".strip()
-
-_RESOLVE_REVIEW_THREAD_MUTATION = """
-mutation ResolveReviewThread($input: ResolveReviewThreadInput!) {
-  resolveReviewThread(input: $input) {
-    thread {
-      id
-      isResolved
-    }
-  }
-}
-""".strip()
 
 
 def _digest(value: str) -> str:
@@ -257,6 +222,7 @@ class ReplyResult:
     approval_diagnostic: str | None = None
     assessment_status: str | None = None
     assessment_diagnostic: str | None = None
+    resolution_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -295,21 +261,6 @@ class ProcessingReaction:
     """One App-authored processing reaction that must be removed."""
 
     reaction_id: int
-
-
-@dataclass(frozen=True)
-class ResolutionAuthority:
-    """Durable authority to resolve one App-owned finding thread.
-
-    A generated reply's resolve bit is not this record. The evidence digest is
-    the provenance of the current diff that established the finding is addressed.
-    """
-
-    instance: str
-    head_sha: str
-    source_comment_id: int
-    decision: str
-    evidence_sha256: str
 
 
 class ConversationPublisher:
@@ -1205,38 +1156,20 @@ class ConversationPublisher:
             used += size
         return tuple(selected)
 
-    def _resolution_record(
+    def _can_record_resolution(
         self,
         *,
         reply: ConversationReply,
         root_is_app_authored: bool,
         root_body: object,
-        head_sha: str,
-        source_comment_id: int,
         resolution_evidence: str | None,
-    ) -> ResolutionAuthority | None:
-        """Return durable addressed-finding authority, or nothing.
-
-        ``resolve=true`` without a current-diff evidence digest, or without an
-        instance marker on the App root, leaves the thread open.
-        """
-
-        if not reply.resolve or not root_is_app_authored:
-            return None
-        if (
-            not isinstance(resolution_evidence, str)
-            or re.fullmatch(r"[a-f0-9]{64}", resolution_evidence) is None
-        ):
-            return None
-        instance = finding_instance_from_body(root_body)
-        if instance is None:
-            return None
-        return ResolutionAuthority(
-            instance=instance,
-            head_sha=head_sha,
-            source_comment_id=source_comment_id,
-            decision="addressed",
-            evidence_sha256=resolution_evidence,
+    ) -> bool:
+        return bool(
+            reply.resolve
+            and root_is_app_authored
+            and finding_instance_from_body(root_body) is not None
+            and isinstance(resolution_evidence, str)
+            and re.fullmatch(r"[a-f0-9]{64}", resolution_evidence)
         )
 
     def publish(
@@ -1254,6 +1187,8 @@ class ConversationPublisher:
         source_kind: str = "inline",
         pending_page: PendingReplyPage | None = None,
         resolution_evidence: str | None = None,
+        resolution_base_sha: str | None = None,
+        resolution_token: str | None = None,
     ) -> ReplyResult:
         if not GIT_SHA_HEX.fullmatch(head_sha):
             raise GitHubConversationError("reply head sha is invalid")
@@ -1369,30 +1304,34 @@ class ConversationPublisher:
             expected_body=body if pending_page is not None else None,
         )
         if existing is not None:
-            if (
-                self._resolution_record(
-                    reply=reply,
-                    root_is_app_authored=root_is_app_authored,
-                    root_body=root_body,
-                    head_sha=head_sha,
-                    source_comment_id=source_comment_id,
-                    resolution_evidence=resolution_evidence,
-                )
-                is not None
+            if self._can_record_resolution(
+                reply=reply,
+                root_is_app_authored=root_is_app_authored,
+                root_body=root_body,
+                resolution_evidence=resolution_evidence,
             ):
-                self._resolve_and_finalize(
-                    token=token,
+                resolution = self._resolve_and_finalize(
+                    token=resolution_token,
                     repository=repository,
                     pull_request=pull_request,
                     root_comment_id=resolved_root,
                     head_sha=head_sha,
                     app_slug=app_slug,
                     root_is_blocking_finding=root_is_blocking_finding,
+                    source_comment_id=source_comment_id,
+                    source_updated_at=source_updated_at,
+                    evidence_sha256=resolution_evidence,
+                    base_sha=resolution_base_sha,
                 )
                 return ReplyResult(
-                    status="already_replied_and_resolved",
+                    status="already_replied_and_resolved"
+                    if resolution.resolved
+                    else "already_replied",
                     comment_id=existing,
-                    resolved=True,
+                    resolved=resolution.resolved,
+                    resolution_status=resolution.resolution_status,
+                    approval_status=resolution.approval_status,
+                    approval_diagnostic=resolution.approval_diagnostic,
                 )
             return ReplyResult(status="already_replied", comment_id=existing)
 
@@ -1429,23 +1368,6 @@ class ConversationPublisher:
         ):
             return ReplyResult(status="skipped_fork")
 
-        authority = self._resolution_record(
-            reply=reply,
-            root_is_app_authored=root_is_app_authored,
-            root_body=root_body,
-            head_sha=head_sha,
-            source_comment_id=source_comment_id,
-            resolution_evidence=resolution_evidence,
-        )
-        if authority is not None:
-            durable = (
-                "\n\n<!-- reviewsensei:resolution:v1 "
-                f"instance={authority.instance} head={head_sha} "
-                f"source={source_comment_id} evidence={authority.evidence_sha256} "
-                "decision=addressed -->"
-            )
-            if len((body + durable).encode("utf-8")) <= MAX_REPLY_BYTES:
-                body = body + durable
         request_body: dict[str, object] = {"body": body}
         target = (
             f"/pulls/{pull_request}/comments/{resolved_root}/replies"
@@ -1491,30 +1413,34 @@ class ConversationPublisher:
                         raise GitHubConversationTransientError(
                             "pending reply page readback was not confirmed"
                         )
-                if (
-                    self._resolution_record(
-                        reply=reply,
-                        root_is_app_authored=root_is_app_authored,
-                        root_body=root_body,
-                        head_sha=head_sha,
-                        source_comment_id=source_comment_id,
-                        resolution_evidence=resolution_evidence,
-                    )
-                    is not None
+                if self._can_record_resolution(
+                    reply=reply,
+                    root_is_app_authored=root_is_app_authored,
+                    root_body=root_body,
+                    resolution_evidence=resolution_evidence,
                 ):
-                    self._resolve_and_finalize(
-                        token=token,
+                    resolution = self._resolve_and_finalize(
+                        token=resolution_token,
                         repository=repository,
                         pull_request=pull_request,
                         root_comment_id=resolved_root,
                         head_sha=head_sha,
                         app_slug=app_slug,
                         root_is_blocking_finding=root_is_blocking_finding,
+                        source_comment_id=source_comment_id,
+                        source_updated_at=source_updated_at,
+                        evidence_sha256=resolution_evidence,
+                        base_sha=resolution_base_sha,
                     )
                     return ReplyResult(
-                        status="replied_and_resolved",
+                        status="replied_and_resolved"
+                        if resolution.resolved
+                        else "replied",
                         comment_id=comment_id,
-                        resolved=True,
+                        resolved=resolution.resolved,
+                        resolution_status=resolution.resolution_status,
+                        approval_status=resolution.approval_status,
+                        approval_diagnostic=resolution.approval_diagnostic,
                     )
                 return ReplyResult(status="replied", comment_id=comment_id)
         if status == 422 or status == 409 or status == 429 or status >= 500:
@@ -1528,30 +1454,34 @@ class ConversationPublisher:
                 expected_body=body if pending_page is not None else None,
             )
             if existing_after is not None:
-                if (
-                    self._resolution_record(
-                        reply=reply,
-                        root_is_app_authored=root_is_app_authored,
-                        root_body=root_body,
-                        head_sha=head_sha,
-                        source_comment_id=source_comment_id,
-                        resolution_evidence=resolution_evidence,
-                    )
-                    is not None
+                if self._can_record_resolution(
+                    reply=reply,
+                    root_is_app_authored=root_is_app_authored,
+                    root_body=root_body,
+                    resolution_evidence=resolution_evidence,
                 ):
-                    self._resolve_and_finalize(
-                        token=token,
+                    resolution = self._resolve_and_finalize(
+                        token=resolution_token,
                         repository=repository,
                         pull_request=pull_request,
                         root_comment_id=resolved_root,
                         head_sha=head_sha,
                         app_slug=app_slug,
                         root_is_blocking_finding=root_is_blocking_finding,
+                        source_comment_id=source_comment_id,
+                        source_updated_at=source_updated_at,
+                        evidence_sha256=resolution_evidence,
+                        base_sha=resolution_base_sha,
                     )
                     return ReplyResult(
-                        status="already_replied_and_resolved",
+                        status="already_replied_and_resolved"
+                        if resolution.resolved
+                        else "already_replied",
                         comment_id=existing_after,
-                        resolved=True,
+                        resolved=resolution.resolved,
+                        resolution_status=resolution.resolution_status,
+                        approval_status=resolution.approval_status,
+                        approval_diagnostic=resolution.approval_diagnostic,
                     )
                 return ReplyResult(status="already_replied", comment_id=existing_after)
             if status == 422:
@@ -1812,302 +1742,215 @@ class ConversationPublisher:
     def _resolve_and_finalize(
         self,
         *,
-        token: str,
+        token: str | None,
         repository: str,
         pull_request: int,
         root_comment_id: int | None,
         head_sha: str,
         app_slug: str,
         root_is_blocking_finding: bool,
-    ) -> None:
-        """Resolve one thread and re-run the exact-head approval decision.
-
-        The resolution itself proves nothing: the approval decision is made from
-        the eligibility document the publication persisted for this exact head,
-        so a resolved thread, a moved head, or an absent document withholds
-        instead of approving on a caller's word. A missing document is not an
-        error: the reply has already been published, and the remaining required
-        fixes stay visible in the review and its threads.
-        """
-
-        self._resolve_review_thread(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            root_comment_id=root_comment_id,
-            head_sha=head_sha,
+        source_comment_id: int | None = None,
+        source_updated_at: str | None = None,
+        evidence_sha256: str | None = None,
+        base_sha: str | None = None,
+    ) -> ReplyResult:
+        """Confirm durable addressed authority before mutation; retain partial success."""
+        from .thread_resolution import (
+            FindingThreadResolver,
+            digest,
+            resolution_marker,
+            resolution_records,
         )
-        if not root_is_blocking_finding:
-            return
+
+        result = ReplyResult(
+            status="replied",
+            resolution_status="unconfirmed",
+            approval_status="approval_withheld",
+            approval_diagnostic="approval_withheld",
+        )
+        if not token:
+            return result
         try:
-            eligibility = self.finalizer.load_eligibility(
+            if (
+                type(root_comment_id) is not int
+                or type(source_comment_id) is not int
+                or not isinstance(base_sha, str)
+                or not GIT_SHA_HEX.fullmatch(base_sha)
+                or not isinstance(evidence_sha256, str)
+                or re.fullmatch(r"[a-f0-9]{64}", evidence_sha256) is None
+            ):
+                return result
+            status, root = self.http.request(
+                "GET",
+                self.http.repository_path(
+                    repository, f"/pulls/comments/{root_comment_id}"
+                ),
+                token=token,
+            )
+            if (
+                status != 200
+                or not isinstance(root, dict)
+                or str(root.get("user", {}).get("login", "")).casefold()
+                != app_slug.casefold()
+                or root.get("user", {}).get("type") != "Bot"
+            ):
+                return result
+            scope = finding_publication_scope(root.get("body"))
+            instance = finding_instance_from_body(root.get("body"))
+            if (
+                scope is None
+                or scope[1:4] != (pull_request, head_sha, base_sha)
+                or instance is None
+            ):
+                return result
+            status, source = self.http.request(
+                "GET",
+                self.http.repository_path(
+                    repository, f"/pulls/comments/{source_comment_id}"
+                ),
+                token=token,
+            )
+            if (
+                status != 200
+                or not isinstance(source, dict)
+                or source.get("updated_at") != source_updated_at
+            ):
+                return result
+            reviews = self.finalizer._load_head_reviews(
+                token=token, repository=repository, pull_request=pull_request
+            )
+            eligibility = self.finalizer._eligibility_from_reviews(
+                reviews, head_sha=head_sha, app_slug=app_slug, require_valid=True
+            )
+            if eligibility is None:
+                return result
+            index = self.finalizer.finding_index_from_reviews(
+                reviews,
+                repository_id=scope[0],
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                eligibility=eligibility,
+            )
+            if (
+                index is None
+                or index.base_sha != base_sha
+                or not any(
+                    entry.instance == instance and not entry.body_placed
+                    for entry in index.entries
+                )
+            ):
+                return result
+            record = {
+                "repo": scope[0],
+                "pr": pull_request,
+                "head": head_sha,
+                "base": base_sha,
+                "result": eligibility.result_digest,
+                "instance": instance,
+                "root": root_comment_id,
+                "source": source_comment_id,
+                "updated": source_updated_at,
+                "actor": source.get("user", {}).get("login"),
+                "source_digest": digest(source.get("body", "")),
+                "evidence": evidence_sha256,
+            }
+            resolver = FindingThreadResolver(self.http)
+            if not resolver.source_valid(
+                token=token, repository=repository, record=record, app_slug=app_slug
+            ):
+                return result
+            current = self.finalizer.load_eligibility(
                 token=token,
                 repository=repository,
                 pull_request=pull_request,
                 head_sha=head_sha,
                 app_slug=app_slug,
             )
-            if eligibility is None:
-                return
-            self.finalizer.finalize(
+            live = self.finalizer._preflight(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            if (
+                current != eligibility
+                or live.result is not None
+                or live.app_authored
+                or live.repository_id != scope[0]
+                or live.base_sha != base_sha
+            ):
+                return result
+            if record not in resolution_records(reviews, app_slug):
+                # The full record is independent of reply paging/size and is never omitted.
+                body = (
+                    "Recorded addressed finding; thread resolution and approval are checked separately.\n\n"
+                    + resolution_marker(record)
+                )
+                try:
+                    self.http.request(
+                        "POST",
+                        self.http.repository_path(
+                            repository, f"/pulls/{pull_request}/reviews"
+                        ),
+                        token=token,
+                        body={"commit_id": head_sha, "event": "COMMENT", "body": body},
+                    )
+                except GitHubHTTPError:
+                    pass  # Ambiguous writes grant nothing until the exact record reads back.
+                reviews = self.finalizer._load_head_reviews(
+                    token=token, repository=repository, pull_request=pull_request
+                )
+                if record not in resolution_records(reviews, app_slug):
+                    return result
+            resolution = self.finalizer.reconcile_decided_threads(
+                token=token,
+                repository=repository,
+                repository_id=scope[0],
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                eligibility=eligibility,
+                index=index,
+                reviews=reviews,
+            )
+            resolved = (
+                instance in resolution.resolved
+                and instance not in resolution.unconfirmed
+            )
+            result = ReplyResult(
+                status="replied",
+                resolved=resolved,
+                resolution_status="resolved" if resolved else "unconfirmed",
+                approval_status="approval_withheld",
+                approval_diagnostic="approval_withheld",
+            )
+            finalized = self.finalizer.finalize(
                 token=token,
                 repository=repository,
                 pull_request=pull_request,
                 head_sha=head_sha,
                 app_slug=app_slug,
                 eligibility=eligibility,
+                require_persisted=True,
             )
-        except (GitHubHTTPTransientError, GitHubPublicationTransientError) as exc:
-            raise GitHubConversationTransientError(
-                "approval finalization failed temporarily"
-            ) from exc
-        except (GitHubHTTPError, GitHubPublicationError) as exc:
-            raise GitHubConversationError("approval finalization failed") from exc
-
-    def _preflight_resolution_pr(
-        self,
-        *,
-        token: str,
-        repository: str,
-        pull_request: int,
-        head_sha: str,
-    ) -> None:
-        """Require the PR identity to remain eligible for thread mutation."""
-
-        status, pr = self.http.request(
-            "GET",
-            self.http.repository_path(repository, f"/pulls/{pull_request}"),
-            token=token,
-        )
-        if status < 200 or status >= 300 or not isinstance(pr, dict):
-            raise GitHubConversationError("reply resolution PR preflight failed")
-        if pr.get("state") != "open" or pr.get("draft") is True:
-            raise GitHubConversationError("reply resolution PR is not eligible")
-        current_head = pr.get("head")
-        if not isinstance(current_head, dict) or current_head.get("sha") != head_sha:
-            raise GitHubConversationError("reply resolution head is stale")
-        head_repo = current_head.get("repo")
-        base = pr.get("base")
-        base_repo = base.get("repo") if isinstance(base, dict) else None
-        if (
-            not isinstance(head_repo, dict)
-            or not isinstance(base_repo, dict)
-            or head_repo.get("fork") is not False
-            or base_repo.get("fork") is not False
-            or head_repo.get("full_name") != repository
-            or base_repo.get("full_name") != repository
+            return ReplyResult(
+                status="replied",
+                resolved=resolved,
+                resolution_status=result.resolution_status,
+                approval_status=finalized.status,
+                approval_diagnostic=finalized.diagnostic,
+            )
+        except (
+            GitHubHTTPError,
+            GitHubPublicationError,
+            GitHubConversationError,
+            ReviewInputError,
+            AttributeError,
+            TypeError,
         ):
-            raise GitHubConversationError("reply resolution repository is not eligible")
-
-    def _resolve_review_thread(
-        self,
-        *,
-        token: str,
-        repository: str,
-        pull_request: int,
-        root_comment_id: int | None,
-        head_sha: str,
-    ) -> None:
-        """Resolve one ReviewSensei-owned inline thread after an AI decision.
-
-        The caller has already verified that the root comment belongs to the
-        App.  We still re-read the pull request and the GraphQL thread mapping
-        immediately before mutation so a changed head or malformed response
-        fails closed.
-        """
-
-        if (
-            isinstance(root_comment_id, bool)
-            or not isinstance(root_comment_id, int)
-            or root_comment_id < 1
-        ):
-            raise GitHubConversationError("reply resolution root is invalid")
-        self._preflight_resolution_pr(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=head_sha,
-        )
-        owner, separator, name = repository.partition("/")
-        if not separator or not owner or not name:
-            raise GitHubConversationError("reply resolution repository is invalid")
-
-        after: str | None = None
-        thread_id: str | None = None
-        thread_resolved = False
-        for _ in range(MAX_REVIEW_THREAD_PAGES):
-            variables: dict[str, object] = {
-                "owner": owner,
-                "name": name,
-                "number": pull_request,
-                "after": after,
-            }
-            try:
-                status, payload = self.http.request(
-                    "POST",
-                    "/graphql",
-                    token=token,
-                    body={
-                        "operationName": "ResolveReviewThreadLookup",
-                        "query": _REVIEW_THREADS_FOR_RESOLUTION_QUERY,
-                        "variables": variables,
-                    },
-                )
-            except GitHubHTTPTransientError as exc:
-                raise GitHubConversationTransientError(
-                    "reply resolution thread lookup failed temporarily"
-                ) from exc
-            except GitHubHTTPError as exc:
-                raise GitHubConversationError(
-                    "reply resolution thread lookup failed"
-                ) from exc
-            if status == 429 or status >= 500:
-                raise GitHubConversationTransientError(
-                    "reply resolution thread lookup failed temporarily"
-                )
-            if status < 200 or status >= 300 or not isinstance(payload, dict):
-                raise GitHubConversationError("reply resolution thread lookup failed")
-            errors = payload.get("errors")
-            if errors is not None and (not isinstance(errors, list) or errors):
-                raise GitHubConversationError("reply resolution thread lookup failed")
-            data = payload.get("data")
-            if not isinstance(data, dict):
-                raise GitHubConversationError(
-                    "reply resolution thread response invalid"
-                )
-            repository_data = data.get("repository")
-            if not isinstance(repository_data, dict):
-                raise GitHubConversationError(
-                    "reply resolution thread response invalid"
-                )
-            pull_request_data = repository_data.get("pullRequest")
-            if not isinstance(pull_request_data, dict):
-                raise GitHubConversationError(
-                    "reply resolution thread response invalid"
-                )
-            threads = pull_request_data.get("reviewThreads")
-            if not isinstance(threads, dict):
-                raise GitHubConversationError(
-                    "reply resolution thread response invalid"
-                )
-            nodes = threads.get("nodes")
-            if not isinstance(nodes, list):
-                raise GitHubConversationError(
-                    "reply resolution thread response invalid"
-                )
-            for node in nodes:
-                if not isinstance(node, dict):
-                    raise GitHubConversationError(
-                        "reply resolution thread response invalid"
-                    )
-                candidate_id = node.get("id")
-                is_resolved = node.get("isResolved")
-                comments = node.get("comments")
-                if (
-                    not isinstance(candidate_id, str)
-                    or not candidate_id.strip()
-                    or not isinstance(is_resolved, bool)
-                    or not isinstance(comments, dict)
-                ):
-                    raise GitHubConversationError(
-                        "reply resolution thread response invalid"
-                    )
-                comment_nodes = comments.get("nodes")
-                if not isinstance(comment_nodes, list):
-                    raise GitHubConversationError(
-                        "reply resolution thread response invalid"
-                    )
-                if not comment_nodes:
-                    continue
-                root = comment_nodes[0]
-                if not isinstance(root, dict):
-                    raise GitHubConversationError(
-                        "reply resolution thread response invalid"
-                    )
-                database_id = root.get("databaseId")
-                if database_id is not None and (
-                    isinstance(database_id, bool)
-                    or not isinstance(database_id, int)
-                    or database_id < 1
-                ):
-                    raise GitHubConversationError(
-                        "reply resolution thread response invalid"
-                    )
-                if database_id == root_comment_id:
-                    thread_id = candidate_id
-                    thread_resolved = is_resolved
-                    break
-            if thread_id is not None:
-                break
-            page_info = threads.get("pageInfo")
-            if not isinstance(page_info, dict):
-                raise GitHubConversationError(
-                    "reply resolution thread response invalid"
-                )
-            has_next = page_info.get("hasNextPage")
-            end_cursor = page_info.get("endCursor")
-            if not isinstance(has_next, bool) or (
-                has_next and (not isinstance(end_cursor, str) or not end_cursor)
-            ):
-                raise GitHubConversationError(
-                    "reply resolution thread response invalid"
-                )
-            if not has_next:
-                break
-            after = end_cursor
-        if thread_id is None:
-            raise GitHubConversationError(
-                "reply resolution thread could not be matched to the root comment"
-            )
-        if thread_resolved:
-            return
-
-        # Recheck immediately before the mutation so a head update during the
-        # GraphQL lookup cannot authorize resolution against a newer PR state.
-        self._preflight_resolution_pr(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=head_sha,
-        )
-
-        try:
-            status, payload = self.http.request(
-                "POST",
-                "/graphql",
-                token=token,
-                body={
-                    "operationName": "ResolveReviewThread",
-                    "query": _RESOLVE_REVIEW_THREAD_MUTATION,
-                    "variables": {"input": {"threadId": thread_id}},
-                },
-            )
-        except GitHubHTTPTransientError as exc:
-            raise GitHubConversationTransientError(
-                "reply resolution mutation failed temporarily"
-            ) from exc
-        except GitHubHTTPError as exc:
-            raise GitHubConversationError("reply resolution mutation failed") from exc
-        if status == 429 or status >= 500:
-            raise GitHubConversationTransientError(
-                "reply resolution mutation failed temporarily"
-            )
-        if status < 200 or status >= 300 or not isinstance(payload, dict):
-            raise GitHubConversationError("reply resolution mutation failed")
-        errors = payload.get("errors")
-        if errors is not None and (not isinstance(errors, list) or errors):
-            raise GitHubConversationError("reply resolution mutation failed")
-        data = payload.get("data")
-        if not isinstance(data, dict):
-            raise GitHubConversationError("reply resolution mutation response invalid")
-        result = data.get("resolveReviewThread")
-        if not isinstance(result, dict):
-            raise GitHubConversationError("reply resolution mutation response invalid")
-        thread = result.get("thread")
-        if not isinstance(thread, dict):
-            raise GitHubConversationError("reply resolution mutation response invalid")
-        if thread.get("id") != thread_id or thread.get("isResolved") is not True:
-            raise GitHubConversationError("reply resolution mutation was not confirmed")
+            return result
 
     def _find_existing(
         self,

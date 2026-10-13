@@ -358,6 +358,8 @@ class OverrideStabilityTests(unittest.TestCase):
                 json_response(pr_payload(head_sha=head)),
                 graphql_review_threads_response(),
                 json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha=head)),
             ],
             routes=((matches, respond),),
         )
