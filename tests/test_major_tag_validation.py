@@ -691,6 +691,7 @@ class SurfaceTests(unittest.TestCase):
             data["jobs"]["qualify"]["if"], "needs.gate.outputs.eligible == 'true'"
         )
         self.assertIn("--expected-wheel-sha256", text)
+        self.assertIn('--github-version "$PUBLISHED_GITHUB_VERSION"', text)
         self.assertIn("ref: ${{ needs.gate.outputs.validator_sha }}", text)
         self.assertIn('test "$CLI_RESULT" = success', text)
         self.assertIn("if: always()", text)
@@ -704,10 +705,16 @@ class SurfaceTests(unittest.TestCase):
         self.assertEqual(
             job["strategy"]["matrix"]["os"], ["ubuntu-latest", "macos-latest"]
         )
-        self.assertIn("--version 0.6.21", text)
+        self.assertIn("--version 0.6.23", text)
         self.assertIn(
             "--expected-wheel-sha256 "
-            "58f9ed48e8df2434c2136ba9e57c260e606fd550e396cd422ee2efd1d4d4ef31",
+            "e3966ccc999fad1cfdc0b278f22e43b570d8c3f809acd3a507ad075517f2bf37",
+            text,
+        )
+        self.assertIn("--github-version 0.1.1", text)
+        self.assertIn(
+            "--expected-github-wheel-sha256 "
+            "139f40dc5778af743e868616a1eb9a3cd2d8ab4eda564ab514f35720edaed0ba",
             text,
         )
         self.assertNotIn("github.token", text)
@@ -812,6 +819,7 @@ class GateProcessTests(unittest.TestCase):
             receipt = {
                 "status": "PASS",
                 "version": VERSION + "\nextra=true",
+                "github_version": "0.1.1",
                 "wheel_sha256": DIGEST,
                 "source_sha": SOURCE,
                 "tag_object": OBJECT,
@@ -865,12 +873,20 @@ class GateProcessTests(unittest.TestCase):
         receipt = {
             "status": "PASS",
             "version": VERSION,
+            "github_version": "0.1.1",
             "wheel_sha256": DIGEST,
             "source_sha": SOURCE,
             "tag_object": OBJECT,
             "channel": "v5",
         }
-        for key in ["version", "wheel_sha256", "source_sha", "tag_object", "channel"]:
+        for key in [
+            "version",
+            "github_version",
+            "wheel_sha256",
+            "source_sha",
+            "tag_object",
+            "channel",
+        ]:
             for bad in ["\nextra=true", "\rextra=true", None]:
                 with self.subTest(key=key, bad=bad), self.assertRaises(ValueError):
                     gate.workflow_outputs({**receipt, key: bad})
@@ -1028,8 +1044,31 @@ class FullGateTests(unittest.TestCase):
         )
         self.assertEqual(receipt["release_binding"], binding())
         self.assertTrue(receipt["surface"]["data_only"])
-        self.assertEqual(len(receipt["source_data_sha256"]), 10)
+        self.assertEqual(len(receipt["source_data_sha256"]), 11)
+        manifest = (ROOT / installer.HOSTED_MANIFEST).read_bytes()
+        self.assertEqual(
+            receipt["source_data_sha256"][installer.HOSTED_MANIFEST],
+            hashlib.sha256(manifest).hexdigest(),
+        )
+        hosted = tomllib.loads(manifest.decode())
+        self.assertEqual(receipt["github_version"], hosted["project"]["version"])
         self.wheel.assert_called_once()
+
+    def test_hosted_manifest_must_pin_the_exact_engine_before_wheel(self):
+        original = (ROOT / installer.HOSTED_MANIFEST).read_text()
+        pin = '"review-sensei==' + VERSION + '"'
+        for raw in [
+            original.replace(pin, '"review-sensei==0.0.1"'),
+            original.replace(pin, '"review-sensei>=' + VERSION + '"'),
+            original.replace('name = "review-sensei-github"', 'name = "other"'),
+        ]:
+            self.assertNotEqual(raw, original)
+            self.file_mutations[installer.HOSTED_MANIFEST] = raw.encode()
+            with self.assertRaises(ValueError):
+                gate.qualify(
+                    self.selected, self.root / hashlib.sha256(raw.encode()).hexdigest()
+                )
+        self.wheel.assert_not_called()
 
     def test_mixed_manifest_or_prerelease_refuses_before_wheel(self):
         for raw in [

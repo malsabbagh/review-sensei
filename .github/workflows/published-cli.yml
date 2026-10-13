@@ -10,6 +10,10 @@ on:
         description: Exact published PyPI version (never latest)
         required: true
         type: string
+      github_version:
+        description: Exact published review-sensei-github version that pins it
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -24,6 +28,7 @@ jobs:
       actions: read
     outputs:
       version: ${{ steps.gate.outputs.version }}
+      github_version: ${{ steps.gate.outputs.github_version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -36,7 +41,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MANUAL_VERSION: ${{ inputs.version }}
-        run: python scripts/published_cli_release_gate.py --version "$MANUAL_VERSION" --report "$RUNNER_TEMP/publication-gate.json"
+          MANUAL_GITHUB_VERSION: ${{ inputs.github_version }}
+        run: python scripts/published_cli_release_gate.py --version "$MANUAL_VERSION" --github-version "$MANUAL_GITHUB_VERSION" --report "$RUNNER_TEMP/publication-gate.json"
       - name: Retain publication gate receipt
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -64,10 +70,11 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Test installer and publication gate contracts
         run: python -m unittest discover -s tests/published_cli -p 'test_bootstrap.py'
-      - name: Install exact PyPI wheel in a fresh environment and qualify it
+      - name: Install exact PyPI engine and hosted wheels in a fresh environment and qualify them
         env:
           PUBLISHED_VERSION: ${{ needs.publication.outputs.version }}
-        run: python scripts/qualify_published_cli.py --version "$PUBLISHED_VERSION" --output "$RUNNER_TEMP/published-cli"
+          PUBLISHED_GITHUB_VERSION: ${{ needs.publication.outputs.github_version }}
+        run: python scripts/qualify_published_cli.py --version "$PUBLISHED_VERSION" --github-version "$PUBLISHED_GITHUB_VERSION" --output "$RUNNER_TEMP/published-cli"
       - name: Retain sanitized qualification evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

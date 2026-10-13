@@ -1,18 +1,26 @@
 # Published CLI qualification
 
-This suite runs unattended against one **exact PyPI wheel** installed in a newly
-created virtual environment. It never installs `latest`, falls back to a source
+This suite runs unattended against two **exact PyPI wheels**, the engine
+`review-sensei` and the hosted runtime `review-sensei-github`, installed together
+in a newly created virtual environment. The hosted wheel must pin exactly the
+engine version under test. It never installs `latest`, falls back to a source
 checkout, configures credentials, or makes paid model/GitHub calls. Expectations
 are ordinary contracts: known released defects remain failures.
 
 ```sh
-python scripts/qualify_published_cli.py --version 0.6.20 --output /tmp/qualification-unique
+python scripts/qualify_published_cli.py --version 0.6.23 --github-version 0.1.1 \
+  --output /tmp/qualification-unique
 ```
+
+The workflows read the hosted version from the released commit's
+`packages/python/review-sensei-github/pyproject.toml`, the same source the hosted
+runtime workflow installs from. Releases before the hosted split (0.6.22 and
+earlier) cannot be qualified by this harness.
 
 The output directory must not already exist. Exit 0 requires all five suites to
 complete and pass; failed installation, propagation, process timeouts, malformed
 receipts, or failed assertions exit nonzero. `summary.json` binds requested and
-installed versions, package origin, wheel SHA-256, dependency versions, retry
+installed versions, package origins, both wheel SHA-256s, dependency versions, retry
 receipts, suite totals, and exclusions. Per-case results include process exits,
 bounded call accounting, coverage checks, and sanitized stdout/stderr from
 synthetic inputs. The Actions artifact includes these machine-readable receipts.
@@ -25,7 +33,7 @@ case ceilings. The full lane has a 25-minute Actions ceiling.
 
 `qualify.py` drives the installed console process with deterministic fixture
 responses. `transports.py` drives real loopback HTTP and POSIX SIGINT with fake
-Ollama responses. `operations.py` reproduces missing metadata tokens and complete/paginated operation-record discovery through the installed CLI with blocked sockets and mocked publication continuation. `operation_state.py` exercises trusted operation creation, body/author readback, partial acceptance and replay through an in-memory HTTP opener. `seam_boundaries.py` supplements console tests with installed
+Ollama responses. `operations.py` reproduces missing metadata tokens and complete/paginated operation-record discovery through the installed hosted CLI's `publish` command, run in-process so the blocked sockets and mocked publication continuation apply (the engine's `github review` forwards to a hosted subprocess). `operation_state.py` exercises trusted operation creation, body/author readback, partial acceptance and replay through an in-memory HTTP opener. `seam_boundaries.py` supplements console tests with installed
 model/budget constructor boundaries; those are not evidence of live inference.
 Cases test numeric/type limits, canonical config precedence, diff admission,
 chunking and cumulative calls, normalized output, retry/correction, persistence

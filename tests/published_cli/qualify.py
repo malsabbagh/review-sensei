@@ -676,7 +676,6 @@ def cases():
         "helper-version",
         "known-baseline-defects",
         ["resolve-hosted-openrouter", "--version"],
-        stdout_contains="0.6.20",
     )
     for count, cap in [
         (1, 1),
@@ -998,6 +997,7 @@ class Runner:
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--expected-version", required=True)
+    p.add_argument("--expected-github-version", required=True)
     p.add_argument("--report", type=Path, required=True)
     p.add_argument("--jobs", type=int, default=4)
     p.add_argument("--case-timeout", type=float, default=25)
@@ -1007,6 +1007,11 @@ def main():
     version = importlib.metadata.version("review-sensei")
     if version != args.expected_version:
         p.error("installed distribution does not match exact expected version")
+    if (
+        importlib.metadata.version("review-sensei-github")
+        != args.expected_github_version
+    ):
+        p.error("installed review-sensei-github does not match exact expected version")
     import review_sensei
 
     origin = str(Path(review_sensei.__file__).resolve())
@@ -1024,7 +1029,7 @@ def main():
         p.error("no cases selected")
     for c in selected:
         if c["id"] == "helper-version":
-            c["stdout_contains"] = args.expected_version
+            c["stdout_contains"] = args.expected_github_version
     if any(c["group"] == "prepare-diff" for c in selected):
         repo = runner.root / "git-fixture"
         repo.mkdir(exist_ok=True)
