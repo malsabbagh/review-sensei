@@ -1,6 +1,7 @@
 # ADR 0063 - Authenticated abandoned analysis recovery
 
-Status: Proposed (the requirement that recovery needs an explicit maintainer `continue` is superseded by ADR 0079; the evidence and mutation seam defined here is unchanged)
+Status: Proposed
+Superseded (in part) by: [ADR 0079](0079-reservation-leak-prevention-and-admission-self-heal.md) — only the requirement that recovery needs an explicit maintainer `continue`; the evidence and mutation seam defined here is unchanged
 Date: 2026-10-06
 GitHub Issue: Pending triage
 Pull Request: [#215](https://github.com/malsabbagh/review-sensei/pull/215)
