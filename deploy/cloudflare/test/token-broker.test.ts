@@ -361,6 +361,64 @@ describe("token broker authorization", () => {
     expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
   });
 
+  it("issues a release-only token for the owning run after the head moves", async () => {
+    const { broker, github } = harness();
+    github.pullRequestHead.mockResolvedValue("c".repeat(40));
+
+    const result = await broker.exchange({
+      oidc_token: "signed-jwt",
+      capability: "review_session",
+      release_only: true,
+      session: {
+        repository_id: 987654321,
+        pull_request: 7,
+        head_sha: SHA,
+      },
+    });
+
+    const { token: releaseToken, ...releaseRest } = result;
+    expect(releaseToken).toBeTruthy();
+    expect(releaseRest).toEqual({
+      capability: "review_session",
+      release_only: true,
+      reservation_owner: { run_id: "10000000001", head_sha: SHA },
+    });
+    // No mutation grant and no enrollment state: a release-only token
+    // cannot be replayed into authorize_session_mutation, which requires
+    // a signed session grant this exchange never issues.
+    expect(result.session_grant).toBeUndefined();
+    expect(result.session_state).toBeUndefined();
+    // No enrollment witness and no grant: releasing publishes nothing.
+    expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed release-only exchanges instead of widening authorization", async () => {
+    const { broker, github } = harness();
+    github.pullRequestHead.mockResolvedValue("c".repeat(40));
+    const session = {
+      repository_id: 987654321,
+      pull_request: 7,
+      head_sha: SHA,
+    };
+    for (const body of [
+      { oidc_token: "signed-jwt", capability: "review_session", release_only: false, session },
+      { oidc_token: "signed-jwt", capability: "review_session", release_only: "true", session },
+      {
+        oidc_token: "signed-jwt",
+        capability: "review_session",
+        release_only: true,
+        session,
+        session_attestation: { operation: "review" },
+      },
+      { oidc_token: "signed-jwt", capability: "review_publish", release_only: true },
+    ]) {
+      await expect(broker.exchange(body as never)).rejects.toThrow(
+        "broker_session_invalid",
+      );
+    }
+    expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
+  });
+
   it("issues an opaque grant only after deriving command actor authority from a live comment", async () => {
     const { broker, github } = harness();
     const attestation = {

@@ -1756,6 +1756,89 @@ class GitHubSessionLedgerTests(unittest.TestCase):
             [method for method, _url, _data in calls], ["GET", "GET", "GET"]
         )
 
+    def _reserved_record_with_owner(self, owner_run_id: str):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        return record.evolve(
+            now=FIXED_NOW,
+            generation=1,
+            reservation_id="abcd1234",
+            reserved_slot="initial",
+            reservation_owner={"run_id": owner_run_id, "head_sha": "a" * 40},
+        )
+
+    def test_owner_abort_releases_own_reservation_after_head_moves(self):
+        # Reproduction for the cancelled-run leak: run 10000000001 reserved
+        # the round, a push moved the head to d*40, then the run was
+        # cancelled. Releasing its own reservation must still succeed;
+        # releasing never publishes anything.
+        from review_sensei.session import mutate_abort
+
+        reserved = self._reserved_record_with_owner("10000000001")
+        aborted = mutate_abort(
+            reserved,
+            reservation_id="abcd1234",
+            expected_generation=1,
+            now=FIXED_NOW,
+        )
+        reserved_body = render_session_comment(
+            repository_id=99, pull_request=136, record=reserved
+        )
+        aborted_body = render_session_comment(
+            repository_id=99, pull_request=136, record=aborted
+        )
+        http, calls = make_http(
+            [
+                json_response([{"id": 7, "body": reserved_body}]),
+                json_response([{"id": 7, "body": reserved_body}]),
+                json_response({"id": 7, "body": aborted_body}),
+                json_response([{"id": 7, "body": aborted_body}]),
+            ]
+        )
+        attestation = self._grant_attestation()
+        verifier = self._GrantVerifier(returned=attestation)
+        ledger = self._grant_bound_ledger(http, verifier, attestation)
+
+        released = ledger.abort(
+            IDENTITY,
+            reservation_id="abcd1234",
+            expected_generation=1,
+            now=FIXED_NOW,
+        )
+
+        self.assertIsNone(released.reservation_id)
+        self.assertIsNone(released.reservation_owner)
+        self.assertEqual(
+            [method for method, _url, _data in calls],
+            ["GET", "GET", "PATCH", "GET"],
+        )
+
+    def test_non_owner_abort_still_rejected_after_head_moves(self):
+        reserved = self._reserved_record_with_owner("99999999999")
+        reserved_body = render_session_comment(
+            repository_id=99, pull_request=136, record=reserved
+        )
+        http, calls = make_http(
+            [
+                json_response([{"id": 7, "body": reserved_body}]),
+                json_response([{"id": 7, "body": reserved_body}]),
+                json_response({"head": {"sha": "d" * 40}}),
+            ]
+        )
+        attestation = self._grant_attestation()
+        verifier = self._GrantVerifier(returned=attestation)
+        ledger = self._grant_bound_ledger(http, verifier, attestation)
+
+        with self.assertRaisesRegex(ReviewInputError, "head is stale"):
+            ledger.abort(
+                IDENTITY,
+                reservation_id="abcd1234",
+                expected_generation=1,
+                now=FIXED_NOW,
+            )
+        self.assertEqual(
+            [method for method, _url, _data in calls], ["GET", "GET", "GET"]
+        )
+
     def test_grant_bound_mutation_rejects_invalid_or_mismatched_grants_before_io(self):
         cases = (
             ("replayed", self._GrantVerifier(error=GitHubBrokerClientError("invalid"))),

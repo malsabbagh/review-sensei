@@ -10,6 +10,7 @@ from review_sensei.cli import (
     _explicit_cli_options,
     _print_offline_error,
     _run_evaluate_convergence_command,
+    _sigterm_as_keyboard_interrupt,
 )
 from review_sensei.cli import (
     main as engine_main,
@@ -41,6 +42,7 @@ _PUBLIC = (
     "host-plan",
     "resolve-hosted-openrouter",
     "evaluate-observed",
+    "release-reservation",
     "doctor",
 )
 _HELP = {
@@ -51,6 +53,7 @@ _HELP = {
     "host-plan": "resolve the hosted runner plan",
     "resolve-hosted-openrouter": "resolve the hosted OpenRouter model",
     "evaluate-observed": "evaluate an observed review",
+    "release-reservation": "release this run's own session reservation",
     "doctor": "run hosted diagnostics",
 }
 
@@ -129,7 +132,47 @@ def _resolve_openrouter(arguments: list[str]) -> int:
     return emit_hosted_openrouter_resolution(parsed.action)
 
 
+def _release_reservation(arguments: list[str]) -> int:
+    import argparse
+
+    from review_sensei_github.broker_client import BrokerClient
+    from review_sensei_github.http import GitHubHttp
+    from review_sensei_github.release_reservation import release_own_reservation
+
+    parser = argparse.ArgumentParser(prog="review-sensei-github release-reservation")
+    parser.add_argument("--repository", required=True)
+    parser.add_argument("--repository-id", required=True, type=int)
+    parser.add_argument("--pull-request", required=True, type=int)
+    parser.add_argument("--head-sha", required=True)
+    parser.add_argument("--run-id", required=True)
+    parsed = parser.parse_args(arguments)
+    try:
+        status = release_own_reservation(
+            broker=BrokerClient(),
+            http=GitHubHttp(),
+            repository=parsed.repository,
+            repository_id=parsed.repository_id,
+            pull_request=parsed.pull_request,
+            head_sha=parsed.head_sha,
+            run_id=parsed.run_id,
+        )
+    except (OSError, ValueError, ReviewSenseiError) as exc:
+        print(f"review-sensei: reservation release failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"reservation release: {status}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    try:
+        with _sigterm_as_keyboard_interrupt():
+            return _main(argv)
+    except KeyboardInterrupt:
+        print("review-sensei: cancelled", file=sys.stderr)
+        return 130
+
+
+def _main(argv: list[str] | None = None) -> int:
     args = _normalize(list(argv) if argv is not None else sys.argv[1:])
     if not args or args[0] in {"-h", "--help"}:
         print(_usage(), file=sys.stderr)
@@ -147,6 +190,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_evaluate_convergence_command(
             ["--observed", *rest], observed_runner=run_observed_review_sequence
         )
+    if command == "release-reservation":
+        return _release_reservation(rest)
     if command == "doctor":
         return _doctor(rest)
     print(

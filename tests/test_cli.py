@@ -82,6 +82,61 @@ class FakeRegistry:
 
 
 class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
+    @unittest.skipUnless(
+        os.name == "posix",
+        "SIGTERM delivery to a Python handler is POSIX; Windows job "
+        "termination does not deliver it to the process",
+    )
+    def test_sigterm_is_normalized_to_cancellation_cleanup(self):
+        # GitHub cancellation escalates to SIGTERM. It must unwind through
+        # the same KeyboardInterrupt cleanup as SIGINT (exit 130) instead
+        # of killing the process before its reservation abort can run.
+        import signal
+
+        def _terminate(argv=None, *, hosted_hooks=None):
+            os.kill(os.getpid(), signal.SIGTERM)
+            return 0
+
+        with (
+            patch("review_sensei.cli._main", side_effect=_terminate),
+            redirect_stderr(io.StringIO()),
+        ):
+            status = main([])
+        self.assertEqual(status, 130)
+
+    @unittest.skipUnless(
+        os.name == "posix",
+        "SIGTERM delivery to a Python handler is POSIX; Windows job "
+        "termination does not deliver it to the process",
+    )
+    def test_sigterm_mid_run_unwinds_through_cleanup_in_a_subprocess(self):
+        # Real delivery, not a synchronous mock: SIGTERM arrives from a
+        # timer while the command sleeps, and must still unwind through
+        # the KeyboardInterrupt cleanup (exit 130), which is where a
+        # review releases its reservation.
+        child = (
+            "import os, signal, sys, threading, time\n"
+            "import review_sensei.cli as cli\n"
+            "def fake(argv=None, *, hosted_hooks=None):\n"
+            "    threading.Timer(0.3, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()\n"
+            "    try:\n"
+            "        time.sleep(30)\n"
+            "    except KeyboardInterrupt:\n"
+            "        print('cleanup-ran', flush=True)\n"
+            "        raise\n"
+            "    return 0\n"
+            "cli._main = fake\n"
+            "sys.exit(cli.main([]))\n"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", child],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 130)
+        self.assertIn("cleanup-ran", completed.stdout)
+
     def test_unified_cli_receipts_restart_without_provider_calls_and_require_policy(
         self,
     ):

@@ -1370,7 +1370,8 @@ class GitHubIssueCommentSessionLedger:
                 or preactivation.generation != record.generation
             ):
                 raise ReviewInputError("session generation conflict before activation")
-        self._verify_live_head(identity)
+        if not self._is_own_release(record, updated):
+            self._verify_live_head(identity)
         repository_id = self._require_identity(identity)
         path = self.http.repository_path(
             identity.repository, f"/issues/comments/{comment_id}"
@@ -2168,13 +2169,41 @@ class GitHubIssueCommentSessionLedger:
         expected_generation: int,
         now: datetime | None = None,
     ) -> SessionRecord:
-        return self.replace(
-            identity,
-            lambda record: mutate_abort(
-                record,
-                reservation_id=reservation_id,
-                expected_generation=expected_generation,
+        # Releasing a reservation publishes nothing, so the owning run may
+        # release its own hold even after the PR head has moved. replace()
+        # scopes the live-head exception to exactly this mutation.
+        previous = getattr(self, "_owner_release", False)
+        self._owner_release = True
+        try:
+            return self.replace(
+                identity,
+                lambda record: mutate_abort(
+                    record,
+                    reservation_id=reservation_id,
+                    expected_generation=expected_generation,
+                    now=now,
+                ),
                 now=now,
-            ),
-            now=now,
-        )
+            )
+        finally:
+            self._owner_release = previous
+
+    def _is_own_release(self, record: SessionRecord, updated: SessionRecord) -> bool:
+        """True only when this run releases its own held reservation.
+
+        Ownership comes from the broker-recorded reservation owner matching
+        the run bound into this adapter's verified session attestation.
+        Any other mutation, owner, or outcome keeps the live-head check.
+        """
+
+        if not getattr(self, "_owner_release", False):
+            return False
+        if record.reservation_id is None or updated.reservation_id is not None:
+            return False
+        owner = record.reservation_owner
+        if owner is None:
+            return False
+        attestation = self._session_attestation or {}
+        return str(owner.get("run_id")) == str(attestation.get("run_id")) and str(
+            owner.get("head_sha")
+        ) == str(attestation.get("head_sha"))
