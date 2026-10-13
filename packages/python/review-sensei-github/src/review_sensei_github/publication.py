@@ -1131,7 +1131,7 @@ _PUBLICATION_TO_RUN_STATUS = {
     "auto_approval_disabled": "skipped_policy",
     "disabled": "skipped_policy",
     "handoff": "action_required",
-    "publication_incomplete": "publication_failed",
+    "publication_incomplete": "action_required",
 }
 
 PUBLICATION_RESULT_STATUSES = frozenset(_PUBLICATION_TO_RUN_STATUS)
@@ -1139,6 +1139,7 @@ PUBLICATION_RESULT_STATUSES = frozenset(_PUBLICATION_TO_RUN_STATUS)
 _PUBLICATION_DIAGNOSTIC_OVERRIDES = {
     "disabled": "writes_disabled",
     "skipped_fork": "fork_not_allowed",
+    "publication_incomplete": "publication_ambiguous",
 }
 
 
@@ -3129,7 +3130,7 @@ class ReviewPublisher:
             ):
                 return PublicationResult(
                     status="publication_incomplete",
-                    diagnostic="publication_unconfirmed",
+                    diagnostic="publication_ambiguous",
                 )
             return self._finalize_after_publication(
                 token=token,

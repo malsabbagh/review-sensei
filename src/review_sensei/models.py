@@ -1529,8 +1529,10 @@ class ReviewResult:
             key = (comment.path, comment.line, comment.side, comment.body)
             previous = seen.get(key)
             if previous is not None:
+                # Runtime admission may set effective_blocking on a copy of the
+                # same explanation. That overlay is not a second classification.
                 if (
-                    previous.blocks_approval != comment.blocks_approval
+                    previous.blocking != comment.blocking
                     or previous.needs_human != comment.needs_human
                 ):
                     raise ReviewInputError("conflicting finding classifications")

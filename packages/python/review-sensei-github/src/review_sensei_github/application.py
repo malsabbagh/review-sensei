@@ -2373,6 +2373,19 @@ class GitHubApplication:
                 and diff_context
             ):
                 resolution_evidence = sha256(diff_context.encode("utf-8")).hexdigest()
+            if resolution_evidence is None:
+                return publish(
+                    token=capability_token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    source_comment_id=prepared.source_comment_id,
+                    source_updated_at=prepared.source_updated_at,
+                    head_sha=prepared.head_sha,
+                    reply=reply,
+                    app_slug=app_slug,
+                    root_comment_id=prepared.root_comment_id,
+                    source_kind=prepared.source_kind,
+                )
             return publish(
                 token=capability_token,
                 repository=repository,
@@ -2384,11 +2397,7 @@ class GitHubApplication:
                 app_slug=app_slug,
                 root_comment_id=prepared.root_comment_id,
                 source_kind=prepared.source_kind,
-                **(
-                    {"resolution_evidence": resolution_evidence}
-                    if resolution_evidence is not None
-                    else {}
-                ),
+                resolution_evidence=resolution_evidence,
             )
         finally:
             self.replier.remove_processing_reaction(
