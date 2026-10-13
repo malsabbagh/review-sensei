@@ -27,6 +27,7 @@ from review_sensei_github.publication import (
     finding_fingerprint_from_body,
     finding_instance_marker,
     finding_marker,
+    parse_finding_index,
     review_marker,
 )
 
@@ -38,7 +39,11 @@ from review_sensei.convergence import (
 )
 from review_sensei.coverage import CoverageManifest, FileCoverage
 from review_sensei.models import ReviewComment, ReviewResult
-from review_sensei.presentation import build_finding_view, render_body_findings
+from review_sensei.presentation import (
+    assign_finding_identifiers,
+    build_finding_view,
+    render_body_findings,
+)
 from review_sensei.validation import ReviewLimits
 from review_sensei.verifier import CandidateFinding, EvidenceReference
 
@@ -904,7 +909,7 @@ class ReviewPublisherTests(unittest.TestCase):
             body["body"],
         )
         self.assertIn(
-            "After an override, comment `@reviewsensei verify` to apply it.",
+            "An override re-checks approval on this commit without a new AI review. Comment `@reviewsensei verify` to retry that check.",
             body["body"],
         )
         self.assertIn(
@@ -916,7 +921,7 @@ class ReviewPublisherTests(unittest.TestCase):
             body["comments"][0]["body"],
         )
         self.assertIn(
-            "After an override, comment `@reviewsensei verify` to apply it.",
+            "An override re-checks approval on this commit without a new AI review. Comment `@reviewsensei verify` to retry that check.",
             body["comments"][0]["body"],
         )
         self.assertIn(
@@ -1626,6 +1631,20 @@ class ReviewPublisherTests(unittest.TestCase):
         self.assertEqual(eligibility.human_review.base_sha, "a" * 40)
         self.assertEqual(len(eligibility.human_review.pending), 1)
         self.assertEqual(eligibility.human_review.pending[0].body, comment.body)
+        index = parse_finding_index(
+            review_body, repository_id=1, pull_request=2, head_sha=head
+        )
+        self.assertIsNotNone(index)
+        self.assertEqual(len(index.entries), 1)
+        entry = index.entries[0]
+        self.assertEqual(
+            entry.instance, eligibility.human_review.pending[0].fingerprint
+        )
+        self.assertTrue(entry.needs_human)
+        self.assertTrue(entry.overridable)
+        self.assertTrue(entry.body_placed)
+        identifier = assign_finding_identifiers((entry.instance,))[entry.instance]
+        self.assertIn(identifier, review_body)
 
     def test_partial_coverage_review_is_published_without_an_approval(self):
         head = "b" * 40

@@ -1174,7 +1174,7 @@ class ConversationPublisherTests(unittest.TestCase):
             post_body["body"],
         )
         self.assertIn(
-            "After an override, comment `@reviewsensei verify` to apply it.",
+            "An override re-checks approval on this commit without a new AI review. Comment `@reviewsensei verify` to retry that check.",
             post_body["body"],
         )
         self.assertIn(

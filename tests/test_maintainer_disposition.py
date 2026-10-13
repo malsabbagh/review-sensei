@@ -167,6 +167,14 @@ class MaintainerCommandParseTests(unittest.TestCase):
                 parsed = None
             with self.subTest(body=body):
                 self.assertEqual(parsed is not None, case["accepted"])
+                expected = case.get("references")
+                if expected and parsed is not None:
+                    actual = parsed.finding_references or (
+                        (parsed.finding_reference,)
+                        if parsed.finding_reference is not None
+                        else ()
+                    )
+                    self.assertEqual(list(actual), expected)
 
     def test_finding_disposition_requires_reason(self):
         self.assertIsNone(
@@ -391,7 +399,7 @@ class SessionCommandTests(unittest.TestCase):
             ledger, IDENTITY, current, now=FIXED_NOW
         )
         self.assertTrue(applied.applied)
-        self.assertIn("AI result stays partial", applied.summary)
+        self.assertIn("approval is re-checked without a new AI review", applied.summary)
         pushed = parse_maintainer_command(
             "@sensei verify", actor="alice", head_sha="b" * 40
         )

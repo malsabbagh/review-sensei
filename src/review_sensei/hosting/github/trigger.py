@@ -29,8 +29,8 @@ _MAINTAINER_COMMAND = re.compile(
     r"|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}"
     r"\s+--reason\s+(?P<reason>\S.*)"
     r"|i\s+reviewed\s+the\s+media\s+files\s+and\s+i\s+approve"
-    r"|override\s+(?:rs-)?[a-f0-9]{6,64}(?:\s+acceptable\s+risk)?"
-    r"|(?:rs-)?[a-f0-9]{6,64}\s+is\s+acceptable\s+risk"
+    r"|override\s+(?:(?:rs-)?[a-f0-9]{6,64})(?:(?:\s*,\s*|\s+)(?:rs-)?[a-f0-9]{6,64}){0,9}(?:\s+acceptable\s+risk)?"
+    r"|(?:(?:rs-)?[a-f0-9]{6,64})(?:(?:\s*,\s*|\s+)(?:rs-)?[a-f0-9]{6,64}){0,9}\s+(?:is|are)\s+acceptable\s+risk"
     r")\Z",
     re.IGNORECASE | re.DOTALL,
 )

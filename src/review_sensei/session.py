@@ -149,6 +149,13 @@ def _operator_paused(value: object) -> bool:
 
 
 MAX_STORED_DISPOSITIONS = 4
+MAX_DISPOSITIONS_PER_HEAD = 32
+MAX_UNHEADED_DISPOSITIONS = 4
+# Four maximum-size dispositions are about 9845 canonical bytes once non-ASCII
+# reasons and actors are escaped. The bound stays above that historical record
+# so an existing four-item ledger still loads.
+MAX_DISPOSITION_BYTES = 10240
+MAX_DISPOSITION_ITEMS = 256
 MAX_DISPOSITION_REASON_BYTES = 512
 MAX_DISPOSITION_ACTOR_BYTES = 256
 _DISPOSITION_FINGERPRINT_RE = re.compile(r"^[a-f0-9]{16,64}$")
@@ -461,6 +468,18 @@ def _validate_convergence_history_baseline(
         )
 
 
+def disposition_array_bytes(items: object) -> int:
+    """Canonical JSON size of a dispositions array."""
+
+    return len(
+        json.dumps(
+            list(items),  # type: ignore[call-overload]
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+
+
 def _stored_dispositions(
     value: object,
 ) -> tuple[dict[str, object], ...]:
@@ -470,7 +489,7 @@ def _stored_dispositions(
         raise ReviewInputError("session dispositions must be an array")
     if not isinstance(value, (list, tuple)):
         raise ReviewInputError("session dispositions must be an array")
-    if len(value) > MAX_STORED_DISPOSITIONS:
+    if len(value) > MAX_DISPOSITION_ITEMS:
         raise ReviewInputError("session dispositions exceed the configured bound")
     normalized: list[dict[str, object]] = []
     allowed = {"fingerprint", "action", "reason", "actor", "head_sha", "expires_at"}
@@ -522,6 +541,27 @@ def _stored_dispositions(
                 "expires_at": expires_at,
             }
         )
+    if disposition_array_bytes(normalized) > MAX_DISPOSITION_BYTES:
+        raise ReviewInputError("session dispositions exceed the configured bound")
+    seen: set[tuple[str, str | None]] = set()
+    per_head: dict[str, int] = {}
+    unheaded = 0
+    for item in normalized:
+        fingerprint = item["fingerprint"]
+        head_sha = item["head_sha"]
+        assert isinstance(fingerprint, str)
+        key = (fingerprint, head_sha if isinstance(head_sha, str) else None)
+        if key in seen:
+            raise ReviewInputError("session disposition is duplicated")
+        seen.add(key)
+        if key[1] is None:
+            unheaded += 1
+        else:
+            per_head[key[1]] = per_head.get(key[1], 0) + 1
+    if unheaded > MAX_UNHEADED_DISPOSITIONS or any(
+        count > MAX_DISPOSITIONS_PER_HEAD for count in per_head.values()
+    ):
+        raise ReviewInputError("session dispositions exceed the configured bound")
     return tuple(normalized)
 
 
