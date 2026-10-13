@@ -398,7 +398,12 @@ class ReplyTransportTests(unittest.TestCase):
         transport = GitHubHttp(api_url="https://example.test", timeout=7)
         transport.primed_issue_comments["/cached"] = [{"id": 1}]
         transport.custom_configuration = object()
-        with patch.object(transport, "request", return_value=(200, [])) as request:
+        # This checks adapter configuration; a fixed clock avoids platform float
+        # rounding in (now + budget) - now while retaining the strict limit.
+        with (
+            patch("review_sensei_github.reply_budget.time.monotonic", return_value=100),
+            patch.object(transport, "request", return_value=(200, [])) as request,
+        ):
             wrapped = ReplyPublicationHttp(transport)
             self.assertIs(
                 wrapped.primed_issue_comments, transport.primed_issue_comments
