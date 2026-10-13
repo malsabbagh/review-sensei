@@ -859,7 +859,10 @@ def apply_session_command(
                 clauses.append(f"blocked by run {owner.get('run_id')}, still running")
             else:
                 clauses.append("blocked by a held reservation, owner unknown")
-        state_clause = "; ".join(clauses) if clauses else "not paused"
+        # No clause when nothing is blocked: the paused= field already
+        # carries the state, and a redundant "not paused" suffix only
+        # duplicates it.
+        state_suffix = f"; {'; '.join(clauses)}" if clauses else ""
         return record, MaintainerCommandResult(
             action="status",
             applied=False,
@@ -868,7 +871,7 @@ def apply_session_command(
                 f"initial={record.completed_initial_reviews} "
                 f"verification={record.completed_verification_rounds} "
                 f"failed_attempts={record.failed_attempts} "
-                f"paused={paused}{head_suffix}; {state_clause}"
+                f"paused={paused}{head_suffix}{state_suffix}"
             ),
         )
     if not planned:

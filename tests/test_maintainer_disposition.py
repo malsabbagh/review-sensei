@@ -450,8 +450,9 @@ class SessionCommandTests(unittest.TestCase):
         status = parse_maintainer_command("@sensei review status", actor="alice")
         _record, result = apply_session_command(ledger, IDENTITY, status, now=FIXED_NOW)
         self.assertIn("paused=False", result.summary)
-        self.assertIn("not paused", result.summary)
+        self.assertNotIn("not paused", result.summary)
         self.assertNotIn("blocked by", result.summary)
+        self.assertTrue(result.summary.endswith("paused=False"))
 
         pause = parse_maintainer_command("@sensei review pause", actor="alice")
         apply_session_command(ledger, IDENTITY, pause, now=FIXED_NOW)

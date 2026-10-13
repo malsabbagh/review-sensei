@@ -52,6 +52,18 @@ plus this record (#294).
   evidence stays blocked without mutation. Saved publication work is
   never reclaimed.
 
+Authorization envelope: admission self-heal is not a new trust
+boundary. It runs the identical evidence seam as the maintainer
+command — broker-verified session grant, GitHub Actions run evidence
+proving the owner run completed, exact reservation/digest/generation
+recheck, one CAS replacement, one failed attempt charged to the
+abandoned head. The only differences are the grant's operation
+(`review` instead of `command`) and that admission never unpauses.
+A PR trigger therefore cannot steer recovery: without a completed
+owner run proven through Actions evidence, admission stays blocked
+exactly as before, and a maintainer pause stops admission before
+any recovery is attempted.
+
 This supersedes ADR 0063's rule that recovery requires an explicit
 maintainer `continue`. The pause contract is unchanged and stricter:
 
