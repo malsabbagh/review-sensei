@@ -856,7 +856,9 @@ def apply_session_command(
         if record.reservation_id is not None:
             owner = record.reservation_owner
             if owner is not None:
-                clauses.append(f"blocked by held reservation, owner run {owner.get('run_id')}")
+                clauses.append(
+                    f"blocked by held reservation, owner run {owner.get('run_id')}"
+                )
             else:
                 clauses.append("blocked by a held reservation, owner unknown")
         # No clause when nothing is blocked: the paused= field already
