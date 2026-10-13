@@ -418,6 +418,90 @@ class SessionCommandTests(unittest.TestCase):
         )
         self.assertIn(f"head={'a' * 40}", result.summary)
 
+    def test_status_distinguishes_paused_from_blocked_by_run(self):
+        # ADR 0079: the two blocked states must not read the same.
+        ledger = InMemorySessionLedger()
+        pause = parse_maintainer_command("@sensei review pause", actor="alice")
+        apply_session_command(ledger, IDENTITY, pause, now=FIXED_NOW)
+        status = parse_maintainer_command("@sensei review status", actor="alice")
+        _record, result = apply_session_command(ledger, IDENTITY, status, now=FIXED_NOW)
+        self.assertIn(
+            "paused by maintainer, comment @sensei review continue", result.summary
+        )
+
+        ledger = InMemorySessionLedger()
+        ledger.initialize(IDENTITY, now=FIXED_NOW)
+        ledger.replace(
+            IDENTITY,
+            lambda r: r.evolve(
+                reservation_id="abcd1234",
+                reserved_slot="initial",
+                reservation_owner={"run_id": "424242", "head_sha": "a" * 40},
+                now=FIXED_NOW,
+            ),
+            now=FIXED_NOW,
+        )
+        _record, result = apply_session_command(ledger, IDENTITY, status, now=FIXED_NOW)
+        self.assertIn("blocked by held reservation, owner run 424242", result.summary)
+        self.assertNotIn("paused by maintainer", result.summary)
+
+    def test_status_without_pause_or_hold_emits_no_blocked_clause(self):
+        ledger = InMemorySessionLedger()
+        status = parse_maintainer_command("@sensei review status", actor="alice")
+        _record, result = apply_session_command(ledger, IDENTITY, status, now=FIXED_NOW)
+        self.assertIn("paused=False", result.summary)
+        self.assertNotIn("not paused", result.summary)
+        self.assertNotIn("blocked by", result.summary)
+        self.assertTrue(result.summary.endswith("paused=False"))
+
+        pause = parse_maintainer_command("@sensei review pause", actor="alice")
+        apply_session_command(ledger, IDENTITY, pause, now=FIXED_NOW)
+        _record, result = apply_session_command(ledger, IDENTITY, status, now=FIXED_NOW)
+        self.assertIn("paused by maintainer", result.summary)
+        self.assertNotIn("blocked by", result.summary)
+
+    def test_status_composes_pause_and_known_owner_exactly(self):
+        ledger = InMemorySessionLedger()
+        ledger.initialize(IDENTITY, now=FIXED_NOW)
+        ledger.replace(
+            IDENTITY,
+            lambda r: r.evolve(
+                reservation_id="abcd1234",
+                reserved_slot="initial",
+                reservation_owner={"run_id": "424242", "head_sha": "a" * 40},
+                operator_paused=True,
+                now=FIXED_NOW,
+            ),
+            now=FIXED_NOW,
+        )
+        status = parse_maintainer_command("@sensei review status", actor="alice")
+        _record, result = apply_session_command(ledger, IDENTITY, status, now=FIXED_NOW)
+        # Pause first, then the owner clause: the two states stay
+        # distinguishable as one composed string (ADR 0079).
+        self.assertIn(
+            "paused by maintainer, comment @sensei review continue to resume; "
+            "blocked by held reservation, owner run 424242",
+            result.summary,
+        )
+
+    def test_status_composes_pause_and_hold_and_names_unknown_owner(self):
+        ledger = InMemorySessionLedger()
+        ledger.initialize(IDENTITY, now=FIXED_NOW)
+        ledger.replace(
+            IDENTITY,
+            lambda r: r.evolve(
+                reservation_id="abcd1234",
+                reserved_slot="initial",
+                operator_paused=True,
+                now=FIXED_NOW,
+            ),
+            now=FIXED_NOW,
+        )
+        status = parse_maintainer_command("@sensei review status", actor="alice")
+        _record, result = apply_session_command(ledger, IDENTITY, status, now=FIXED_NOW)
+        self.assertIn("paused by maintainer", result.summary)
+        self.assertIn("blocked by a held reservation, owner unknown", result.summary)
+
     def test_disposition_is_not_a_verified_fix(self):
         ledger = InMemorySessionLedger()
         command = parse_maintainer_command(

@@ -87,6 +87,7 @@ Process: `docs/process/adr-process.md`
 | [0076](0076-pr253-gap-closure-contracts.md) | Proposed | Freeze PR253 context, producer, check, unchanged-file, mixed-coverage, bootstrap and acceptance-store contracts | #238, #253 | Uninterrupted bootstrap only; writers stay opt-in until P1 and maintainer acceptance |
 | [0077](0077-explicit-human-file-review.md) | Proposed | Record explicit human review of unsupported binary files without treating AI coverage as complete | #253 | Confirmation is audit; mixed APPROVE waives only the binary blocker |
 | [0078](0078-review-sensei-github-split.md) | Proposed | Ship the GitHub Actions runtime as review-sensei-github | User-authorized split | Engine must not import the host; v5 moves only after the hosted package is published |
+| [0079](0079-reservation-leak-prevention-and-admission-self-heal.md) | Proposed | Prevent reservation leaks and self-heal at admission | Pending triage | Supersedes ADR 0063's explicit-continue rule; pause is never auto-cleared |
 
 ## Policy
 

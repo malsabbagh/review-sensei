@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Prevented cancelled or killed reviews from leaking their session
+  reservation (ADR 0079): `SIGTERM` now unwinds through the same cleanup
+  as `SIGINT`, the owning run may release its own reservation even after
+  the PR head has moved (broker `release_only` exchange plus a ledger
+  exception scoped to release only), and an always-run workflow cleanup
+  step repeats the owner-only release. A lost runner's leaked
+  reservation is healed at review admission — one failed attempt
+  charged to the old head, after which that same review proceeds on
+  the current head — while a maintainer pause is never cleared
+  automatically and status messages now distinguish "paused by
+  maintainer" from "blocked by held reservation, owner run X". Deploy the
+  broker before relying on the new exchange.
+
 ## 0.6.23 - 2026-10-12
 
 - Split the hosted GitHub runtime into the `review-sensei-github` distribution.

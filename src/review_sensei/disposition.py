@@ -544,6 +544,11 @@ class FindingDisposition:
         return expires > _aware_now(now)
 
 
+PAUSED_BY_MAINTAINER_SUMMARY = (
+    "paused by maintainer, comment @sensei review continue to resume"
+)
+
+
 @dataclass(frozen=True)
 class MaintainerCommandResult:
     """Outcome of applying one command. Never converts a withheld decision."""
@@ -778,7 +783,7 @@ def apply_session_command(
             action="pause",
             applied=True,
             operator_paused=True,
-            summary="automated review paused pending maintainer continuation",
+            summary=PAUSED_BY_MAINTAINER_SUMMARY,
         )
     if command.action == "verify":
         dispositions = session_dispositions(record)
@@ -842,6 +847,24 @@ def apply_session_command(
         )
     if command.action == "status":
         head_suffix = f" head={command.head_sha}" if command.head_sha else ""
+        # Tell the two blocked states apart (ADR 0079): a maintainer pause
+        # is only ever cleared by an explicit continue, while a held
+        # reservation names the run that owns it.
+        clauses = []
+        if paused:
+            clauses.append(PAUSED_BY_MAINTAINER_SUMMARY)
+        if record.reservation_id is not None:
+            owner = record.reservation_owner
+            if owner is not None:
+                clauses.append(
+                    f"blocked by held reservation, owner run {owner.get('run_id')}"
+                )
+            else:
+                clauses.append("blocked by a held reservation, owner unknown")
+        # No clause when nothing is blocked: the paused= field already
+        # carries the state, and a redundant "not paused" suffix only
+        # duplicates it.
+        state_suffix = f"; {'; '.join(clauses)}" if clauses else ""
         return record, MaintainerCommandResult(
             action="status",
             applied=False,
@@ -850,7 +873,7 @@ def apply_session_command(
                 f"initial={record.completed_initial_reviews} "
                 f"verification={record.completed_verification_rounds} "
                 f"failed_attempts={record.failed_attempts} "
-                f"paused={paused}{head_suffix}"
+                f"paused={paused}{head_suffix}{state_suffix}"
             ),
         )
     if not planned:
