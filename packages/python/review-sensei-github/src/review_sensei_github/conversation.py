@@ -41,6 +41,7 @@ from .pending import PendingReplyPage, pending_reply_pages
 from .publication import (
     ReviewApprovalFinalizer,
     finding_declares_blocking,
+    finding_instance_from_body,
 )
 from .reply_budget import bounded_reply_publication
 
@@ -294,6 +295,21 @@ class ProcessingReaction:
     """One App-authored processing reaction that must be removed."""
 
     reaction_id: int
+
+
+@dataclass(frozen=True)
+class ResolutionAuthority:
+    """Durable authority to resolve one App-owned finding thread.
+
+    A generated reply's resolve bit is not this record. The evidence digest is
+    the provenance of the current diff that established the finding is addressed.
+    """
+
+    instance: str
+    head_sha: str
+    source_comment_id: int
+    decision: str
+    evidence_sha256: str
 
 
 class ConversationPublisher:
@@ -1189,6 +1205,40 @@ class ConversationPublisher:
             used += size
         return tuple(selected)
 
+    def _resolution_record(
+        self,
+        *,
+        reply: ConversationReply,
+        root_is_app_authored: bool,
+        root_body: object,
+        head_sha: str,
+        source_comment_id: int,
+        resolution_evidence: str | None,
+    ) -> ResolutionAuthority | None:
+        """Return durable addressed-finding authority, or nothing.
+
+        ``resolve=true`` without a current-diff evidence digest, or without an
+        instance marker on the App root, leaves the thread open.
+        """
+
+        if not reply.resolve or not root_is_app_authored:
+            return None
+        if (
+            not isinstance(resolution_evidence, str)
+            or re.fullmatch(r"[a-f0-9]{64}", resolution_evidence) is None
+        ):
+            return None
+        instance = finding_instance_from_body(root_body)
+        if instance is None:
+            return None
+        return ResolutionAuthority(
+            instance=instance,
+            head_sha=head_sha,
+            source_comment_id=source_comment_id,
+            decision="addressed",
+            evidence_sha256=resolution_evidence,
+        )
+
     def publish(
         self,
         *,
@@ -1203,6 +1253,7 @@ class ConversationPublisher:
         root_comment_id: int,
         source_kind: str = "inline",
         pending_page: PendingReplyPage | None = None,
+        resolution_evidence: str | None = None,
     ) -> ReplyResult:
         if not GIT_SHA_HEX.fullmatch(head_sha):
             raise GitHubConversationError("reply head sha is invalid")
@@ -1276,6 +1327,7 @@ class ConversationPublisher:
             resolved_root = authoritative_root
         root_is_app_authored = False
         root_is_blocking_finding = False
+        root_body: object = None
         if source_kind == "inline" and resolved_root != source_comment_id:
             status, root = self.http.request(
                 "GET",
@@ -1304,7 +1356,8 @@ class ConversationPublisher:
                 and root_user["login"].casefold() == app_slug.casefold()
                 and root_user.get("type") == "Bot"
             )
-            root_is_blocking_finding = finding_declares_blocking(root.get("body"))
+            root_body = root.get("body")
+            root_is_blocking_finding = finding_declares_blocking(root_body)
 
         existing = self._find_existing(
             token=token,
@@ -1316,7 +1369,17 @@ class ConversationPublisher:
             expected_body=body if pending_page is not None else None,
         )
         if existing is not None:
-            if reply.resolve and root_is_app_authored:
+            if (
+                self._resolution_record(
+                    reply=reply,
+                    root_is_app_authored=root_is_app_authored,
+                    root_body=root_body,
+                    head_sha=head_sha,
+                    source_comment_id=source_comment_id,
+                    resolution_evidence=resolution_evidence,
+                )
+                is not None
+            ):
                 self._resolve_and_finalize(
                     token=token,
                     repository=repository,
@@ -1366,6 +1429,23 @@ class ConversationPublisher:
         ):
             return ReplyResult(status="skipped_fork")
 
+        authority = self._resolution_record(
+            reply=reply,
+            root_is_app_authored=root_is_app_authored,
+            root_body=root_body,
+            head_sha=head_sha,
+            source_comment_id=source_comment_id,
+            resolution_evidence=resolution_evidence,
+        )
+        if authority is not None:
+            durable = (
+                "\n\n<!-- reviewsensei:resolution:v1 "
+                f"instance={authority.instance} head={head_sha} "
+                f"source={source_comment_id} evidence={authority.evidence_sha256} "
+                "decision=addressed -->"
+            )
+            if len((body + durable).encode("utf-8")) <= MAX_REPLY_BYTES:
+                body = body + durable
         request_body: dict[str, object] = {"body": body}
         target = (
             f"/pulls/{pull_request}/comments/{resolved_root}/replies"
@@ -1411,7 +1491,17 @@ class ConversationPublisher:
                         raise GitHubConversationTransientError(
                             "pending reply page readback was not confirmed"
                         )
-                if reply.resolve and root_is_app_authored:
+                if (
+                    self._resolution_record(
+                        reply=reply,
+                        root_is_app_authored=root_is_app_authored,
+                        root_body=root_body,
+                        head_sha=head_sha,
+                        source_comment_id=source_comment_id,
+                        resolution_evidence=resolution_evidence,
+                    )
+                    is not None
+                ):
                     self._resolve_and_finalize(
                         token=token,
                         repository=repository,
@@ -1438,7 +1528,17 @@ class ConversationPublisher:
                 expected_body=body if pending_page is not None else None,
             )
             if existing_after is not None:
-                if reply.resolve and root_is_app_authored:
+                if (
+                    self._resolution_record(
+                        reply=reply,
+                        root_is_app_authored=root_is_app_authored,
+                        root_body=root_body,
+                        head_sha=head_sha,
+                        source_comment_id=source_comment_id,
+                        resolution_evidence=resolution_evidence,
+                    )
+                    is not None
+                ):
                     self._resolve_and_finalize(
                         token=token,
                         repository=repository,

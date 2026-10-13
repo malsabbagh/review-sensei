@@ -929,7 +929,7 @@ class ReviewPublisherTests(unittest.TestCase):
             body["comments"][0]["body"],
         )
 
-    def test_existing_fingerprint_is_not_republished_across_heads(self):
+    def test_same_instance_on_an_older_head_is_published_again(self):
         from review_sensei.context import finding_lifecycle_for_comment
 
         head = "b" * 40
@@ -985,11 +985,10 @@ class ReviewPublisherTests(unittest.TestCase):
             ]
         )
         self.assertEqual(outcome.status, "published")
-        # Duplicate suppression is a property of publication, not of incremental
-        # mode: a plain full review is the common re-review case.
+        # An older head with the same instance does not suppress the current head.
         self.assertEqual(current.coverage_mode, "full")
         body = __import__("json").loads(calls[4][2].decode("utf-8"))
-        self.assertEqual(body["comments"], [])
+        self.assertEqual(len(body["comments"]), 1)
         self.assertEqual(body["event"], "REQUEST_CHANGES")
         self.assertEqual(finding_fingerprint_from_body(existing), fingerprint)
         self.assertTrue(finding_declares_blocking(existing))
@@ -1162,7 +1161,7 @@ class ReviewPublisherTests(unittest.TestCase):
         existing = finding_marker(
             repository_id=1,
             pull_request=2,
-            head_sha="c" * 40,
+            head_sha=head,
             base_sha="a" * 40,
             result=current,
             blocking=True,
@@ -1243,28 +1242,24 @@ class ReviewPublisherTests(unittest.TestCase):
             )
         )
 
-    def test_fingerprint_sweep_degrades_when_graphql_is_not_permitted(self):
-        """Publication continues without suppression when GraphQL is blocked."""
+    def test_fingerprint_sweep_stops_when_graphql_is_not_permitted(self):
+        """Inline publication does not skip duplicate checks when GraphQL is blocked."""
 
         head = "b" * 40
         for status in (401, 403):
             with self.subTest(status=status):
-                outcome, calls = self.publish(
-                    [
-                        json_response(pr_payload(head_sha=head)),
-                        json_response([]),
-                        json_response(pr_payload(head_sha=head)),
-                        json_response({}, status),
-                        json_response({"id": 5}, 200),
-                        json_response(pr_payload(head_sha=head)),
-                        json_response(pr_payload(head_sha=head)),
-                        json_response([]),
-                        json_response({"id": 9}, 200),
-                    ]
+                with self.assertRaises(GitHubPublicationError) as raised:
+                    self.publish(
+                        [
+                            json_response(pr_payload(head_sha=head)),
+                            json_response([]),
+                            json_response(pr_payload(head_sha=head)),
+                            json_response({}, status),
+                        ]
+                    )
+                self.assertIn(
+                    "review thread reconciliation", str(raised.exception).lower()
                 )
-                self.assertEqual(outcome.status, "published")
-                body = __import__("json").loads(calls[4][2].decode("utf-8"))
-                self.assertEqual(len(body["comments"]), 1)
 
     def test_skipped_incremental_pass_cannot_approve_with_blocking_roots(self):
         """A skip carries no findings, so only the finalizer decides approval.
@@ -1573,6 +1568,7 @@ class ReviewPublisherTests(unittest.TestCase):
                 json_response(pr_payload(head_sha=head)),
                 json_response([]),
                 json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
                 json_response({"id": 5}, 200),
                 json_response(pr_payload(head_sha=head)),
                 graphql_review_threads_response(),
@@ -1611,14 +1607,19 @@ class ReviewPublisherTests(unittest.TestCase):
 
         self.assertEqual(outcome.status, "published")
         self.assertEqual(self._published_review_events(calls), ["COMMENT"])
-        body = json.loads(calls[3][2].decode("utf-8"))
+        body = next(
+            json.loads(data.decode("utf-8"))
+            for method, url, data in calls
+            if method == "POST" and url.endswith("/pulls/2/reviews")
+        )
         self.assertIn("## ReviewSensei — Approval withheld", body["body"])
         self.assertIn(
             "Approval was withheld because a required human assessment is pending.",
             body["body"],
         )
-        # The pending assessment is body feedback, never an enforcement thread.
-        self.assertEqual(body["comments"], [])
+        # A valid diff line publishes the assessment as an inline thread.
+        self.assertEqual(len(body["comments"]), 1)
+        self.assertEqual(body["comments"][0]["side"], "RIGHT")
 
         review_body = next(
             json.loads(data.decode("utf-8"))["body"]
@@ -1642,7 +1643,7 @@ class ReviewPublisherTests(unittest.TestCase):
         )
         self.assertTrue(entry.needs_human)
         self.assertTrue(entry.overridable)
-        self.assertTrue(entry.body_placed)
+        self.assertFalse(entry.body_placed)
         identifier = assign_finding_identifiers((entry.instance,))[entry.instance]
         self.assertIn(identifier, review_body)
 
@@ -1705,31 +1706,46 @@ class ReviewPublisherTests(unittest.TestCase):
             if method == "POST" and url.endswith("/reviews") and body
         ]
 
-    def test_rejects_formatted_comment_that_exceeds_output_limit(self):
+    def test_oversized_inline_comment_falls_back_to_the_body(self):
         head = "b" * 40
         http, calls = make_http(
             [
                 json_response(pr_payload(head_sha=head)),
                 json_response([]),
                 json_response(pr_payload(head_sha=head)),
+                json_response({"id": 5}, 200),
             ]
         )
-        with self.assertRaises(GitHubPublicationError):
-            ReviewPublisher(http=http).publish(
-                token="ghs_token",
-                repository="owner/repo",
-                repository_id=1,
-                pull_request=2,
-                head_sha=head,
-                base_branch="main",
-                base_sha="a" * 40,
-                result=body_limited_result(),
-                diff=DIFF,
-                app_slug="review-sensei[bot]",
-                convergence_policy=ReviewConvergencePolicy(mode="legacy"),
-                allow_retired_legacy_policy=True,
-            )
-        self.assertEqual(len(calls), 3)
+        outcome = ReviewPublisher(http=http).publish(
+            token="ghs_token",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+            base_branch="main",
+            base_sha="a" * 40,
+            result=body_limited_result(),
+            diff=DIFF,
+            app_slug="review-sensei[bot]",
+            convergence_policy=ReviewConvergencePolicy(mode="legacy"),
+            allow_retired_legacy_policy=True,
+        )
+        self.assertEqual(outcome.status, "published")
+        review = next(
+            json.loads(data.decode("utf-8"))
+            for method, url, data in calls
+            if method == "POST" and url.endswith("/pulls/2/reviews")
+        )
+        self.assertEqual(review["comments"], [])
+        index = parse_finding_index(
+            review["body"],
+            repository_id=1,
+            pull_request=2,
+            head_sha=head,
+        )
+        self.assertIsNotNone(index)
+        self.assertTrue(index.entries[0].body_placed)
+        self.assertTrue(index.entries[0].blocking)
 
     def test_rejects_complete_summary_body_above_github_transport_limit(self):
         head = "b" * 40

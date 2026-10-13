@@ -538,14 +538,16 @@ protection (`required_conversation_resolution.enabled`). A positive
 requirement is conclusive, and only a conclusive absence permits optional
 inline threads; an unreadable, unparseable, or unexpected response leaves the
 state unknown, which fails closed to the body and never creates a thread the
-branch would require to be resolved. A finding that blocks approval and
-carries a valid snapshot line keeps its inline thread and its gate under every
-conversation-resolution state, because it is enforced feedback. Non-enforced
-feedback is explained in the review body: findings awaiting a human
-assessment, findings without a publishable location, optional feedback under a
-policy that does not open advisory threads, optional feedback on a branch
-whose resolution requirement is present or unknown, and every advisory-mode
-finding. A non-blocking label cannot override the host's resolution rule. The
+branch would require to be resolved. A finding that blocks approval, or a finding awaiting a human assessment, keeps
+its inline thread when it carries a valid `RIGHT` or `LEFT` snapshot line,
+including when the branch requires conversation resolution. The review body
+keeps a finding when the review is advisory, the anchor is `FILE` or otherwise
+unpublishable (missing path, missing line, or a binary file), the finding is
+optional and advisory threads are disabled, the finding is optional and
+conversation resolution is required or unknown, or the formatted inline comment
+exceeds its configured byte limit. That oversized comment moves to the body as
+one finding; it is not split, and the rest of the review stays eligible for
+inline placement. A line is never invented to force an inline comment. The
 body states placement once, using the rule that decided it, so a reader learns
 why the feedback is not an inline thread without re-deriving the planner's
 order; the explanation is not repeated per finding.
@@ -1122,8 +1124,17 @@ An override applies to the current commit only. A new push needs a new override.
 The default evidence policy is `legacy` single-pass mode. `confirmed` publishes
 only snapshot-bound confirmed candidates; unverified comments never become
 findings. The formatted summary and inline bodies must fit their configured
-`ReviewLimits`; the complete framed review body must also fit the GitHub
-transport ceiling of 65,536 bytes before any POST is attempted.
+`ReviewLimits`. Each formatted inline comment keeps its own ceiling, including
+its instruction and markers; a comment over that ceiling is published in the
+review body instead of failing the review. The complete framed review body must
+also fit the GitHub transport ceiling of 65,536 bytes before any POST is
+attempted. Placement is fixed before the finding index is written. Required
+framing, the finding index, and every blocking or human-assessment explanation
+that stays in the body are retained. Only optional, non-blocking, non-human
+body prose may be omitted for size, lowest severity first. The body then counts
+those omitted explanations. If the body or summary still cannot fit, or the
+finding index cannot be represented, publication is refused. An eligibility
+marker that cannot be encoded keeps its own error.
 The marker, App slug, exact head commit, and repository identity form the
 idempotency boundary; stale, fork, duplicate, ambiguous, or invalid writes
 fail closed.

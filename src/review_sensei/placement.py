@@ -1,11 +1,13 @@
 """Host-fact placement planning for published findings.
 
 Placement is decided from the host's own facts — whether the target branch
-enforces conversation resolution — rather than from a finding's label alone.
-A non-blocking label cannot override GitHub's conversation-resolution rule, so
-non-enforced feedback goes to the review body. Unknown host facts fail closed
-to body placement, which never creates an unresolvable thread, and an
-unanchored required finding keeps its required-fix effect from the body.
+enforces conversation resolution — and from whether the anchor is a real diff
+line. A non-blocking label cannot override GitHub's conversation-resolution
+rule, so optional feedback goes to the review body when a thread would have
+to be resolved or the requirement is unknown. Blocking findings and human
+assessments with a real left or right diff line stay inline, including when
+the branch requires conversation resolution. Unknown host facts fail closed
+for optional threads. An unanchored finding keeps its obligation in the body.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ BODY_REASON_UNANCHORED = "unanchored"
 BODY_REASON_HUMAN_ASSESSMENT = "human-assessment"
 BODY_REASON_OPTIONAL_POLICY = "optional-policy"
 BODY_REASON_CONVERSATION_RESOLUTION = "conversation-resolution"
+BODY_REASON_OVERSIZED = "oversized-inline"
 
 BODY_PLACEMENT_NOTE = (
     "Findings that cannot be enforced as inline threads are explained in this "
@@ -117,16 +120,18 @@ def plan_finding_placement_detail(
         # content even when a valid inline location exists.
         return BODY_PLACEMENT, BODY_REASON_ADVISORY
     if anchor not in ("left", "right"):
-        # No publishable inline location: the body retains a required fix's
-        # gate effect, and location fallback alone does not make the analysis
-        # incomplete.
+        # No publishable inline location: file subjects, missing lines, missing
+        # paths, and binary files stay in the body. The body retains a required
+        # fix's gate effect. Location fallback alone does not make the analysis
+        # incomplete, and a line is never invented to force a thread.
         return BODY_PLACEMENT, BODY_REASON_UNANCHORED
-    if comment.needs_human:
-        # Unresolved uncertainty is labeled for human assessment rather than
-        # asserted as a proven defect, so it never becomes an enforcement
-        # thread.
-        return BODY_PLACEMENT, BODY_REASON_HUMAN_ASSESSMENT
-    if comment.blocks_approval:
+    if comment.needs_human or comment.blocks_approval:
+        # A real deleted-side or new-side line can carry a blocking finding or
+        # a required human assessment. Both stay inline when the branch
+        # requires conversation resolution: they are obligations, not optional
+        # notes. An oversized formatted comment is moved to the body by the
+        # publisher after this decision, and that fallback is recorded as body
+        # placement before the finding index is written.
         return INLINE_PLACEMENT, None
     if not policy.inline_advisory_threads:
         return BODY_PLACEMENT, BODY_REASON_OPTIONAL_POLICY
@@ -156,6 +161,7 @@ __all__ = [
     "BODY_REASON_CONVERSATION_RESOLUTION",
     "BODY_REASON_HUMAN_ASSESSMENT",
     "BODY_REASON_OPTIONAL_POLICY",
+    "BODY_REASON_OVERSIZED",
     "BODY_REASON_UNANCHORED",
     "CONVERSATION_RESOLUTION_NOT_REQUIRED",
     "CONVERSATION_RESOLUTION_PLACEMENT_NOTE",

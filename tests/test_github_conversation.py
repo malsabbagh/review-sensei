@@ -30,6 +30,39 @@ try:
 except ModuleNotFoundError:
     from tests.fake_github_http import FakeHTTPResponse, json_response, make_http
 
+
+def blocking_root_body(head: str, *, blocking: bool = True) -> str:
+    """App root whose instance and publication scope can authorize resolution."""
+
+    from review_sensei_github.publication import (
+        finding_instance_marker,
+        finding_marker,
+    )
+
+    from review_sensei.context import finding_lifecycle_for_comment
+    from review_sensei.models import ReviewComment
+
+    comment = ReviewComment(
+        path="src/app.py", line=1, body="The original finding", blocking=blocking
+    )
+    result = ReviewResult(summary="Summary.", comments=(comment,), provider="ollama")
+    marker = finding_marker(
+        repository_id=1,
+        pull_request=1,
+        head_sha=head,
+        base_sha="a" * 40,
+        result=result,
+        blocking=blocking,
+        fingerprint=finding_lifecycle_for_comment(comment).fingerprint,
+    )
+    return (
+        "[🚫 Blocking] The original finding\n\n"
+        + marker
+        + "\n\n"
+        + finding_instance_marker(comment)
+    )
+
+
 INLINE_URL = "https://api.github.test/repos/owner/repo/pulls/1"
 ISSUE_URL = "https://api.github.test/repos/owner/repo/issues/1"
 
@@ -1205,7 +1238,7 @@ class ConversationPublisherTests(unittest.TestCase):
                 {
                     "id": 10,
                     "pull_request_url": INLINE_URL,
-                    "body": "[🚫 Blocking] The original finding",
+                    "body": blocking_root_body(head),
                     "user": {"login": "Review-Sensei[Bot]", "type": "Bot"},
                     "author_association": "OWNER",
                     "in_reply_to_id": None,
@@ -1285,6 +1318,7 @@ class ConversationPublisherTests(unittest.TestCase):
             reply=ConversationReply.from_dict(
                 {"body": "Confirmed—the fix is complete.", "resolve": True}
             ),
+            resolution_evidence="ab" * 32,
             app_slug="review-sensei[bot]",
             root_comment_id=10,
         )
@@ -1447,7 +1481,7 @@ class ConversationPublisherTests(unittest.TestCase):
         root = {
             "id": 10,
             "pull_request_url": INLINE_URL,
-            "body": "Original finding",
+            "body": blocking_root_body(head, blocking=False),
             "user": {"login": "review-sensei[bot]", "type": "Bot"},
             "in_reply_to_id": None,
         }
@@ -1493,6 +1527,7 @@ class ConversationPublisherTests(unittest.TestCase):
             reply=ConversationReply.from_dict(
                 {"body": "Confirmed—the fix is complete.", "resolve": True}
             ),
+            resolution_evidence="ab" * 32,
             app_slug="review-sensei[bot]",
             root_comment_id=10,
         )
@@ -1509,7 +1544,7 @@ class ConversationPublisherTests(unittest.TestCase):
         root = {
             "id": 10,
             "pull_request_url": INLINE_URL,
-            "body": "Original finding",
+            "body": blocking_root_body(head, blocking=False),
             "user": {"login": "review-sensei[bot]", "type": "Bot"},
             "in_reply_to_id": None,
         }
@@ -1544,6 +1579,7 @@ class ConversationPublisherTests(unittest.TestCase):
                 reply=ConversationReply.from_dict(
                     {"body": "Confirmed—the fix is complete.", "resolve": True}
                 ),
+                resolution_evidence="ab" * 32,
                 app_slug="review-sensei[bot]",
                 root_comment_id=10,
             )
@@ -1558,7 +1594,7 @@ class ConversationPublisherTests(unittest.TestCase):
         root = {
             "id": 10,
             "pull_request_url": INLINE_URL,
-            "body": "Original finding",
+            "body": blocking_root_body(head, blocking=False),
             "user": {"login": "review-sensei[bot]", "type": "Bot"},
             "in_reply_to_id": None,
         }
@@ -1594,6 +1630,7 @@ class ConversationPublisherTests(unittest.TestCase):
                 reply=ConversationReply.from_dict(
                     {"body": "Confirmed—the fix is complete.", "resolve": True}
                 ),
+                resolution_evidence="ab" * 32,
                 app_slug="review-sensei[bot]",
                 root_comment_id=10,
             )
@@ -1606,7 +1643,7 @@ class ConversationPublisherTests(unittest.TestCase):
         root = {
             "id": 10,
             "pull_request_url": INLINE_URL,
-            "body": "Original finding",
+            "body": blocking_root_body(head, blocking=False),
             "user": {"login": "review-sensei[bot]", "type": "Bot"},
             "in_reply_to_id": None,
         }
@@ -1642,6 +1679,7 @@ class ConversationPublisherTests(unittest.TestCase):
                 reply=ConversationReply.from_dict(
                     {"body": "Confirmed—the fix is complete.", "resolve": True}
                 ),
+                resolution_evidence="ab" * 32,
                 app_slug="review-sensei[bot]",
                 root_comment_id=10,
             )

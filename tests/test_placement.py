@@ -8,7 +8,6 @@ from review_sensei.placement import (
     BODY_PLACEMENT_NOTE,
     BODY_REASON_ADVISORY,
     BODY_REASON_CONVERSATION_RESOLUTION,
-    BODY_REASON_HUMAN_ASSESSMENT,
     BODY_REASON_OPTIONAL_POLICY,
     BODY_REASON_UNANCHORED,
     CONVERSATION_RESOLUTION_NOT_REQUIRED,
@@ -108,10 +107,35 @@ class FindingPlacementTests(unittest.TestCase):
             BODY_PLACEMENT,
         )
 
-    def test_human_assessment_is_labeled_in_the_body_not_enforced_inline(self):
-        self.assertEqual(
-            self._plan(_comment(blocking=True, needs_human=True)), BODY_PLACEMENT
-        )
+    def test_human_assessment_with_a_diff_line_stays_inline(self):
+        for state in (
+            CONVERSATION_RESOLUTION_REQUIRED,
+            CONVERSATION_RESOLUTION_UNKNOWN,
+            CONVERSATION_RESOLUTION_NOT_REQUIRED,
+        ):
+            with self.subTest(state=state):
+                self.assertEqual(
+                    self._plan(
+                        _comment(blocking=True, needs_human=True), facts=_facts(state)
+                    ),
+                    INLINE_PLACEMENT,
+                )
+                self.assertEqual(
+                    self._plan(
+                        _comment(needs_human=True),
+                        anchor="left",
+                        facts=_facts(state),
+                    ),
+                    INLINE_PLACEMENT,
+                )
+
+    def test_human_assessment_without_a_diff_line_stays_in_the_body(self):
+        for anchor in ("summary", "file"):
+            with self.subTest(anchor=anchor):
+                self.assertEqual(
+                    self._plan(_comment(needs_human=True), anchor=anchor),
+                    BODY_PLACEMENT,
+                )
 
     def test_legacy_policy_keeps_optional_inline_threads_on_permitted_branches(self):
         legacy = ReviewConvergencePolicy(mode="legacy")
@@ -173,10 +197,10 @@ class PlacementReasonTests(unittest.TestCase):
                 BODY_REASON_UNANCHORED,
             ),
             (
-                "human-assessment",
+                "unanchored-human-assessment",
                 _comment(blocking=True, needs_human=True),
-                {},
-                BODY_REASON_HUMAN_ASSESSMENT,
+                {"anchor": "file"},
+                BODY_REASON_UNANCHORED,
             ),
             (
                 "optional-policy",
@@ -203,6 +227,9 @@ class PlacementReasonTests(unittest.TestCase):
     def test_inline_placement_reports_no_body_reason(self):
         self.assertEqual(
             self._detail(_comment(blocking=True)), (INLINE_PLACEMENT, None)
+        )
+        self.assertEqual(
+            self._detail(_comment(needs_human=True)), (INLINE_PLACEMENT, None)
         )
         self.assertEqual(
             self._detail(_comment(), policy=ReviewConvergencePolicy(mode="legacy")),

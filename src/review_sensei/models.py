@@ -1520,16 +1520,22 @@ class ReviewResult:
         if len(self.learning_proposals) > self.limits.max_learning_proposals:
             raise ReviewInputError("review contains too many learning proposals")
 
-        # Exact location/body duplicates are publisher-noise.  Keep the first
-        # occurrence in stage order while preserving distinct comments that
-        # happen to share a path and line.
+        # Exact location/body duplicates are one instance. The same instance
+        # with two approval classifications is rejected; input order does not
+        # choose the obligation. Matching duplicates keep the first occurrence.
         unique_comments: list[ReviewComment] = []
-        seen: set[tuple[str, int | None, str, str]] = set()
+        seen: dict[tuple[str, int | None, str, str], ReviewComment] = {}
         for comment in self.comments:
             key = (comment.path, comment.line, comment.side, comment.body)
-            if key in seen:
+            previous = seen.get(key)
+            if previous is not None:
+                if (
+                    previous.blocks_approval != comment.blocks_approval
+                    or previous.needs_human != comment.needs_human
+                ):
+                    raise ReviewInputError("conflicting finding classifications")
                 continue
-            seen.add(key)
+            seen[key] = comment
             unique_comments.append(comment)
         object.__setattr__(self, "comments", tuple(unique_comments))
         if len(self.comments) > self.limits.max_comments:

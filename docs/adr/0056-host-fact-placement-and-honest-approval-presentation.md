@@ -38,12 +38,14 @@ the publisher reads whether the target branch requires conversation resolution
 branch protection (`required_conversation_resolution.enabled`). A positive
 requirement is conclusive; only a conclusive absence permits optional inline
 threads, and an unreadable, unparseable, or unexpected response leaves the
-state unknown, which fails closed to the body. The planner's rule order is:
-advisory mode, missing publishable anchor, pending human assessment, blocking
-feedback (inline), policy that does not open advisory threads, host facts that
-do not permit optional threads, and otherwise inline. A finding that blocks
-approval keeps its inline thread and its gate under every conversation-
-resolution state, because it is enforced feedback.
+state unknown, which fails closed to the body for optional feedback. The
+planner's rule order is: advisory mode, missing publishable anchor, then a
+blocking finding or a pending human assessment with a valid left or right line
+stays inline, then a policy that does not open advisory threads, host facts
+that do not permit optional threads, and otherwise inline. A blocking finding
+and a human assessment keep their inline thread and their gate under every
+conversation-resolution state when the line is a real diff line. Closing a
+human-assessment thread by hand does not record the assessment.
 
 The review body explains placement once, using the rule that decided it
 (advisory mode, a conversation-resolution requirement, or the general body

@@ -2364,6 +2364,15 @@ class GitHubApplication:
             if not isinstance(reply, ConversationReply):
                 raise ReviewInputError("operation entry refused: result_missing")
             publish = getattr(self.replier, "publish_current", self.replier.publish)
+            resolution_evidence = None
+            diff_context = prepared.context.diff_context
+            if (
+                reply.resolve
+                and isinstance(self.replier, ConversationPublisher)
+                and isinstance(diff_context, str)
+                and diff_context
+            ):
+                resolution_evidence = sha256(diff_context.encode("utf-8")).hexdigest()
             return publish(
                 token=capability_token,
                 repository=repository,
@@ -2375,6 +2384,11 @@ class GitHubApplication:
                 app_slug=app_slug,
                 root_comment_id=prepared.root_comment_id,
                 source_kind=prepared.source_kind,
+                **(
+                    {"resolution_evidence": resolution_evidence}
+                    if resolution_evidence is not None
+                    else {}
+                ),
             )
         finally:
             self.replier.remove_processing_reaction(
