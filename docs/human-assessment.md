@@ -81,8 +81,9 @@ There is no general `mark human assessment complete` command. Recognized parser
 commands are `review status`, `review pause`, `review continue`, `review reenroll`,
 `verify`, `dismiss|defer|accept-risk <16–64 hex ID> --reason <reason>`,
 `I reviewed the media files and I approve`, and
-`override <RS-id> acceptable risk` or `<RS-id> is acceptable risk`, each
-preceded by the standalone mention. The media sentence and the `RS-` override
+`override <RS-id> acceptable risk` or `<RS-id> is acceptable risk`. Up to 10
+finding IDs can be named in the same comment, separated by spaces or commas.
+Each command is preceded by the standalone mention. The media sentence and the `RS-` override
 require a maintainer or admin. The published review repeats those commands.
 An override re-checks approval on this commit without a new AI review. Comment `@reviewsensei verify` to retry that check. An override
 applies to the current commit only. A new push needs a new override.

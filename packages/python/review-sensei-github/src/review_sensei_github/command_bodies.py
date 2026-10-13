@@ -416,6 +416,7 @@ def _legacy_inventory(
         APPROVAL_ELIGIBILITY_MARKER_PREFIX,
         IndexedFinding,
         approval_eligibility_from_body,
+        finding_blocking_from_body,
         finding_fingerprint_from_body,
         finding_instance_from_body,
     )
@@ -466,9 +467,7 @@ def _legacy_inventory(
         if not isinstance(instance, str) or instance in seen or lifecycle is None:
             continue
         seen.add(instance)
-        blocking = (
-            "blocking=true" in comment_body if isinstance(comment_body, str) else False
-        )
+        blocking = finding_blocking_from_body(comment_body) is True
         entries.append(
             IndexedFinding(
                 instance=instance,
@@ -562,15 +561,12 @@ def _override_facts(
             prior[commit_id] = review
     inventory: tuple[Any, ...] = ()
     if latest is not None and isinstance(latest.get("body"), str):
-        try:
-            index = finding_inventory_for_head(
-                latest["body"],
-                repository_id=repository_id,
-                pull_request=pull_request,
-                head_sha=head_sha,
-            )
-        except ReviewInputError:
-            raise
+        index = finding_inventory_for_head(
+            latest["body"],
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+        )
         if index is not None:
             inventory = index.entries
         else:

@@ -42,7 +42,7 @@ A maintainer or admin handles this review with one comment. Copy a command exact
 
 - Approve the media files without listing each file: `@reviewsensei I reviewed the media files and I approve`
 - Override one finding by its id: `@reviewsensei override RS-ABCDEF acceptable risk` or `@reviewsensei RS-ABCDEF is acceptable risk`. Replace `RS-ABCDEF` with the finding id in this review.
-- Override several findings at once: `@reviewsensei override RS-ABCDEF RS-123456 acceptable risk` (up to 10 IDs, separated by spaces or commas).
+- Override many findings in the same comment, up to 10: `@reviewsensei override RS-ABCDEF RS-123456 acceptable risk`. Separate the IDs with spaces or commas.
 
 An override re-checks approval on this commit without a new AI review. Comment `@reviewsensei verify` to retry that check. An override applies to the current commit only. A new push needs a new override.
 

@@ -2048,7 +2048,8 @@ class GitHubApplication:
         )
         from review_sensei.disposition import parse_maintainer_command
 
-        if parse_maintainer_command(source_body, actor="maintainer") is not None:
+        command = parse_maintainer_command(source_body, actor="maintainer")
+        if command is not None and len(command.finding_references) > 1:
             capability_token = self.broker.exchange(
                 oidc_token or self.broker.request_oidc_token(),
                 capability=(

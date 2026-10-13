@@ -1114,8 +1114,8 @@ comments append the fixed follow-up instruction `To discuss this finding, reply
 with @reviewsensei followed by your question.` and the maintainer commands
 `@reviewsensei I reviewed the media files and I approve` and
 `@reviewsensei override RS-ABCDEF acceptable risk` and
-`@reviewsensei override RS-ABCDEF RS-123456 acceptable risk` (up to 10 IDs,
-separated by spaces or commas). An override re-checks approval on this commit
+`@reviewsensei override RS-ABCDEF RS-123456 acceptable risk`. Up to 10 IDs
+can be named in the same comment, separated by spaces or commas. An override re-checks approval on this commit
 without a new AI review. Comment `@reviewsensei verify` to retry that check.
 An override applies to the current commit only. A new push needs a new override. Those bodies carry the marker
 `<!-- reviewsensei:review:v1 repo=<id> pr=<n> head=<sha> result=<sha256> -->`.

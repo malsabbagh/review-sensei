@@ -1372,6 +1372,46 @@ class GitHubApplicationTests(unittest.TestCase):
             self.replier.calls[0]["reply"].body,
         )
 
+    def test_single_command_routed_to_reply_is_not_called_a_stale_caller(self):
+        self.replier.prepare_context = lambda **kwargs: PreparedConversation(
+            source_kind="issue",
+            source_comment_id=10,
+            source_updated_at="updated",
+            head_sha="a" * 40,
+            root_comment_id=10,
+            context=ConversationContext(
+                messages=(
+                    ConversationMessage(
+                        author="alice",
+                        body="@reviewsensei verify",
+                        created_at="updated",
+                    ),
+                ),
+                pull_request_number=1,
+                head_sha="a" * 40,
+            ),
+        )
+        outcome = self.application.generate_and_publish_reply(
+            options=GitHubWriteOptions(github_writes=True, mention_replies=True),
+            oidc_token="provided-oidc",
+            read_token="read-token",
+            repository="owner/repo",
+            pull_request=1,
+            source_comment_id=10,
+            source_updated_at="updated",
+            expected_head_sha=None,
+            reply_provider=RecordingProvider(),
+            model="fixture-model",
+            app_slug="review-sensei[bot]",
+            root_comment_id=10,
+            source_kind="issue",
+        )
+        self.assertEqual(outcome.status, "replied")
+        self.assertNotIn(
+            "predates multi-finding overrides",
+            self.replier.calls[0]["reply"].body,
+        )
+
     def test_generated_reply_authorizes_then_uses_reply_capability(self):
         options = GitHubWriteOptions(github_writes=True, mention_replies=True)
         outcome = self.application.generate_and_publish_reply(
