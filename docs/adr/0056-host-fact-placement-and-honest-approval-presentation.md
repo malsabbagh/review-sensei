@@ -38,12 +38,14 @@ the publisher reads whether the target branch requires conversation resolution
 branch protection (`required_conversation_resolution.enabled`). A positive
 requirement is conclusive; only a conclusive absence permits optional inline
 threads, and an unreadable, unparseable, or unexpected response leaves the
-state unknown, which fails closed to the body. The planner's rule order is:
-advisory mode, missing publishable anchor, pending human assessment, blocking
-feedback (inline), policy that does not open advisory threads, host facts that
-do not permit optional threads, and otherwise inline. A finding that blocks
-approval keeps its inline thread and its gate under every conversation-
-resolution state, because it is enforced feedback.
+state unknown, which fails closed to the body for optional feedback. The
+planner's rule order is: advisory mode, missing publishable anchor, then a
+blocking finding or a pending human assessment with a valid left or right line
+stays inline, then a policy that does not open advisory threads, host facts
+that do not permit optional threads, and otherwise inline. A blocking finding
+and a human assessment keep their inline thread and their gate under every
+conversation-resolution state when the line is a real diff line. Closing a
+human-assessment thread by hand does not record the assessment.
 
 The review body explains placement once, using the rule that decided it
 (advisory mode, a conversation-resolution requirement, or the general body
@@ -192,3 +194,28 @@ the acceptance matrix that cites these fixtures.
 - [ADR 0032](0032-blocking-finding-classification-for-approvals.md)
 - [ADR 0035](0035-request-changes-for-blocking-findings.md)
 - [ADR 0055](0055-merge-focused-default-and-legacy-retirement.md)
+
+### Thread-decision reconciliation (PR #297)
+
+The hosted adapter confirms an addressed reply in a separate App-authored
+`resolution:v2` COMMENT review before mutating its thread. The record binds the
+repository ID, PR, base/head, reviewed result, instance, root/source comment,
+source timestamp/body digest and actor, and current-diff evidence digest.
+It is independent of paged reply bodies and cannot be omitted for reply size.
+Writing this record and finalizing approval use the `review_publish` capability;
+ordinary reply delivery continues to use `issue_reply`.
+
+Overrides, validated human reassessments and `verify` share bounded thread
+reconciliation. Each mutation rechecks the App root, current decision/index,
+source authority where applicable, and exact open/non-draft/non-fork PR scope.
+A full ten-page-bounded discovery precedes mutations. Ambiguous mutation
+responses receive a readback; unconfirmed resolution preserves the durable
+decision and remains retryable. Successful resolution remains successful when
+approval subsequently fails. Receipts expose resolution and approval separately.
+
+Later assessment, addressed-decision and approval receipts cannot hide the
+original finding index: the finalizer retrieves the inventory for the current
+eligibility result. A conflicting or unmatched inventory withholds approval.
+Legacy histories without any index retain their conservative existing gates.
+Old-head thread supersession requires a confirmed same-concern replacement and
+fresh scope checks; unrelated historical threads are left untouched.

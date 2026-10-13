@@ -780,8 +780,10 @@ revert unmerged setup PRs rather than writing the default branch directly.
 
 When ReviewSensei withholds approval for human assessment, an authorized
 repository owner, member or collaborator can reply with `@reviewsensei` and a concrete
-explanation addressing those findings. Body findings can be addressed in a PR
-conversation comment; no inline thread is required. ReviewSensei checks the
+explanation addressing those findings. A human assessment with a valid diff line
+is published as an inline thread. Closing that thread in GitHub does not record
+the assessment. Body findings can be addressed in a PR conversation comment.
+ReviewSensei checks the
 explanation against the current diff and records only supported resolutions or
 dismissals. A bare dismissal, thanks, unrelated text or request to approve does
 not settle a concern.

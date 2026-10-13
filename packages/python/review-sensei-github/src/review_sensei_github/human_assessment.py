@@ -975,20 +975,20 @@ class HumanAssessmentPublisher:
             # The conversation publisher has now reconciled this source's
             # reply (or acknowledged a new mention). Re-enter the exact-head
             # finalizer without another assessment record or model decision.
-            finalized = self.finalizer.finalize(
+            finalized = self.finalizer.finalize_recorded_decisions(
                 token=review_token,
                 repository=repository,
                 pull_request=pull_request,
                 head_sha=conversation.head_sha,
                 app_slug=app_slug,
                 eligibility=refreshed,
-                require_persisted=True,
             )
             return ReplyResult(
                 status=finalized.status
                 if finalized.status.startswith("skipped_")
                 else outcome.status,
                 comment_id=outcome.comment_id,
+                resolution_status=finalized.thread_resolution,
                 approval_status=finalized.status,
                 approval_diagnostic=finalized.diagnostic,
             )
@@ -1061,17 +1061,17 @@ class HumanAssessmentPublisher:
             )
         # Re-read durable eligibility inside finalization, including after the
         # thread scan, so a newer same-head human finding wins over this result.
-        finalized = self.finalizer.finalize(
+        finalized = self.finalizer.finalize_recorded_decisions(
             token=review_token,
             repository=repository,
             pull_request=pull_request,
             head_sha=conversation.head_sha,
             app_slug=app_slug,
             eligibility=refreshed,
-            require_persisted=True,
         )
         return replace(
             outcome,
+            resolution_status=finalized.thread_resolution,
             approval_status=finalized.status,
             approval_diagnostic=finalized.diagnostic,
         )

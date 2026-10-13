@@ -1975,6 +1975,17 @@ class GitHubApplication:
             )
         except Exception:
             return replace(result, summary=failed)
+        thread_status = getattr(publication, "thread_resolution", None)
+        if thread_status:
+            result = replace(
+                result,
+                summary=result.summary
+                + (
+                    "; matching threads resolved"
+                    if thread_status == "resolved"
+                    else "; decision recorded; thread resolution unconfirmed, comment `@reviewsensei verify` to retry"
+                ),
+            )
         if getattr(publication, "status", None) == "gate_reevaluation_failed":
             return replace(result, summary=failed)
         if getattr(publication, "status", None) in {"approved", "already_approved"}:
@@ -2364,6 +2375,35 @@ class GitHubApplication:
             if not isinstance(reply, ConversationReply):
                 raise ReviewInputError("operation entry refused: result_missing")
             publish = getattr(self.replier, "publish_current", self.replier.publish)
+            resolution_evidence = None
+            diff_context = prepared.context.diff_context
+            if (
+                reply.resolve
+                and isinstance(self.replier, ConversationPublisher)
+                and isinstance(diff_context, str)
+                and diff_context
+            ):
+                resolution_evidence = sha256(diff_context.encode("utf-8")).hexdigest()
+            if resolution_evidence is None:
+                return publish(
+                    token=capability_token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    source_comment_id=prepared.source_comment_id,
+                    source_updated_at=prepared.source_updated_at,
+                    head_sha=prepared.head_sha,
+                    reply=reply,
+                    app_slug=app_slug,
+                    root_comment_id=prepared.root_comment_id,
+                    source_kind=prepared.source_kind,
+                )
+            try:
+                resolution_token = self.broker.exchange(
+                    oidc_token or self.broker.request_oidc_token(),
+                    capability="review_publish",
+                )
+            except (GitHubBrokerClientError, GitHubHTTPTransientError, OSError):
+                resolution_token = None
             return publish(
                 token=capability_token,
                 repository=repository,
@@ -2375,6 +2415,9 @@ class GitHubApplication:
                 app_slug=app_slug,
                 root_comment_id=prepared.root_comment_id,
                 source_kind=prepared.source_kind,
+                resolution_token=resolution_token,
+                resolution_evidence=resolution_evidence,
+                resolution_base_sha=prepared.context.base_sha,
             )
         finally:
             self.replier.remove_processing_reaction(

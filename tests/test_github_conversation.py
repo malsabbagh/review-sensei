@@ -7,7 +7,6 @@ from review_sensei_github import (
     ConversationPublisher,
     GitHubConversationError,
     GitHubConversationTransientError,
-    GitHubPublicationError,
 )
 from review_sensei_github.approval import approval_eligibility_from_result
 from review_sensei_github.conversation import (
@@ -29,6 +28,39 @@ try:
     from fake_github_http import FakeHTTPResponse, json_response, make_http
 except ModuleNotFoundError:
     from tests.fake_github_http import FakeHTTPResponse, json_response, make_http
+
+
+def blocking_root_body(head: str, *, blocking: bool = True) -> str:
+    """App root whose instance and publication scope can authorize resolution."""
+
+    from review_sensei_github.publication import (
+        finding_instance_marker,
+        finding_marker,
+    )
+
+    from review_sensei.context import finding_lifecycle_for_comment
+    from review_sensei.models import ReviewComment
+
+    comment = ReviewComment(
+        path="src/app.py", line=1, body="The original finding", blocking=blocking
+    )
+    result = ReviewResult(summary="Summary.", comments=(comment,), provider="ollama")
+    marker = finding_marker(
+        repository_id=1,
+        pull_request=1,
+        head_sha=head,
+        base_sha="a" * 40,
+        result=result,
+        blocking=blocking,
+        fingerprint=finding_lifecycle_for_comment(comment).fingerprint,
+    )
+    return (
+        "[🚫 Blocking] The original finding\n\n"
+        + marker
+        + "\n\n"
+        + finding_instance_marker(comment)
+    )
+
 
 INLINE_URL = "https://api.github.test/repos/owner/repo/pulls/1"
 ISSUE_URL = "https://api.github.test/repos/owner/repo/issues/1"
@@ -1185,207 +1217,22 @@ class ConversationPublisherTests(unittest.TestCase):
         self.assertTrue(calls[-1][1].endswith("/pulls/1/comments/10/replies"))
 
     def test_ai_resolution_resolves_review_sensei_inline_thread(self):
-        head = "b" * 40
-        updated = "2026-08-19T00:00:00Z"
-        responses = [
-            json_response(
-                {
-                    "id": 11,
-                    "pull_request_url": INLINE_URL,
-                    "body": "@sensei addressed this",
-                    "user": {"login": "alice", "type": "User"},
-                    "author_association": "MEMBER",
-                    "updated_at": updated,
-                    "in_reply_to_id": 10,
-                    "path": "src/app.py",
-                    "diff_hunk": "@@ -1 +1 @@\n-old\n+new",
-                }
-            ),
-            json_response(
-                {
-                    "id": 10,
-                    "pull_request_url": INLINE_URL,
-                    "body": "[🚫 Blocking] The original finding",
-                    "user": {"login": "Review-Sensei[Bot]", "type": "Bot"},
-                    "author_association": "OWNER",
-                    "in_reply_to_id": None,
-                }
-            ),
-            json_response([]),
-            json_response(pr_payload(head)),
-            json_response({"id": 12}, 201),
-            json_response(pr_payload(head)),
-            json_response(
-                {
-                    "data": {
-                        "repository": {
-                            "pullRequest": {
-                                "reviewThreads": {
-                                    "nodes": [
-                                        {
-                                            "id": "PRRT_thread",
-                                            "isResolved": False,
-                                            "comments": {"nodes": [{"databaseId": 10}]},
-                                        }
-                                    ],
-                                    "pageInfo": {
-                                        "hasNextPage": False,
-                                        "endCursor": None,
-                                    },
-                                }
-                            }
-                        }
-                    }
-                }
-            ),
-            json_response(pr_payload(head)),
-            json_response(
-                {
-                    "data": {
-                        "resolveReviewThread": {
-                            "thread": {
-                                "id": "PRRT_thread",
-                                "isResolved": True,
-                            }
-                        }
-                    }
-                }
-            ),
-            json_response(head_reviews(head)),
-            json_response(pr_payload(head)),
-            json_response(
-                {
-                    "data": {
-                        "repository": {
-                            "pullRequest": {
-                                "reviewThreads": {
-                                    "nodes": [],
-                                    "pageInfo": {
-                                        "hasNextPage": False,
-                                        "endCursor": None,
-                                    },
-                                }
-                            }
-                        }
-                    }
-                }
-            ),
-            json_response(pr_payload(head)),
-            json_response(head_reviews(head)),
-            json_response({"id": 13}, 200),
-        ]
-        http, calls = make_http(responses)
-        outcome = ConversationPublisher(http=http).publish(
-            token="token",
-            repository="owner/repo",
-            pull_request=1,
-            source_comment_id=11,
-            source_updated_at=updated,
-            head_sha=head,
-            reply=ConversationReply.from_dict(
-                {"body": "Confirmed—the fix is complete.", "resolve": True}
-            ),
-            app_slug="review-sensei[bot]",
-            root_comment_id=10,
-        )
-        self.assertEqual(outcome.status, "replied_and_resolved")
+        from tests.test_thread_resolution_recovery import ResolutionHost
+
+        host = ResolutionHost()
+        outcome = host.reply()
         self.assertTrue(outcome.resolved)
-        self.assertEqual(outcome.comment_id, 12)
-        # The resolution runs in a different process from the review that
-        # produced the evidence, so the delayed finalization re-reads the
-        # persisted eligibility document for the exact head before approving.
-        self.assertEqual(
-            [call[0] for call in calls],
-            [
-                "GET",
-                "GET",
-                "GET",
-                "GET",
-                "POST",
-                "GET",
-                "POST",
-                "GET",
-                "POST",
-                "GET",
-                "GET",
-                "POST",
-                "GET",
-                "GET",
-                "POST",
-            ],
-        )
-        self.assertEqual(
-            [
-                call[1]
-                .split("https://api.github.test", 1)[-1]
-                .rsplit("/repos/owner/repo", 1)[-1]
-                .split("?")[0]
-                for call in calls
-            ],
-            [
-                "/pulls/comments/11",
-                "/pulls/comments/10",
-                "/pulls/1/comments",
-                "/pulls/1",
-                "/pulls/1/comments/10/replies",
-                "/pulls/1",
-                "/graphql",
-                "/pulls/1",
-                "/graphql",
-                "/pulls/1/reviews",
-                "/pulls/1",
-                "/graphql",
-                "/pulls/1",
-                "/pulls/1/reviews",
-                "/pulls/1/reviews",
-            ],
-        )
-        mutation = json.loads(calls[8][2].decode("utf-8"))
-        self.assertEqual(mutation["operationName"], "ResolveReviewThread")
-        self.assertEqual(mutation["variables"], {"input": {"threadId": "PRRT_thread"}})
-        scan = json.loads(calls[11][2].decode("utf-8"))
-        self.assertEqual(scan["operationName"], "ReviewThreads")
-        approval = json.loads(calls[-1][2].decode("utf-8"))
-        self.assertEqual(approval["event"], "APPROVE")
-        self.assertEqual(approval["commit_id"], head)
-        self.assertNotIn("comments", approval)
+        self.assertEqual(outcome.approval_status, "approved")
+        self.assertTrue(host.resolved)
 
     def test_ai_resolution_wraps_finalizer_publication_errors(self):
-        head = "b" * 40
+        from tests.test_thread_resolution_recovery import ResolutionHost
 
-        class FailingFinalizer:
-            def load_eligibility(self, **_kwargs):
-                return approval_eligibility_from_result(
-                    ReviewResult(
-                        summary="Summary.",
-                        comments=(),
-                        provider="ollama",
-                        review_status="complete",
-                    ),
-                    head_sha=head,
-                    enabled=True,
-                    app_authored=False,
-                    qualification="not-required",
-                    check_published=True,
-                )
-
-            def finalize(self, **_kwargs):
-                raise GitHubPublicationError("finalization rejected")
-
-        publisher = ConversationPublisher(http=make_http([])[0])
-        publisher.finalizer = FailingFinalizer()
-        publisher._resolve_review_thread = lambda **_kwargs: None
-
-        with self.assertRaises(GitHubConversationError):
-            publisher._resolve_and_finalize(
-                token="token",
-                repository="owner/repo",
-                pull_request=1,
-                root_comment_id=10,
-                head_sha=head,
-                app_slug="review-sensei[bot]",
-                root_is_blocking_finding=True,
-            )
+        host = ResolutionHost()
+        host.fail_approval = True
+        outcome = host.reply()
+        self.assertTrue(outcome.resolved)
+        self.assertEqual(outcome.approval_status, "approval_withheld")
 
     def test_ai_resolution_does_not_resolve_human_root_thread(self):
         head = "b" * 40
@@ -1425,228 +1272,41 @@ class ConversationPublisherTests(unittest.TestCase):
         self.assertEqual(len(calls), 4)
 
     def test_ai_resolution_retries_an_existing_reply_idempotently(self):
-        head = "b" * 40
-        updated = "2026-08-19T00:00:00Z"
-        marker = reply_marker(
-            source_comment_id=11,
-            source_updated_digest=__import__("hashlib")
-            .sha256(updated.encode("utf-8"))
-            .hexdigest(),
-            pull_request=1,
-            head_sha=head,
-        )
-        source = {
-            "id": 11,
-            "pull_request_url": INLINE_URL,
-            "body": "@sensei addressed this",
-            "user": {"login": "alice", "type": "User"},
-            "author_association": "MEMBER",
-            "updated_at": updated,
-            "in_reply_to_id": 10,
-        }
-        root = {
-            "id": 10,
-            "pull_request_url": INLINE_URL,
-            "body": "Original finding",
-            "user": {"login": "review-sensei[bot]", "type": "Bot"},
-            "in_reply_to_id": None,
-        }
-        responses = [
-            json_response(source),
-            json_response(root),
-            json_response(
-                [{"id": 12, "body": marker, "user": {"login": "review-sensei[bot]"}}]
-            ),
-            json_response(pr_payload(head)),
-            json_response(
-                {
-                    "data": {
-                        "repository": {
-                            "pullRequest": {
-                                "reviewThreads": {
-                                    "nodes": [
-                                        {
-                                            "id": "PRRT_thread",
-                                            "isResolved": True,
-                                            "comments": {"nodes": [{"databaseId": 10}]},
-                                        }
-                                    ],
-                                    "pageInfo": {
-                                        "hasNextPage": False,
-                                        "endCursor": None,
-                                    },
-                                }
-                            }
-                        }
-                    }
-                }
-            ),
-        ]
-        http, calls = make_http(responses)
-        outcome = ConversationPublisher(http=http).publish(
-            token="token",
-            repository="owner/repo",
-            pull_request=1,
-            source_comment_id=11,
-            source_updated_at=updated,
-            head_sha=head,
-            reply=ConversationReply.from_dict(
-                {"body": "Confirmed—the fix is complete.", "resolve": True}
-            ),
-            app_slug="review-sensei[bot]",
-            root_comment_id=10,
-        )
-        self.assertEqual(outcome.status, "already_replied_and_resolved")
-        self.assertTrue(outcome.resolved)
-        self.assertEqual(outcome.comment_id, 12)
-        self.assertEqual(
-            [call[0] for call in calls], ["GET", "GET", "GET", "GET", "POST"]
-        )
+        from tests.test_thread_resolution_recovery import ResolutionHost
+
+        host = ResolutionHost()
+        self.assertTrue(host.reply().resolved)
+        previous = len(host.reviews)
+        self.assertTrue(host.reply().resolved)
+        self.assertEqual(len(host.reviews), previous)
 
     def test_ai_resolution_fails_closed_when_head_changes_before_mutation(self):
-        head = "b" * 40
-        updated = "2026-08-19T00:00:00Z"
-        root = {
-            "id": 10,
-            "pull_request_url": INLINE_URL,
-            "body": "Original finding",
-            "user": {"login": "review-sensei[bot]", "type": "Bot"},
-            "in_reply_to_id": None,
-        }
-        source = {
-            "id": 11,
-            "pull_request_url": INLINE_URL,
-            "body": "@sensei addressed this",
-            "user": {"login": "alice", "type": "User"},
-            "author_association": "MEMBER",
-            "updated_at": updated,
-            "in_reply_to_id": 10,
-            "path": "src/app.py",
-            "diff_hunk": "@@ -1 +1 @@\n-old\n+new",
-        }
-        responses = [
-            json_response(source),
-            json_response(root),
-            json_response([]),
-            json_response(pr_payload(head)),
-            json_response({"id": 12}, 201),
-            json_response(pr_payload("c" * 40)),
-        ]
-        http, calls = make_http(responses)
-        with self.assertRaises(GitHubConversationError):
-            ConversationPublisher(http=http).publish(
-                token="token",
-                repository="owner/repo",
-                pull_request=1,
-                source_comment_id=11,
-                source_updated_at=updated,
-                head_sha=head,
-                reply=ConversationReply.from_dict(
-                    {"body": "Confirmed—the fix is complete.", "resolve": True}
-                ),
-                app_slug="review-sensei[bot]",
-                root_comment_id=10,
-            )
-        self.assertEqual(
-            [call[0] for call in calls], ["GET", "GET", "GET", "GET", "POST", "GET"]
-        )
-        self.assertFalse(any(call[1].endswith("/graphql") for call in calls))
+        from tests.test_thread_resolution_recovery import ResolutionHost
+
+        host = ResolutionHost()
+        host.before_resolution = lambda live: live.pr["head"].update(sha="c" * 40)
+        outcome = host.reply()
+        self.assertFalse(outcome.resolved)
+        self.assertFalse(host.resolved)
 
     def test_ai_resolution_fails_closed_on_malformed_thread_lookup(self):
-        head = "b" * 40
-        updated = "2026-08-19T00:00:00Z"
-        root = {
-            "id": 10,
-            "pull_request_url": INLINE_URL,
-            "body": "Original finding",
-            "user": {"login": "review-sensei[bot]", "type": "Bot"},
-            "in_reply_to_id": None,
-        }
-        source = {
-            "id": 11,
-            "pull_request_url": INLINE_URL,
-            "body": "@sensei addressed this",
-            "user": {"login": "alice", "type": "User"},
-            "author_association": "MEMBER",
-            "updated_at": updated,
-            "in_reply_to_id": 10,
-            "path": "src/app.py",
-            "diff_hunk": "@@ -1 +1 @@\n-old\n+new",
-        }
-        responses = [
-            json_response(source),
-            json_response(root),
-            json_response([]),
-            json_response(pr_payload(head)),
-            json_response({"id": 12}, 201),
-            json_response(pr_payload(head)),
-            json_response({"data": {}}),
-        ]
-        http, calls = make_http(responses)
-        with self.assertRaises(GitHubConversationError):
-            ConversationPublisher(http=http).publish(
-                token="token",
-                repository="owner/repo",
-                pull_request=1,
-                source_comment_id=11,
-                source_updated_at=updated,
-                head_sha=head,
-                reply=ConversationReply.from_dict(
-                    {"body": "Confirmed—the fix is complete.", "resolve": True}
-                ),
-                app_slug="review-sensei[bot]",
-                root_comment_id=10,
-            )
-        self.assertEqual(calls[-1][1], "https://api.github.test/graphql")
-        self.assertEqual(len(calls), 7)
+        from tests.test_thread_resolution_recovery import ResolutionHost
+
+        host = ResolutionHost()
+        host.lookup_failure = "malformed"
+        outcome = host.reply()
+        self.assertFalse(outcome.resolved)
+        self.assertEqual(outcome.resolution_status, "unconfirmed")
+        self.assertEqual(outcome.approval_status, "approval_withheld")
 
     def test_ai_resolution_maps_thread_lookup_transport_failure(self):
-        head = "b" * 40
-        updated = "2026-08-19T00:00:00Z"
-        root = {
-            "id": 10,
-            "pull_request_url": INLINE_URL,
-            "body": "Original finding",
-            "user": {"login": "review-sensei[bot]", "type": "Bot"},
-            "in_reply_to_id": None,
-        }
-        source = {
-            "id": 11,
-            "pull_request_url": INLINE_URL,
-            "body": "@sensei addressed this",
-            "user": {"login": "alice", "type": "User"},
-            "author_association": "MEMBER",
-            "updated_at": updated,
-            "in_reply_to_id": 10,
-            "path": "src/app.py",
-            "diff_hunk": "@@ -1 +1 @@\n-old\n+new",
-        }
-        responses = [
-            json_response(source),
-            json_response(root),
-            json_response([]),
-            json_response(pr_payload(head)),
-            json_response({"id": 12}, 201),
-            json_response(pr_payload(head)),
-            URLError("timed out"),
-        ]
-        http, calls = make_http(responses)
-        with self.assertRaises(GitHubConversationTransientError):
-            ConversationPublisher(http=http).publish(
-                token="token",
-                repository="owner/repo",
-                pull_request=1,
-                source_comment_id=11,
-                source_updated_at=updated,
-                head_sha=head,
-                reply=ConversationReply.from_dict(
-                    {"body": "Confirmed—the fix is complete.", "resolve": True}
-                ),
-                app_slug="review-sensei[bot]",
-                root_comment_id=10,
-            )
-        self.assertEqual(calls[-1][1], "https://api.github.test/graphql")
-        self.assertEqual(len(calls), 7)
+        from tests.test_thread_resolution_recovery import ResolutionHost
+
+        host = ResolutionHost()
+        host.lookup_failure = "transport"
+        outcome = host.reply()
+        self.assertFalse(outcome.resolved)
+        self.assertEqual(outcome.approval_status, "approval_withheld")
 
     def test_reconciliation_pagination_failure_fails_closed_before_post(self):
         updated = "2026-08-19T00:00:00Z"

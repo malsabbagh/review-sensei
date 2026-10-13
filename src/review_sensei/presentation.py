@@ -381,6 +381,7 @@ class FindingView:
     needs_human: bool = False
     location: str | None = None
     excerpt: str | None = None
+    explanation_omitted: bool = False
 
     def __post_init__(self) -> None:
         if self.requirement not in (REQUIRED_FINDING, OPTIONAL_FINDING):
@@ -484,6 +485,11 @@ def render_finding(view: FindingView) -> str:
 def render_finding_reference(view: FindingView) -> str:
     """Render a short summary reference for one finding."""
 
+    if view.explanation_omitted:
+        return (
+            f"- **{view.identifier}:** This finding remains open. Its explanation "
+            "was omitted for the review body size limit."
+        )
     reference = (
         _DISCUSSION_REFERENCE_INLINE
         if view.placement == "inline"
@@ -605,12 +611,19 @@ class ReviewSummaryView:
     limitations: tuple[str, ...] = ()
     placement_note: str | None = None
     reason: str | None = None
+    omitted_explanations: int = 0
 
     def __post_init__(self) -> None:
         if self.state not in _HEADING_STATES:
             raise ReviewInputError("review summary state is invalid")
         if len(self.optional) > _HIGHLIGHTED_OPTIONAL_LIMIT:
             raise ReviewInputError("review summary highlights too many optional items")
+        if (
+            isinstance(self.omitted_explanations, bool)
+            or not isinstance(self.omitted_explanations, int)
+            or self.omitted_explanations < 0
+        ):
+            raise ReviewInputError("omitted explanation count is invalid")
 
 
 def build_review_summary_view(
@@ -625,6 +638,7 @@ def build_review_summary_view(
     limitations: Sequence[str] = (),
     placement_note: str | None = None,
     reason: str | None = None,
+    omitted_explanations: int = 0,
 ) -> ReviewSummaryView:
     """Order and bound summary content deterministically before rendering."""
 
@@ -643,6 +657,7 @@ def build_review_summary_view(
         limitations=tuple(limitations),
         placement_note=placement_note,
         reason=reason,
+        omitted_explanations=omitted_explanations,
     )
 
 
@@ -677,13 +692,33 @@ def render_review_summary(view: ReviewSummaryView) -> str:
     if view.optional or view.optional_grouped:
         lines.extend(["", "### Optional"])
         lines.extend(render_finding_reference(item) for item in view.optional)
-        if view.optional_grouped:
+        if view.optional_grouped and view.omitted_explanations:
+            label = (
+                "1 additional optional suggestion remains open"
+                if view.optional_grouped == 1
+                else (
+                    f"{view.optional_grouped} additional optional suggestions "
+                    "remain open"
+                )
+            )
+            lines.append(f"- {label}.")
+        elif view.optional_grouped:
             label = (
                 "1 additional optional suggestion is"
                 if view.optional_grouped == 1
                 else f"{view.optional_grouped} additional optional suggestions are"
             )
             lines.append(f"- {label} covered in this review body.")
+        if view.omitted_explanations:
+            notice = (
+                "1 finding explanation was omitted for size. That finding remains open."
+                if view.omitted_explanations == 1
+                else (
+                    f"{view.omitted_explanations} finding explanations were omitted "
+                    "for size. Those findings remain open."
+                )
+            )
+            lines.extend(["", notice])
     if view.limitations:
         lines.extend(["", "### Limitations"])
         lines.extend(f"- {item}" for item in view.limitations)

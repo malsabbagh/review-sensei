@@ -220,8 +220,24 @@ class EvidenceCapacityTests(unittest.TestCase):
                     len(state.reviews[-1]["body"].encode()),
                     MAX_PUBLISHED_REVIEW_BODY_BYTES,
                 )
+                posted = [
+                    body
+                    for method, path, body in state.calls
+                    if method == "POST"
+                    and path.endswith("/pulls/1/reviews")
+                    and isinstance(body, dict)
+                ]
+                inline = "\n".join(
+                    item.get("body", "")
+                    for review in posted
+                    for item in review.get("comments") or []
+                    if isinstance(item, dict)
+                )
                 for comment in comments:
-                    self.assertIn(comment.body, state.reviews[-1]["body"])
+                    self.assertTrue(
+                        comment.body in state.reviews[-1]["body"]
+                        or comment.body in inline
+                    )
 
     def test_varied_publication_above_host_bound_preserves_prior_authority(self):
         state = State()

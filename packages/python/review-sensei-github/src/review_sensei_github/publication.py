@@ -27,8 +27,10 @@ from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.outcomes import PUBLIC_DIAGNOSTICS, RunOutcome, sanitize_diagnostic
 from review_sensei.placement import (
     BODY_PLACEMENT,
+    BODY_REASON_OVERSIZED,
     CONVERSATION_RESOLUTION_NOT_REQUIRED,
     CONVERSATION_RESOLUTION_REQUIRED,
+    INLINE_PLACEMENT,
     HostPlacementFacts,
     placement_note,
     plan_finding_placement_detail,
@@ -116,6 +118,7 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: Stri
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $after) {
         nodes {
+          id
           isResolved
           comments(first: 1) {
             nodes {
@@ -147,7 +150,7 @@ _FINDING_MARKER_V2_RE = re.compile(
     r"pr=(?P<pull_request>[1-9][0-9]*) head=(?P<head_sha>[a-f0-9]{40}) "
     r"base=(?P<base_sha>[a-f0-9]{40}) fingerprint=(?P<fingerprint>[a-f0-9]{64}) "
     r"state=(?P<state>new|still-present|fixed|outdated|uncertain) "
-    r"blocking=(?P<blocking>true|false) -->"
+    r"blocking=(?P<blocking>true|false)(?: human=(?P<human>true|false))? -->"
 )
 FINDING_INDEX_MARKER_PREFIX = "<!-- reviewsensei:finding-index:v1"
 MAX_INDEXED_FINDINGS = 64
@@ -314,7 +317,27 @@ def override_provenance_marker(
     )
 
 
+def _reject_conflicting_instances(comments: Sequence[ReviewComment]) -> None:
+    """Reject one instance whose approval classification is not unique.
+
+    Preparation must not keep whichever comment arrived first. The instance is
+    path, line, side, and explanation; blocking and human assessment are the
+    classification.
+    """
+
+    seen: dict[str, tuple[bool, bool]] = {}
+    for comment in comments:
+        classification = (bool(comment.blocks_approval), bool(comment.needs_human))
+        instance = finding_instance_fingerprint(comment)
+        previous = seen.get(instance)
+        if previous is not None and previous != classification:
+            raise GitHubPublicationError("conflicting finding classifications")
+        seen[instance] = classification
+
+
 def _publication_anchor(comment: ReviewComment, analysis: DiffAnalysis) -> str:
+    if comment.path in analysis.binary_paths:
+        return "summary"
     if comment.side == "LEFT":
         if comment.line in analysis.deleted_lines.get(comment.path, frozenset()):
             return "left"
@@ -510,6 +533,32 @@ def _framed_body_fits(
     return len(framed.encode("utf-8")) <= MAX_PUBLISHED_REVIEW_BODY_BYTES
 
 
+class PublicationLimitError(GitHubPublicationError):
+    """A publication ceiling failed. The message names the failing check."""
+
+    def __init__(self, check: str) -> None:
+        self.check = check
+        messages = {
+            "published-summary": (
+                "published review summary exceeds the configured publication limit"
+            ),
+            "framed-review-body": (
+                "framed review body exceeds the configured publication limit"
+            ),
+            "formatted-comment": (
+                "formatted comment exceeds the configured publication limit"
+            ),
+            "finding-index": (
+                "finding index metadata exceeds the configured publication limit"
+            ),
+        }
+        super().__init__(
+            messages.get(
+                check, "formatted review exceeds the configured publication limit"
+            )
+        )
+
+
 def _index_marker_for_budget(
     entries: Sequence[IndexedFinding],
     *,
@@ -522,23 +571,10 @@ def _index_marker_for_budget(
     base_sha: str,
     result_digest: str,
     summary_limit: int | None = None,
-) -> tuple[str | None, str]:
-    """Return the index marker when it fits, otherwise a visible limitation.
+) -> tuple[str, str]:
+    """Return the finding index. It is not dropped to make a body fit."""
 
-    A review that cannot hold the index is still published. The limitation line
-    is added only when it fits both the summary budget and the review body.
-    """
-
-    def fits(text: str, marker: str | None) -> bool:
-        return _framed_body_fits(
-            text,
-            review_marker=review_marker,
-            index_marker=marker,
-            eligibility_marker=eligibility_marker,
-            summary_limit=summary_limit,
-        )
-
-    if len(entries) <= MAX_INDEXED_FINDINGS:
+    try:
         marker = finding_index_marker(
             repository_id=repository_id,
             pull_request=pull_request,
@@ -547,13 +583,177 @@ def _index_marker_for_budget(
             result_digest=result_digest,
             entries=entries,
         )
-        if fits(summary, marker):
-            return marker, summary
-    if FINDING_INDEX_LIMITATION in summary or not fits(
-        f"{summary}\n\n{FINDING_INDEX_LIMITATION}", None
+    except GitHubPublicationError as exc:
+        raise PublicationLimitError("finding-index") from exc
+    if not _framed_body_fits(
+        summary,
+        review_marker=review_marker,
+        index_marker=marker,
+        eligibility_marker=eligibility_marker,
+        summary_limit=summary_limit,
     ):
-        return None, summary
-    return None, f"{summary}\n\n{FINDING_INDEX_LIMITATION}"
+        summary_over = (
+            summary_limit is not None and len(summary.encode("utf-8")) > summary_limit
+        )
+        if summary_over:
+            raise PublicationLimitError("published-summary")
+        minimum = _framed_review_body(
+            "",
+            review_marker=review_marker,
+            index_marker=marker,
+            eligibility_marker=eligibility_marker,
+        )
+        if len(minimum.encode("utf-8")) > MAX_PUBLISHED_REVIEW_BODY_BYTES:
+            raise PublicationLimitError("finding-index")
+        raise PublicationLimitError("framed-review-body")
+    return marker, summary
+
+
+_SEVERITY_DROP_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+
+@dataclass(frozen=True)
+class BodyExplanation:
+    """One body explanation that may be omitted only when it is optional."""
+
+    instance: str
+    severity: str | None
+    obligatory: bool
+    view: FindingView
+
+
+@dataclass(frozen=True)
+class AssembledReview:
+    """Placement-final finding inventory before the framed body is fitted."""
+
+    inline_comments: tuple[tuple[ReviewComment, str, str, str], ...]
+    index_entries: tuple[IndexedFinding, ...]
+    head_sha: str
+    state: str
+    reason: str | None
+    overview: str
+    coverage_line: str | None
+    required_views: tuple[FindingView, ...]
+    optional_views: tuple[FindingView, ...]
+    limitations: tuple[str, ...]
+    placement_note: str | None
+    body_explanations: tuple[BodyExplanation, ...]
+    inline_blocker_instances: tuple[str, ...]
+    requests_changes: bool
+
+
+def _render_assembled_summary(
+    assembled: AssembledReview,
+    *,
+    omitted_identifiers: frozenset[str],
+    kept_explanations: Sequence[BodyExplanation],
+    suffix: str = "",
+) -> str:
+    def marked(view: FindingView) -> FindingView:
+        if view.identifier in omitted_identifiers:
+            return replace(view, explanation_omitted=True)
+        return view
+
+    summary = render_review_summary(
+        build_review_summary_view(
+            state=assembled.state,
+            head_sha=assembled.head_sha,
+            overview=assembled.overview,
+            coverage_line=assembled.coverage_line,
+            required=tuple(marked(view) for view in assembled.required_views),
+            optional=tuple(marked(view) for view in assembled.optional_views),
+            limitations=assembled.limitations,
+            placement_note=assembled.placement_note,
+            reason=assembled.reason,
+            omitted_explanations=len(omitted_identifiers),
+        )
+    )
+    prose = tuple(
+        item.view
+        for item in kept_explanations
+        if item.view.identifier not in omitted_identifiers and item.view.detail
+    )
+    if prose:
+        summary = f"{summary}\n\n{render_body_findings(prose)}"
+    if suffix:
+        summary = f"{summary}\n\n{suffix}"
+    return summary
+
+
+def fit_assembled_review(
+    assembled: AssembledReview,
+    *,
+    review_marker: str,
+    eligibility_marker: str,
+    repository_id: int,
+    pull_request: int,
+    head_sha: str,
+    base_sha: str,
+    result_digest: str,
+    summary_limit: int,
+    suffix: str = "",
+) -> tuple[str, str]:
+    """Fit the framed body without dropping obligations or the finding index.
+
+    Optional, non-blocking, non-human body prose is removed lowest severity
+    first. Blocking and human-assessment explanations stay. The omission count
+    is part of the measured body. If the body still cannot fit, publication
+    is refused and the error names the failing check.
+    """
+
+    try:
+        index_marker = finding_index_marker(
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            base_sha=base_sha,
+            result_digest=result_digest,
+            entries=assembled.index_entries,
+        )
+    except GitHubPublicationError as exc:
+        raise PublicationLimitError("finding-index") from exc
+    optional = [item for item in assembled.body_explanations if not item.obligatory]
+    obligatory = [item for item in assembled.body_explanations if item.obligatory]
+    optional.sort(
+        key=lambda item: (
+            _SEVERITY_DROP_RANK.get((item.severity or "").strip().lower(), -1),
+            item.instance,
+        )
+    )
+    omitted: list[str] = []
+    while True:
+        omitted_ids = frozenset(omitted)
+        kept = [*obligatory, *optional]
+        summary = _render_assembled_summary(
+            assembled,
+            omitted_identifiers=omitted_ids,
+            kept_explanations=kept,
+            suffix=suffix,
+        )
+        summary_over = len(summary.encode("utf-8")) > summary_limit
+        framed = _framed_review_body(
+            summary,
+            review_marker=review_marker,
+            index_marker=index_marker,
+            eligibility_marker=eligibility_marker,
+        )
+        framed_over = len(framed.encode("utf-8")) > MAX_PUBLISHED_REVIEW_BODY_BYTES
+        if not summary_over and not framed_over:
+            return summary, index_marker
+        if not optional:
+            if summary_over:
+                raise PublicationLimitError("published-summary")
+            minimum = _framed_review_body(
+                "",
+                review_marker=review_marker,
+                index_marker=index_marker,
+                eligibility_marker=eligibility_marker,
+            )
+            if len(minimum.encode("utf-8")) > MAX_PUBLISHED_REVIEW_BODY_BYTES:
+                raise PublicationLimitError("finding-index")
+            raise PublicationLimitError("framed-review-body")
+        dropped = optional.pop(0)
+        omitted.append(dropped.view.identifier)
 
 
 def _published_summary_byte_limit(result: ReviewResult) -> int:
@@ -620,15 +820,18 @@ def finding_marker(
     blocking: bool,
     fingerprint: str | None = None,
     state: str | None = None,
+    needs_human: bool = False,
 ) -> str:
     """Bind one inline finding's approval classification to this review head."""
 
     if fingerprint is not None:
         lifecycle_state = state or "new"
+        human = " human=true" if needs_human else ""
         return (
             f"{FINDING_MARKER_PREFIX_V2} repo={repository_id} pr={pull_request} "
             f"head={head_sha} base={base_sha} fingerprint={fingerprint} "
-            f"state={lifecycle_state} blocking={'true' if blocking else 'false'} -->"
+            f"state={lifecycle_state} blocking={'true' if blocking else 'false'}"
+            f"{human} -->"
         )
     return (
         f"{FINDING_MARKER_PREFIX} repo={repository_id} pr={pull_request} "
@@ -678,13 +881,55 @@ def finding_blocking_from_body(body: object) -> bool | None:
     return match.group("blocking") == "true"
 
 
+def finding_publication_scope(
+    body: object,
+) -> tuple[int, int, str, str, bool, bool | None] | None:
+    """Return repo, pull request, head, base, blocking, and human classification.
+
+    ``None`` means the body has no recognizable finding marker. A parsed marker
+    for another head is still returned so the caller can tell that scope apart
+    from an unreadable root.
+    """
+
+    if not isinstance(body, str):
+        return None
+    match = _FINDING_MARKER_V2_RE.search(body)
+    if match is None:
+        match = _FINDING_MARKER_RE.search(body)
+    if match is None:
+        return None
+    human = match.groupdict().get("human")
+    return (
+        int(match.group("repository_id")),
+        int(match.group("pull_request")),
+        match.group("head_sha"),
+        match.group("base_sha"),
+        match.group("blocking") == "true",
+        None if human is None else human == "true",
+    )
+
+
+@dataclass(frozen=True)
+class PublishedInstance:
+    """One open or historical App thread bound to a publication scope."""
+
+    blocking: bool
+    needs_human: bool | None
+    head_sha: str
+    base_sha: str
+    resolved: bool
+    thread_id: str | None = None
+    concern: str | None = None
+
+
 @dataclass(frozen=True)
 class PublishedFindingSuppression:
     """Indexes already-published findings for duplicate suppression."""
 
     by_fingerprint: Mapping[str, bool]
     by_location: Mapping[tuple[str, int], bool]
-    by_instance: Mapping[str, bool] = field(default_factory=dict)
+    by_instance: Mapping[str, PublishedInstance] = field(default_factory=dict)
+    superseded_threads: tuple[tuple[str, str], ...] = ()
 
 
 def _should_suppress_published_finding(
@@ -693,22 +938,29 @@ def _should_suppress_published_finding(
     suppression: PublishedFindingSuppression,
     *,
     instance: str | None = None,
+    head_sha: str | None = None,
+    base_sha: str | None = None,
 ) -> bool:
-    """Return whether an already-published root makes this inline comment redundant."""
+    """Reuse an open same-head thread only when scope and classification match.
 
-    if instance is not None:
-        existing = suppression.by_instance.get(instance)
-        # A legacy concern or location does not prove equality of full prose.
-        # Republishing is safer than dropping a distinct explanation.
-        return existing is not None and existing == comment.blocks_approval
-    existing = suppression.by_fingerprint.get(fingerprint)
-    if existing is not None:
-        return existing == comment.blocks_approval
-    if comment.line is not None:
-        location = suppression.by_location.get((comment.path, comment.line))
-        if location is not None:
-            return location == comment.blocks_approval
-    return False
+    Instance identity does not include the head. An older head, a resolved
+    thread, or a changed blocking or human-assessment classification must not
+    suppress a current obligation. A concern fingerprint or path/line alone
+    does not prove this explanation.
+    """
+
+    if instance is None or head_sha is None or base_sha is None:
+        return False
+    existing = suppression.by_instance.get(instance)
+    if existing is None or existing.resolved:
+        return False
+    if existing.head_sha != head_sha or existing.base_sha != base_sha:
+        return False
+    if existing.blocking != comment.blocks_approval:
+        return False
+    if existing.needs_human is None:
+        return not comment.needs_human
+    return existing.needs_human == bool(comment.needs_human)
 
 
 def approval_marker(
@@ -856,6 +1108,7 @@ class PublicationResult:
     review_id: int | None = None
     diagnostic: str | None = None
     shadow: Mapping[str, object] | None = None
+    thread_resolution: str | None = None
     # A terminal no-progress handoff exposes the durable identity so an
     # at-least-once caller can distinguish persisted suppression from retryable
     # publication failure.
@@ -879,6 +1132,7 @@ _PUBLICATION_TO_RUN_STATUS = {
     "auto_approval_disabled": "skipped_policy",
     "disabled": "skipped_policy",
     "handoff": "action_required",
+    "publication_incomplete": "action_required",
 }
 
 PUBLICATION_RESULT_STATUSES = frozenset(_PUBLICATION_TO_RUN_STATUS)
@@ -886,6 +1140,7 @@ PUBLICATION_RESULT_STATUSES = frozenset(_PUBLICATION_TO_RUN_STATUS)
 _PUBLICATION_DIAGNOSTIC_OVERRIDES = {
     "disabled": "writes_disabled",
     "skipped_fork": "fork_not_allowed",
+    "publication_incomplete": "publication_ambiguous",
 }
 
 
@@ -1031,6 +1286,7 @@ class ReviewApprovalFinalizer:
         eligibility: ReviewApprovalEligibility,
         require_persisted: bool = False,
         honored_instances: frozenset[str] | None = None,
+        assume_inline_unresolved: frozenset[str] | None = None,
     ) -> PublicationResult:
         """Emit at most one exact-head APPROVE from trusted eligibility.
 
@@ -1056,10 +1312,19 @@ class ReviewApprovalFinalizer:
             return PublicationResult(
                 status="approval_withheld", diagnostic="approval_withheld"
             )
-        # Evaluate the persisted facts with the thread state assumed clean so
-        # every non-thread blocker is reported before any network read.
+        # Body-placed blockers stay in the persisted flag. Inline blockers are
+        # not settled by that flag: a caller that just published them says they
+        # are unresolved, and a later finalizer requires a resolved thread.
+        honored = honored_instances or frozenset()
+        unresolved_inline = frozenset(assume_inline_unresolved or ()) - honored
         static = evaluate_approval_facts(
-            replace(eligibility.facts, has_open_review_threads=False)
+            replace(
+                eligibility.facts,
+                has_open_review_threads=False,
+                has_blocking_findings=(
+                    eligibility.facts.has_blocking_findings or bool(unresolved_inline)
+                ),
+            )
         )
         if "auto-approval-disabled" in static.blockers:
             return PublicationResult(status="auto_approval_disabled")
@@ -1067,6 +1332,10 @@ class ReviewApprovalFinalizer:
             return PublicationResult(
                 status="approval_withheld",
                 diagnostic=approval_withheld_diagnostic(static),
+            )
+        if unresolved_inline:
+            return PublicationResult(
+                status="approval_withheld", diagnostic="required_fixes_open"
             )
         preflight = self._preflight(
             token=token,
@@ -1085,7 +1354,7 @@ class ReviewApprovalFinalizer:
             and eligibility.human_review.base_sha != preflight.base_sha
         ):
             return PublicationResult(status="skipped_stale_base")
-        open_blocking = self._scan_blocking_threads(
+        open_blocking, resolved_instances = self._scan_blocking_threads(
             token=token,
             repository=repository,
             pull_request=pull_request,
@@ -1093,7 +1362,7 @@ class ReviewApprovalFinalizer:
             head_sha=head_sha,
             base_sha=preflight.base_sha,
             app_slug=app_slug,
-            honored_instances=honored_instances or frozenset(),
+            honored_instances=honored,
         )
         # The thread scan can paginate, so bind the write to the same exact PR
         # identity immediately before emitting APPROVE.
@@ -1125,6 +1394,18 @@ class ReviewApprovalFinalizer:
         reviews = self._load_head_reviews(
             token=token, repository=repository, pull_request=pull_request
         )
+        if not self._inline_obligations_resolved(
+            reviews,
+            repository_id=preflight.repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            app_slug=app_slug,
+            resolved_instances=resolved_instances,
+            honored_instances=honored,
+        ):
+            return PublicationResult(
+                status="approval_withheld", diagnostic="required_fixes_open"
+            )
         if (
             require_persisted
             and self._eligibility_from_reviews(
@@ -1214,6 +1495,8 @@ class ReviewApprovalFinalizer:
                 or not isinstance(body, str)
             ):
                 continue
+            if APPROVAL_ELIGIBILITY_MARKER_PREFIX not in body:
+                continue
             if chosen is None or review_id >= int(chosen["id"]):
                 chosen = review
         if chosen is None:
@@ -1232,13 +1515,15 @@ class ReviewApprovalFinalizer:
                 status="approval_withheld", diagnostic="approval_withheld"
             )
         try:
-            index = parse_finding_index(
-                body,
+            index = self.finding_index_from_reviews(
+                reviews,
                 repository_id=repository_id,
                 pull_request=pull_request,
                 head_sha=head_sha,
+                app_slug=app_slug,
+                eligibility=eligibility,
             )
-        except ReviewInputError:
+        except (ReviewInputError, GitHubPublicationError):
             return PublicationResult(
                 status="gate_reevaluation_failed",
                 diagnostic="gate_reevaluation_failed",
@@ -1266,7 +1551,9 @@ class ReviewApprovalFinalizer:
         )
         honored_instances = frozenset(entry.instance for entry in honored)
         has_blocking = any(
-            entry.blocking and entry.instance not in honored_instances
+            entry.blocking
+            and entry.body_placed
+            and entry.instance not in honored_instances
             for entry in index.entries
         )
         human = eligibility.human_review
@@ -1306,6 +1593,34 @@ class ReviewApprovalFinalizer:
             )
             if provenance not in new_body:
                 new_body = f"{new_body}\n\n{provenance}"
+        live = self._preflight(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            app_slug=app_slug,
+        )
+        if live.result is not None:
+            return live.result
+        if live.base_sha != index.base_sha or live.repository_id != repository_id:
+            return PublicationResult(status="skipped_stale_base")
+        if (
+            self.load_eligibility(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            != eligibility
+        ):
+            return PublicationResult(
+                status="approval_withheld", diagnostic="approval_withheld"
+            )
+        if len(new_body.encode("utf-8")) > MAX_PUBLISHED_REVIEW_BODY_BYTES:
+            return PublicationResult(
+                status="gate_reevaluation_failed", diagnostic="gate_reevaluation_failed"
+            )
         try:
             status, _payload = self.http.request(
                 "PATCH",
@@ -1340,15 +1655,55 @@ class ReviewApprovalFinalizer:
                 )
             except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
                 pass
-        return self.finalize(
+        if (
+            self.load_eligibility(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            != adjusted
+        ):
+            return PublicationResult(
+                status="gate_reevaluation_failed", diagnostic="gate_reevaluation_failed"
+            )
+        resolution = self.reconcile_decided_threads(
             token=token,
             repository=repository,
+            repository_id=repository_id,
             pull_request=pull_request,
             head_sha=head_sha,
             app_slug=app_slug,
             eligibility=adjusted,
-            require_persisted=True,
+            index=index,
+            reviews=reviews,
             honored_instances=honored_instances,
+        )
+        try:
+            finalized = self.finalize(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                eligibility=adjusted,
+                require_persisted=True,
+                honored_instances=honored_instances,
+            )
+        except (GitHubHTTPError, GitHubPublicationError):
+            finalized = PublicationResult(
+                status="approval_withheld", diagnostic="approval_withheld"
+            )
+        return replace(
+            finalized,
+            thread_resolution=(
+                "unconfirmed"
+                if resolution.unconfirmed
+                else "resolved"
+                if resolution.resolved
+                else None
+            ),
         )
 
     def _post_head_review(
@@ -1478,6 +1833,294 @@ class ReviewApprovalFinalizer:
             app_authored=author["login"] == app_slug,
         )
 
+    def finding_index_from_reviews(
+        self,
+        reviews: Sequence[Any],
+        *,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        app_slug: str,
+        eligibility: ReviewApprovalEligibility | None = None,
+    ) -> FindingIndex | None:
+        """Find the original inventory bound to the latest eligibility result.
+
+        Assessment and approval receipts need not repeat the index. They cannot
+        erase an earlier inventory, or reveal an inventory for another result.
+        """
+        if eligibility is None:
+            eligibility = self._eligibility_from_reviews(
+                list(reviews),
+                head_sha=head_sha,
+                app_slug=app_slug,
+                require_valid=True,
+            )
+        indexes = []
+        for review in reversed(reviews):
+            if (
+                not isinstance(review, dict)
+                or review.get("commit_id") != head_sha
+                or str(review.get("user", {}).get("login", "")).casefold()
+                != app_slug.casefold()
+            ):
+                continue
+            body = review.get("body")
+            if not isinstance(body, str) or FINDING_INDEX_MARKER_PREFIX not in body:
+                continue
+            if body.count(FINDING_INDEX_MARKER_PREFIX) != 1:
+                raise GitHubPublicationError("finding index is ambiguous")
+            index = parse_finding_index(
+                body,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+            )
+            if index is None:
+                raise GitHubPublicationError("finding index scope is invalid")
+            indexes.append(index)
+        if not indexes:
+            return None
+        if eligibility is None:
+            # Without eligibility there is no permission to change the inventory.
+            return indexes[0]
+        matching = [
+            item for item in indexes if item.result_digest == eligibility.result_digest
+        ]
+        if not matching or any(item != matching[0] for item in matching):
+            raise GitHubPublicationError(
+                "finding index does not match current eligibility"
+            )
+        return matching[0]
+
+    def reconcile_decided_threads(
+        self,
+        *,
+        token: str,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        app_slug: str,
+        eligibility: ReviewApprovalEligibility,
+        index: FindingIndex | None,
+        reviews: Sequence[Any],
+        honored_instances: frozenset[str] = frozenset(),
+    ):
+        """Retry durable override, assessment and addressed decisions without AI."""
+        from .thread_resolution import (
+            FindingThreadResolver,
+            ThreadResolutionResult,
+            resolution_records,
+        )
+
+        if index is None:
+            return ThreadResolutionResult()
+        try:
+            durable_records = resolution_records(reviews, app_slug)
+        except GitHubPublicationError:
+            return ThreadResolutionResult(
+                unconfirmed=tuple(
+                    entry.instance for entry in index.entries if not entry.body_placed
+                )
+            )
+        records = tuple(
+            record
+            for record in durable_records
+            if (
+                record["repo"],
+                record["pr"],
+                record["head"],
+                record["base"],
+                record["result"],
+            )
+            == (
+                repository_id,
+                pull_request,
+                head_sha,
+                index.base_sha,
+                eligibility.result_digest,
+            )
+        )
+        assessed = (
+            set(eligibility.human_review.resolved)
+            if eligibility.human_review
+            else set()
+        )
+        addressed = {record["instance"] for record in records}
+        instances = frozenset(
+            entry.instance
+            for entry in index.entries
+            if not entry.body_placed
+            and (
+                entry.instance in honored_instances
+                or entry.instance in addressed
+                or (entry.needs_human and entry.instance in assessed)
+            )
+        )
+        if not instances:
+            return ThreadResolutionResult()
+
+        def fence() -> bool:
+            live_reviews = self._load_head_reviews(
+                token=token, repository=repository, pull_request=pull_request
+            )
+            current = self._eligibility_from_reviews(
+                live_reviews, head_sha=head_sha, app_slug=app_slug, require_valid=True
+            )
+            current_index = self.finding_index_from_reviews(
+                live_reviews,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                eligibility=current,
+            )
+            live_records = resolution_records(live_reviews, app_slug)
+            if current_index != index or any(
+                record not in live_records for record in records
+            ):
+                return False
+            live = self._preflight(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            return (
+                current == eligibility
+                and live.result is None
+                and live.repository_id == repository_id
+                and live.base_sha == index.base_sha
+                and not live.app_authored
+            )
+
+        try:
+            return FindingThreadResolver(self.http).resolve(
+                token=token,
+                repository=repository,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=index.base_sha,
+                app_slug=app_slug,
+                instances=instances,
+                records=records,
+                fence=fence,
+            )
+        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+            return ThreadResolutionResult(unconfirmed=tuple(sorted(instances)))
+
+    def finalize_recorded_decisions(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        head_sha: str,
+        app_slug: str,
+        eligibility: ReviewApprovalEligibility,
+    ) -> PublicationResult:
+        """Keep a recorded decision successful when a later host operation fails."""
+        resolution = None
+        try:
+            live = self._preflight(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            if live.result is not None:
+                return live.result
+            assert live.repository_id is not None
+            reviews = self._load_head_reviews(
+                token=token, repository=repository, pull_request=pull_request
+            )
+            index = self.finding_index_from_reviews(
+                reviews,
+                repository_id=live.repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                eligibility=eligibility,
+            )
+            resolution = self.reconcile_decided_threads(
+                token=token,
+                repository=repository,
+                repository_id=live.repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                eligibility=eligibility,
+                index=index,
+                reviews=reviews,
+            )
+            result = self.finalize(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                eligibility=eligibility,
+                require_persisted=True,
+            )
+        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+            result = PublicationResult(
+                status="approval_withheld", diagnostic="approval_withheld"
+            )
+        return replace(
+            result,
+            thread_resolution=(
+                "unconfirmed"
+                if resolution is None or resolution.unconfirmed
+                else "resolved"
+                if resolution.resolved
+                else None
+            ),
+        )
+
+    def _inline_obligations_resolved(
+        self,
+        reviews: Sequence[Any],
+        *,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        app_slug: str,
+        resolved_instances: frozenset[str],
+        honored_instances: frozenset[str],
+    ) -> bool:
+        """Require every unhonored inline blocker to have a resolved thread.
+
+        A missing index is a legacy review and keeps the thread scan's answer.
+        An index that does not decode withholds. A missing thread is not treated
+        as resolved. Manual closure does not clear a human-assessment obligation;
+        that obligation stays on the eligibility facts.
+        """
+
+        try:
+            index = self.finding_index_from_reviews(
+                reviews,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+        except (ReviewInputError, GitHubPublicationError):
+            return False
+        if index is None:
+            # Compatibility only for histories without any finding index.
+            return True
+        required = {
+            entry.instance
+            for entry in index.entries
+            if entry.blocking
+            and not entry.body_placed
+            and entry.instance not in honored_instances
+        }
+        return required <= resolved_instances
+
     def _scan_blocking_threads(
         self,
         *,
@@ -1489,11 +2132,13 @@ class ReviewApprovalFinalizer:
         base_sha: str,
         app_slug: str,
         honored_instances: frozenset[str] | None = None,
-    ) -> bool:
-        """Return whether this exact head still has an unresolved App blocking root.
+    ) -> tuple[bool, frozenset[str]]:
+        """Return unresolved blocking state and instances positively resolved.
 
         An override names an instance. That thread stays open on GitHub, and its
-        marker still says blocking, but it no longer withholds approval.
+        marker still says blocking, but it no longer withholds approval. A
+        marker that belongs to another head is ignored. An unreadable App root
+        withholds.
         """
 
         owner, separator, name = repository.partition("/")
@@ -1501,6 +2146,7 @@ class ReviewApprovalFinalizer:
             raise GitHubPublicationError("review thread repository is invalid")
         after: str | None = None
         open_blocking = False
+        resolved_instances: set[str] = set()
         for _ in range(MAX_REVIEW_THREAD_PAGES):
             try:
                 status, payload = self.http.request(
@@ -1549,19 +2195,53 @@ class ReviewApprovalFinalizer:
                     raise GitHubPublicationError("review thread response was invalid")
                 comments = node.get("comments")
                 roots = comments.get("nodes") if isinstance(comments, dict) else None
-                if node["isResolved"]:
-                    continue
                 if (
                     not isinstance(roots, list)
                     or len(roots) != 1
                     or not isinstance(roots[0], dict)
                 ):
+                    if node["isResolved"]:
+                        continue
                     raise GitHubPublicationError("review thread response was invalid")
                 root = roots[0]
                 author = root.get("author")
                 if not isinstance(author, dict) or author.get("login") != app_slug:
                     continue
-                instance = finding_instance_from_body(root.get("body"))
+                body = root.get("body")
+                instance = finding_instance_from_body(body)
+                scope = finding_publication_scope(body)
+                if scope is not None:
+                    (
+                        repo_id,
+                        pr_number,
+                        marker_head,
+                        marker_base,
+                        blocking_bit,
+                        _human,
+                    ) = scope
+                    this_head = (
+                        repo_id == repository_id
+                        and pr_number == pull_request
+                        and marker_head == head_sha
+                        and marker_base == base_sha
+                    )
+                    if not this_head:
+                        continue
+                    if node["isResolved"]:
+                        if blocking_bit and instance is not None:
+                            resolved_instances.add(instance)
+                        continue
+                    if (
+                        honored_instances
+                        and instance is not None
+                        and instance in honored_instances
+                    ):
+                        continue
+                    if blocking_bit:
+                        open_blocking = True
+                    continue
+                if node["isResolved"]:
+                    continue
                 if (
                     honored_instances
                     and instance is not None
@@ -1569,7 +2249,7 @@ class ReviewApprovalFinalizer:
                 ):
                     continue
                 blocking = finding_blocks_approval(
-                    body=root.get("body"),
+                    body=body,
                     repository_id=repository_id,
                     pull_request=pull_request,
                     head_sha=head_sha,
@@ -1581,7 +2261,7 @@ class ReviewApprovalFinalizer:
             if not isinstance(has_next, bool):
                 raise GitHubPublicationError("review thread response was invalid")
             if not has_next:
-                return open_blocking
+                return open_blocking, frozenset(resolved_instances)
             after = page_info.get("endCursor")
             if not isinstance(after, str) or not after:
                 raise GitHubPublicationError("review thread response was invalid")
@@ -2103,6 +2783,7 @@ class ReviewPublisher:
             raise GitHubPublicationError("review base sha is invalid")
         if not isinstance(result, ReviewResult):
             raise GitHubPublicationError("review result is invalid")
+        _reject_conflicting_instances(result.comments)
         if retained_eligibility is not None:
             if (
                 not isinstance(retained_eligibility, ReviewApprovalEligibility)
@@ -2369,14 +3050,11 @@ class ReviewPublisher:
         )
         if write_preflight.result is not None:
             return write_preflight.result
-        continuation_body_parts: (
-            tuple[
-                list[tuple[ReviewComment, str, str, str]],
-                str,
-                tuple[IndexedFinding, ...],
-            ]
-            | None
-        ) = None
+        continuation_review: AssembledReview | None = None
+        continuation_suffix = (
+            "Earlier findings remain in their assessment inventory; all "
+            "approval requirements still apply."
+        )
         if retained_eligibility is not None:
             assert source_guard is not None
             if not source_guard():
@@ -2391,7 +3069,7 @@ class ReviewPublisher:
             )
             if current != retained_eligibility:
                 return PublicationResult(status="skipped_stale_head")
-            continuation_body_parts = self._assemble_review_body(
+            continuation_review = self._assemble_review_body(
                 result=result,
                 analysis=analysis,
                 convergence_policy=convergence_policy,
@@ -2404,32 +3082,26 @@ class ReviewPublisher:
                 head_sha=head_sha,
                 base_sha=base_sha,
             )
-            prepared_comments, continuation_summary, continuation_entries = (
-                continuation_body_parts
-            )
-            continuation_summary += "\n\nEarlier findings remain in their assessment inventory; all approval requirements still apply."
-            continuation_body_parts = (
-                prepared_comments,
-                continuation_summary,
-                continuation_entries,
-            )
-            validate_bounded_text(
-                continuation_summary,
-                _published_summary_byte_limit(result),
-                label="published review summary",
-                allow_empty=False,
-            )
             # False is the longer JSON boolean. Preflight the whole framed
             # authority before the first check or review mutation.
             preflight_eligibility = approval_eligibility_marker(
                 replace(
                     prospective_eligibility,
-                    facts=replace(prospective_eligibility.facts, check_published=False),
+                    facts=replace(
+                        prospective_eligibility.facts,
+                        check_published=False,
+                        has_blocking_findings=(
+                            any(
+                                entry.blocking and entry.body_placed
+                                for entry in continuation_review.index_entries
+                            )
+                            or retained_eligibility.facts.has_blocking_findings
+                        ),
+                    ),
                 )
             )
-            preflight_index, continuation_summary = _index_marker_for_budget(
-                continuation_entries,
-                summary=continuation_summary,
+            fit_assembled_review(
+                continuation_review,
                 review_marker=marker,
                 eligibility_marker=preflight_eligibility,
                 repository_id=repository_id,
@@ -2438,23 +3110,7 @@ class ReviewPublisher:
                 base_sha=base_sha,
                 result_digest=review_result_digest(result),
                 summary_limit=_published_summary_byte_limit(result),
-            )
-            continuation_body_parts = (
-                prepared_comments,
-                continuation_summary,
-                continuation_entries,
-            )
-            preflight_body = _framed_review_body(
-                continuation_summary,
-                review_marker=marker,
-                index_marker=preflight_index,
-                eligibility_marker=preflight_eligibility,
-            )
-            validate_bounded_text(
-                preflight_body,
-                MAX_PUBLISHED_REVIEW_BODY_BYTES,
-                label="published review body",
-                allow_empty=False,
+                suffix=continuation_suffix,
             )
         # An old success on this head must not stand in for the review that is
         # about to be published, so the pending gate state is written first and
@@ -2499,33 +3155,36 @@ class ReviewPublisher:
             retained_eligibility=retained_eligibility,
         )
         try:
-            prepared_comments, summary, index_entries = (
-                continuation_body_parts
-                or self._assemble_review_body(
-                    result=result,
-                    analysis=analysis,
-                    convergence_policy=convergence_policy,
-                    read_facts=lambda: self._conversation_resolution_facts(
-                        token=token, repository=repository, branch=base_branch
-                    ),
-                    auto_approve=auto_approval,
-                    repository_id=repository_id,
-                    pull_request=pull_request,
-                    head_sha=head_sha,
-                    base_sha=base_sha,
+            assembled = continuation_review or self._assemble_review_body(
+                result=result,
+                analysis=analysis,
+                convergence_policy=convergence_policy,
+                read_facts=lambda: self._conversation_resolution_facts(
+                    token=token, repository=repository, branch=base_branch
+                ),
+                auto_approve=auto_approval,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+            )
+            body_blocking = any(
+                entry.blocking and entry.body_placed
+                for entry in assembled.index_entries
+            )
+            if retained_eligibility is not None:
+                # A continuation does not restate earlier findings. Their
+                # persisted blocking obligation stays in force.
+                body_blocking = (
+                    body_blocking or retained_eligibility.facts.has_blocking_findings
                 )
+            eligibility = replace(
+                eligibility,
+                facts=replace(eligibility.facts, has_blocking_findings=body_blocking),
             )
-            validate_bounded_text(
-                summary,
-                _published_summary_byte_limit(result),
-                label="published review summary",
-                allow_empty=False,
-            )
-
             eligibility_marker = approval_eligibility_marker(eligibility)
-            index_marker, summary = _index_marker_for_budget(
-                index_entries,
-                summary=summary,
+            summary, index_marker = fit_assembled_review(
+                assembled,
                 review_marker=marker,
                 eligibility_marker=eligibility_marker,
                 repository_id=repository_id,
@@ -2534,13 +3193,9 @@ class ReviewPublisher:
                 base_sha=base_sha,
                 result_digest=review_result_digest(result),
                 summary_limit=_published_summary_byte_limit(result),
+                suffix=continuation_suffix if continuation_review is not None else "",
             )
-            validate_bounded_text(
-                summary,
-                _published_summary_byte_limit(result),
-                label="published review summary",
-                allow_empty=False,
-            )
+            prepared_comments = assembled.inline_comments
 
             def body_for_summary(review_summary: str) -> str:
                 return _framed_review_body(
@@ -2580,19 +3235,15 @@ class ReviewPublisher:
             ) from exc
         suppression = PublishedFindingSuppression({}, {})
         if prepared_comments:
-            try:
-                suppression = self._published_finding_suppression(
-                    token=token,
-                    repository=repository,
-                    pull_request=pull_request,
-                    app_slug=app_slug,
-                )
-            except GitHubPublicationError as exc:
-                # Installations without GraphQL thread access can still publish;
-                # duplicate suppression is skipped rather than blocking every
-                # review when the entitlement surface is unavailable.
-                if "was not permitted" not in str(exc):
-                    raise
+            suppression = self._published_finding_suppression(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                app_slug=app_slug,
+                repository_id=repository_id,
+                head_sha=head_sha,
+                base_sha=base_sha,
+            )
         comments = []
         for comment, fingerprint, comment_body, anchor in prepared_comments:
             if _should_suppress_published_finding(
@@ -2600,6 +3251,8 @@ class ReviewPublisher:
                 fingerprint,
                 suppression,
                 instance=finding_instance_fingerprint(comment),
+                head_sha=head_sha,
+                base_sha=base_sha,
             ):
                 continue
             comment_payload: dict[str, object] = {
@@ -2619,9 +3272,13 @@ class ReviewPublisher:
         # App-authored pull requests stay comments because GitHub rejects
         # REQUEST_CHANGES from the pull request author. blocking fails the
         # check and comments; advisory never fails the check.
+        retained_blocking = (
+            retained_eligibility is not None
+            and retained_eligibility.facts.has_blocking_findings
+        )
         if (
             approval_enabled
-            and eligibility.facts.has_blocking_findings
+            and (assembled.requests_changes or retained_blocking)
             and not write_preflight.app_authored
         ):
             event, published_state = "REQUEST_CHANGES", "CHANGES_REQUESTED"
@@ -2694,6 +3351,19 @@ class ReviewPublisher:
         if status == 200 and isinstance(payload, dict):
             review_id = payload.get("id")
             if isinstance(review_id, int):
+                self._supersede_replaced_threads(
+                    token=token,
+                    threads=suppression.superseded_threads,
+                    confirmed_review_id=review_id,
+                    repository=repository,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    app_slug=app_slug,
+                    eligibility=eligibility,
+                    replacements=prepared_comments,
+                )
                 return self._finalize_after_publication(
                     token=token,
                     repository=repository,
@@ -2705,6 +3375,9 @@ class ReviewPublisher:
                     check_diagnostic=check_diagnostic,
                     status="published",
                     review_id=review_id,
+                    assume_inline_unresolved=frozenset(
+                        assembled.inline_blocker_instances
+                    ),
                 )
         if status == 404:
             self._complete_failed_check(
@@ -2727,36 +3400,57 @@ class ReviewPublisher:
             )
             raise GitHubPublicationError("review publication lacks permission")
         if status == 422:
-            # Ambiguous failure: reconcile the marker before deciding.
-            if self._reconcile_marker(
+            # An HTTP 422 is ambiguous. It is not evidence that a line was an
+            # invalid inline location. Reconcile the exact review, then the
+            # expected finding identities. One existing thread is not the review.
+            if not self._reconcile_marker(
                 token=token,
                 repository=repository,
                 pull_request=pull_request,
                 head_sha=head_sha,
-                marker=marker if retained_eligibility is not None else identity_marker,
+                marker=marker,
                 app_slug=app_slug,
                 expected_state=published_state,
             ):
-                return self._finalize_after_publication(
-                    token=token,
+                self._complete_failed_check(
+                    check_token=check_token,
                     repository=repository,
-                    pull_request=pull_request,
                     head_sha=head_sha,
                     app_slug=app_slug,
-                    eligibility=eligibility,
-                    require_persisted=retained_eligibility is not None,
-                    check_diagnostic=check_diagnostic,
-                    status="already_published",
+                    policy=effective_policy,
+                    transient=False,
                 )
-            self._complete_failed_check(
-                check_token=check_token,
+                raise GitHubPublicationError(
+                    "review publication was rejected; intended review is absent"
+                )
+            if not self._inline_findings_persisted(
+                token=token,
                 repository=repository,
+                pull_request=pull_request,
+                app_slug=app_slug,
+                repository_id=repository_id,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                instances=tuple(
+                    finding_instance_fingerprint(comment)
+                    for comment, _fingerprint, _body, _anchor in prepared_comments
+                ),
+            ):
+                return PublicationResult(
+                    status="publication_incomplete",
+                    diagnostic="publication_ambiguous",
+                )
+            return self._finalize_after_publication(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
                 head_sha=head_sha,
                 app_slug=app_slug,
-                policy=effective_policy,
-                transient=False,
+                eligibility=eligibility,
+                require_persisted=retained_eligibility is not None,
+                check_diagnostic=check_diagnostic,
+                status="already_published",
             )
-            raise GitHubPublicationError("review publication was rejected")
         if status == 409 or status == 429 or status >= 500:
             if self._reconcile_marker(
                 token=token,
@@ -2812,6 +3506,7 @@ class ReviewPublisher:
         status: str,
         review_id: int | None = None,
         require_persisted: bool = False,
+        assume_inline_unresolved: frozenset[str] | None = None,
     ) -> PublicationResult:
         """Finalize approval for one published head and report its withholding.
 
@@ -2831,6 +3526,7 @@ class ReviewPublisher:
             app_slug=app_slug,
             eligibility=eligibility,
             require_persisted=require_persisted,
+            assume_inline_unresolved=assume_inline_unresolved,
         )
         diagnostic = check_diagnostic
         if diagnostic is None and finalized.status == "approval_withheld":
@@ -2841,6 +3537,122 @@ class ReviewPublisher:
             diagnostic=diagnostic,
         )
 
+    def _inline_findings_persisted(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        app_slug: str,
+        repository_id: int,
+        head_sha: str,
+        base_sha: str,
+        instances: Sequence[str],
+    ) -> bool:
+        """Return whether each expected inline instance is already on this head.
+
+        Failure or an incomplete thread read is not confirmation. A 422 is not
+        rewritten into an invalid-location error here.
+        """
+
+        if not instances:
+            return True
+        try:
+            found = self._published_finding_suppression(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                app_slug=app_slug,
+                repository_id=repository_id,
+                head_sha=head_sha,
+                base_sha=base_sha,
+            )
+        except (GitHubPublicationError, GitHubPublicationTransientError):
+            return False
+        return all(instance in found.by_instance for instance in instances)
+
+    def _supersede_replaced_threads(
+        self,
+        *,
+        token: str,
+        threads: Sequence[tuple[str, str]],
+        confirmed_review_id: int,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        base_sha: str,
+        app_slug: str,
+        eligibility: ReviewApprovalEligibility,
+        replacements: Sequence[tuple[ReviewComment, str, str, str]],
+    ) -> None:
+        from .thread_resolution import FindingThreadResolver
+
+        replacement_concerns = {item[1] for item in replacements}
+        matching = {
+            thread: concern
+            for thread, concern in threads
+            if concern in replacement_concerns
+        }
+        if (
+            not matching
+            or type(confirmed_review_id) is not int
+            or confirmed_review_id < 1
+        ):
+            return
+        try:
+
+            def fence() -> bool:
+                if not self._inline_findings_persisted(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    app_slug=app_slug,
+                    repository_id=repository_id,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    instances=tuple(
+                        finding_instance_fingerprint(item[0]) for item in replacements
+                    ),
+                ):
+                    return False
+                current = self.finalizer.load_eligibility(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                )
+                live = self.finalizer._preflight(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                )
+                return (
+                    current == eligibility
+                    and live.result is None
+                    and live.repository_id == repository_id
+                    and live.base_sha == base_sha
+                    and not live.app_authored
+                )
+
+            FindingThreadResolver(self.http).resolve(
+                token=token,
+                repository=repository,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                app_slug=app_slug,
+                instances=frozenset(),
+                supersede=matching,
+                fence=fence,
+            )
+        except (GitHubHTTPError, GitHubPublicationError):
+            return
+
     def _published_finding_suppression(
         self,
         *,
@@ -2848,13 +3660,16 @@ class ReviewPublisher:
         repository: str,
         pull_request: int,
         app_slug: str,
+        repository_id: int,
+        head_sha: str,
+        base_sha: str,
     ) -> PublishedFindingSuppression:
         """Return already-published finding indexes for duplicate suppression.
 
-        Human comments are ignored. v2 markers index by fingerprint; legacy v1
-        markers index by inline path and line until installations roll forward.
-        Suppression applies only when the persisted blocking bit matches the
-        current comment, so a reclassification still publishes an update.
+        Only an open App thread whose marker matches this repository, pull
+        request, head, base, instance, and approval classification can suppress
+        a new comment. An older head is recorded for supersession and does not
+        suppress the current head.
         """
 
         owner, separator, name = repository.partition("/")
@@ -2862,7 +3677,8 @@ class ReviewPublisher:
             raise GitHubPublicationError("review thread repository is invalid")
         by_fingerprint: dict[str, bool] = {}
         by_location: dict[tuple[str, int], bool] = {}
-        by_instance: dict[str, bool] = {}
+        by_instance: dict[str, PublishedInstance] = {}
+        superseded: list[tuple[str, str]] = []
         after: str | None = None
         for _ in range(MAX_REVIEW_THREAD_PAGES):
             try:
@@ -2897,7 +3713,7 @@ class ReviewPublisher:
                 # enterprise policy blocking /graphql is reported distinctly from
                 # a malformed response instead of as a generic failure.
                 raise GitHubPublicationError(
-                    "review thread lookup was not permitted; publication "
+                    "review thread reconciliation is unavailable; publication "
                     "requires GraphQL read access to review threads"
                 )
             if status < 200 or status >= 300 or not isinstance(payload, dict):
@@ -2943,32 +3759,57 @@ class ReviewPublisher:
                 # differs only in case must still match its own findings.
                 if login is None or login.casefold() != app_slug.casefold():
                     continue
+                resolved = node.get("isResolved")
+                if not isinstance(resolved, bool):
+                    raise GitHubPublicationError("review thread response was invalid")
                 body = root.get("body")
-                blocking = finding_blocking_from_body(body)
-                if blocking is None:
+                scope = finding_publication_scope(body)
+                if scope is None:
                     continue
+                repo_id, pr_number, marker_head, marker_base, blocking, needs_human = (
+                    scope
+                )
+                thread_id = node.get("id")
+                if thread_id is not None and not isinstance(thread_id, str):
+                    raise GitHubPublicationError("review thread response was invalid")
                 fingerprint = finding_fingerprint_from_body(body)
                 instance = finding_instance_from_body(body)
-                if instance is not None:
-                    by_instance[instance] = blocking
-                if fingerprint is not None:
-                    by_fingerprint[fingerprint] = blocking
-                    continue
-                path = root.get("path")
-                line = root.get("line")
+                same_pull = repo_id == repository_id and pr_number == pull_request
                 if (
-                    isinstance(path, str)
-                    and isinstance(line, int)
-                    and line > 0
-                    and _FINDING_MARKER_RE.search(body if isinstance(body, str) else "")
+                    same_pull
+                    and marker_head != head_sha
+                    and isinstance(thread_id, str)
+                    and thread_id
+                    and not resolved
+                    and fingerprint is not None
                 ):
-                    by_location[(path, line)] = blocking
+                    superseded.append((thread_id, fingerprint))
+                if (
+                    same_pull
+                    and marker_head == head_sha
+                    and marker_base == base_sha
+                    and instance is not None
+                ):
+                    by_instance[instance] = PublishedInstance(
+                        blocking=blocking,
+                        needs_human=needs_human,
+                        head_sha=marker_head,
+                        base_sha=marker_base,
+                        resolved=resolved,
+                        thread_id=thread_id if isinstance(thread_id, str) else None,
+                        concern=fingerprint,
+                    )
+                if fingerprint is not None and marker_head == head_sha:
+                    by_fingerprint[fingerprint] = blocking
             has_next = page_info.get("hasNextPage")
             if not isinstance(has_next, bool):
                 raise GitHubPublicationError("review thread response was invalid")
             if not has_next:
                 return PublishedFindingSuppression(
-                    by_fingerprint, by_location, by_instance
+                    by_fingerprint,
+                    by_location,
+                    by_instance,
+                    superseded_threads=tuple(superseded),
                 )
             after = page_info.get("endCursor")
             if not isinstance(after, str) or not after:
@@ -2996,16 +3837,14 @@ class ReviewPublisher:
         pull_request: int,
         head_sha: str,
         base_sha: str,
-    ) -> tuple[
-        list[tuple[ReviewComment, str, str, str]], str, tuple[IndexedFinding, ...]
-    ]:
-        """Plan placement and render one coherent review body.
+    ) -> AssembledReview:
+        """Plan placement, including oversized-inline fallback, before the index.
 
-        Every finding is rendered through the shared typed renderers and gets
-        one stable ID projected from its instance fingerprint. Inline findings
-        are POSTed as threads; body findings keep their full explanation in the
-        review body, and an unanchored required finding retains its gate effect
-        through its finding marker.
+        Every displayed finding gets one stable ID from its instance
+        fingerprint. Conflicting classifications for that instance are rejected
+        before publication. Fixed and outdated findings do not open threads.
+        Inline findings are POSTed as threads; body findings keep their
+        explanation unless optional prose must be removed for the body ceiling.
         """
 
         advisory = not convergence_policy.automatic_github_review_events
@@ -3019,21 +3858,37 @@ class ReviewPublisher:
         instances = [
             finding_instance_fingerprint(comment) for comment in result.comments
         ]
+        classifications: dict[str, tuple[bool, bool]] = {}
+        for comment, instance in zip(result.comments, instances, strict=True):
+            classification = (
+                bool(comment.blocks_approval),
+                bool(comment.needs_human),
+            )
+            previous = classifications.get(instance)
+            if previous is not None and previous != classification:
+                raise GitHubPublicationError("conflicting finding classifications")
+            classifications[instance] = classification
         identifiers = assign_finding_identifiers(instances)
         prepared_comments: list[tuple[ReviewComment, str, str, str]] = []
-        body_views: list[FindingView] = []
         body_reasons: list[str] = []
         all_views: list[FindingView] = []
         index_entries: list[IndexedFinding] = []
+        explanations: list[BodyExplanation] = []
+        inline_blockers: list[str] = []
         facts: HostPlacementFacts | None = None
         seen_instances: set[str] = set()
+        requests_changes = False
         for comment, fingerprint, instance in zip(
             result.comments, fingerprints, instances, strict=True
         ):
+            state = lifecycle_by_fingerprint.get(fingerprint, "new")
+            if state in {"fixed", "outdated"}:
+                continue
+            if comment.blocks_approval:
+                requests_changes = True
             if instance in seen_instances:
                 continue
             seen_instances.add(instance)
-            state = lifecycle_by_fingerprint.get(fingerprint, "new")
             anchor = _publication_anchor(comment, analysis)
             if facts is None and _placement_needs_host_facts(
                 comment,
@@ -3059,6 +3914,25 @@ class ReviewPublisher:
             )
             # Concern history cannot prove this exact instance was explained.
             view = replace(view, repeat=True)
+            if placement == INLINE_PLACEMENT:
+                comment_body = (
+                    f"{_with_discussion_instruction(render_finding(view))}\n\n"
+                    f"{finding_instance_marker(comment)}\n\n"
+                    f"{finding_marker(repository_id=repository_id, pull_request=pull_request, head_sha=head_sha, base_sha=base_sha, result=result, blocking=comment.blocks_approval, fingerprint=fingerprint, state=state, needs_human=comment.needs_human)}"
+                )
+                if (
+                    len(comment_body.encode("utf-8"))
+                    > result.limits.max_comment_body_bytes
+                ):
+                    placement = BODY_PLACEMENT
+                    body_reason = BODY_REASON_OVERSIZED
+                    view = replace(view, placement=BODY_PLACEMENT)
+                else:
+                    prepared_comments.append(
+                        (comment, fingerprint, comment_body, anchor)
+                    )
+                    if comment.blocks_approval:
+                        inline_blockers.append(instance)
             all_views.append(view)
             overridable = bool(comment.blocks_approval or comment.needs_human)
             index_entries.append(
@@ -3072,46 +3946,39 @@ class ReviewPublisher:
                 )
             )
             if placement == BODY_PLACEMENT:
-                body_views.append(view)
                 if body_reason is not None:
                     body_reasons.append(body_reason)
-                continue
-            comment_body = (
-                f"{_with_discussion_instruction(render_finding(view))}\n\n"
-                f"{finding_instance_marker(comment)}\n\n"
-                f"{finding_marker(repository_id=repository_id, pull_request=pull_request, head_sha=head_sha, base_sha=base_sha, result=result, blocking=comment.blocks_approval, fingerprint=fingerprint, state=state)}"
-            )
-            validate_bounded_text(
-                comment_body,
-                result.limits.max_comment_body_bytes,
-                label="published comment body",
-                allow_empty=False,
-            )
-            prepared_comments.append((comment, fingerprint, comment_body, anchor))
+                explanations.append(
+                    BodyExplanation(
+                        instance=instance,
+                        severity=comment.severity,
+                        obligatory=bool(comment.blocks_approval or comment.needs_human),
+                        view=view,
+                    )
+                )
         state, reason = _review_summary_state(
             result, policy=convergence_policy, auto_approve=auto_approve
         )
-        summary = render_review_summary(
-            build_review_summary_view(
-                state=state,
-                head_sha=head_sha,
-                overview=result.summary,
-                coverage_line=_coverage_line(result),
-                required=tuple(
-                    view for view in all_views if view.requirement != OPTIONAL_FINDING
-                ),
-                optional=tuple(
-                    view for view in all_views if view.requirement == OPTIONAL_FINDING
-                ),
-                limitations=_review_limitations(result, all_views),
-                placement_note=placement_note(body_reasons) if body_views else None,
-                reason=reason,
-            )
+        return AssembledReview(
+            inline_comments=tuple(prepared_comments),
+            index_entries=tuple(index_entries),
+            head_sha=head_sha,
+            state=state,
+            reason=reason,
+            overview=result.summary,
+            coverage_line=_coverage_line(result),
+            required_views=tuple(
+                view for view in all_views if view.requirement != OPTIONAL_FINDING
+            ),
+            optional_views=tuple(
+                view for view in all_views if view.requirement == OPTIONAL_FINDING
+            ),
+            limitations=_review_limitations(result, all_views),
+            placement_note=placement_note(body_reasons) if explanations else None,
+            body_explanations=tuple(explanations),
+            inline_blocker_instances=tuple(inline_blockers),
+            requests_changes=requests_changes,
         )
-        repeated_body_views = tuple(view for view in body_views if view.repeat)
-        if repeated_body_views:
-            summary = f"{summary}\n\n{render_body_findings(repeated_body_views)}"
-        return prepared_comments, summary, tuple(index_entries)
 
     def _conversation_resolution_facts(
         self, *, token: str, repository: str, branch: str

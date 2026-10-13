@@ -283,6 +283,7 @@ class OverrideStabilityTests(unittest.TestCase):
                 json_response(pr_payload(head_sha=head)),
                 json_response([]),
                 json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
                 json_response({"id": 5}, 200),
                 json_response(pr_payload(head_sha=head)),
                 graphql_review_threads_response(),
@@ -354,6 +355,8 @@ class OverrideStabilityTests(unittest.TestCase):
 
         finalizer_http, finalizer_calls = make_http(
             [
+                json_response(pr_payload(head_sha=head)),
+                graphql_review_threads_response(),
                 json_response(pr_payload(head_sha=head)),
                 graphql_review_threads_response(),
                 json_response(pr_payload(head_sha=head)),
