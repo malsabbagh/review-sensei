@@ -2057,8 +2057,6 @@ class GitHubApplication:
                     else "issue_reply"
                 ),
             )
-            from review_sensei.models import ConversationReply
-
             return self.replier.publish(
                 token=capability_token,
                 repository=repository,

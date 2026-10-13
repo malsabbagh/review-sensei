@@ -659,7 +659,12 @@ def _post_command_receipt(
 ) -> None:
     """Post one receipt comment. A failed post does not undo a recorded command."""
 
-    if not receipts or not isinstance(source_comment_id, int) or source_comment_id <= 0:
+    if (
+        broker is None
+        or not receipts
+        or not isinstance(source_comment_id, int)
+        or source_comment_id <= 0
+    ):
         return
     import hashlib
 
@@ -891,7 +896,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             except OverrideRejected as exc:
                 _post_command_receipt(
                     http,
-                    application.broker,
+                    getattr(application, "broker", None),
                     oidc_token=getattr(args, "oidc_token", None),
                     repository=args.repository,
                     pull_request=args.pull_request,
@@ -905,7 +910,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             print(result.summary)
             _post_command_receipt(
                 http,
-                application.broker,
+                getattr(application, "broker", None),
                 oidc_token=getattr(args, "oidc_token", None),
                 repository=args.repository,
                 pull_request=args.pull_request,
