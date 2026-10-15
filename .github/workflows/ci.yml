@@ -188,7 +188,7 @@ jobs:
         shell: bash
         run: sha256sum dist/*.tar.gz dist/*.whl | tee dist/SHA256SUMS
       - name: Upload distributions
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: review-sensei-distributions
           path: dist/*
@@ -351,7 +351,7 @@ jobs:
             --head-ref "$(git rev-parse HEAD)"
       - name: Retain verified native ABI evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: frozen-intel-crypto-check
           path: ${{ runner.temp }}/frozen-crypto.json
@@ -407,11 +407,11 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+      - uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           languages: ${{ matrix.language }}
           config-file: ./.github/codeql/codeql-config.yml
-      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+      - uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           # Upload is intentionally disabled until the repository capability is
           # enabled; the deterministic local gate below remains enforcement.
@@ -428,7 +428,7 @@ jobs:
             --expected-languages "${{ matrix.language }}"
       - name: Archive CodeQL SARIF
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: codeql-sarif-${{ matrix.language }}
           path: ${{ runner.temp }}/codeql-results
