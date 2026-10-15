@@ -188,7 +188,7 @@ jobs:
         shell: bash
         run: sha256sum dist/*.tar.gz dist/*.whl | tee dist/SHA256SUMS
       - name: Upload distributions
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: review-sensei-distributions
           path: dist/*
@@ -351,7 +351,7 @@ jobs:
             --head-ref "$(git rev-parse HEAD)"
       - name: Retain verified native ABI evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: frozen-intel-crypto-check
           path: ${{ runner.temp }}/frozen-crypto.json
@@ -428,7 +428,7 @@ jobs:
             --expected-languages "${{ matrix.language }}"
       - name: Archive CodeQL SARIF
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: codeql-sarif-${{ matrix.language }}
           path: ${{ runner.temp }}/codeql-results

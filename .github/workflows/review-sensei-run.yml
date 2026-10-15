@@ -1324,7 +1324,7 @@ jobs:
 
       - name: Upload diagnostics artifact
         if: always() && !cancelled() && inputs.operation == 'review' && needs.bootstrap.outputs.artifacts == 'diagnostics' && ((steps.provider-review.outcome == 'success' && steps.provider-review.outputs.result_ready == 'true') || (steps.provider-review.outcome == 'failure' && steps.provider-review.outputs.checkpoint_workspace_clean == 'true' && hashFiles('checkpoint-evidence.json') != ''))
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: review-sensei-diagnostics
           path: |
@@ -1864,7 +1864,7 @@ jobs:
 
       - name: Upload diagnostics artifact
         if: always() && !cancelled() && inputs.operation == 'review' && needs.bootstrap.outputs.artifacts == 'diagnostics' && ((steps.provider-review.outcome == 'success' && steps.provider-review.outputs.result_ready == 'true') || (steps.provider-review.outcome == 'failure' && steps.provider-review.outputs.checkpoint_workspace_clean == 'true' && hashFiles('checkpoint-evidence.json') != ''))
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: review-sensei-diagnostics
           path: |

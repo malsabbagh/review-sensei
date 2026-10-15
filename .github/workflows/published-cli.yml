@@ -45,7 +45,7 @@ jobs:
         run: python scripts/published_cli_release_gate.py --version "$MANUAL_VERSION" --github-version "$MANUAL_GITHUB_VERSION" --report "$RUNNER_TEMP/publication-gate.json"
       - name: Retain publication gate receipt
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: published-cli-publication-gate
           path: ${{ runner.temp }}/publication-gate.json
@@ -77,7 +77,7 @@ jobs:
         run: python scripts/qualify_published_cli.py --version "$PUBLISHED_VERSION" --github-version "$PUBLISHED_GITHUB_VERSION" --output "$RUNNER_TEMP/published-cli"
       - name: Retain sanitized qualification evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: published-cli-${{ matrix.os }}-py${{ matrix.python }}
           path: |
