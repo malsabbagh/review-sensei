@@ -28,6 +28,7 @@ from review_sensei.human_file_review import (
     canonical,
     display_path,
     is_blanket_media_approval,
+    is_human_confirmable_file,
     parse_confirmation,
     positive,
     sha,
@@ -81,8 +82,8 @@ class HumanFileReviewAssessment:
     def render(self) -> str:
         lines = [
             f"Coverage: {len(self.ai_reviewed_paths)} AI-reviewed path(s), "
-            f"{len(self.human_reviewed_ids)} human-reviewed binary change(s), "
-            f"{len(self.pending_ids)} unsupported binary change(s) pending."
+            f"{len(self.human_reviewed_ids)} human-reviewed file change(s), "
+            f"{len(self.pending_ids)} file change(s) pending human review."
         ]
         if self.invalidated_receipt_ids:
             lines.append(
@@ -388,11 +389,7 @@ class HumanFileReviewPublisher:
             raise ReviewInputError(
                 "human file request requires complete coverage inventory"
             )
-        paths = {
-            x.path
-            for x in result.coverage.files
-            if x.outcome == "unsupported" and x.reason == "binary"
-        }
+        paths = {x.path for x in result.coverage.files if is_human_confirmable_file(x)}
         if not paths or not result.coverage.enumeration_complete:
             raise ReviewInputError(
                 "human file unsupported inventory is missing or incomplete"
@@ -488,7 +485,7 @@ class HumanFileReviewPublisher:
 
     def _receipt_body(self, receipt: FileReviewReceipt) -> str:
         return (
-            f"Human file review recorded for {len(receipt.selected_ids)} selected binary change(s); "
+            f"Human file review recorded for {len(receipt.selected_ids)} selected file change(s); "
             "not AI-reviewed. Other findings and approval checks remain in force.\n"
             f"Reviewer: {receipt.actor} (numeric user {receipt.actor_id}); source comment {receipt.source_comment_id}.\n"
             + "\n".join(f"- `{key}`: human-reviewed." for key in receipt.selected_ids)

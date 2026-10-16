@@ -1084,10 +1084,79 @@ class GitHubApplication:
                 prepared,
                 published=publication.status == "published",
             )
+        if (
+            isinstance(result, ReviewResult)
+            and result.coverage_only_partial
+            and publication.status in {"published", "already_published"}
+            and type(publication.review_id) is int
+            and publication.review_id > 0
+        ):
+            try:
+                self._publish_human_file_request(
+                    token=token,
+                    repository=repository,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    review_id=publication.review_id,
+                    result=result,
+                )
+            except Exception:
+                # The review is already published. A follow-up inventory comment
+                # must not turn that success into a publication failure.
+                pass
         return _with_shadow(
             publication,
             _shadow_observation(_shadow_state(prepared, flags)),
         )
+
+    def _publish_human_file_request(
+        self,
+        *,
+        token: str,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        review_id: int,
+        result: ReviewResult,
+    ) -> None:
+        """Post the digest-bound human file request after the owned review exists."""
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+
+        from .human_file_review import HumanFileReviewPolicy, HumanFileReviewPublisher
+
+        http = self.http
+        api_url = getattr(http, "api_url", None)
+        if not isinstance(api_url, str) or not api_url.startswith("https://"):
+            raise ReviewInputError("human file request API URL is invalid")
+        status, body = http.request("GET", "/user", token=token)
+        user_id = body.get("id") if isinstance(body, dict) else None
+        login = body.get("login") if isinstance(body, dict) else None
+        if (
+            status != 200
+            or not isinstance(body, dict)
+            or body.get("type") != "Bot"
+            or isinstance(user_id, bool)
+            or not isinstance(user_id, int)
+            or user_id <= 0
+            or not isinstance(login, str)
+            or not login
+        ):
+            raise ReviewInputError("human file request requires the app user")
+        budget = EvidenceReadBudget()
+        publisher = HumanFileReviewPublisher(
+            http=http,
+            api_url=api_url,
+            repository=repository,
+            repository_id=repository_id,
+            pull_request=pull_request,
+            app_login=login,
+            app_user_id=user_id,
+            token=token,
+            before_request=budget.consume,
+            policy=HumanFileReviewPolicy(allow_confirmations=True),
+        )
+        publisher.request_review(review_id=review_id, result=result)
 
     def apply_maintainer_command(
         self,

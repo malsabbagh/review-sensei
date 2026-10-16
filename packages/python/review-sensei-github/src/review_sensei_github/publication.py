@@ -420,6 +420,10 @@ def _review_summary_state(
 
 
 def _incomplete_reason(result: ReviewResult) -> str | None:
+    if result.coverage_only_partial and result.coverage is not None:
+        from review_sensei.human_file_review import human_confirmation_reason
+
+        return human_confirmation_reason(result.coverage)
     if result.review_status != "complete":
         return f"the review reported status {result.review_status}"
     coverage = result.coverage
