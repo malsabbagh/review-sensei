@@ -127,10 +127,17 @@ def _coverage_causes(
         if provider_output_incomplete:
             causes.append("incomplete-provider-output")
         return causes
+    excluded_paths = {
+        entry.path
+        for entry in coverage.files
+        if entry.outcome == "excluded-by-policy" and entry.reason == "generated"
+    }
     for entry in coverage.files:
         if entry.outcome == "reviewed":
             continue
         if entry.outcome == "unsupported" and entry.reason == "binary":
+            continue
+        if entry.outcome == "excluded-by-policy" and entry.reason == "generated":
             continue
         if entry.outcome == "unsupported":
             causes.append("non-binary-unsupported")
@@ -138,7 +145,15 @@ def _coverage_causes(
             causes.append("incomplete-provider-output")
         else:
             causes.append("failed-stage")
-    if any(entry.outcome != "reviewed" for entry in coverage.hunks):
+    if any(
+        entry.outcome != "reviewed"
+        and not (
+            entry.path in excluded_paths
+            and entry.outcome == "excluded-by-policy"
+            and entry.reason == "generated"
+        )
+        for entry in coverage.hunks
+    ):
         causes.append("failed-stage")
     if failed_stage:
         causes.append("failed-stage")
@@ -195,9 +210,10 @@ def evaluate_mixed_coverage(
     """Return a mixed-coverage approval decision without mutating ``result``.
 
     ``coverage_satisfied`` is completed AI text and a current valid human
-    confirmation for every required regular binary. ``coverage_only_partial``
-    is reported only when that binary gap is the complete remaining coverage
-    cause. AI status, baseline, and cache stay untouched.
+    confirmation for every required regular binary or generated file excluded
+    by policy. ``coverage_only_partial`` is reported only when that gap is the
+    complete remaining coverage cause. AI status, baseline, and cache stay
+    untouched.
     """
 
     if schema_version != MIXED_COVERAGE_SCHEMA:
@@ -323,7 +339,8 @@ def evaluate_mixed_coverage(
     blockers = _unique([*causes, *gates])
     coverage_files = result.coverage.files if result.coverage is not None else ()
     binary_blocker_remains = not coverage_satisfied and (
-        binary_only or any(item.reason == "binary" for item in coverage_files)
+        binary_only
+        or any(item.reason in {"binary", "generated"} for item in coverage_files)
     )
     receipt_id = None
     minted_receipt = False

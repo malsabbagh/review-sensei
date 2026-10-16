@@ -3,18 +3,21 @@ import json
 import unittest
 from dataclasses import replace
 
-from review_sensei.coverage import CoverageManifest, FileCoverage
+from review_sensei.coverage import CoverageManifest, FileCoverage, HunkCoverage
 from review_sensei.errors import ReviewInputError
 from review_sensei.human_file_review import (
     FileReviewReceipt,
     FileReviewRequest,
     UnsupportedFile,
+    coverage_only_binary,
+    human_confirmation_reason,
     parse_confirmation,
+    validate_inventory,
 )
 from review_sensei.models import ReviewRequest, ReviewResult
 from review_sensei.service import ReviewService
 from review_sensei.validation import ReviewLimits
-from tests.test_coverage_planning import BINARY, TWO_FILES, FakeProvider
+from tests.test_coverage_planning import BINARY, GENERATED, TWO_FILES, FakeProvider
 
 
 class HumanFileReviewTests(unittest.TestCase):
@@ -198,6 +201,102 @@ class HumanFileReviewTests(unittest.TestCase):
             ReviewResult.from_dict(
                 {**partial.to_dict(), "coverage_only_partial": "true"}
             )
+
+    def test_generated_policy_exclusion_is_human_confirmable(self):
+        path = "vendor/brace-expansion-compat/package.json"
+        coverage = CoverageManifest(
+            files=(
+                FileCoverage("src/a.py", "reviewed"),
+                FileCoverage(path, "excluded-by-policy", "generated"),
+            ),
+            hunks=(
+                HunkCoverage(1, "src/a.py", "reviewed"),
+                HunkCoverage(2, path, "excluded-by-policy", "generated"),
+            ),
+            enumerated_paths=("src/a.py", path),
+        )
+        self.assertTrue(coverage_only_binary(coverage))
+        item = UnsupportedFile(path, "modified", "a" * 40, "b" * 40)
+        request = FileReviewRequest(
+            "owner/repo", 1, 2, "c" * 40, "d" * 40, 3, "e" * 64, (item,)
+        )
+        validate_inventory(request, coverage)
+        reason = human_confirmation_reason(coverage)
+        self.assertIn("excluded-by-policy (generated)", reason)
+        self.assertIn("package.json", reason)
+        self.assertIn("I reviewed the media files and I approve", reason)
+        blocked = CoverageManifest(
+            files=coverage.files,
+            hunks=(
+                HunkCoverage(1, "src/a.py", "unsupported", "too-large-hunk"),
+                HunkCoverage(2, path, "excluded-by-policy", "generated"),
+            ),
+            enumerated_paths=coverage.enumerated_paths,
+        )
+        self.assertFalse(coverage_only_binary(blocked))
+        with self.assertRaisesRegex(ReviewInputError, "reviewable text hunk"):
+            validate_inventory(request, blocked)
+
+    def test_service_marks_generated_policy_exclusion_as_coverage_only_partial(self):
+        result = ReviewService(FakeProvider([])).review(ReviewRequest(diff=GENERATED))
+        self.assertTrue(result.coverage_only_partial)
+        self.assertEqual(result.review_status, "partial")
+        self.assertTrue(result.coverage.hunks)
+        self.assertTrue(
+            all(
+                entry.outcome == "excluded-by-policy" and entry.reason == "generated"
+                for entry in (*result.coverage.files, *result.coverage.hunks)
+            )
+        )
+        mixed = ReviewService(FakeProvider([])).review(
+            ReviewRequest(diff=TWO_FILES + GENERATED)
+        )
+        self.assertTrue(mixed.coverage_only_partial)
+        self.assertTrue(
+            any(
+                entry.reason == "generated" and entry.outcome == "excluded-by-policy"
+                for entry in mixed.coverage.files
+            )
+        )
+
+    def test_published_summary_names_generated_files_and_the_existing_command(self):
+        from review_sensei_github.publication import (
+            _incomplete_reason,
+            _review_limitations,
+        )
+
+        from review_sensei.presentation import (
+            build_review_summary_view,
+            render_review_summary,
+        )
+
+        path = "vendor/pkg/package.json"
+        coverage = CoverageManifest(
+            files=(FileCoverage(path, "excluded-by-policy", "generated"),),
+            hunks=(HunkCoverage(1, path, "excluded-by-policy", "generated"),),
+            enumerated_paths=(path,),
+        )
+        result = ReviewResult(
+            "Generated files need human review.",
+            (),
+            "fixture",
+            review_status="partial",
+            coverage=coverage,
+            coverage_only_partial=True,
+        )
+        reason = _incomplete_reason(result)
+        rendered = render_review_summary(
+            build_review_summary_view(
+                state="incomplete",
+                head_sha="b" * 40,
+                limitations=_review_limitations(result, ()),
+                reason=reason,
+            )
+        )
+        self.assertIn("excluded-by-policy (generated)", rendered)
+        self.assertIn("I reviewed the media files and I approve", rendered)
+        self.assertNotIn("Re-run ReviewSensei once resolved.", rendered)
+        self.assertNotIn("reported status partial", rendered)
 
     def test_service_marks_only_completed_text_plus_binary_coverage(self):
         for diff, orchestrate in (

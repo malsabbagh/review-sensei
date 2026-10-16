@@ -39,7 +39,8 @@ source receipts refuse evaluation.
 
 Preserve AI coverage and the partial result. Introduce optional host-derived
 `coverage_only_partial` provenance only after complete reviewable text analysis
-with exclusively binary remaining obligations. Absent provenance preserves the
+with exclusively binary or generated-policy-excluded remaining obligations.
+Absent provenance preserves the
 historic content digest; present provenance uses an explicit human-files-v1
 projection and the complete publication result digest. A fresh separate
 assessment may satisfy only this coverage/status blocker after all selected
@@ -48,16 +49,24 @@ approval. No existing marker, cache/baseline, passing check or APPROVE is writte
 
 ## Scope
 
-Regular unsupported binary blobs only, at most 32 changes; added, modified,
-removed and renamed changes are supported. Canonical literal Unicode/glob paths
-retain equality. Text, symlinks, submodules, arbitrary policy exclusions and
-unknown coverage remain outside this exemption. Issue-comment commands only.
+Regular unsupported binary blobs and generated files excluded by policy
+(`excluded-by-policy`, reason `generated`) only, at most 32 changes; added,
+modified, removed and renamed changes are supported. Canonical literal
+Unicode/glob paths retain equality. Reviewable text, symlinks, submodules,
+other policy exclusions and unknown coverage remain outside this exemption.
+Issue-comment commands only. The existing maintainer sentence
+`@reviewsensei I reviewed the media files and I approve` selects every file on
+the current request, including generated files once they are in that inventory.
 Trusted configuration is the library policy object; no repository YAML flag,
 CLI command, mention workflow, v4 writer or broker capability is enabled.
 
 ## Consequences
 
-Humans can record exact selected-file review without model inference. Existing
+Humans can record exact selected-file review without model inference. When the
+remaining coverage is only those confirmable files, the published review names
+them and the application posts the existing digest-bound request comment after
+the owned review id exists. That follow-up does not post APPROVE, and a failure
+to post it leaves the published review in place. Existing
 partial readers continue to withhold; a new host must deliberately compose the
 fresh assessment. No automatic carry is conservative and may require humans to
 repeat review after unrelated changes. Current permission/source checks can

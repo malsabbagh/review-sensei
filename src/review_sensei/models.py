@@ -1418,7 +1418,8 @@ class ReviewResult:
     transaction: ReviewTransaction | None = None
     persistence_status: str | None = None
     # Host-derived provenance for a complete analysis whose ONLY remaining
-    # coverage obligations are unsupported binary blobs. Never model output.
+    # coverage obligations are unsupported binary blobs or generated files
+    # excluded by policy. Never model output.
     coverage_only_partial: bool = False
 
     def __post_init__(self) -> None:

@@ -13,7 +13,7 @@ from datetime import datetime
 from html import escape
 from typing import Mapping, cast
 
-from .coverage import CoverageManifest
+from .coverage import CoverageManifest, FileCoverage, HunkCoverage
 from .errors import ReviewInputError
 from .evidence import evidence_digest
 from .validation import validate_repository_path
@@ -251,7 +251,9 @@ class FileReviewRequest:
 
     def render(self) -> str:
         lines = [
-            "Human review requested for unsupported binary files (not AI-reviewed).",
+            "Human review requested for files ReviewSensei did not assess "
+            "(unsupported binary files, or generated files excluded by policy; "
+            "not AI-reviewed).",
             f"Snapshot: base `{self.base_sha}`, head `{self.head_sha}`.",
             "A maintainer or admin who reviewed these files may approve them in one reply.",
         ]
@@ -331,35 +333,94 @@ def parse_confirmation(
     return ids
 
 
-def coverage_only_binary(coverage: CoverageManifest) -> bool:
-    """Only unsupported binary coverage can be satisfied by this feature."""
+def is_human_confirmable_file(entry: FileCoverage) -> bool:
+    return (entry.outcome == "unsupported" and entry.reason == "binary") or (
+        entry.outcome == "excluded-by-policy" and entry.reason == "generated"
+    )
+
+
+def is_human_confirmable_hunk(entry: HunkCoverage) -> bool:
+    return entry.outcome == "excluded-by-policy" and entry.reason == "generated"
+
+
+def human_confirmation_reason(coverage: CoverageManifest) -> str:
+    """Name the files a maintainer can confirm and the existing approval command."""
+
+    binary = [
+        display_path(entry.path)
+        for entry in coverage.files
+        if entry.outcome == "unsupported" and entry.reason == "binary"
+    ]
+    generated = [
+        display_path(entry.path)
+        for entry in coverage.files
+        if entry.outcome == "excluded-by-policy" and entry.reason == "generated"
+    ]
+    groups: list[str] = []
+    if binary:
+        groups.append("unsupported (binary) " + ", ".join(binary))
+    if generated:
+        groups.append("excluded-by-policy (generated) " + ", ".join(generated))
+    listing = "; ".join(groups) if groups else "the files in this review"
     return (
-        coverage.enumeration_complete
-        and bool(coverage.files)
-        and any(x.outcome == "unsupported" for x in coverage.files)
+        "human confirmation is still required for "
+        + listing
+        + ". A maintainer or admin who reviewed these files replies "
+        "`@reviewsensei I reviewed the media files and I approve`"
+    )
+
+
+def coverage_only_binary(coverage: CoverageManifest) -> bool:
+    """Return whether human file review can satisfy the remaining coverage.
+
+    Unsupported binary files and generated files excluded by policy qualify.
+    Reviewable text hunks do not.
+    """
+    if not coverage.enumeration_complete or not coverage.files:
+        return False
+    confirmable_paths = {
+        entry.path for entry in coverage.files if is_human_confirmable_file(entry)
+    }
+    excluded_paths = {
+        entry.path
+        for entry in coverage.files
+        if entry.outcome == "excluded-by-policy" and entry.reason == "generated"
+    }
+    return (
+        bool(confirmable_paths)
         and all(
-            x.outcome == "reviewed"
-            or (x.outcome == "unsupported" and x.reason == "binary")
-            for x in coverage.files
+            entry.outcome == "reviewed" or is_human_confirmable_file(entry)
+            for entry in coverage.files
         )
-        and all(x.outcome == "reviewed" for x in coverage.hunks)
+        and all(
+            entry.outcome == "reviewed"
+            or (entry.path in excluded_paths and is_human_confirmable_hunk(entry))
+            for entry in coverage.hunks
+        )
     )
 
 
 def validate_inventory(request: FileReviewRequest, coverage: CoverageManifest) -> None:
     expected = {
-        x.path
-        for x in coverage.files
-        if x.outcome == "unsupported" and x.reason == "binary"
+        entry.path for entry in coverage.files if is_human_confirmable_file(entry)
+    }
+    excluded_paths = {
+        entry.path
+        for entry in coverage.files
+        if entry.outcome == "excluded-by-policy" and entry.reason == "generated"
     }
     actual = {path for item in request.files for path in item.paths}
     if not coverage.enumeration_complete or not expected or expected != actual:
         raise ReviewInputError(
-            "human file inventory must cover exactly all unsupported binary paths"
+            "human file inventory must cover exactly all human-confirmable paths"
         )
-    if any(x.path in actual and x.outcome != "reviewed" for x in coverage.hunks):
+    if any(
+        entry.outcome != "reviewed"
+        and not (entry.path in excluded_paths and is_human_confirmable_hunk(entry))
+        for entry in coverage.hunks
+    ):
         raise ReviewInputError(
-            "human file confirmation cannot replace text hunk review"
+            "human file confirmation cannot replace reviewable text hunk review"
         )
 
 

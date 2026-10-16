@@ -66,13 +66,15 @@ confirmation-plus-approval handler or promise useful 32-file hosted support.
 
 ## Bot request and human reply
 
-The request lists every unsupported binary change with its exact path, change
-kind, previous path for renames, old/new blob SHAs, regular file modes, full file
-ID, and request digest. Only regular Git blobs (modes `100644` or `100755`) are
-eligible. Symlinks, submodules, missing/truncated tree evidence, unsupported text,
-policy-excluded files, incomplete file enumeration and unreviewed hunks do not
-gain a human exemption. Deleted files bind the old blob; new files bind the new
-blob; renames bind both paths and blobs.
+The request lists every unsupported binary change and every generated file
+excluded by policy (`excluded-by-policy`, reason `generated`) with its exact
+path, change kind, previous path for renames, old/new blob SHAs, regular file
+modes, full file ID, and request digest. Only regular Git blobs (modes
+`100644` or `100755`) are eligible. Symlinks, submodules, missing/truncated
+tree evidence, unsupported text, other policy exclusions, incomplete file
+enumeration and unreviewed hunks do not gain a human exemption. Deleted files
+bind the old blob; new files bind the new blob; renames bind both paths and
+blobs.
 
 A maintainer or admin replies with this exact sentence to approve every file
 in the current request:
@@ -130,7 +132,8 @@ never resolve text findings, human adjudication, learning obligations, failed
 stages, incomplete document/source context, qualification or other approval
 checks. The service computes an optional `coverage_only_partial` provenance
 field only after all reviewable text stages complete and the remaining coverage
-is exclusively binary. The complete owned review digest binds this field. New
+is exclusively unsupported binary files or generated files excluded by policy.
+The complete owned review digest binds this field. New
 provenance uses the explicit `reviewsensei:review-content:human-files:v1` content
 digest projection; absent provenance preserves the historic result digest. An
 old transaction reader cannot silently verify and drop the new approval input.

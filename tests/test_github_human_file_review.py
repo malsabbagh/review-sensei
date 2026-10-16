@@ -757,3 +757,63 @@ class GitHubHumanFileReviewTests(unittest.TestCase):
         assessment = self.evaluate(identifier)
         self.assertFalse(assessment.approval.approved)
         self.assertEqual(assessment.invalidated_receipt_ids, (receipt,))
+
+    def test_generated_file_is_requested_with_the_owned_review(self):
+        from review_sensei_github.application import GitHubApplication
+
+        from review_sensei.coverage import HunkCoverage
+
+        path = "widget.min.js"
+        coverage = CoverageManifest(
+            files=(
+                FileCoverage("app.py", "reviewed"),
+                FileCoverage(path, "excluded-by-policy", "generated"),
+            ),
+            hunks=(HunkCoverage(1, path, "excluded-by-policy", "generated"),),
+            enumerated_paths=("app.py", path),
+        )
+        result = ReviewResult(
+            "Completed text analysis; generated files need human review.",
+            (),
+            "fixture",
+            review_status="partial",
+            coverage=coverage,
+            coverage_only_partial=True,
+        )
+        self.state.set_result(result)
+        self.state.files = [
+            {"filename": "app.py", "status": "modified"},
+            {"filename": path, "status": "added"},
+        ]
+        self.state.new[path] = ("9" * 40, "100644")
+
+        class Http:
+            api_url = API
+
+            def __init__(self, state):
+                self.state = state
+
+            def request(
+                self, method, path, token=None, body=None, timeout_seconds=None
+            ):
+                if path == "/user":
+                    return 200, {"id": BOT["id"], "login": BOT["login"], "type": "Bot"}
+                return self.state.request(
+                    method, path, body=body, timeout_seconds=timeout_seconds
+                )
+
+        application = GitHubApplication.__new__(GitHubApplication)
+        application.http = Http(self.state)
+        application._publish_human_file_request(
+            token="synthetic",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=2,
+            review_id=10,
+            result=result,
+        )
+        bodies = [comment["body"] for comment in self.state.comments.values()]
+        self.assertEqual(len(bodies), 1)
+        self.assertIn(path, bodies[0])
+        self.assertIn("I reviewed the media files and I approve", bodies[0])
+        self.assertIn("generated files excluded by policy", bodies[0])

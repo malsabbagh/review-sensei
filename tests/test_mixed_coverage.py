@@ -267,3 +267,43 @@ class MixedCoverageTests(unittest.TestCase):
             self.evaluate(result, inventory, reason_metadata={"photo.png": "generated"})
         with self.assertRaisesRegex(ReviewInputError, "schema"):
             self.evaluate(result, inventory, schema_version="mixed-coverage-v0")
+
+    def test_generated_policy_exclusion_can_be_human_confirmed(self):
+        path = "vendor/pkg/package.json"
+        coverage = CoverageManifest(
+            files=(
+                FileCoverage("src/a.py", "reviewed"),
+                FileCoverage(path, "excluded-by-policy", "generated"),
+            ),
+            hunks=(
+                HunkCoverage(1, "src/a.py", "reviewed"),
+                HunkCoverage(2, path, "excluded-by-policy", "generated"),
+            ),
+            enumerated_paths=("src/a.py", path),
+        )
+        result = ReviewResult(
+            "Completed text review; generated files remain excluded by policy.",
+            (),
+            "fixture",
+            review_status="partial",
+            coverage=coverage,
+            coverage_only_partial=True,
+        )
+        inventory = (_file(path),)
+        decision = self.evaluate(result, inventory)
+        self.assertTrue(decision.approved)
+        self.assertTrue(decision.coverage_satisfied)
+        self.assertTrue(decision.coverage_only_partial)
+        self.assertFalse(decision.binary_blocker_remains)
+        pending = evaluate_mixed_coverage(
+            result,
+            inventory,
+            (),
+            text_completed=True,
+            allow_confirmations=True,
+            event_id=EVENT,
+        )
+        self.assertFalse(pending.coverage_satisfied)
+        self.assertTrue(pending.coverage_only_partial)
+        self.assertTrue(pending.binary_blocker_remains)
+        self.assertIn("binary-coverage", pending.blockers)

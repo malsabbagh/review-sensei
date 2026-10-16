@@ -572,6 +572,8 @@ def _next_action(
         )
     if state == INCOMPLETE_STATE:
         detail = reason or "the review did not complete"
+        if "I reviewed the media files and I approve" in detail:
+            return detail if detail.endswith(".") else f"{detail}."
         return f"This review is incomplete because {detail}. Re-run ReviewSensei once resolved."
     if state == WITHHELD_STATE:
         detail = reason or "automatic approval is disabled for this repository"
