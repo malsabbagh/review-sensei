@@ -2198,6 +2198,7 @@ class GitHubIssueCommentSessionLedger:
         reservation_id: str,
         expected_generation: int,
         head_sha: str | None = None,
+        rescan_request: object | None = None,
         now: datetime | None = None,
     ) -> SessionRecord:
         return self.replace(
@@ -2210,6 +2211,7 @@ class GitHubIssueCommentSessionLedger:
                     reservation_id=reservation_id,
                     expected_generation=expected_generation,
                     head_sha=head_sha,
+                    rescan_request=rescan_request,
                     now=now,
                 ),
             ),

@@ -741,6 +741,7 @@ class SessionRecord:
     transaction: ReviewTransaction | None = None
     convergence_history: Mapping[str, object] | None = None
     reservation_owner: Mapping[str, object] | None = None
+    rescan_state: Mapping[str, object] | None = None
     assessment_queue: Mapping[str, object] | None = None
     # The shape is selected only while loading an existing untrusted document;
     # it is not part of the public record or its equality contract.
@@ -897,6 +898,22 @@ class SessionRecord:
             raise ReviewInputError(
                 "session convergence history requires the current digest shape"
             )
+        if self.rescan_state is not None:
+            from .rescan import validate_rescan_state
+
+            object.__setattr__(
+                self, "rescan_state", validate_rescan_state(self.rescan_state)
+            )
+            receipts = self.rescan_state["receipts"]
+            assert isinstance(receipts, list)
+            if any(
+                item["source"]["repository"] != self.repository
+                or item["source"]["pull_request"] != self.pull_request
+                for item in receipts
+            ):
+                raise ReviewInputError("rescan source does not match session identity")
+            if self._digest_shape != "current":
+                raise ReviewInputError("rescan state requires current digest shape")
         object.__setattr__(
             self, "assessment_queue", _stored_assessment_queue(self.assessment_queue)
         )
@@ -954,6 +971,8 @@ class SessionRecord:
             payload["transaction"] = self.transaction.to_dict()
         if self.convergence_history is not None:
             payload["convergence_history"] = dict(self.convergence_history)
+        if self.rescan_state is not None:
+            payload["rescan_state"] = dict(self.rescan_state)
         if self.assessment_queue is not None:
             payload["assessment_queue"] = dict(self.assessment_queue)
         return payload
@@ -1007,6 +1026,7 @@ class SessionRecord:
         transaction: ReviewTransaction | None = None,
         convergence_history: Mapping[str, object] | None = None,
         reservation_owner: Mapping[str, object] | None = None,
+        rescan_state: Mapping[str, object] | None = None,
         assessment_queue: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         normalized_dispositions = _stored_dispositions(dispositions)
@@ -1041,6 +1061,8 @@ class SessionRecord:
         normalized_history = _stored_convergence_history(convergence_history)
         if normalized_history is not None:
             payload["convergence_history"] = normalized_history
+        if rescan_state is not None:
+            payload["rescan_state"] = dict(rescan_state)
         normalized_queue = _stored_assessment_queue(assessment_queue)
         if normalized_queue is not None:
             payload["assessment_queue"] = normalized_queue
@@ -1075,6 +1097,7 @@ class SessionRecord:
             transaction=transaction,
             convergence_history=normalized_history,
             reservation_owner=normalized_owner,
+            rescan_state=rescan_state,
             assessment_queue=normalized_queue,
         )
 
@@ -1147,6 +1170,7 @@ class SessionRecord:
             or has_attempt_head
             or has_owner
             or has_queue
+            or "rescan_state" in value
             else "operator-paused"
             if has_operator_paused
             else "legacy"
@@ -1223,6 +1247,7 @@ class SessionRecord:
                 value.get("convergence_history")
             ),
             reservation_owner=_stored_reservation_owner(value.get("reservation_owner")),
+            rescan_state=value.get("rescan_state"),  # type: ignore[arg-type]
             assessment_queue=_stored_assessment_queue(value.get("assessment_queue")),
             _digest_shape_input=digest_shape,
         )
@@ -1250,6 +1275,7 @@ class SessionRecord:
         transaction: ReviewTransaction | None = None,
         convergence_history: Mapping[str, object] | None = None,
         reservation_owner: Mapping[str, object] | None = None,
+        rescan_state: Mapping[str, object] | None = None,
         assessment_queue: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         created = _aware_now(now)
@@ -1287,6 +1313,7 @@ class SessionRecord:
             transaction=transaction,
             convergence_history=convergence_history,
             reservation_owner=reservation_owner,
+            rescan_state=rescan_state,
             assessment_queue=assessment_queue,
         )
 
@@ -1308,6 +1335,7 @@ class SessionRecord:
         transaction: ReviewTransaction | None | object = ...,
         convergence_history: Mapping[str, object] | None | object = ...,
         reservation_owner: Mapping[str, object] | None | object = ...,
+        rescan_state: Mapping[str, object] | None | object = ...,
         assessment_queue: Mapping[str, object] | None | object = ...,
     ) -> "SessionRecord":
         updated = _format_datetime(_aware_now(now))
@@ -1372,6 +1400,11 @@ class SessionRecord:
                 self.transaction
                 if transaction is ...
                 else cast(ReviewTransaction | None, transaction)
+            ),
+            rescan_state=(
+                self.rescan_state
+                if rescan_state is ...
+                else cast(Mapping[str, object] | None, rescan_state)
             ),
             assessment_queue=(
                 self.assessment_queue
@@ -1575,6 +1608,7 @@ class SessionLedger(Protocol):
         reservation_id: str,
         expected_generation: int,
         head_sha: str | None = None,
+        rescan_request: object | None = None,
         now: datetime | None = None,
     ) -> SessionRecord: ...
 
@@ -1692,6 +1726,7 @@ def mutate_reserved(
     reservation_id: str,
     expected_generation: int,
     head_sha: str | None = None,
+    rescan_request: object | None = None,
     now: datetime | None = None,
 ) -> SessionRecord:
     if record.last_committed_reservation_id == reservation_id:
@@ -1704,6 +1739,10 @@ def mutate_reserved(
         return record
     if record.reservation_id is not None:
         raise ReviewInputError("session reservation is already held")
+    if rescan_request is not None:
+        from .rescan import consume_rescan_request
+
+        record = consume_rescan_request(record, rescan_request, reservation_id)
     if record.transaction is not None:
         # A completed transaction is historical metadata.  A new admitted
         # head gets a fresh transaction; an active analysis cannot be silently
@@ -1809,6 +1848,7 @@ def prepare_session_round(
     reservation_id: str,
     now: datetime | None = None,
     head_sha: str | None = None,
+    rescan_request: object | None = None,
     **state_flags: bool,
 ) -> PreparedSessionRound:
     """Reserve a counted slot when C1 would admit the round.
@@ -1842,7 +1882,28 @@ def prepare_session_round(
         record = loaded.record
     else:
         raise ReviewInputError(f"session ledger load failed: {loaded.status}")
+    from .rescan import (
+        AuthorizedRescan,
+        ordinary_rescan_duplicate,
+        replayed_rescan,
+        rescan_publication_recovery,
+        rescan_reservation,
+    )
+
+    if isinstance(rescan_request, AuthorizedRescan):
+        rescan_request = replace(rescan_request, ordinary_reservation=reservation_id)
+    if rescan_request is not None:
+        reservation_id = rescan_reservation(record, rescan_request, head_sha)
     flags = dict(state_flags)
+    if (
+        (
+            isinstance(rescan_request, AuthorizedRescan)
+            and replayed_rescan(record, rescan_request)
+        )
+        or ordinary_rescan_duplicate(record, reservation_id, head_sha)
+        or rescan_publication_recovery(record, head_sha)
+    ):
+        flags.setdefault("same_head_duplicate", True)
     if record.operator_paused:
         flags.setdefault("paused", True)
     held = record.reservation_id
@@ -1901,6 +1962,7 @@ def prepare_session_round(
         reservation_id=reservation_id,
         expected_generation=record.generation,
         head_sha=head_sha,
+        rescan_request=rescan_request,
         now=now,
     )
     return PreparedSessionRound(
@@ -1919,6 +1981,7 @@ def prepare_review_transaction(
     configuration_digest: str,
     evidence_digest: str,
     now: datetime | None = None,
+    rescan_request: object | None = None,
     **state_flags: bool,
 ) -> PreparedSessionRound:
     """Reserve and bind one logical analysis transaction before inference."""
@@ -1944,6 +2007,7 @@ def prepare_review_transaction(
         reservation_id=reservation_id,
         now=now,
         head_sha=head_sha,
+        rescan_request=rescan_request,
         **state_flags,
     )
     if prepared.reservation_id is None:
@@ -2804,6 +2868,7 @@ class InMemorySessionLedger:
         reservation_id: str,
         expected_generation: int,
         head_sha: str | None = None,
+        rescan_request: object | None = None,
         now: datetime | None = None,
     ) -> SessionRecord:
         return self.replace(
@@ -2814,6 +2879,7 @@ class InMemorySessionLedger:
                 reservation_id=reservation_id,
                 expected_generation=expected_generation,
                 head_sha=head_sha,
+                rescan_request=rescan_request,
                 now=now,
             ),
             now=now,
@@ -4324,6 +4390,7 @@ class LocalSessionLedger:
         reservation_id: str,
         expected_generation: int,
         head_sha: str | None = None,
+        rescan_request: object | None = None,
         now: datetime | None = None,
     ) -> SessionRecord:
         return self.replace(
@@ -4334,6 +4401,7 @@ class LocalSessionLedger:
                 reservation_id=reservation_id,
                 expected_generation=expected_generation,
                 head_sha=head_sha,
+                rescan_request=rescan_request,
                 now=now,
             ),
             now=now,

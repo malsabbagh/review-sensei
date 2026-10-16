@@ -1,0 +1,751 @@
+"""A same-head explicit rescan is new bounded work, never an approval grant."""
+
+import io
+import json
+import os
+import tempfile
+import unittest
+from contextlib import redirect_stderr
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from review_sensei_github.approval import approval_eligibility_from_result
+from review_sensei_github.publication import approval_eligibility_marker, review_marker
+from review_sensei_github.rescan import resolve_rescan
+from review_sensei_github.review_hooks import GitHubReviewHooks
+
+from review_sensei.cli import main
+from review_sensei.errors import ReviewInputError
+from review_sensei.outcomes import RunOutcome
+from review_sensei.rescan import AuthorizedRescan, rescan_source
+from review_sensei.service import ReviewRun
+from review_sensei.session import (
+    InMemorySessionLedger,
+    SessionRecord,
+    checkpoint_review_analysis,
+    complete_review_publication,
+    prepare_review_transaction,
+    record_session_failed_attempt,
+)
+
+try:
+    import test_partial_review_transaction as partial
+    import test_review_transaction as tx
+except ModuleNotFoundError:
+    from tests import test_partial_review_transaction as partial
+    from tests import test_review_transaction as tx
+
+
+def seed(ledger=None, *, complete=False, result=None):
+    ledger = ledger or InMemorySessionLedger()
+    prepared = partial.prepare(ledger)
+    bound = checkpoint_review_analysis(
+        ledger,
+        tx.IDENTITY,
+        prepared,
+        result or (tx._result() if complete else partial.partial_result()),
+    )
+    complete_review_publication(ledger, tx.IDENTITY, bound.transaction, published=True)
+    return ledger, bound
+
+
+def request(ledger, request_id=10, kind="workflow_dispatch"):
+    return AuthorizedRescan(
+        kind, request_id, rescan_source(ledger.load(tx.IDENTITY).record), 5
+    )
+
+
+def prepare(ledger, rescan=None, *, head=tx.HEAD_SHA):
+    return prepare_review_transaction(
+        ledger,
+        tx.IDENTITY,
+        tx.POLICY,
+        reservation_id=partial.session_reservation_id(
+            repository=tx.IDENTITY.repository,
+            pull_request=tx.IDENTITY.pull_request,
+            head_sha=head,
+            kind="publish",
+        ),
+        head_sha=head,
+        base_sha=tx.BASE_SHA,
+        configuration_digest=tx.CONFIGURATION_DIGEST,
+        evidence_digest=tx.EVIDENCE_DIGEST,
+        rescan_request=rescan,
+    )
+
+
+class RescanAdmissionTests(unittest.TestCase):
+    def test_published_partial_rescans_once_and_retains_truth_and_history(self):
+        ledger, old = seed()
+        before = ledger.load(tx.IDENTITY).record
+        self.assertFalse(prepare(ledger).decision.admit)
+        explicit = request(ledger)
+        admitted = prepare(ledger, explicit)
+        self.assertTrue(admitted.decision.admit)
+        self.assertNotEqual(admitted.reservation_id, old.transaction.reservation_id)
+        self.assertFalse(admitted.decision.may_emit_approve)
+        self.assertEqual(admitted.record.failed_attempts, before.failed_attempts)
+        new = checkpoint_review_analysis(
+            ledger, tx.IDENTITY, admitted, partial.partial_result()
+        )
+        record = complete_review_publication(
+            ledger, tx.IDENTITY, new.transaction, published=True
+        )
+        self.assertEqual(record.failed_attempts, 2)
+        self.assertEqual(record.completed_initial_reviews, 0)
+        self.assertIsNone(record.convergence_history)
+        self.assertEqual(
+            record.rescan_state["receipts"][0]["source"]["transaction_id"],
+            old.transaction.transaction_id,
+        )
+        # A fresh process sees the same authenticated receipt and watermarks.
+        ledger._records[(tx.IDENTITY.repository, tx.IDENTITY.pull_request)] = (
+            SessionRecord.from_dict(record.to_dict())
+        )
+        self.assertFalse(prepare(ledger, explicit).decision.admit)
+        self.assertFalse(prepare(ledger).decision.admit)
+        self.assertEqual(ledger.load(tx.IDENTITY).record.generation, record.generation)
+
+    def test_seven_reviewed_files_and_excluded_manifest_remain_partial(self):
+        from review_sensei.coverage import CoverageManifest, FileCoverage
+
+        paths = tuple(f"src/module{index}.py" for index in range(7))
+        excluded = "vendor/brace-expansion-compat/package.json"
+        result = replace(
+            partial.partial_result(),
+            comments=(),
+            coverage=CoverageManifest(
+                files=tuple(FileCoverage(path, "reviewed") for path in paths)
+                + (FileCoverage(excluded, "excluded-by-policy", "generated"),),
+                enumerated_paths=(*paths, excluded),
+            ),
+        )
+        ledger, _ = seed(result=result)
+        admitted = prepare(ledger, request(ledger))
+        bound = checkpoint_review_analysis(ledger, tx.IDENTITY, admitted, result)
+        self.assertEqual(
+            sum(item.outcome == "reviewed" for item in bound.coverage.files), 7
+        )
+        self.assertFalse(bound.coverage.fully_reviewed)
+        facts = approval_eligibility_from_result(
+            bound, head_sha=tx.HEAD_SHA, enabled=True, app_authored=False
+        ).facts
+        self.assertEqual(facts.review_status, "partial")
+        self.assertEqual(facts.coverage_blocker, "partial")
+        self.assertEqual(ledger.load(tx.IDENTITY).record.failed_attempts, 2)
+
+    def test_concurrent_and_stale_deliveries_cannot_replace_active_work(self):
+        ledger, _ = seed()
+        authority = request(ledger)
+        first = prepare(ledger, authority)
+        active = ledger.load(tx.IDENTITY).record
+        for event in (replace(authority, request_id=11),):
+            # The host does not grant a rescan of an analysis-phase source.
+            with self.assertRaises(ReviewInputError):
+                prepare(ledger, event)
+        self.assertFalse(prepare(ledger).decision.admit)
+        self.assertEqual(ledger.load(tx.IDENTITY).record, active)
+        with self.assertRaisesRegex(ReviewInputError, "generation conflict"):
+            ledger.reserve(
+                tx.IDENTITY,
+                slot="initial",
+                reservation_id="e" * 64,
+                expected_generation=first.record.generation - 1,
+            )
+
+    def test_failed_retry_consumes_event_and_keeps_budget_and_original_source(self):
+        ledger, _ = seed()
+        explicit = request(ledger)
+        admitted = prepare(ledger, explicit)
+        record_session_failed_attempt(
+            ledger,
+            tx.IDENTITY,
+            reservation_id=admitted.reservation_id,
+            head_sha=tx.HEAD_SHA,
+            expected_generation=admitted.record.generation,
+        )
+        record = ledger.load(tx.IDENTITY).record
+        self.assertEqual(record.failed_attempts, 2)
+        self.assertIsNone(record.transaction)
+        self.assertFalse(prepare(ledger, explicit).decision.admit)
+        self.assertFalse(prepare(ledger).decision.admit)
+        retry = prepare(ledger, request(ledger, 11))
+        self.assertTrue(retry.decision.admit)
+        self.assertEqual(retry.record.failed_attempts, 2)
+
+    def test_fresh_local_adapters_preserve_active_and_stale_generation_fences(self):
+        from review_sensei.session import LocalSessionLedger
+
+        # Local storage's documented contract is one writer; hosted provider
+        # jobs serialize by authoritative PR before using the hosted ledger.
+        with tempfile.TemporaryDirectory() as root:
+            ledger, _ = seed(LocalSessionLedger(Path(root)))
+            explicit = request(ledger)
+            before = ledger.load(tx.IDENTITY).record
+            admitted = prepare(LocalSessionLedger(Path(root)), explicit)
+            self.assertTrue(admitted.decision.admit)
+            self.assertFalse(
+                prepare(LocalSessionLedger(Path(root)), explicit).decision.admit
+            )
+            with self.assertRaisesRegex(ReviewInputError, "generation conflict"):
+                LocalSessionLedger(Path(root)).reserve(
+                    tx.IDENTITY,
+                    slot="initial",
+                    reservation_id="e" * 64,
+                    expected_generation=before.generation,
+                    rescan_request=replace(explicit, request_id=11),
+                )
+            record = LocalSessionLedger(Path(root)).load(tx.IDENTITY).record
+            self.assertEqual(record.failed_attempts, 1)
+            self.assertEqual(len(record.rescan_state["receipts"]), 1)
+
+    def test_bounded_receipts_keep_watermarks_after_eviction(self):
+        ledger, _ = seed()
+        oldest = request(ledger, 10)
+        for index in range(8):
+            if index:
+                head = f"{index:040x}"
+                ordinary = prepare(ledger, head=head)
+                bound = checkpoint_review_analysis(
+                    ledger, tx.IDENTITY, ordinary, partial.partial_result()
+                )
+                complete_review_publication(
+                    ledger, tx.IDENTITY, bound.transaction, published=True
+                )
+            else:
+                head = tx.HEAD_SHA
+            admitted = prepare(ledger, request(ledger, 10 + index), head=head)
+            bound = checkpoint_review_analysis(
+                ledger, tx.IDENTITY, admitted, partial.partial_result()
+            )
+            complete_review_publication(
+                ledger, tx.IDENTITY, bound.transaction, published=True
+            )
+        record = SessionRecord.from_dict(ledger.load(tx.IDENTITY).record.to_dict())
+        self.assertEqual(len(record.rescan_state["receipts"]), 6)
+        self.assertEqual(record.rescan_state["workflow_dispatch"], 17)
+        self.assertFalse(prepare(ledger, oldest, head=head).decision.admit)
+
+    def test_budget_pause_and_changed_head_fences(self):
+        ledger, _ = seed()
+        record = ledger.load(tx.IDENTITY).record
+        explicit = request(ledger)
+        ledger._records[(tx.IDENTITY.repository, tx.IDENTITY.pull_request)] = (
+            record.evolve(failed_attempts=6)
+        )
+        refused = prepare(ledger, explicit)
+        self.assertFalse(refused.decision.admit)
+        self.assertEqual(
+            refused.decision.handoff_reason, "failed-attempt-budget-exhausted"
+        )
+        ledger._records[(tx.IDENTITY.repository, tx.IDENTITY.pull_request)] = (
+            record.evolve(operator_paused=True)
+        )
+        self.assertFalse(prepare(ledger, explicit).decision.admit)
+        ledger._records[(tx.IDENTITY.repository, tx.IDENTITY.pull_request)] = record
+        with self.assertRaisesRegex(ReviewInputError, "source changed"):
+            prepare(ledger, explicit, head="c" * 40)
+        changed = prepare(ledger, head="c" * 40)
+        self.assertTrue(changed.decision.admit)
+        self.assertEqual(changed.record.failed_attempts, 0)
+
+
+class AuthorityHTTP:
+    def __init__(self, bound, *, complete=False):
+        result = tx._result() if complete else partial.partial_result()
+        eligibility = approval_eligibility_from_result(
+            result, head_sha=tx.HEAD_SHA, enabled=True, app_authored=False
+        )
+        self.review = {
+            "id": 5,
+            "submitted_at": "2026-10-16T20:00:00Z",
+            "state": "COMMENTED",
+            "commit_id": tx.HEAD_SHA,
+            "user": {"login": "reviewsensei[bot]", "type": "Bot"},
+            "body": review_marker(
+                repository_id=99, pull_request=146, head_sha=tx.HEAD_SHA, result=bound
+            )
+            + "\n"
+            + approval_eligibility_marker(eligibility),
+        }
+        self.permission = "write"
+        self.head = tx.HEAD_SHA
+        self.comment = {
+            "id": 20,
+            "body": "@reviewsensei rescan",
+            "updated_at": "2026-10-16T22:04:00Z",
+            "created_at": "2026-10-16T22:04:00Z",
+            "user": {"login": "alice", "type": "User"},
+            "author_association": "COLLABORATOR",
+            "issue_url": "https://api.github.com/repos/owner/repo/issues/146",
+        }
+
+    def repository_path(self, repository, suffix):
+        return "/repos/" + repository + suffix
+
+    def request(self, method, path, **kwargs):
+        if "/actions/runs/" in path:
+            return 200, {
+                "id": 10,
+                "event": "workflow_dispatch",
+                "repository": {"id": 99},
+                "actor": {"login": "alice"},
+                "created_at": "2026-10-16T22:04:00Z",
+            }
+        if path.endswith("/permission"):
+            return 200, {"permission": self.permission}
+        if "/issues/comments/" in path:
+            return 200, self.comment
+        return 200, {
+            "number": 146,
+            "state": "open",
+            "head": {"sha": self.head},
+            "base": {"repo": {"id": 99}},
+        }
+
+    def paginate(self, **kwargs):
+        return [self.review]
+
+
+class RescanHostTests(unittest.TestCase):
+    def setUp(self):
+        self.ledger, bound = seed()
+        self.http = AuthorityHTTP(bound)
+        self.ledger.http = self.http
+        self.ledger.token = "synthetic-token"
+        self.args = SimpleNamespace(
+            repository="owner/repo",
+            repository_id=99,
+            pull_request=146,
+            head_sha=tx.HEAD_SHA,
+            app_slug="reviewsensei[bot]",
+        )
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.event_path = Path(self.temp.name) / "event.json"
+        self.event = {
+            "repository": {"full_name": "owner/repo", "id": 99},
+            "inputs": {"pull_request_number": "146"},
+            "sender": {"login": "alice", "type": "User"},
+        }
+        self.env = patch.dict(
+            os.environ,
+            {
+                "GITHUB_EVENT_NAME": "workflow_dispatch",
+                "GITHUB_EVENT_PATH": str(self.event_path),
+                "GITHUB_ACTOR": "alice",
+                "GITHUB_TRIGGERING_ACTOR": "alice",
+                "GITHUB_RUN_ID": "10",
+            },
+        )
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.write_event()
+
+    def write_event(self):
+        self.event_path.write_text(json.dumps(self.event))
+
+    def test_dispatch_and_comment_bind_distinct_stable_request_identities(self):
+        self.assertEqual(
+            resolve_rescan(
+                self.args, self.ledger, actions_token="synthetic-actions-token"
+            ).request_id,
+            10,
+        )
+        os.environ["GITHUB_RUN_ATTEMPT"] = "2"
+        self.addCleanup(os.environ.pop, "GITHUB_RUN_ATTEMPT", None)
+        self.assertEqual(
+            resolve_rescan(
+                self.args, self.ledger, actions_token="synthetic-actions-token"
+            ).request_id,
+            10,
+        )
+        os.environ["GITHUB_EVENT_NAME"] = "issue_comment"
+        self.event.update(
+            action="created", issue={"number": 146}, comment=dict(self.http.comment)
+        )
+        self.write_event()
+        self.assertEqual(
+            resolve_rescan(
+                self.args, self.ledger, actions_token="synthetic-actions-token"
+            ).request_id,
+            20,
+        )
+        self.http.comment["body"] = "@reviewsensei rescan commit " + "c" * 40
+        with self.assertRaisesRegex(ReviewInputError, "edited"):
+            resolve_rescan(
+                self.args, self.ledger, actions_token="synthetic-actions-token"
+            )
+
+    def test_unauthorized_and_stale_events_make_no_mutation(self):
+        before = self.ledger.load(tx.IDENTITY).record
+        self.http.permission = "read"
+        with self.assertRaisesRegex(ReviewInputError, "permission"):
+            resolve_rescan(
+                self.args, self.ledger, actions_token="synthetic-actions-token"
+            )
+        self.http.permission = "write"
+        self.http.head = "c" * 40
+        with self.assertRaisesRegex(ReviewInputError, "stale"):
+            resolve_rescan(
+                self.args, self.ledger, actions_token="synthetic-actions-token"
+            )
+        self.http.head = tx.HEAD_SHA
+        self.event["sender"]["type"] = "Bot"
+        self.write_event()
+        with self.assertRaisesRegex(ReviewInputError, "unauthorized"):
+            resolve_rescan(
+                self.args, self.ledger, actions_token="synthetic-actions-token"
+            )
+        self.assertEqual(self.ledger.load(tx.IDENTITY).record, before)
+
+    def test_dispatch_cannot_broaden_the_humans_selected_pull_request(self):
+        self.event["inputs"]["pull_request_number"] = "147"
+        self.write_event()
+        with self.assertRaisesRegex(ReviewInputError, "another pull request"):
+            resolve_rescan(
+                self.args, self.ledger, actions_token="synthetic-actions-token"
+            )
+
+    def test_old_queued_request_cannot_reopen_a_newer_review(self):
+        self.http.review["submitted_at"] = "2026-10-16T22:05:00Z"
+        self.assertIsNone(
+            resolve_rescan(
+                self.args, self.ledger, actions_token="synthetic-actions-token"
+            )
+        )
+        self.assertFalse(prepare(self.ledger).decision.admit)
+
+    def test_complete_review_and_changed_head_use_ordinary_admission(self):
+        self.ledger, bound = seed(complete=True)
+        self.ledger.http = AuthorityHTTP(bound, complete=True)
+        self.ledger.token = "synthetic-token"
+        self.assertIsNone(
+            resolve_rescan(
+                self.args, self.ledger, actions_token="synthetic-actions-token"
+            )
+        )
+        self.assertFalse(prepare(self.ledger).decision.admit)
+        self.args.head_sha = "c" * 40
+        self.ledger.http.head = self.args.head_sha
+        self.assertIsNone(
+            resolve_rescan(
+                self.args, self.ledger, actions_token="synthetic-actions-token"
+            )
+        )
+
+    def test_real_cli_published_partial_rescan_and_duplicate_delivery(self):
+        root = Path(self.temp.name)
+        (root / "diff.patch").write_text(partial.gates.DIFF)
+        (root / "response.json").write_text('{"summary":"ok","comments":[]}')
+        ledger = self.ledger
+
+        class Hooks(GitHubReviewHooks):
+            def resolve_ledger(self, args, **kwargs):
+                return ledger
+
+            def resolve_rescan(self, args, resolved_ledger):
+                return resolve_rescan(
+                    args, resolved_ledger, actions_token="synthetic-actions-token"
+                )
+
+        argv = [
+            "--diff",
+            str(root / "diff.patch"),
+            "--provider",
+            "fixture",
+            "--fixture-response",
+            str(root / "response.json"),
+            "--model",
+            "fixture-model",
+            "--repository",
+            "owner/repo",
+            "--repository-id",
+            "99",
+            "--pull-request",
+            "146",
+            "--head-sha",
+            tx.HEAD_SHA,
+            "--base-sha",
+            tx.BASE_SHA,
+            "--format",
+            "json",
+            "--transaction",
+            "--github-session-ledger",
+            "--rescan",
+            "--no-learning-proposals",
+            "--output",
+            str(root / "review.json"),
+            "--outcome",
+            str(root / "outcome.json"),
+            "--configuration-context-output",
+            str(root / "configuration.json"),
+            "--admission-context-output",
+            str(root / "admission.json"),
+            "--exit-semantics",
+            "operational",
+        ]
+        run = ReviewRun(
+            RunOutcome("partial", diagnostic="partial_coverage", provider_calls=1),
+            result=partial.partial_result(),
+        )
+        with (
+            patch("review_sensei.cli.ReviewService.run", return_value=run) as provider,
+            redirect_stderr(io.StringIO()) as err,
+        ):
+            self.assertEqual(main(argv, hosted_hooks=Hooks()), 0, err.getvalue())
+            self.assertEqual(provider.call_count, 1)
+            rendered = json.loads((root / "review.json").read_text())
+            self.assertEqual(rendered["review_status"], "partial")
+            record = ledger.load(tx.IDENTITY).record
+            complete_review_publication(
+                ledger, tx.IDENTITY, record.transaction, published=False
+            )
+            self.assertEqual(main(argv, hosted_hooks=Hooks()), 1, err.getvalue())
+            self.assertEqual(provider.call_count, 1)
+            self.assertEqual(
+                json.loads((root / "outcome.json").read_text())["diagnostic"],
+                "publication_recovery_required",
+            )
+            record = ledger.load(tx.IDENTITY).record
+            complete_review_publication(
+                ledger, tx.IDENTITY, record.transaction, published=True
+            )
+            self.assertEqual(main(argv, hosted_hooks=Hooks()), 0, err.getvalue())
+            self.assertEqual(provider.call_count, 1)
+            self.assertEqual(
+                json.loads((root / "outcome.json").read_text())["provider_calls"], 0
+            )
+
+
+class RescanPublicationTests(unittest.TestCase):
+    def test_application_publishes_new_partial_and_retries_without_duplication(self):
+        from review_sensei_github import (
+            GitHubApplication,
+            GitHubWriteOptions,
+            ReviewPublisher,
+        )
+
+        gates = partial.gates
+        ledger, old = seed()
+        admitted = prepare(ledger, request(ledger))
+        result = checkpoint_review_analysis(
+            ledger,
+            tx.IDENTITY,
+            admitted,
+            replace(partial.partial_result(), comments=()),
+        )
+        old_review = AuthorityHTTP(old).review
+        checks = gates.FakeCheckRuns()
+        payload = gates.pr_payload(head_sha=tx.HEAD_SHA)
+        payload["base"]["sha"] = tx.BASE_SHA
+        payload["base"]["repo"]["id"] = tx.IDENTITY.repository_id
+        http, calls = gates.make_http(
+            [
+                gates.json_response(payload),
+                gates.json_response([old_review]),
+                gates.json_response(payload),
+                gates.json_response({"id": 6}),
+            ],
+            routes=((checks.matches, checks.respond),),
+        )
+        app = GitHubApplication(
+            broker=tx._Broker(),
+            http=http,
+            reviewer=ReviewPublisher(http=http),
+            learner=tx._Noop(),
+            replier=tx._Noop(),
+            session_ledger=ledger,
+        )
+        kwargs = dict(
+            options=GitHubWriteOptions(auto_review=True, github_writes=True),
+            oidc_token="oidc",
+            repository=tx.IDENTITY.repository,
+            repository_id=99,
+            pull_request=146,
+            head_sha=tx.HEAD_SHA,
+            base_branch="main",
+            base_sha=tx.BASE_SHA,
+            result=result,
+            diff=gates.DIFF,
+            app_slug=gates.APP,
+            convergence_policy=tx.POLICY,
+            configuration_context=tx.CONFIGURATION,
+            evidence_context=tx.EVIDENCE,
+        )
+        self.assertEqual(app.publish_review(**kwargs).status, "published")
+        self.assertEqual(app.publish_review(**kwargs).status, "already_published")
+        bodies = [
+            json.loads(body)
+            for method, url, body in calls
+            if method == "POST" and url.endswith("/reviews")
+        ]
+        self.assertEqual([body["event"] for body in bodies], ["COMMENT"])
+        self.assertIn("Review incomplete", bodies[0]["body"])
+        self.assertEqual(checks.conclusions, [None, "action_required"])
+        self.assertEqual(ledger.load(tx.IDENTITY).record.failed_attempts, 2)
+
+    def test_reanalysis_does_not_reopen_a_newer_complete_publication(self):
+        from review_sensei_github import ReviewPublisher
+
+        gates = partial.gates
+        ledger, old = seed()
+        result = checkpoint_review_analysis(
+            ledger,
+            tx.IDENTITY,
+            prepare(ledger, request(ledger)),
+            replace(partial.partial_result(), comments=()),
+        )
+        complete_review = AuthorityHTTP(old, complete=True).review
+        payload = gates.pr_payload(head_sha=tx.HEAD_SHA)
+        payload["base"]["sha"] = tx.BASE_SHA
+        payload["base"]["repo"]["id"] = 99
+        http, calls = gates.make_http(
+            [gates.json_response(payload), gates.json_response([complete_review])]
+        )
+        outcome = ReviewPublisher(http=http).publish(
+            token="synthetic-token",
+            repository="owner/repo",
+            repository_id=99,
+            pull_request=146,
+            head_sha=tx.HEAD_SHA,
+            base_branch="main",
+            base_sha=tx.BASE_SHA,
+            result=result,
+            diff=gates.DIFF,
+            app_slug=gates.APP,
+            convergence_policy=tx.POLICY,
+            explicit_reanalysis=True,
+        )
+        self.assertEqual(outcome.status, "already_published")
+        self.assertFalse(
+            any(
+                method == "POST" and url.endswith("/reviews")
+                for method, url, _ in calls
+            )
+        )
+
+    def test_operation_entry_uses_the_admitted_rescan_reservation(self):
+        from review_sensei_github.commands import run_hosted_provider
+        from review_sensei_github.operation_entry import HostedProviderResult
+
+        ledger, _ = seed()
+        admitted = prepare(ledger, request(ledger))
+        run = ReviewRun(
+            RunOutcome("partial", diagnostic="partial_coverage", provider_calls=1),
+            result=partial.partial_result(),
+        )
+        with (
+            patch.dict(
+                os.environ, {"GITHUB_RUN_ID": "10", "REVIEWSENSEI_APP_ID": "42"}
+            ),
+            patch(
+                "review_sensei_github.operation_entry.run_actions_analysis",
+                return_value=HostedProviderResult(run, None, None),
+            ) as operation,
+        ):
+            result = run_hosted_provider(
+                SimpleNamespace(),
+                SimpleNamespace(),
+                hosted_session_ledger=True,
+                operation_entry="enabled",
+                ledger=SimpleNamespace(http=object(), token="synthetic-token"),
+                repository="owner/repo",
+                repository_id=99,
+                pull_request=146,
+                trusted_head_sha=tx.HEAD_SHA,
+                analysis_reservation_id=admitted.reservation_id,
+            )
+        self.assertIs(result, run)
+        self.assertEqual(
+            operation.call_args.kwargs["reservation_id"], admitted.reservation_id
+        )
+
+    def test_complete_reanalysis_can_pass_existing_approval_checks(self):
+        from review_sensei_github import ReviewPublisher
+
+        try:
+            import test_github_publication as publishing
+        except ModuleNotFoundError:
+            from tests import test_github_publication as publishing
+        gates = partial.gates
+        ledger, old = seed()
+        admitted = prepare(ledger, request(ledger))
+        result = checkpoint_review_analysis(ledger, tx.IDENTITY, admitted, tx._result())
+        old_review = AuthorityHTTP(old).review
+        payload = gates.pr_payload(head_sha=tx.HEAD_SHA)
+        payload["base"]["sha"] = tx.BASE_SHA
+        payload["base"]["repo"]["id"] = 99
+        http, calls = gates.make_http(
+            [
+                gates.json_response(payload),
+                gates.json_response([old_review]),
+                gates.json_response(payload),
+                gates.json_response({"id": 6}),
+                gates.json_response(payload),
+                publishing.graphql_review_threads_response(),
+                gates.json_response(payload),
+                gates.json_response([]),
+                gates.json_response({"id": 7}),
+            ]
+        )
+        outcome = ReviewPublisher(http=http).publish(
+            token="synthetic-token",
+            repository="owner/repo",
+            repository_id=99,
+            pull_request=146,
+            head_sha=tx.HEAD_SHA,
+            base_branch="main",
+            base_sha=tx.BASE_SHA,
+            result=result,
+            diff=gates.DIFF,
+            app_slug=gates.APP,
+            convergence_policy=tx.POLICY,
+            explicit_reanalysis=True,
+        )
+        self.assertEqual(outcome.status, "published")
+        bodies = [
+            json.loads(body)
+            for method, url, body in calls
+            if method == "POST" and url.endswith("/reviews")
+        ]
+        self.assertIn("APPROVE", [body["event"] for body in bodies])
+
+    def test_reusable_runner_wires_both_provider_lanes_without_caller_upgrade(self):
+        if os.environ.get("REVIEWSENSEI_DIST_SAFE_LANE") == "1":
+            self.skipTest("Reusable workflow source is verified in the checkout lane")
+        import yaml
+
+        workflow = yaml.safe_load(
+            (
+                Path(__file__).parents[1] / ".github/workflows/review-sensei-run.yml"
+            ).read_text()
+        )
+        steps = [
+            step
+            for job in workflow["jobs"].values()
+            for step in job.get("steps", [])
+            if step.get("id") == "provider-review"
+        ]
+        serialized = [
+            job["concurrency"]
+            for job in workflow["jobs"].values()
+            if "concurrency" in job
+        ]
+        self.assertEqual(len(serialized), 3)
+        self.assertEqual(len({job["group"] for job in serialized}), 1)
+        self.assertIn(
+            "needs.authoritative-preflight.outputs.pull_request_number",
+            serialized[0]["group"],
+        )
+        self.assertTrue(all(job["cancel-in-progress"] is False for job in serialized))
+        self.assertEqual(len(steps), 2)
+        for step in steps:
+            self.assertIn('"$GITHUB_EVENT_NAME" == "workflow_dispatch"', step["run"])
+            self.assertIn('"$GITHUB_EVENT_NAME" == "issue_comment"', step["run"])
+            self.assertIn("review_args+=(--rescan)", step["run"])
+            self.assertIn(
+                'review-sensei-github" review "${review_args[@]}"', step["run"]
+            )

@@ -962,6 +962,11 @@ class GitHubApplication:
                 "evidence_confirmed_concerns": evidence_confirmed_concerns,
                 "authorized_dispositions": authorized_dispositions,
             }
+            if transaction_record is not None:
+                from review_sensei.rescan import is_rescan_transaction
+
+                if is_rescan_transaction(transaction_record):
+                    publisher_arguments["explicit_reanalysis"] = True
             if publisher_has_prepare:
                 publisher_arguments["prepared_review"] = prepared_publishable
             if retained_eligibility is not None:

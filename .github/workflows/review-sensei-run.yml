@@ -1104,6 +1104,9 @@ jobs:
           # ledger rather than a runner-local file, so the publication step of
           # this run and the analysis of the next run read the same durable
           # rounds and baselines.
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" || "$GITHUB_EVENT_NAME" == "issue_comment" ]]; then
+            review_args+=(--rescan)
+          fi
           review_args+=(--transaction --github-session-ledger \
             --repository-id "$REPOSITORY_ID" \
             --configuration-context-output configuration-context.json \
@@ -1648,6 +1651,9 @@ jobs:
           # ledger rather than a runner-local file, so the publication step of
           # this run and the analysis of the next run read the same durable
           # rounds and baselines.
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" || "$GITHUB_EVENT_NAME" == "issue_comment" ]]; then
+            review_args+=(--rescan)
+          fi
           review_args+=(--transaction --github-session-ledger \
             --repository-id "$REPOSITORY_ID" \
             --configuration-context-output configuration-context.json \

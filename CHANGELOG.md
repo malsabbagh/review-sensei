@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Let an authorized explicit rescan reanalyze a published incomplete review on
+  the same head, with durable request replay protection and existing budgets.
+  Ordinary duplicates and complete reviews remain suppressed; excluded content
+  still withholds approval.
+
 ## 0.7.1 - 2026-10-16
 
 Changes since [v0.7.0](https://github.com/malsabbagh/review-sensei/releases/tag/v0.7.0), from [a1fe2590fdeca0ee3475cc928eb1d133e93b7583](https://github.com/malsabbagh/review-sensei/commit/a1fe2590fdeca0ee3475cc928eb1d133e93b7583) through [e20f40032ea7dffb14342112b8fb8a39fb8dd87b](https://github.com/malsabbagh/review-sensei/commit/e20f40032ea7dffb14342112b8fb8a39fb8dd87b).

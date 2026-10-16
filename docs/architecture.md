@@ -1033,3 +1033,14 @@ ADR: fifty varied findings fit the baseline and resolution-growth contracts;
 larger or more verbose inventories can still exceed inline bounds. Full finding
 text is budgeted separately from the input overview, while the framed review
 body remains bounded to 65,536 bytes.
+
+### Explicit incomplete-review reanalysis
+
+An explicit hosted rescan authenticates the human event and latest incomplete
+App publication before reserving fresh analysis on an unchanged head. Session
+replay watermarks and bounded receipts distinguish this request from ordinary
+snapshot duplicates while retaining the existing per-head failure budget and
+current-head fences. Both reusable workflow provider lanes pass `--rescan` for
+manual dispatches and issue-comment review requests. Publication recognizes
+receipt-bound transactions and preserves all approval and coverage gates. See
+[ADR 0080](adr/0080-explicit-incomplete-review-rescans.md).
