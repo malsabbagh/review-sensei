@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.7.1 - 2026-10-16
+
+Changes since [v0.7.0](https://github.com/malsabbagh/review-sensei/releases/tag/v0.7.0), from [a1fe2590fdeca0ee3475cc928eb1d133e93b7583](https://github.com/malsabbagh/review-sensei/commit/a1fe2590fdeca0ee3475cc928eb1d133e93b7583) through [e20f40032ea7dffb14342112b8fb8a39fb8dd87b](https://github.com/malsabbagh/review-sensei/commit/e20f40032ea7dffb14342112b8fb8a39fb8dd87b).
+
+Previous annotated tag object: `7515b20b782724daf212ff15392e9ea6cedba52c`.
+
+- docs: record released v0.7.0 ([ee405c7e49b34c8e490a8fe4f8e9d33162f0d844](https://github.com/malsabbagh/review-sensei/commit/ee405c7e49b34c8e490a8fe4f8e9d33162f0d844)).
+- Bump actions/upload-artifact from 7.0.1 to 7.0.2 \(\#299\) ([7a27f674f1f49f6dba7b3531a952109841cdc16a](https://github.com/malsabbagh/review-sensei/commit/7a27f674f1f49f6dba7b3531a952109841cdc16a)).
+- Bump ruff from 0.16.10 to 0.17.0 \(\#301\) ([b15f95bbf27f36cb3764cde89f845491a071e117](https://github.com/malsabbagh/review-sensei/commit/b15f95bbf27f36cb3764cde89f845491a071e117)).
+- Bump actions/download-artifact from 8.0.1 to 8.0.2 \(\#300\) ([5237eabc0c85e22d78b89dbb433be7336b863bfd](https://github.com/malsabbagh/review-sensei/commit/5237eabc0c85e22d78b89dbb433be7336b863bfd)).
+- Bump the codeql-action group with 2 updates \(\#303\) ([f954320f61e19e8d98cde98bcc45a5644810fdcf](https://github.com/malsabbagh/review-sensei/commit/f954320f61e19e8d98cde98bcc45a5644810fdcf)).
+- Bump actions/setup-node from 7.0.0 to 7.1.0 \(\#302\) ([5d78c792007af2c13eddef031e4b0cb05a9741d8](https://github.com/malsabbagh/review-sensei/commit/5d78c792007af2c13eddef031e4b0cb05a9741d8)).
+- Let maintainers confirm generated files excluded by policy. \(\#304\) ([e20f40032ea7dffb14342112b8fb8a39fb8dd87b](https://github.com/malsabbagh/review-sensei/commit/e20f40032ea7dffb14342112b8fb8a39fb8dd87b)).
+
+## review-sensei-github 0.2.1 - 2026-10-16
+
+- Pin `review-sensei==0.7.1`.
+
 ## 0.7.0 - 2026-10-13
 
 - Prevented cancelled or killed reviews from leaking their session

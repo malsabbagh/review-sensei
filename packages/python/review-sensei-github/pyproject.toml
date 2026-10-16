@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "review-sensei-github"
-version = "0.2.0"
+version = "0.2.1"
 description = "GitHub Actions runtime for ReviewSensei: broker, session ledger, and publication."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,7 +18,7 @@ classifiers = [
 ]
 dependencies = [
   "cryptography>=44,<51",
-  "review-sensei==0.7.0",
+  "review-sensei==0.7.1",
 ]
 
 [project.urls]
