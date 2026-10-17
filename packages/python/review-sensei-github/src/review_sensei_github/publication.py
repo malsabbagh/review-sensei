@@ -2121,7 +2121,11 @@ class ReviewApprovalFinalizer:
         """Keep a recorded decision successful when a later host operation fails."""
         from .checks import ReviewCheckPublisher, review_check_outcome
 
+        auto_approve_enabled = (
+            reviews_policy == "auto-approve" and eligibility.facts.enabled
+        )
         resolution = None
+        has_open_inline_fixes = False
         try:
             live = self._preflight(
                 token=token,
@@ -2132,10 +2136,27 @@ class ReviewApprovalFinalizer:
             )
             if live.result is not None:
                 return live.result
-            assert live.repository_id is not None
+            if live.app_authored:
+                return PublicationResult(status="skipped_app_authored")
+            if (
+                eligibility.human_review is not None
+                and eligibility.human_review.base_sha != live.base_sha
+            ):
+                return PublicationResult(status="skipped_stale_base")
+            assert live.repository_id is not None and live.base_sha is not None
             reviews = self._load_head_reviews(
                 token=token, repository=repository, pull_request=pull_request
             )
+            if (
+                eligibility.partitioned_root is None
+                and self._eligibility_from_reviews(
+                    reviews, head_sha=head_sha, app_slug=app_slug
+                )
+                != eligibility
+            ):
+                return PublicationResult(
+                    status="approval_withheld", diagnostic="approval_withheld"
+                )
             index = self.finding_index_from_reviews(
                 reviews,
                 repository_id=live.repository_id,
@@ -2155,28 +2176,71 @@ class ReviewApprovalFinalizer:
                 index=index,
                 reviews=reviews,
             )
-            result = self.finalize(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                app_slug=app_slug,
-                eligibility=eligibility,
-                require_persisted=True,
-                partition_reader=partition_reader,
-                visible_reader=visible_reader,
-            )
+            if (
+                check_token
+                and not auto_approve_enabled
+                and index is not None
+                and any(
+                    entry.blocking and not entry.body_placed for entry in index.entries
+                )
+            ):
+                open_blocking, resolved_instances = self._scan_blocking_threads(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    repository_id=live.repository_id,
+                    head_sha=head_sha,
+                    base_sha=live.base_sha,
+                    app_slug=app_slug,
+                    honored_instances=frozenset(),
+                )
+                has_open_inline_fixes = (
+                    open_blocking
+                    or not self._inline_obligations_resolved(
+                        reviews,
+                        repository_id=live.repository_id,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        app_slug=app_slug,
+                        resolved_instances=resolved_instances,
+                        honored_instances=frozenset(),
+                        eligibility=eligibility,
+                    )
+                )
+            if reviews_policy != "auto-approve":
+                result = PublicationResult(status="auto_approval_disabled")
+            else:
+                result = self.finalize(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                    eligibility=eligibility,
+                    require_persisted=True,
+                    partition_reader=partition_reader,
+                    visible_reader=visible_reader,
+                )
         except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
             result = PublicationResult(
                 status="approval_withheld", diagnostic="approval_withheld"
             )
+        if result.status.startswith("skipped_"):
+            return result
         check_failed = False
         if check_token:
-            has_open_fixes = eligibility.facts.has_blocking_findings or (
-                result.status == "approval_withheld"
-                and result.diagnostic == "required_fixes_open"
+            has_open_fixes = (
+                eligibility.facts.has_blocking_findings
+                or has_open_inline_fixes
+                or (
+                    result.status == "approval_withheld"
+                    and result.diagnostic == "required_fixes_open"
+                )
             )
-            has_open_decisions = eligibility.facts.has_human_adjudication_findings
+            has_open_decisions = (
+                eligibility.facts.has_human_adjudication_findings
+                or bool(eligibility.human_review and eligibility.human_review.pending)
+            )
             try:
                 ReviewCheckPublisher(http=self.http).complete(
                     token=check_token,

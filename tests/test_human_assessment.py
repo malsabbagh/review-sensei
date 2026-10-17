@@ -164,6 +164,7 @@ class State:
         self.replies = []
         self.hook = None
         self.threads = []
+        self.check_runs = []
         self.http = GitHubHttp(api_url="https://api.github.test", opener=self.open)
 
     @staticmethod
@@ -231,6 +232,8 @@ class State:
                 return json_response([self.source, *self.replies])
             if path.endswith("/pulls/1/comments"):
                 return json_response([])
+            if path.endswith("/check-runs"):
+                return json_response({"check_runs": self.check_runs})
             if "/contents/" in path:
                 return json_response({}, 404)
         if request.method == "POST":
@@ -262,6 +265,14 @@ class State:
                     value,
                     200 if body["event"] == "APPROVE" or "comments" in body else 201,
                 )
+            if path.endswith("/check-runs"):
+                run = {
+                    "id": 500 + len(self.check_runs),
+                    "html_url": f"https://github.test/checks/{500 + len(self.check_runs)}",
+                    **body,
+                }
+                self.check_runs.append(run)
+                return json_response(run, 201)
             if path == "/graphql":
                 return json_response(
                     {
@@ -280,6 +291,19 @@ class State:
                         }
                     }
                 )
+        if request.method == "PATCH" and "/check-runs/" in path:
+            run_id = int(path.rsplit("/", 1)[-1])
+            for run in self.check_runs:
+                if run.get("id") == run_id:
+                    run.update(body or {})
+                    return json_response(run, 200)
+            run = {
+                "id": run_id,
+                "html_url": f"https://github.test/checks/{run_id}",
+                **(body or {}),
+            }
+            self.check_runs.append(run)
+            return json_response(run, 200)
         if request.method == "DELETE" and path.endswith("/reactions/99"):
             return json_response({}, 204)
         raise AssertionError((request.method, path, body))
@@ -433,7 +457,9 @@ class HumanAssessmentTests(unittest.TestCase):
         self.assertGreater(len(provider.calls), 1)
         self.assertEqual(outcome.approval_status, "approved")
         self.assertEqual(state.events(), ["COMMENT", "APPROVE"])
-        self.assertEqual(broker.capabilities, ["issue_reply", "review_publish"])
+        self.assertEqual(
+            broker.capabilities, ["issue_reply", "review_publish", "check_publish"]
+        )
         refreshed = approval_eligibility_from_body(state.reviews[-2]["body"])
         self.assertFalse(refreshed.human_review.pending)
         self.assertEqual(refreshed.result_digest, original.result_digest)
@@ -688,7 +714,9 @@ class HumanAssessmentTests(unittest.TestCase):
         provider = Provider(payload)
         outcome, broker = state.application_reply(provider)
         self.assertEqual(outcome.status, "replied")
-        self.assertEqual(broker.capabilities, ["issue_reply", "review_publish"])
+        self.assertEqual(
+            broker.capabilities, ["issue_reply", "review_publish", "check_publish"]
+        )
         self.assertEqual(state.events(), ["COMMENT", "COMMENT", "APPROVE"])
         self.assertEqual(outcome.approval_status, "approved")
         self.assertEqual(state.reply_count, 1)
@@ -736,7 +764,9 @@ class HumanAssessmentTests(unittest.TestCase):
         self.assertEqual(outcome.approval_status, "approved")
         self.assertEqual(state.events(), ["COMMENT", "APPROVE"])
         self.assertFalse(retry_provider.calls)
-        self.assertEqual(broker.capabilities, ["issue_reply", "review_publish"])
+        self.assertEqual(
+            broker.capabilities, ["issue_reply", "review_publish", "check_publish"]
+        )
         self.assertIs(ReviewApprovalFinalizer.finalize, finalize)
         self.assertEqual(state.reply_count, 2)
         again, _ = state.application_reply(retry_provider)
@@ -1783,5 +1813,7 @@ class HumanAssessmentTests(unittest.TestCase):
             source_kind="issue",
         )
         self.assertEqual(outcome.status, "replied")
-        self.assertEqual(broker.capabilities, ["issue_reply", "review_publish"])
+        self.assertEqual(
+            broker.capabilities, ["issue_reply", "review_publish", "check_publish"]
+        )
         self.assertEqual(state.events(), ["COMMENT", "APPROVE"])

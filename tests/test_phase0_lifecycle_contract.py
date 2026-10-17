@@ -695,6 +695,195 @@ class Phase1BlockerAdmissionAndTaxonomyJourneyTests(unittest.TestCase):
         )
         self.assertEqual(exit_code, REVIEW_EXIT_INCOMPLETE)
 
+    def test_verifier_rejects_ungrounded_causal_premises_and_partial_or_invalidated_guards(
+        self,
+    ) -> None:
+        """Items 2 & 3: Verifier must not synthesize causal premises from model labels or treat non-terminating/partial/reassigned guards as contrary evidence."""
+        # 1. Safe subprocess list call with shell-injection claim -> contrary_evidence=True, not blocking
+        snap_subproc = {
+            "src/runner.py": "import subprocess\ndef status():\n    return subprocess.run(['git', 'status'], check=True)\n"
+        }
+        sha_subproc = _snapshot_digest(snap_subproc)
+        cand_subproc = CandidateFinding(
+            claim="Command injection via subprocess.run in status().",
+            triggering_conditions="User triggers status().",
+            impacted_path="src/runner.py",
+            severity_rationale="High severity remote command injection.",
+            evidence=(
+                EvidenceReference(
+                    path="src/runner.py",
+                    line=3,
+                    snapshot_sha256=sha_subproc,
+                    excerpt="return subprocess.run(['git', 'status'], check=True)",
+                ),
+            ),
+            severity="high",
+            remedy="Avoid shell execution in subprocess.run.",
+        )
+        prep_subproc = prepare_publishable_review(
+            ReviewResult(
+                summary="Review.",
+                comments=(),
+                provider="ollama",
+                review_status="complete",
+            ),
+            candidates=(cand_subproc,),
+            snapshot=snap_subproc,
+            snapshot_sha256=sha_subproc,
+            evidence_policy="confirmed",
+            changed_lines={"src/runner.py": frozenset({3})},
+            changed_paths=("src/runner.py",),
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        )
+        self.assertTrue(prep_subproc.verifications[0].contrary_evidence)
+        self.assertFalse(prep_subproc.result.comments[0].effective_blocking)
+        self.assertFalse(prep_subproc.result.comments[0].needs_human)
+
+        # 2. Unverified required_contract / named_mandatory_rule on harmless assignment -> not blocking
+        snap_simple = {"src/const.py": "DEFAULT_TIMEOUT = 1\n"}
+        sha_simple = _snapshot_digest(snap_simple)
+        cand_contract = CandidateFinding(
+            claim="DEFAULT_TIMEOUT violates contract.",
+            triggering_conditions="Importing src/const.py.",
+            impacted_path="src/const.py",
+            severity_rationale="High severity contract mismatch.",
+            evidence=(
+                EvidenceReference(
+                    path="src/const.py",
+                    line=1,
+                    snapshot_sha256=sha_simple,
+                    excerpt="DEFAULT_TIMEOUT = 1",
+                ),
+            ),
+            severity="high",
+            remedy="Update DEFAULT_TIMEOUT.",
+            required_contract="api-contract",
+            named_mandatory_rule="R1",
+        )
+        prep_contract = prepare_publishable_review(
+            ReviewResult(
+                summary="Review.",
+                comments=(),
+                provider="ollama",
+                review_status="complete",
+            ),
+            candidates=(cand_contract,),
+            snapshot=snap_simple,
+            snapshot_sha256=sha_simple,
+            evidence_policy="confirmed",
+            changed_lines={"src/const.py": frozenset({1})},
+            changed_paths=("src/const.py",),
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        )
+        self.assertFalse(prep_contract.result.comments[0].effective_blocking)
+
+        # 3. Generic filler remedy on an unguarded dereference -> actionable-remedy not supported, stays Required decision
+        snap_deref = {
+            "src/auth.py": "def load_token(user):\n    return user.token.strip()\n"
+        }
+        sha_deref = _snapshot_digest(snap_deref)
+        cand_generic_remedy = CandidateFinding(
+            claim="load_token dereferences user.token when None.",
+            triggering_conditions="Call load_token(user) with user.token=None.",
+            impacted_path="src/auth.py",
+            severity_rationale="Raises AttributeError on None dereference.",
+            evidence=(
+                EvidenceReference(
+                    path="src/auth.py",
+                    line=2,
+                    snapshot_sha256=sha_deref,
+                    excerpt="return user.token.strip()",
+                ),
+            ),
+            severity="high",
+            remedy="Consider refactoring this module for maintainability.",
+        )
+        prep_generic = prepare_publishable_review(
+            ReviewResult(
+                summary="Review.",
+                comments=(),
+                provider="ollama",
+                review_status="complete",
+            ),
+            candidates=(cand_generic_remedy,),
+            snapshot=snap_deref,
+            snapshot_sha256=sha_deref,
+            evidence_policy="confirmed",
+            changed_lines={"src/auth.py": frozenset({2})},
+            changed_paths=("src/auth.py",),
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        )
+        self.assertNotIn(
+            "actionable-remedy", prep_generic.verifications[0].supported_premises
+        )
+        self.assertFalse(prep_generic.result.comments[0].effective_blocking)
+        self.assertTrue(prep_generic.result.comments[0].needs_human)
+
+        # 4. Non-terminating guard (`if user is None: log(...)`), partial guard (`if user is None: return None` before `user.profile.token`),
+        # and reassigned guard (`user = maybe_clear(user)`) must NOT set contrary_evidence=True
+        for case_name, code, line_no, excerpt, claim_text, remedy_text in (
+            (
+                "non_terminating_if",
+                "def load_token(user):\n    if user is None:\n        log('missing')\n    return user.token.strip()\n",
+                4,
+                "return user.token.strip()",
+                "load_token dereferences user when user is None after logging.",
+                "Return early when user is None before accessing user.token.",
+            ),
+            (
+                "partial_guard_on_root_only",
+                "def load_token(user):\n    if user is None:\n        return None\n    return user.profile.token.strip()\n",
+                4,
+                "return user.profile.token.strip()",
+                "load_token dereferences user.profile.token when user.profile is None.",
+                "Guard user.profile against None before accessing token.",
+            ),
+            (
+                "reassigned_after_guard",
+                "def load_token(user):\n    if user is not None:\n        user = maybe_clear(user)\n        return user.token.strip()\n    return ''\n",
+                4,
+                "return user.token.strip()",
+                "load_token dereferences user.token after maybe_clear(user) can return None.",
+                "Check whether user is None after maybe_clear(user) before accessing user.token.",
+            ),
+        ):
+            with self.subTest(case=case_name):
+                snap = {"src/auth.py": code}
+                sha = _snapshot_digest(snap)
+                cand = CandidateFinding(
+                    claim=claim_text,
+                    triggering_conditions="Call load_token(user) when target expression evaluates to None.",
+                    impacted_path="src/auth.py",
+                    severity_rationale="Raises AttributeError at runtime.",
+                    evidence=(
+                        EvidenceReference(
+                            path="src/auth.py",
+                            line=line_no,
+                            snapshot_sha256=sha,
+                            excerpt=excerpt,
+                        ),
+                    ),
+                    severity="high",
+                    remedy=remedy_text,
+                )
+                prep = prepare_publishable_review(
+                    ReviewResult(
+                        summary="Review.",
+                        comments=(),
+                        provider="ollama",
+                        review_status="complete",
+                    ),
+                    candidates=(cand,),
+                    snapshot=snap,
+                    snapshot_sha256=sha,
+                    evidence_policy="confirmed",
+                    changed_lines={"src/auth.py": frozenset({line_no})},
+                    changed_paths=("src/auth.py",),
+                    convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+                )
+                self.assertFalse(prep.verifications[0].contrary_evidence)
+                self.assertTrue(prep.result.comments[0].effective_blocking)
+
 
 class Phase2CheckAndPrecedenceMatrixJourneyTests(unittest.TestCase):
     """Phase 2 contract tests: state/policy precedence matrix and human-resolution reconciliation."""
@@ -801,6 +990,7 @@ class Phase2CheckAndPrecedenceMatrixJourneyTests(unittest.TestCase):
     ) -> None:
         """Resolving the last human decision updates the check run and approves, and retries cleanly after partial check failure."""
         import json as _json
+
         from review_sensei_github.publication import (
             IndexedFinding,
             finding_index_marker,
@@ -874,7 +1064,9 @@ class Phase2CheckAndPrecedenceMatrixJourneyTests(unittest.TestCase):
 
         def open_handler(request, timeout):
             path = urlparse(request.full_url).path
-            payload = _json.loads(request.data.decode("utf-8")) if request.data else None
+            payload = (
+                _json.loads(request.data.decode("utf-8")) if request.data else None
+            )
             if path.endswith("/pulls/1"):
                 return json_response(
                     {
@@ -932,7 +1124,9 @@ class Phase2CheckAndPrecedenceMatrixJourneyTests(unittest.TestCase):
                     fail_check_once["fail"] = False
                     raise GitHubHTTPTransientError("check update failed temporarily")
                 check_updates.append(payload)
-                return json_response({"id": 500, "html_url": "https://github.test/checks/500"}, 201)
+                return json_response(
+                    {"id": 500, "html_url": "https://github.test/checks/500"}, 201
+                )
             raise AssertionError(f"Unexpected request: {request.method} {path}")
 
         http = GitHubHttp(api_url="https://api.github.test", opener=open_handler)
@@ -974,6 +1168,136 @@ class Phase2CheckAndPrecedenceMatrixJourneyTests(unittest.TestCase):
         self.assertEqual(len(approve_posts), 1)
         self.assertEqual(len(check_updates), 1)
         self.assertEqual(check_updates[0]["conclusion"], "success")
+
+    def test_public_human_assessment_reply_updates_check_run_across_auto_approve_blocking_and_remaining_fix(
+        self,
+    ) -> None:
+        """Item 1: Public GitHubApplication.generate_and_publish_reply must pass check_token and reviews_policy and update the check run."""
+        from review_sensei_github.application import (
+            GitHubApplication,
+            GitHubWriteOptions,
+        )
+
+        from tests.test_human_assessment import (
+            Broker,
+            ConversationPublisher,
+            Provider,
+            State,
+            prior,
+            response_for,
+        )
+
+        # 1. auto-approve mode: updates check to 'success' and posts APPROVE
+        state_auto = State()
+        broker_auto = Broker()
+        app_auto = GitHubApplication(
+            broker=broker_auto,
+            reviewer=None,
+            learner=None,
+            replier=ConversationPublisher(http=state_auto.http),
+            http=state_auto.http,
+        )
+        out_auto = app_auto.generate_and_publish_reply(
+            options=GitHubWriteOptions(
+                github_writes=True, mention_replies=True, auto_approve=True
+            ),
+            oidc_token="synthetic-oidc",
+            read_token="read",
+            repository="owner/repo",
+            pull_request=1,
+            source_comment_id=10,
+            source_updated_at="updated",
+            expected_head_sha=HEAD,
+            reply_provider=Provider(response_for(state_auto.eligibility)),
+            model="fixture-model",
+            app_slug=APP,
+            root_comment_id=10,
+            source_kind="issue",
+        )
+        self.assertEqual(out_auto.status, "replied")
+        self.assertEqual(out_auto.approval_status, "approved")
+        self.assertEqual(
+            broker_auto.capabilities,
+            ["issue_reply", "review_publish", "check_publish"],
+        )
+        self.assertEqual(state_auto.events(), ["COMMENT", "APPROVE"])
+        self.assertEqual(len(state_auto.check_runs), 1)
+        self.assertEqual(state_auto.check_runs[-1]["conclusion"], "success")
+
+        # 2. blocking mode (auto_approve=False): updates check to 'success' without posting APPROVE
+        state_blocking = State()
+        broker_blocking = Broker()
+        app_blocking = GitHubApplication(
+            broker=broker_blocking,
+            reviewer=None,
+            learner=None,
+            replier=ConversationPublisher(http=state_blocking.http),
+            http=state_blocking.http,
+        )
+        out_blocking = app_blocking.generate_and_publish_reply(
+            options=GitHubWriteOptions(
+                github_writes=True, mention_replies=True, auto_approve=False
+            ),
+            oidc_token="synthetic-oidc",
+            read_token="read",
+            repository="owner/repo",
+            pull_request=1,
+            source_comment_id=10,
+            source_updated_at="updated",
+            expected_head_sha=HEAD,
+            reply_provider=Provider(response_for(state_blocking.eligibility)),
+            model="fixture-model",
+            app_slug=APP,
+            root_comment_id=10,
+            source_kind="issue",
+        )
+        self.assertEqual(out_blocking.status, "replied")
+        self.assertEqual(out_blocking.approval_status, "auto_approval_disabled")
+        self.assertEqual(
+            broker_blocking.capabilities,
+            ["issue_reply", "review_publish", "check_publish"],
+        )
+        self.assertEqual(state_blocking.events(), ["COMMENT"])
+        self.assertEqual(len(state_blocking.check_runs), 1)
+        self.assertEqual(state_blocking.check_runs[-1]["conclusion"], "success")
+
+        # 3. Remaining required fix alongside resolved human decision: check updated to 'failure', approval withheld
+        base_elig = prior()
+        with_fix = replace(
+            base_elig,
+            facts=replace(base_elig.facts, has_blocking_findings=True),
+        )
+        state_fix = State(with_fix)
+        broker_fix = Broker()
+        app_fix = GitHubApplication(
+            broker=broker_fix,
+            reviewer=None,
+            learner=None,
+            replier=ConversationPublisher(http=state_fix.http),
+            http=state_fix.http,
+        )
+        out_fix = app_fix.generate_and_publish_reply(
+            options=GitHubWriteOptions(
+                github_writes=True, mention_replies=True, auto_approve=True
+            ),
+            oidc_token="synthetic-oidc",
+            read_token="read",
+            repository="owner/repo",
+            pull_request=1,
+            source_comment_id=10,
+            source_updated_at="updated",
+            expected_head_sha=HEAD,
+            reply_provider=Provider(response_for(state_fix.eligibility)),
+            model="fixture-model",
+            app_slug=APP,
+            root_comment_id=10,
+            source_kind="issue",
+        )
+        self.assertEqual(out_fix.status, "replied")
+        self.assertEqual(out_fix.approval_status, "approval_withheld")
+        self.assertEqual(state_fix.events(), ["COMMENT"])
+        self.assertEqual(len(state_fix.check_runs), 1)
+        self.assertEqual(state_fix.check_runs[-1]["conclusion"], "failure")
 
 
 class Phase3LocalLifecycleAndReplayIdentityJourneyTests(unittest.TestCase):
@@ -1034,6 +1358,63 @@ class Phase3LocalLifecycleAndReplayIdentityJourneyTests(unittest.TestCase):
                 (ctx_dir / "module.py").write_text("x = 2\n", encoding="utf-8")
                 with_ctx_2 = make_args(context_root=ctx_dir)
                 self.assertNotEqual(with_ctx_1, with_ctx_2)
+            finally:
+                os.chdir(old_cwd)
+
+    def test_local_session_revision_hashes_past_64_files_64kb_and_ignores_unused_context_config(
+        self,
+    ) -> None:
+        """Item 4: Local replay identity must detect same-size edits beyond 64 files / 64 KB and ignore unused context_root/.reviewsensei.yml."""
+        import os
+
+        diff_text = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            diff_path = tmp_path / "change.diff"
+            diff_path.write_text(diff_text, encoding="utf-8")
+            (tmp_path / ".reviewsensei.yml").write_text(
+                "review:\n  mode: enforced\n", encoding="utf-8"
+            )
+            ctx_dir = tmp_path / "context"
+            ctx_dir.mkdir()
+            for idx in range(65):
+                (ctx_dir / f"file_{idx:03d}.py").write_text(
+                    ("a" * 1200) + f"\n# {idx:03d}\n", encoding="utf-8"
+                )
+
+            def make_args() -> tuple[str, str]:
+                ns = argparse.Namespace(
+                    session_ledger=tmp_path / "ledger",
+                    repository="local/workspace",
+                    pull_request=1,
+                    head_sha=None,
+                    base_sha=None,
+                    diff=diff_path,
+                    model="qwen2.5-coder:7b",
+                    review_mode="enforced",
+                    config=None,
+                    context_root=ctx_dir,
+                )
+                _prepare_local_session(ns, hosted_session_ledger=False)
+                return (ns.base_sha, ns.head_sha)
+
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(tmp_path)
+                before_65th = make_args()
+                # Same-size edit on the 65th file (beyond 64 files and >64 KB into the tree)
+                (ctx_dir / "file_064.py").write_text(
+                    ("b" * 1200) + "\n# 064\n", encoding="utf-8"
+                )
+                after_65th = make_args()
+                self.assertNotEqual(before_65th, after_65th)
+
+                # Adding or editing an unused context_root/.reviewsensei.yml must NOT alter replay identity
+                (ctx_dir / ".reviewsensei.yml").write_text(
+                    "review:\n  mode: shadow\n", encoding="utf-8"
+                )
+                with_unused_ctx_cfg = make_args()
+                self.assertEqual(after_65th, with_unused_ctx_cfg)
             finally:
                 os.chdir(old_cwd)
 
@@ -1105,7 +1486,9 @@ class Phase5PartitionedFinalizerAndReconciliationJourneyTests(unittest.TestCase)
             persisted_doc["human_resolution"] = dict(persisted_doc["human_resolution"])
             persisted_doc["human_resolution"]["resolved"] = []
         bundle.reviews.items.append(
-            bundle.reviews.item(10000, "Partitioned root.\n" + bundle.marker(persisted_doc))
+            bundle.reviews.item(
+                10000, "Partitioned root.\n" + bundle.marker(persisted_doc)
+            )
         )
         approve_calls: list[dict[str, object]] = []
         orig_open = bundle.reviews.open
@@ -1199,7 +1582,9 @@ class Phase5PartitionedFinalizerAndReconciliationJourneyTests(unittest.TestCase)
         self,
     ) -> None:
         """A clean/resolved v4 partitioned root must run live preflight, thread scan, readback, and POST APPROVE."""
-        bundle, complete_eligibility, approve_calls = self._configure_partitioned_bundle(100)
+        bundle, complete_eligibility, approve_calls = (
+            self._configure_partitioned_bundle(100)
+        )
         outcome = ReviewApprovalFinalizer(
             http=bundle.reviews.http,
             evidence_budget=bundle.budget,
@@ -1219,8 +1604,8 @@ class Phase5PartitionedFinalizerAndReconciliationJourneyTests(unittest.TestCase)
         self.assertEqual(approve_calls[0]["event"], "APPROVE")
 
         # Also verify fail-closed when an open blocking thread exists on GitHub
-        bundle_blocked, elig_blocked, calls_blocked = self._configure_partitioned_bundle(
-            100, open_blocking_thread=True
+        bundle_blocked, elig_blocked, calls_blocked = (
+            self._configure_partitioned_bundle(100, open_blocking_thread=True)
         )
         withheld_thread = ReviewApprovalFinalizer(
             http=bundle_blocked.reviews.http,
@@ -1239,8 +1624,8 @@ class Phase5PartitionedFinalizerAndReconciliationJourneyTests(unittest.TestCase)
         self.assertEqual(len(calls_blocked), 0)
 
         # Also verify fail-closed when the persisted v4 root on the server differs from eligibility
-        bundle_tampered, elig_tampered, calls_tampered = self._configure_partitioned_bundle(
-            100, tamper_root_after_stage=True
+        bundle_tampered, elig_tampered, calls_tampered = (
+            self._configure_partitioned_bundle(100, tamper_root_after_stage=True)
         )
         withheld_tampered = ReviewApprovalFinalizer(
             http=bundle_tampered.reviews.http,
@@ -1259,7 +1644,9 @@ class Phase5PartitionedFinalizerAndReconciliationJourneyTests(unittest.TestCase)
         self.assertEqual(len(calls_tampered), 0)
 
         # Also verify fail-closed when the shared EvidenceReadBudget is exhausted during readback
-        bundle_exhausted, elig_exhausted, calls_exhausted = self._configure_partitioned_bundle(100)
+        bundle_exhausted, elig_exhausted, calls_exhausted = (
+            self._configure_partitioned_bundle(100)
+        )
         while bundle_exhausted.budget.calls < 59:
             bundle_exhausted.budget.consume()
         with self.assertRaises(GitHubPublicationError):
@@ -1488,6 +1875,78 @@ class Phase5PartitionedFinalizerAndReconciliationJourneyTests(unittest.TestCase)
                 require_persisted=True,
             )
         self.assertEqual(len(review_get_calls), 60)
+
+    def test_five_disposition_session_ledger_with_consumed_grant_loads_cleanly(
+        self,
+    ) -> None:
+        """Sanitized regression fixture for PR #308: a 5-disposition session comment with a consumed-grant header loads cleanly under the current schema."""
+        from datetime import datetime, timezone
+
+        from review_sensei_github.session_ledger import (
+            GitHubIssueCommentSessionLedger,
+            render_session_comment,
+        )
+
+        from review_sensei.disposition import FindingDisposition
+        from review_sensei.session import SessionIdentity, SessionRecord
+
+        identity = SessionIdentity(
+            repository="owner/repo",
+            pull_request=308,
+            repository_id=1,
+        )
+        now = datetime(2026, 10, 17, 16, 55, 58, tzinfo=timezone.utc)
+        dispositions = tuple(
+            FindingDisposition(
+                fingerprint=f"{idx:064x}",
+                action="accept-risk",
+                reason="acceptable risk",
+                actor="maintainer",
+                head_sha=HEAD,
+            ).to_dict()
+            for idx in range(1, 6)
+        )
+        record = SessionRecord.create(identity, now=now).evolve(
+            now=now,
+            completed_initial_reviews=1,
+            generation=5,
+            dispositions=dispositions,
+        )
+        comment_body = render_session_comment(
+            repository_id=1,
+            pull_request=308,
+            record=record,
+            consumed_grants=(
+                "5643617f0d4e7612ecba3aaa1364a625a1c9d75798738f719ebb901eb45e81e4",
+            ),
+        )
+
+        def open_handler(request, timeout):
+            path = urlparse(request.full_url).path
+            if (
+                path == "/repos/owner/repo/issues/308/comments"
+                and request.method == "GET"
+            ):
+                return json_response(
+                    [
+                        {
+                            "id": 6236936357,
+                            "issue_url": "https://api.github.test/repos/owner/repo/issues/308",
+                            "body": comment_body,
+                            "updated_at": "2026-10-17T16:55:59Z",
+                            "user": {"id": 7, "login": APP, "type": "Bot"},
+                        }
+                    ]
+                )
+            raise AssertionError(f"Unexpected request: {request.method} {path}")
+
+        http = GitHubHttp(api_url="https://api.github.test", opener=open_handler)
+        ledger = GitHubIssueCommentSessionLedger(http, token="synthetic", app_slug=APP)
+        loaded = ledger.load(identity, now=now)
+        self.assertEqual(loaded.status, "ok")
+        assert loaded.record is not None
+        self.assertEqual(loaded.record.generation, 5)
+        self.assertEqual(len(loaded.record.dispositions), 5)
 
 
 if __name__ == "__main__":

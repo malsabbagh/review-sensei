@@ -2307,15 +2307,21 @@ class GitHubApplication:
                     )
                     if work_assessment is not None:
                         accepted = accepted or work_assessment.inventory != inventory
+                    review_policy = options.review_policy()
                     review_token = None
+                    check_token = None
                     if accepted:
+                        exchange_input = oidc_token or self.broker.request_oidc_token()
                         review_token = self.broker.exchange(
-                            oidc_token or self.broker.request_oidc_token(),
+                            exchange_input,
                             capability="review_publish",
                         )
+                        check_token = self._check_capability_token(exchange_input)
                     reply_outcome = assessor.publish(
                         token=capability_token,
                         review_token=review_token,
+                        check_token=check_token,
+                        reviews_policy=review_policy,
                         repository=repository,
                         pull_request=pull_request,
                         prepared=human,
