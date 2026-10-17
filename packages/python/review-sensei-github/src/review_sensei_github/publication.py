@@ -3481,11 +3481,12 @@ class ReviewPublisher:
                 comment_payload["side"] = "RIGHT"
             comments.append(comment_payload)
         # auto-approve submits GitHub's Changes requested review when this
-        # head has required fixes, then approves a later eligible head. The
-        # ReviewSensei check stays successful for that completed review.
-        # App-authored pull requests stay comments because GitHub rejects
-        # REQUEST_CHANGES from the pull request author. blocking fails the
-        # check and comments; advisory never fails the check.
+        # head has required fixes, then approves a later eligible head. Both
+        # auto-approve and blocking fail the ReviewSensei check when required
+        # fixes remain and return action_required when human decisions remain;
+        # advisory never fails the check. App-authored pull requests stay
+        # comments because GitHub rejects REQUEST_CHANGES from the pull
+        # request author.
         retained_blocking = (
             retained_eligibility is not None
             and retained_eligibility.facts.has_blocking_findings

@@ -2493,6 +2493,108 @@ class Phase5PartitionedFinalizerAndReconciliationJourneyTests(unittest.TestCase)
         self.assertFalse(comment.effective_blocking)
         self.assertFalse(comment.needs_human)
 
+    def test_verifier_safe_and_reversed_null_and_division_ternaries_in_prepare_publishable_review(
+        self,
+    ) -> None:
+        """Safe ternaries set contrary_evidence=True, whereas reversed ternaries admit as required fixes."""
+        null_cases = (
+            ("return user.token if user is not None else ''", True, False),
+            ("return '' if user is None else user.token", True, False),
+            ("return user.token if user is None else ''", False, True),
+            ("return '' if user is not None else user.token", False, True),
+        )
+        for line_code, expected_contrary, expected_blocking in null_cases:
+            with self.subTest(kind="null", line_code=line_code):
+                snap = {"src/auth.py": f"def get_token(user):\n    {line_code}\n"}
+                sha = _snapshot_digest(snap)
+                candidate = CandidateFinding(
+                    claim="get_token dereferences user when user is None.",
+                    triggering_conditions="Call get_token(None).",
+                    impacted_path="src/auth.py",
+                    severity_rationale="Raises AttributeError on None user.",
+                    evidence=(
+                        EvidenceReference(
+                            path="src/auth.py",
+                            line=2,
+                            snapshot_sha256=sha,
+                            excerpt=line_code,
+                        ),
+                    ),
+                    severity="high",
+                    remedy="Guard against user is None before accessing user.token.",
+                )
+                prepared = prepare_publishable_review(
+                    ReviewResult(
+                        summary="Review.",
+                        comments=(),
+                        provider="ollama",
+                        review_status="complete",
+                    ),
+                    candidates=(candidate,),
+                    snapshot=snap,
+                    snapshot_sha256=sha,
+                    evidence_policy="confirmed",
+                    changed_lines={"src/auth.py": frozenset({2})},
+                    changed_paths=("src/auth.py",),
+                    convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+                )
+                self.assertEqual(
+                    prepared.verifications[0].contrary_evidence, expected_contrary
+                )
+                self.assertEqual(
+                    prepared.result.comments[0].effective_blocking, expected_blocking
+                )
+                self.assertFalse(prepared.result.comments[0].needs_human)
+
+        div_cases = (
+            ("return total / count if count != 0 else 0.0", True, False),
+            ("return 0.0 if count == 0 else total / count", True, False),
+            ("return total / count if count == 0 else 0.0", False, True),
+            ("return 0.0 if count != 0 else total / count", False, True),
+        )
+        for line_code, expected_contrary, expected_blocking in div_cases:
+            with self.subTest(kind="division", line_code=line_code):
+                snap = {"src/metrics.py": f"def mean(total, count):\n    {line_code}\n"}
+                sha = _snapshot_digest(snap)
+                candidate = CandidateFinding(
+                    claim="mean divides total by count when count is zero.",
+                    triggering_conditions="Call mean(10, 0).",
+                    impacted_path="src/metrics.py",
+                    severity_rationale="Raises ZeroDivisionError when count is 0.",
+                    evidence=(
+                        EvidenceReference(
+                            path="src/metrics.py",
+                            line=2,
+                            snapshot_sha256=sha,
+                            excerpt=line_code,
+                        ),
+                    ),
+                    severity="high",
+                    remedy="Return 0.0 if count == 0 before dividing by count.",
+                )
+                prepared = prepare_publishable_review(
+                    ReviewResult(
+                        summary="Review.",
+                        comments=(),
+                        provider="ollama",
+                        review_status="complete",
+                    ),
+                    candidates=(candidate,),
+                    snapshot=snap,
+                    snapshot_sha256=sha,
+                    evidence_policy="confirmed",
+                    changed_lines={"src/metrics.py": frozenset({2})},
+                    changed_paths=("src/metrics.py",),
+                    convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+                )
+                self.assertEqual(
+                    prepared.verifications[0].contrary_evidence, expected_contrary
+                )
+                self.assertEqual(
+                    prepared.result.comments[0].effective_blocking, expected_blocking
+                )
+                self.assertFalse(prepared.result.comments[0].needs_human)
+
 
 if __name__ == "__main__":
     unittest.main()

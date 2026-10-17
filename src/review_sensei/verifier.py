@@ -495,22 +495,24 @@ def _unparse_expr(node: ast.AST) -> str:
         return ""
 
 
-def _dereferenced_expressions_on_line(tree: ast.AST, line_no: int) -> set[str]:
-    """Return canonical AST expressions dereferenced via attribute or subscript on ``line_no``."""
-    exprs: set[str] = set()
+def _dereferenced_nodes_on_line(
+    tree: ast.AST, line_no: int
+) -> list[tuple[ast.AST, str]]:
+    """Return ``(node, receiver_expr)`` pairs dereferenced via attribute or subscript on ``line_no``."""
+    items: list[tuple[ast.AST, str]] = []
     for node in ast.walk(tree):
         if getattr(node, "lineno", None) != line_no:
             continue
         if isinstance(node, (ast.Attribute, ast.Subscript)):
             text = _unparse_expr(node.value)
             if text:
-                exprs.add(text)
-    return exprs
+                items.append((node, text))
+    return items
 
 
-def _divisor_expressions_on_line(tree: ast.AST, line_no: int) -> set[str]:
-    """Return canonical AST divisor expressions in ``/``, ``//``, or ``%`` on ``line_no``."""
-    divisors: set[str] = set()
+def _divisor_nodes_on_line(tree: ast.AST, line_no: int) -> list[tuple[ast.AST, str]]:
+    """Return ``(node, divisor_expr)`` pairs in ``/``, ``//``, or ``%`` on ``line_no``."""
+    items: list[tuple[ast.AST, str]] = []
     for node in ast.walk(tree):
         if getattr(node, "lineno", None) != line_no:
             continue
@@ -520,13 +522,14 @@ def _divisor_expressions_on_line(tree: ast.AST, line_no: int) -> set[str]:
             if (
                 isinstance(node.right, ast.Constant)
                 and isinstance(node.right.value, (int, float))
+                and not isinstance(node.right.value, bool)
                 and node.right.value != 0
             ):
                 continue
             text = _unparse_expr(node.right)
             if text:
-                divisors.add(text)
-    return divisors
+                items.append((node, text))
+    return items
 
 
 def _extract_non_none_guards(test: ast.expr) -> set[str]:
@@ -604,6 +607,21 @@ def _extract_is_none_guards(test: ast.expr) -> set[str]:
     return guards
 
 
+def _add_nonzero_target_and_len(target: ast.expr, guards: set[str]) -> None:
+    expr = _unparse_expr(target)
+    if expr:
+        guards.add(expr)
+    if (
+        isinstance(target, ast.Call)
+        and isinstance(target.func, ast.Name)
+        and target.func.id == "len"
+        and len(target.args) == 1
+    ):
+        arg_expr = _unparse_expr(target.args[0])
+        if arg_expr:
+            guards.add(arg_expr)
+
+
 def _extract_non_zero_guards(test: ast.expr) -> set[str]:
     """Return expressions guaranteed non-zero when ``test`` evaluates to True."""
     guards: set[str] = set()
@@ -625,20 +643,25 @@ def _extract_non_zero_guards(test: ast.expr) -> set[str]:
         if (
             isinstance(op, (ast.NotEq, ast.Gt, ast.Lt))
             and isinstance(right, ast.Constant)
+            and not isinstance(right.value, bool)
             and right.value == 0
         ):
-            expr = _unparse_expr(left)
-            if expr:
-                guards.add(expr)
-            if (
-                isinstance(left, ast.Call)
-                and isinstance(left.func, ast.Name)
-                and left.func.id == "len"
-                and len(left.args) == 1
-            ):
-                arg_expr = _unparse_expr(left.args[0])
-                if arg_expr:
-                    guards.add(arg_expr)
+            _add_nonzero_target_and_len(left, guards)
+        elif (
+            isinstance(op, (ast.NotEq, ast.Gt, ast.Lt))
+            and isinstance(left, ast.Constant)
+            and not isinstance(left.value, bool)
+            and left.value == 0
+        ):
+            _add_nonzero_target_and_len(right, guards)
+        return guards
+    if (
+        isinstance(test, ast.Call)
+        and isinstance(test.func, ast.Name)
+        and test.func.id == "len"
+        and len(test.args) == 1
+    ):
+        _add_nonzero_target_and_len(test, guards)
         return guards
     if isinstance(test, (ast.Name, ast.Attribute, ast.Subscript)):
         expr = _unparse_expr(test)
@@ -669,20 +692,17 @@ def _extract_is_zero_guards(test: ast.expr) -> set[str]:
         if (
             isinstance(op, (ast.Eq, ast.LtE))
             and isinstance(right, ast.Constant)
+            and not isinstance(right.value, bool)
             and right.value == 0
         ):
-            expr = _unparse_expr(left)
-            if expr:
-                guards.add(expr)
-            if (
-                isinstance(left, ast.Call)
-                and isinstance(left.func, ast.Name)
-                and left.func.id == "len"
-                and len(left.args) == 1
-            ):
-                arg_expr = _unparse_expr(left.args[0])
-                if arg_expr:
-                    guards.add(arg_expr)
+            _add_nonzero_target_and_len(left, guards)
+        elif (
+            isinstance(op, (ast.Eq, ast.GtE))
+            and isinstance(left, ast.Constant)
+            and not isinstance(left.value, bool)
+            and left.value == 0
+        ):
+            _add_nonzero_target_and_len(right, guards)
     return guards
 
 
@@ -740,40 +760,170 @@ def _invalidate_reassigned_guards(guards: set[str], assigned: set[str]) -> set[s
     return remaining
 
 
-def _inline_guards_on_line(
-    stmt: ast.stmt,
-    line_no: int,
+def _collect_expression_branch_guards(
+    node: ast.AST,
+    active_guards: frozenset[str],
     *,
     pos_extractor: Callable[[ast.expr], set[str]],
     neg_extractor: Callable[[ast.expr], set[str]],
-) -> set[str]:
-    """Extract inline expression guards (ternary IfExp or short-circuit BoolOp) on ``line_no``."""
-    guards: set[str] = set()
-    for node in ast.walk(stmt):
-        if getattr(node, "lineno", None) != line_no:
-            continue
-        if isinstance(node, ast.IfExp):
-            guards.update(pos_extractor(node.test))
-            guards.update(neg_extractor(node.test))
-        elif isinstance(node, ast.BoolOp):
-            if isinstance(node.op, ast.And) and len(node.values) >= 2:
-                for value in node.values[:-1]:
-                    guards.update(pos_extractor(value))
-            elif isinstance(node.op, ast.Or) and len(node.values) >= 2:
-                for value in node.values[:-1]:
-                    guards.update(neg_extractor(value))
-    return guards
+    out: dict[int, frozenset[str]],
+) -> None:
+    """Attach branch-specific guard sets to each AST node id along its execution path."""
+    out[id(node)] = active_guards
+    if isinstance(node, ast.IfExp):
+        _collect_expression_branch_guards(
+            node.test,
+            active_guards,
+            pos_extractor=pos_extractor,
+            neg_extractor=neg_extractor,
+            out=out,
+        )
+        body_guards = active_guards | frozenset(pos_extractor(node.test))
+        _collect_expression_branch_guards(
+            node.body,
+            body_guards,
+            pos_extractor=pos_extractor,
+            neg_extractor=neg_extractor,
+            out=out,
+        )
+        else_guards = active_guards | frozenset(neg_extractor(node.test))
+        _collect_expression_branch_guards(
+            node.orelse,
+            else_guards,
+            pos_extractor=pos_extractor,
+            neg_extractor=neg_extractor,
+            out=out,
+        )
+        return
+    if isinstance(node, ast.BoolOp):
+        branch_guards = set(active_guards)
+        for value in node.values:
+            _collect_expression_branch_guards(
+                value,
+                frozenset(branch_guards),
+                pos_extractor=pos_extractor,
+                neg_extractor=neg_extractor,
+                out=out,
+            )
+            if isinstance(node.op, ast.And):
+                branch_guards.update(pos_extractor(value))
+            elif isinstance(node.op, ast.Or):
+                branch_guards.update(neg_extractor(value))
+        return
+    if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+        comp_guards = set(active_guards)
+        for gen in node.generators:
+            _collect_expression_branch_guards(
+                gen.iter,
+                frozenset(comp_guards),
+                pos_extractor=pos_extractor,
+                neg_extractor=neg_extractor,
+                out=out,
+            )
+            _collect_expression_branch_guards(
+                gen.target,
+                frozenset(comp_guards),
+                pos_extractor=pos_extractor,
+                neg_extractor=neg_extractor,
+                out=out,
+            )
+            for if_clause in gen.ifs:
+                _collect_expression_branch_guards(
+                    if_clause,
+                    frozenset(comp_guards),
+                    pos_extractor=pos_extractor,
+                    neg_extractor=neg_extractor,
+                    out=out,
+                )
+                comp_guards.update(pos_extractor(if_clause))
+        if isinstance(node, ast.DictComp):
+            _collect_expression_branch_guards(
+                node.key,
+                frozenset(comp_guards),
+                pos_extractor=pos_extractor,
+                neg_extractor=neg_extractor,
+                out=out,
+            )
+            _collect_expression_branch_guards(
+                node.value,
+                frozenset(comp_guards),
+                pos_extractor=pos_extractor,
+                neg_extractor=neg_extractor,
+                out=out,
+            )
+        else:
+            _collect_expression_branch_guards(
+                node.elt,
+                frozenset(comp_guards),
+                pos_extractor=pos_extractor,
+                neg_extractor=neg_extractor,
+                out=out,
+            )
+        return
+    if isinstance(node, ast.If):
+        _collect_expression_branch_guards(
+            node.test,
+            active_guards,
+            pos_extractor=pos_extractor,
+            neg_extractor=neg_extractor,
+            out=out,
+        )
+        body_guards = active_guards | frozenset(pos_extractor(node.test))
+        for child_stmt in node.body:
+            _collect_expression_branch_guards(
+                child_stmt,
+                body_guards,
+                pos_extractor=pos_extractor,
+                neg_extractor=neg_extractor,
+                out=out,
+            )
+        else_guards = active_guards | frozenset(neg_extractor(node.test))
+        for child_stmt in node.orelse:
+            _collect_expression_branch_guards(
+                child_stmt,
+                else_guards,
+                pos_extractor=pos_extractor,
+                neg_extractor=neg_extractor,
+                out=out,
+            )
+        return
+    for child in ast.iter_child_nodes(node):
+        _collect_expression_branch_guards(
+            child,
+            active_guards,
+            pos_extractor=pos_extractor,
+            neg_extractor=neg_extractor,
+            out=out,
+        )
 
 
-def _active_guards_at_line(
+def _branch_guards_for_stmt(
+    stmt: ast.AST,
+    active_guards: set[str],
+    *,
+    pos_extractor: Callable[[ast.expr], set[str]],
+    neg_extractor: Callable[[ast.expr], set[str]],
+) -> dict[int, frozenset[str]]:
+    out: dict[int, frozenset[str]] = {}
+    _collect_expression_branch_guards(
+        stmt,
+        frozenset(active_guards),
+        pos_extractor=pos_extractor,
+        neg_extractor=neg_extractor,
+        out=out,
+    )
+    return out
+
+
+def _active_node_guards_at_line(
     stmts: Sequence[ast.stmt],
     target_line: int,
     active_guards: set[str],
     *,
     pos_extractor: Callable[[ast.expr], set[str]],
     neg_extractor: Callable[[ast.expr], set[str]],
-) -> set[str] | None:
-    """Walk AST statements in control-flow order and return guards active at ``target_line``."""
+) -> dict[int, frozenset[str]] | None:
+    """Walk AST statements in control-flow order and return per-node guards active at ``target_line``."""
     current_guards = set(active_guards)
     for stmt in stmts:
         start = getattr(stmt, "lineno", None)
@@ -785,20 +935,20 @@ def _active_guards_at_line(
 
         if start <= target_line <= end:
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                found = _active_guards_at_line(
+                found = _active_node_guards_at_line(
                     stmt.body,
                     target_line,
                     set(),
                     pos_extractor=pos_extractor,
                     neg_extractor=neg_extractor,
                 )
-                return found if found is not None else set()
+                return found if found is not None else {}
             if isinstance(stmt, ast.If):
                 test_end = getattr(stmt.test, "end_lineno", start) or start
                 if target_line <= test_end:
-                    return current_guards | _inline_guards_on_line(
+                    return _branch_guards_for_stmt(
                         stmt,
-                        target_line,
+                        current_guards,
                         pos_extractor=pos_extractor,
                         neg_extractor=neg_extractor,
                     )
@@ -808,28 +958,46 @@ def _active_guards_at_line(
                 )
                 if target_line <= body_end:
                     branch_guards = current_guards | pos_extractor(stmt.test)
-                    found = _active_guards_at_line(
+                    found = _active_node_guards_at_line(
                         stmt.body,
                         target_line,
                         branch_guards,
                         pos_extractor=pos_extractor,
                         neg_extractor=neg_extractor,
                     )
-                    return found if found is not None else branch_guards
+                    return (
+                        found
+                        if found is not None
+                        else _branch_guards_for_stmt(
+                            stmt,
+                            branch_guards,
+                            pos_extractor=pos_extractor,
+                            neg_extractor=neg_extractor,
+                        )
+                    )
                 if stmt.orelse:
                     else_guards = current_guards | neg_extractor(stmt.test)
-                    found = _active_guards_at_line(
+                    found = _active_node_guards_at_line(
                         stmt.orelse,
                         target_line,
                         else_guards,
                         pos_extractor=pos_extractor,
                         neg_extractor=neg_extractor,
                     )
-                    return found if found is not None else else_guards
+                    return (
+                        found
+                        if found is not None
+                        else _branch_guards_for_stmt(
+                            stmt,
+                            else_guards,
+                            pos_extractor=pos_extractor,
+                            neg_extractor=neg_extractor,
+                        )
+                    )
             for block_attr in ("body", "orelse", "finalbody"):
                 block = getattr(stmt, block_attr, None)
                 if isinstance(block, list) and block:
-                    found = _active_guards_at_line(
+                    found = _active_node_guards_at_line(
                         block,
                         target_line,
                         current_guards,
@@ -843,7 +1011,7 @@ def _active_guards_at_line(
                 for handler in handlers:
                     h_body = getattr(handler, "body", None)
                     if isinstance(h_body, list):
-                        found = _active_guards_at_line(
+                        found = _active_node_guards_at_line(
                             h_body,
                             target_line,
                             current_guards,
@@ -852,9 +1020,9 @@ def _active_guards_at_line(
                         )
                         if found is not None:
                             return found
-            return current_guards | _inline_guards_on_line(
+            return _branch_guards_for_stmt(
                 stmt,
-                target_line,
+                current_guards,
                 pos_extractor=pos_extractor,
                 neg_extractor=neg_extractor,
             )
@@ -1029,8 +1197,9 @@ def _assess_candidate_premises(
             tree = None
 
         if alleges_null and tree is not None:
-            derefs = _dereferenced_expressions_on_line(tree, reference.line)
-            if derefs:
+            deref_nodes = _dereferenced_nodes_on_line(tree, reference.line)
+            if deref_nodes:
+                derefs = {expr for _, expr in deref_nodes}
                 non_implicit = {
                     expr
                     for expr in derefs
@@ -1044,22 +1213,31 @@ def _assess_candidate_premises(
                     or expr.split(".")[0].lower() in words
                 }
                 relevant_derefs = targeted_derefs or candidate_derefs
-                guards = _active_guards_at_line(
+                relevant_nodes = [
+                    (node, expr)
+                    for node, expr in deref_nodes
+                    if expr in relevant_derefs
+                ]
+                guards = _active_node_guards_at_line(
                     tree.body,
                     reference.line,
                     set(),
                     pos_extractor=_extract_non_none_guards,
                     neg_extractor=_extract_is_none_guards,
                 )
-                active_guards = guards if guards is not None else set()
-                if relevant_derefs.issubset(active_guards):
+                node_guards = guards if guards is not None else {}
+                if relevant_nodes and all(
+                    expr in node_guards.get(id(node), frozenset())
+                    for node, expr in relevant_nodes
+                ):
                     contrary_evidence = True
                 else:
                     mechanism_supported = True
 
         if alleges_div_zero and tree is not None:
-            divisors = _divisor_expressions_on_line(tree, reference.line)
-            if divisors:
+            divisor_nodes = _divisor_nodes_on_line(tree, reference.line)
+            if divisor_nodes:
+                divisors = {expr for _, expr in divisor_nodes}
                 targeted_divisors = {
                     expr
                     for expr in divisors
@@ -1070,15 +1248,23 @@ def _assess_candidate_premises(
                     )
                 }
                 relevant_divisors = targeted_divisors or divisors
-                guards = _active_guards_at_line(
+                relevant_nodes = [
+                    (node, expr)
+                    for node, expr in divisor_nodes
+                    if expr in relevant_divisors
+                ]
+                guards = _active_node_guards_at_line(
                     tree.body,
                     reference.line,
                     set(),
                     pos_extractor=_extract_non_zero_guards,
                     neg_extractor=_extract_is_zero_guards,
                 )
-                active_guards = guards if guards is not None else set()
-                if relevant_divisors.issubset(active_guards):
+                node_guards = guards if guards is not None else {}
+                if relevant_nodes and all(
+                    expr in node_guards.get(id(node), frozenset())
+                    for node, expr in relevant_nodes
+                ):
                     contrary_evidence = True
                 else:
                     mechanism_supported = True
