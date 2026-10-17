@@ -2337,7 +2337,14 @@ def _run_review_provider(
     operation_entry = kwargs.pop("operation_entry", "disabled")
     for hosted_key in ("ledger", "repository", "repository_id", "pull_request"):
         kwargs.pop(hosted_key, None)
-    kwargs.pop("analysis_reservation_id", None)
+    supplied_reservation = kwargs.pop("analysis_reservation_id", None)
+    # This engine provider does not accept a reservation argument. Reject an
+    # empty or non-string value here so a caller cannot smuggle one through.
+    # A real reservation is applied by the hosted provider, not by dropping it.
+    if supplied_reservation is not None and (
+        not isinstance(supplied_reservation, str) or not supplied_reservation.strip()
+    ):
+        raise ReviewInputError("analysis reservation id must be a non-empty string")
     adjust = kwargs.pop("adjust", None)
     if hosted is True and operation_entry == "enabled":
         raise ReviewInputError("Actions operation entry requires review-sensei-github")

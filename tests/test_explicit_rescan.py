@@ -462,6 +462,20 @@ class RescanAdmissionTests(unittest.TestCase):
         repaired = {**document, "issue_comment": 0}
         validate_public_document(repaired, "rescan-state")
 
+    def test_review_id_and_receipt_count_are_bounded(self):
+        from review_sensei.rescan import validate_rescan_state
+
+        ledger, _bound = seed()
+        source = rescan_source(ledger.load(tx.IDENTITY).record)
+        with self.assertRaisesRegex(ReviewInputError, "authority is invalid"):
+            AuthorizedRescan("workflow_dispatch", 1, source, 2**63)
+        AuthorizedRescan("workflow_dispatch", 1, source, 2**63 - 1)
+        prepared = prepare(ledger, request(ledger))
+        state = json.loads(json.dumps(prepared.record.rescan_state))
+        state["receipts"] = state["receipts"] * 7
+        with self.assertRaisesRegex(ReviewInputError, "receipt bound"):
+            validate_rescan_state(state)
+
     def test_empty_analysis_reservation_id_is_rejected(self):
         from review_sensei_github.commands import run_hosted_provider
 
@@ -559,6 +573,7 @@ class AuthorityHTTP:
                 "repository": {"id": 99},
                 "actor": {"login": "alice"},
                 "created_at": "2026-10-16T22:04:00Z",
+                "path": ".github/workflows/review-sensei-review.yml",
             }
         if path.endswith("/permission"):
             return 200, {"permission": self.permission}
@@ -675,6 +690,7 @@ class RescanHostTests(unittest.TestCase):
             ({"id": 11}, True),
             ({"actor": {"login": "another-maintainer"}}, True),
             ({"head_sha": "f" * 40}, False),
+            ({"path": ".github/workflows/other.yml"}, True),
         ):
             with self.subTest(change=change):
 
@@ -705,6 +721,15 @@ class RescanHostTests(unittest.TestCase):
 
     def test_missing_triggering_actor_fails_closed(self):
         before = self.ledger.load(tx.IDENTITY).record
+        previous = os.environ.get("GITHUB_TRIGGERING_ACTOR")
+
+        def restore_actor() -> None:
+            if previous is None:
+                os.environ.pop("GITHUB_TRIGGERING_ACTOR", None)
+            else:
+                os.environ["GITHUB_TRIGGERING_ACTOR"] = previous
+
+        self.addCleanup(restore_actor)
         os.environ.pop("GITHUB_TRIGGERING_ACTOR")
         with self.assertRaisesRegex(ReviewInputError, "unauthorized"):
             resolve_rescan(
@@ -716,6 +741,7 @@ class RescanHostTests(unittest.TestCase):
                 self.args, self.ledger, actions_token="synthetic-actions-token"
             )
         self.assertEqual(self.ledger.load(tx.IDENTITY).record, before)
+        restore_actor()
 
     def test_transient_authority_reads_do_not_consume_the_request(self):
         from review_sensei_github.errors import GitHubHTTPTransientError
@@ -765,6 +791,34 @@ class RescanHostTests(unittest.TestCase):
             resolve_rescan(
                 self.args, self.ledger, actions_token="synthetic-actions-token"
             )
+        self.event["inputs"]["operation"] = " Review "
+        self.write_event()
+        self.assertTrue(cli_event_requests_rescan())
+
+    def test_edited_comment_timestamp_is_refused(self):
+        os.environ["GITHUB_EVENT_NAME"] = "issue_comment"
+        self.event.update(
+            action="created", issue={"number": 146}, comment=dict(self.http.comment)
+        )
+        self.write_event()
+        self.http.comment["updated_at"] = "2026-10-16T22:05:00Z"
+        with self.assertRaisesRegex(ReviewInputError, "edited"):
+            resolve_rescan(
+                self.args, self.ledger, actions_token="synthetic-actions-token"
+            )
+
+    def test_rescan_outside_hosted_authority_is_rejected(self):
+        class Hooks:
+            def resolve_ledger(self, args, **kwargs):
+                return None
+
+        argv = cli_arguments(Path(self.temp.name))
+        with redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(main(argv, hosted_hooks=Hooks()), 1, errors.getvalue())
+        self.assertIn(
+            "--rescan requires a hosted identity-bound transaction",
+            errors.getvalue(),
+        )
 
     def test_offset_timestamps_compare_as_utc_instants(self):
         original = self.http.request

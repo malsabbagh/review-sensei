@@ -43,7 +43,7 @@ class AuthorizedRescan:
             or type(self.request_id) is not int
             or not 0 < self.request_id < 2**63
             or type(self.review_id) is not int
-            or self.review_id <= 0
+            or not 0 < self.review_id < 2**63
             or self.source.phase != "publication_succeeded"
         ):
             raise ReviewInputError("explicit rescan authority is invalid")
@@ -52,9 +52,18 @@ class AuthorizedRescan:
 def validate_rescan_state(state: object) -> dict[str, object]:
     from .schemas import validate_public_document
 
+    if (
+        isinstance(state, dict)
+        and isinstance(state.get("receipts"), list)
+        and len(state["receipts"]) > MAX_RESCAN_RECEIPTS
+    ):
+        raise ReviewInputError("rescan receipt bound was exceeded")
     validate_public_document(state, "rescan-state")
     assert isinstance(state, dict)
-    for receipt in state["receipts"]:
+    receipts = state["receipts"]
+    if not isinstance(receipts, list) or len(receipts) > MAX_RESCAN_RECEIPTS:
+        raise ReviewInputError("rescan receipt bound was exceeded")
+    for receipt in receipts:
         source = ReviewTransaction.from_dict(receipt["source"])
         if source.phase != "publication_succeeded":
             raise ReviewInputError("rescan source must be published")

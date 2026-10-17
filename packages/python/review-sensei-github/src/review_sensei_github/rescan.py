@@ -49,7 +49,9 @@ def _dispatch_requests_rescan(inputs: dict) -> bool:
         "yes",
     }:
         return False
-    return str(inputs.get("operation", "review")) == "review"
+    # Dispatch UIs can send "Review" or surrounding whitespace. Fold the same
+    # way as the rescan flag so only a real review operation is explicit.
+    return str(inputs.get("operation", "review")).strip().lower() == "review"
 
 
 def event_requests_rescan(event: dict, kind: str) -> bool:
@@ -158,6 +160,7 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
             live.get("id") != comment_id
             or live.get("body") != comment.get("body")
             or live.get("updated_at") != comment.get("updated_at")
+            or live.get("created_at") != live.get("updated_at")
             or _object(live.get("user")).get("login") != actor
             or _object(live.get("user")).get("type") != "User"
             or live.get("author_association") not in {"OWNER", "MEMBER", "COLLABORATOR"}
@@ -186,11 +189,16 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
             raise ReviewInputError("explicit rescan run identity is invalid")
         request_id = int(run_id)
         run = get(f"/actions/runs/{request_id}", read_token=actions_token)
+        # The run's head is the workflow ref (usually the default branch), not
+        # the pull request head. Bind the workflow file instead of that SHA.
+        workflow_path = run.get("path")
         if (
             run.get("id") != request_id
             or run.get("event") != "workflow_dispatch"
             or _object(run.get("repository")).get("id") != args.repository_id
             or _object(run.get("actor")).get("login") != actor
+            or not isinstance(workflow_path, str)
+            or not workflow_path.endswith("/review-sensei-review.yml")
         ):
             raise ReviewInputError("explicit rescan run identity is unauthorized")
         requested_at = run.get("created_at")
