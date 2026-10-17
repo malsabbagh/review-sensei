@@ -6,6 +6,13 @@
   the same head, with durable request replay protection and existing budgets.
   Ordinary duplicates and complete reviews remain suppressed; excluded content
   still withholds approval.
+- A maintainer override is checked against the session schema before the
+  GitHub ledger comment is written, so a batch the reader cannot load is
+  not stored. The disposition array cap now matches the runtime item cap;
+  the byte budget and per-head cap are unchanged. Ten short finding
+  decisions in one comment persist together and read back. `verify` still
+  exits 0 when approval is withheld for a real blocker, and exits 1 when
+  gate re-evaluation itself fails.
 
 ## 0.7.1 - 2026-10-16
 

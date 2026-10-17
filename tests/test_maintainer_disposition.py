@@ -17,9 +17,11 @@ from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.disposition import (
     MAINTAINER_ACTIONS,
     FindingDisposition,
+    MaintainerCommandResult,
     apply_session_command,
     authorized_maintainer,
     authorized_override,
+    command_exit_code,
     parse_maintainer_command,
     render_convergence_summary,
     resolve_finding_reference,
@@ -30,6 +32,7 @@ from review_sensei.session import (
     InMemorySessionLedger,
     LocalSessionLedger,
     SessionIdentity,
+    SessionRecord,
     prepare_session_round,
 )
 
@@ -535,6 +538,72 @@ class SessionCommandTests(unittest.TestCase):
         loaded = ledger.load(IDENTITY, now=FIXED_NOW)
         self.assertEqual(loaded.status, "ok")
         self.assertEqual(len(loaded.record.dispositions), 4)
+
+    def test_ten_headed_overrides_persist_and_round_trip(self):
+        ledger = InMemorySessionLedger()
+        head = "ab" * 20
+        fingerprints = [f"{index:016x}" for index in range(1, 11)]
+        command = parse_maintainer_command(
+            "@reviewsensei override " + " ".join(fingerprints) + " acceptable risk",
+            actor="alice",
+            head_sha=head,
+        )
+        self.assertIsNotNone(command)
+        assert command is not None
+        record, result = apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW)
+        self.assertTrue(result.applied)
+        self.assertEqual(
+            [item["fingerprint"] for item in record.dispositions], fingerprints
+        )
+        self.assertEqual(len(result.receipts), 10)
+        self.assertTrue(all(item.outcome == "recorded" for item in result.receipts))
+        reloaded = SessionRecord.from_dict(record.to_dict())
+        self.assertEqual(len(reloaded.dispositions), 10)
+        loaded = ledger.load(IDENTITY, now=FIXED_NOW)
+        self.assertEqual(len(loaded.record.dispositions), 10)
+
+    def test_another_short_override_after_ten_still_round_trips(self):
+        ledger = InMemorySessionLedger()
+        head = "ab" * 20
+        first = [f"{index:016x}" for index in range(1, 11)]
+        command = parse_maintainer_command(
+            "@reviewsensei override " + " ".join(first) + " acceptable risk",
+            actor="alice",
+            head_sha=head,
+        )
+        assert command is not None
+        apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW)
+        extra = parse_maintainer_command(
+            f"@reviewsensei override {11:016x} acceptable risk",
+            actor="alice",
+            head_sha=head,
+        )
+        assert extra is not None
+        record, result = apply_session_command(ledger, IDENTITY, extra, now=FIXED_NOW)
+        self.assertTrue(result.applied)
+        self.assertEqual(len(record.dispositions), 11)
+        self.assertEqual(
+            len(SessionRecord.from_dict(record.to_dict()).dispositions), 11
+        )
+
+    def test_gate_evaluation_failure_exits_nonzero_and_withheld_approval_does_not(
+        self,
+    ):
+        failed = MaintainerCommandResult(
+            action="verify",
+            applied=True,
+            operator_paused=False,
+            summary="gate re-evaluation failed",
+            evaluation_failed=True,
+        )
+        withheld = MaintainerCommandResult(
+            action="verify",
+            applied=True,
+            operator_paused=False,
+            summary="approval withheld (human_adjudication_open)",
+        )
+        self.assertEqual(command_exit_code(failed), 1)
+        self.assertEqual(command_exit_code(withheld), 0)
 
     def test_operator_pause_requires_public_cas_replace(self):
         class LegacyLedger:

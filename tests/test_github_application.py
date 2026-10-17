@@ -32,7 +32,11 @@ from review_sensei.models import (
     ReviewResult,
 )
 from review_sensei.outcomes import RecoveryArtifact
-from review_sensei.session import InMemorySessionLedger, SessionIdentity
+from review_sensei.session import (
+    InMemorySessionLedger,
+    SessionIdentity,
+    SessionRecord,
+)
 from tests.test_operation_entry import MemoryComments
 
 
@@ -137,6 +141,69 @@ class GitHubApplicationTests(unittest.TestCase):
             learner=self.learner,
             replier=self.replier,
         )
+
+    def test_gate_reevaluation_failure_is_an_evaluation_failure(self):
+        from review_sensei.disposition import MaintainerCommandResult
+
+        record = SessionRecord.create(
+            SessionIdentity("owner/repo", 1, repository_id=1),
+            now=datetime(2026, 9, 19, tzinfo=timezone.utc),
+        )
+        self.reviewer.finalizer = SimpleNamespace(
+            refinalize_with_dispositions=lambda **kwargs: PublicationResult(
+                status="gate_reevaluation_failed"
+            )
+        )
+        updated = self.application._refinalize_command(
+            MaintainerCommandResult(
+                action="verify",
+                applied=True,
+                operator_paused=False,
+                summary="overrides for this commit are loaded",
+            ),
+            oidc_token="oidc",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha="a" * 40,
+            app_slug="review-sensei[bot]",
+            actor="alice",
+            record=record,
+        )
+        self.assertTrue(updated.evaluation_failed)
+        self.assertIn("gate re-evaluation failed", updated.summary)
+
+    def test_withheld_approval_is_not_an_evaluation_failure(self):
+        from review_sensei.disposition import MaintainerCommandResult
+
+        record = SessionRecord.create(
+            SessionIdentity("owner/repo", 1, repository_id=1),
+            now=datetime(2026, 9, 19, tzinfo=timezone.utc),
+        )
+        self.reviewer.finalizer = SimpleNamespace(
+            refinalize_with_dispositions=lambda **kwargs: PublicationResult(
+                status="approval_withheld",
+                diagnostic="human_adjudication_open",
+            )
+        )
+        updated = self.application._refinalize_command(
+            MaintainerCommandResult(
+                action="verify",
+                applied=True,
+                operator_paused=False,
+                summary="overrides for this commit are loaded",
+            ),
+            oidc_token="oidc",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha="a" * 40,
+            app_slug="review-sensei[bot]",
+            actor="alice",
+            record=record,
+        )
+        self.assertFalse(updated.evaluation_failed)
+        self.assertIn("approval withheld (human_adjudication_open)", updated.summary)
 
     def test_disabled_options_never_request_or_exchange_capabilities(self):
         options = GitHubWriteOptions()

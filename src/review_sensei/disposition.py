@@ -560,6 +560,20 @@ class MaintainerCommandResult:
     disposition: FindingDisposition | None = None
     dispositions: tuple[FindingDisposition, ...] = ()
     receipts: tuple[OverrideReceipt, ...] = ()
+    # True when the command could not recompute eligibility. Approval still
+    # being blocked is a successful command with evaluation_failed left false.
+    evaluation_failed: bool = False
+
+
+def command_exit_code(result: MaintainerCommandResult) -> int:
+    """Exit 1 only when eligibility could not be evaluated.
+
+    A completed command that withholds approval is exit 0. The review check
+    carries the action-required state. An evaluation failure must not look
+    like a successful workflow run.
+    """
+
+    return 1 if result.evaluation_failed else 0
 
 
 def _reference_receipt(

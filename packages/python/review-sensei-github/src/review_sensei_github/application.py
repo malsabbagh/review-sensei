@@ -2048,7 +2048,7 @@ class GitHubApplication:
                 dispositions=dispositions,
             )
         except Exception:
-            return replace(result, summary=failed)
+            return replace(result, summary=failed, evaluation_failed=True)
         thread_status = getattr(publication, "thread_resolution", None)
         if thread_status:
             result = replace(
@@ -2061,7 +2061,7 @@ class GitHubApplication:
                 ),
             )
         if getattr(publication, "status", None) == "gate_reevaluation_failed":
-            return replace(result, summary=failed)
+            return replace(result, summary=failed, evaluation_failed=True)
         if getattr(publication, "status", None) in {"approved", "already_approved"}:
             return replace(result, summary=result.summary + "; approval submitted")
         diagnostic = getattr(publication, "diagnostic", None)

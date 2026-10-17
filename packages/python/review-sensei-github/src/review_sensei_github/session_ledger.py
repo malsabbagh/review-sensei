@@ -233,7 +233,8 @@ def parse_session_comment(
         record = SessionRecord.from_dict(payload)
     except ReviewInputError as exc:
         raise SessionLoadError(
-            SessionLoadReason.INTEGRITY_FAILED, "session comment record is invalid"
+            SessionLoadReason.INTEGRITY_FAILED,
+            f"session comment record is invalid: {exc}",
         ) from exc
     if record.record_sha256 != marker["digest"]:
         raise SessionLoadError(
@@ -1062,12 +1063,36 @@ class GitHubIssueCommentSessionLedger:
         digests = set(self._observed_consumed_grants)
         if accepted is not None:
             digests.add(accepted)
-        return render_session_comment(
+        body = render_session_comment(
             repository_id=repository_id,
             pull_request=pull_request,
             record=record,
             consumed_grants=tuple(sorted(digests)),
         )
+        # Validate the exact comment before any GitHub write. Writers used to
+        # PATCH first and parse the response afterwards, so a candidate the
+        # public schema rejects became the stored ledger and the next command
+        # only reported "session comment record is invalid".
+        self._require_readable_candidate(body, record)
+        return body
+
+    def _require_readable_candidate(self, body: str, record: SessionRecord) -> None:
+        try:
+            preview = parse_session_comment(body, identity=record.identity())
+        except SessionLoadError as exc:
+            cause = exc.__cause__
+            detail = str(cause) if isinstance(cause, ReviewInputError) else str(exc)
+            raise ReviewInputError(
+                f"session comment was not written: {detail}"
+            ) from exc
+        if (
+            preview is None
+            or preview.record_sha256 != record.record_sha256
+            or preview.generation != record.generation
+        ):
+            raise ReviewInputError(
+                "session comment was not written: candidate is unreadable"
+            )
 
     def _discover(
         self, identity: SessionIdentity, *, now: datetime | None = None

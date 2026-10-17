@@ -154,7 +154,8 @@ MAX_DISPOSITIONS_PER_HEAD = 32
 MAX_UNHEADED_DISPOSITIONS = 4
 # Four maximum-size dispositions are about 9845 canonical bytes once non-ASCII
 # reasons and actors are escaped. The bound stays above that historical record
-# so an existing four-item ledger still loads.
+# so an existing four-item ledger still loads. Shorter decisions can use the
+# rest of the budget, up to the per-head and item caps.
 MAX_DISPOSITION_BYTES = 10240
 MAX_DISPOSITION_ITEMS = 256
 MAX_DISPOSITION_REASON_BYTES = 512
