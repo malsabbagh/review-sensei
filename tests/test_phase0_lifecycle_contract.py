@@ -1948,6 +1948,551 @@ class Phase5PartitionedFinalizerAndReconciliationJourneyTests(unittest.TestCase)
         self.assertEqual(loaded.record.generation, 5)
         self.assertEqual(len(loaded.record.dispositions), 5)
 
+    def test_mixed_source_check_state_agrees_with_persisted_and_retained_decisions(
+        self,
+    ) -> None:
+        """Item 1: ReviewPublisher check conclusion must use merged/persisted required_decisions rather than raw result."""
+        from review_sensei_github.publication import (
+            ReviewPublisher,
+            approval_eligibility_from_body,
+        )
+
+        from tests import test_human_assessment
+
+        diff_text = (
+            "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n"
+            + test_human_assessment.DIFF
+            + "\n"
+        )
+        clean_result = ReviewResult(
+            summary="The broader scope was reviewed.",
+            comments=(),
+            provider="fixture",
+            review_status="complete",
+        )
+
+        # 1. Complete fresh result with no human findings, while retained_eligibility still has a pending decision
+        state_retained = test_human_assessment.State()
+        pub_retained = ReviewPublisher(http=state_retained.http)
+        out_retained = pub_retained.publish(
+            token="synthetic-review",
+            check_token="synthetic-check",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=test_human_assessment.HEAD,
+            base_branch="main",
+            base_sha=test_human_assessment.BASE,
+            result=clean_result,
+            diff=diff_text,
+            app_slug=test_human_assessment.APP,
+            retained_eligibility=state_retained.eligibility,
+            continuation_digest="f" * 64,
+            source_guard=lambda: True,
+        )
+        self.assertEqual(out_retained.status, "published")
+        self.assertEqual(out_retained.diagnostic, "human_adjudication_open")
+        self.assertEqual(state_retained.check_runs[-1]["conclusion"], "action_required")
+        self.assertNotIn("APPROVE", state_retained.events())
+
+        # 2. Replaying an older human-bearing result after its durable decision has been resolved
+        human_comment = ReviewComment(
+            path="src/app.py",
+            line=1,
+            body="Confirm that this path cannot send private input remotely.",
+            severity="high",
+            effective_blocking=False,
+            needs_human=True,
+        )
+        human_result = ReviewResult(
+            summary="Human assessment is required.",
+            comments=(human_comment,),
+            provider="ollama",
+            review_status="complete",
+        )
+        state_replay = test_human_assessment.State()
+        state_replay.reviews = []
+        pub_replay = ReviewPublisher(http=state_replay.http)
+        first_pub = pub_replay.publish(
+            token="synthetic-review",
+            check_token="synthetic-check",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=test_human_assessment.HEAD,
+            base_branch="main",
+            base_sha=test_human_assessment.BASE,
+            result=human_result,
+            diff=diff_text,
+            app_slug=test_human_assessment.APP,
+        )
+        self.assertEqual(first_pub.status, "published")
+        self.assertEqual(state_replay.check_runs[-1]["conclusion"], "action_required")
+
+        persisted = approval_eligibility_from_body(state_replay.reviews[-1]["body"])
+        assert persisted is not None and persisted.human_review is not None
+        fp = persisted.human_review.findings[0].fingerprint
+        resolved_elig = replace(
+            persisted,
+            facts=replace(persisted.facts, has_human_adjudication_findings=False),
+            human_review=replace(persisted.human_review, resolved=(fp,)),
+        )
+        old_marker = approval_eligibility_marker(persisted)
+        new_marker = approval_eligibility_marker(resolved_elig)
+        state_replay.reviews[-1]["body"] = state_replay.reviews[-1]["body"].replace(
+            old_marker, new_marker
+        )
+
+        replay_out = pub_replay.publish(
+            token="synthetic-review",
+            check_token="synthetic-check",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=test_human_assessment.HEAD,
+            base_branch="main",
+            base_sha=test_human_assessment.BASE,
+            result=human_result,
+            diff=diff_text,
+            app_slug=test_human_assessment.APP,
+        )
+        self.assertEqual(replay_out.status, "already_published")
+        self.assertIsNone(replay_out.diagnostic)
+        self.assertEqual(state_replay.check_runs[-1]["conclusion"], "success")
+        self.assertIn("APPROVE", state_replay.events())
+
+        # 3. Partial/incomplete coverage retains non-passing action_required precedence even when decisions are resolved
+        state_partial = test_human_assessment.State(
+            eligibility=test_human_assessment.prior(
+                review_status="partial", coverage_blocker="partial"
+            )
+        )
+        assert state_partial.eligibility.human_review is not None
+        partial_fp = state_partial.eligibility.human_review.findings[0].fingerprint
+        cleared_partial = replace(
+            state_partial.eligibility,
+            facts=replace(
+                state_partial.eligibility.facts,
+                has_human_adjudication_findings=False,
+            ),
+            human_review=replace(
+                state_partial.eligibility.human_review,
+                resolved=(partial_fp,),
+            ),
+        )
+        state_partial.eligibility = cleared_partial
+        state_partial.reviews = [state_partial.review(cleared_partial, 20)]
+        pub_partial = ReviewPublisher(http=state_partial.http)
+        out_partial = pub_partial.publish(
+            token="synthetic-review",
+            check_token="synthetic-check",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=test_human_assessment.HEAD,
+            base_branch="main",
+            base_sha=test_human_assessment.BASE,
+            result=clean_result,
+            diff=diff_text,
+            app_slug=test_human_assessment.APP,
+            retained_eligibility=cleared_partial,
+            continuation_digest="e" * 64,
+            source_guard=lambda: True,
+        )
+        self.assertEqual(out_partial.status, "published")
+        self.assertEqual(out_partial.diagnostic, "review_incomplete")
+        self.assertEqual(state_partial.check_runs[-1]["conclusion"], "action_required")
+        self.assertNotIn("APPROVE", state_partial.events())
+
+    def test_three_way_presentation_classification_across_summary_terminal_and_omission_budget(
+        self,
+    ) -> None:
+        """Item 3: Summary, review body, terminal output, and omission budgets must keep Required fix, Required decision, and Optional suggestion distinct."""
+        from review_sensei_github.publication import (
+            AssembledReview,
+            BodyExplanation,
+            IndexedFinding,
+            fit_assembled_review,
+        )
+
+        from review_sensei.presentation import (
+            CHANGES_REQUIRED_STATE,
+            NO_REQUIRED_FIXES_STATE,
+            OPTIONAL_FINDING,
+            FindingView,
+            build_finding_view,
+            build_review_summary_view,
+            render_review_summary,
+            render_review_text,
+        )
+
+        req_fix = ReviewComment(
+            path="src/a.py",
+            line=10,
+            body="Blocking defect.",
+            severity="high",
+            blocking=True,
+            effective_blocking=True,
+            needs_human=False,
+        )
+        req_decision = ReviewComment(
+            path="src/b.py",
+            line=20,
+            body="Ambiguous external contract.",
+            severity="high",
+            blocking=False,
+            effective_blocking=False,
+            needs_human=True,
+        )
+        opt_suggestion = ReviewComment(
+            path="src/c.py",
+            line=30,
+            body="Rename helper for clarity.",
+            severity="low",
+            blocking=False,
+            effective_blocking=False,
+            needs_human=False,
+        )
+
+        fix_view = build_finding_view(
+            req_fix,
+            fingerprint="1" * 64,
+            identifier="RS-FIX001",
+            placement="inline",
+        )
+        decision_view = build_finding_view(
+            req_decision,
+            fingerprint="2" * 64,
+            identifier="RS-DEC001",
+            placement="body",
+        )
+        opt_view = build_finding_view(
+            opt_suggestion,
+            fingerprint="3" * 64,
+            identifier="RS-OPT001",
+            placement="inline",
+        )
+
+        # 1. Decision-only review summary
+        decision_summary = render_review_summary(
+            build_review_summary_view(
+                state=NO_REQUIRED_FIXES_STATE,
+                head_sha=HEAD,
+                optional=(decision_view,),
+            )
+        )
+        self.assertIn("**No required fixes · 1 required decision**", decision_summary)
+        self.assertIn("### Required decisions", decision_summary)
+        self.assertIn(
+            "Resolve RS-DEC001 before approval can proceed.",
+            decision_summary,
+        )
+        self.assertNotIn("optional improvement", decision_summary.lower())
+
+        # 2. Mixed fix + decision + suggestion summary and terminal output
+        mixed_result = ReviewResult(
+            summary="Mixed findings.",
+            comments=(req_fix, req_decision, opt_suggestion),
+            provider="ollama",
+            review_status="complete",
+        )
+        mixed_summary = render_review_summary(
+            build_review_summary_view(
+                state=CHANGES_REQUIRED_STATE,
+                head_sha=HEAD,
+                required=(fix_view,),
+                optional=(decision_view, opt_view),
+            )
+        )
+        self.assertIn(
+            "**1 required fix · 1 required decision · 1 optional improvement**",
+            mixed_summary,
+        )
+        self.assertIn("### Required\n", mixed_summary)
+        self.assertIn("### Required decisions\n", mixed_summary)
+        self.assertIn("### Optional\n", mixed_summary)
+        self.assertIn(
+            "Address RS-FIX001, resolve RS-DEC001, and run verification. Optional suggestions do not affect the review gate.",
+            mixed_summary,
+        )
+
+        terminal_out = render_review_text(mixed_result)
+        self.assertIn("required fixes: 1", terminal_out)
+        self.assertIn("required decisions: 1", terminal_out)
+        self.assertIn("optional findings: 1", terminal_out)
+        self.assertIn("Required fixes:", terminal_out)
+        self.assertIn("Required decisions:", terminal_out)
+        self.assertIn("Optional findings:", terminal_out)
+        self.assertIn("[required fix]", terminal_out)
+        self.assertIn("[required decision]", terminal_out)
+        self.assertIn("[optional]", terminal_out)
+
+        # 3. Omission under body size limit keeps required decisions intact and only omits optional explanations
+        large_opt_view = FindingView(
+            identifier="RS-OPT999",
+            requirement=OPTIONAL_FINDING,
+            severity="low",
+            title="Optional refactor note.",
+            detail="Optional refactor note: " + ("x" * 2400),
+            placement="body",
+            needs_human=False,
+            location="`src/outside.py:99`",
+        )
+        body_decision_view = FindingView(
+            identifier="RS-DEC999",
+            requirement=OPTIONAL_FINDING,
+            severity="high",
+            title="Confirm cross-service contract before merge.",
+            detail="Confirm cross-service contract before merge.",
+            placement="body",
+            needs_human=True,
+            location="`src/outside.py:50`",
+        )
+        assembled = AssembledReview(
+            inline_comments=(),
+            index_entries=(
+                IndexedFinding(
+                    instance="a" * 64,
+                    lifecycle="a" * 64,
+                    blocking=False,
+                    needs_human=True,
+                    body_placed=True,
+                ),
+                IndexedFinding(
+                    instance="b" * 64,
+                    lifecycle="b" * 64,
+                    blocking=False,
+                    needs_human=False,
+                    body_placed=True,
+                ),
+            ),
+            head_sha=HEAD,
+            state=NO_REQUIRED_FIXES_STATE,
+            reason=None,
+            overview="Size limit test.",
+            coverage_line=None,
+            required_views=(),
+            optional_views=(body_decision_view, large_opt_view),
+            limitations=(),
+            placement_note=None,
+            body_explanations=(
+                BodyExplanation(
+                    instance="a" * 64,
+                    severity="high",
+                    obligatory=True,
+                    view=body_decision_view,
+                ),
+                BodyExplanation(
+                    instance="b" * 64,
+                    severity="low",
+                    obligatory=False,
+                    view=large_opt_view,
+                ),
+            ),
+            inline_blocker_instances=(),
+            requests_changes=False,
+        )
+        fitted_summary, _ = fit_assembled_review(
+            assembled,
+            review_marker="<!-- reviewsensei:review:v1 repo=1 pr=1 head="
+            + HEAD
+            + " result="
+            + ("0" * 64)
+            + " -->",
+            eligibility_marker="<!-- reviewsensei:approval-eligibility:v3 {} -->",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD,
+            base_sha=BASE,
+            result_digest="0" * 64,
+            summary_limit=2200,
+        )
+        self.assertIn("Confirm cross-service contract before merge.", fitted_summary)
+        self.assertIn("### Required decisions", fitted_summary)
+        self.assertIn(
+            "1 finding explanation was omitted for size. That finding remains open.",
+            fitted_summary,
+        )
+
+    def test_required_contract_enum_matches_public_schema_and_round_trips_every_value(
+        self,
+    ) -> None:
+        """Item 4: REQUIRED_CONTRACT_KINDS and candidate-finding.schema.json must accept the exact same 8 contract kinds."""
+        import json as _json
+
+        from review_sensei.convergence import REQUIRED_CONTRACT_KINDS
+        from review_sensei.schemas import validate_public_document
+
+        schema_path = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "review_sensei"
+            / "schemas"
+            / "candidate-finding.schema.json"
+        )
+        schema = _json.loads(schema_path.read_text(encoding="utf-8"))
+        schema_enum = frozenset(schema["properties"]["required_contract"]["enum"])
+        self.assertEqual(REQUIRED_CONTRACT_KINDS, schema_enum)
+        self.assertEqual(
+            REQUIRED_CONTRACT_KINDS,
+            frozenset(
+                {
+                    "api-contract",
+                    "changed-interface",
+                    "compatibility-contract",
+                    "persisted-state",
+                    "public-api",
+                    "required-contract",
+                    "security-boundary",
+                    "test-expectation",
+                }
+            ),
+        )
+        for contract_kind in sorted(REQUIRED_CONTRACT_KINDS):
+            with self.subTest(contract_kind=contract_kind):
+                candidate = CandidateFinding(
+                    claim="Null dereference on user.token.",
+                    triggering_conditions="Call load_token(None).",
+                    impacted_path="src/auth.py",
+                    severity_rationale="Raises AttributeError at runtime.",
+                    evidence=(
+                        EvidenceReference(
+                            path="src/auth.py",
+                            line=2,
+                            snapshot_sha256="a" * 64,
+                            excerpt="return user.token",
+                        ),
+                    ),
+                    severity="high",
+                    remedy="Return early if user is None.",
+                    required_contract=contract_kind,
+                )
+                doc = candidate.to_dict()
+                validate_public_document(doc, "candidate-finding")
+                round_tripped = CandidateFinding.from_dict(doc)
+                self.assertEqual(round_tripped.required_contract, contract_kind)
+
+    def test_local_replay_tree_digest_streams_and_fails_closed_when_file_or_byte_bounds_exceeded(
+        self,
+    ) -> None:
+        """Item 5: Local replay hashing must enforce finite file-count and total-byte bounds and fail closed to a non-reusable digest when exceeded."""
+        import tempfile
+        from unittest.mock import patch
+
+        from review_sensei.cli import _replay_file_digest, _replay_tree_digest
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.txt").write_text("alpha", encoding="utf-8")
+            d1 = _replay_tree_digest(root)
+            d2 = _replay_tree_digest(root)
+            self.assertEqual(d1, d2)
+            self.assertEqual(len(d1), 64)
+
+            # Exceeding file-count bound fails closed with unique non-reusable digest
+            with patch("review_sensei.cli._MAX_REPLAY_TREE_FILES", 0):
+                over_files_1 = _replay_tree_digest(root)
+                over_files_2 = _replay_tree_digest(root)
+            self.assertTrue(over_files_1.startswith("unbounded:"))
+            self.assertNotEqual(over_files_1, over_files_2)
+
+            # Exceeding byte bound fails closed with unique non-reusable digest
+            with patch("review_sensei.cli._MAX_REPLAY_FILE_BYTES", 2):
+                over_bytes_1 = _replay_file_digest(root / "a.txt")
+                over_bytes_2 = _replay_file_digest(root / "a.txt")
+            self.assertTrue(over_bytes_1.startswith("unbounded:"))
+            self.assertNotEqual(over_bytes_1, over_bytes_2)
+
+    def test_verifier_target_specific_guard_matching_and_unsubstantiated_severity_demotion(
+        self,
+    ) -> None:
+        """Item 6: Guarded dereference in a method calling self.format(user.token) sets contrary_evidence=True, and unsubstantiated high-severity claims do not become Required decisions."""
+        # 1. Method calling self.format(user.token) after guarding user and user.token
+        snap_method = {
+            "src/service.py": (
+                "class TokenService:\n"
+                "    def render(self, user):\n"
+                "        if user is None or user.token is None:\n"
+                "            return ''\n"
+                "        return self.format(user.token.strip())\n"
+            )
+        }
+        sha_method = _snapshot_digest(snap_method)
+        cand_method = CandidateFinding(
+            claim="render dereferences user.token without checking for None.",
+            triggering_conditions="Call render(user) when user.token is None.",
+            impacted_path="src/service.py",
+            severity_rationale="Raises AttributeError when user.token is None.",
+            evidence=(
+                EvidenceReference(
+                    path="src/service.py",
+                    line=5,
+                    snapshot_sha256=sha_method,
+                    excerpt="return self.format(user.token.strip())",
+                ),
+            ),
+            severity="high",
+            remedy="Check whether user.token is None before calling strip().",
+        )
+        prep_method = prepare_publishable_review(
+            ReviewResult(
+                summary="Review.",
+                comments=(),
+                provider="ollama",
+                review_status="complete",
+            ),
+            candidates=(cand_method,),
+            snapshot=snap_method,
+            snapshot_sha256=sha_method,
+            evidence_policy="confirmed",
+            changed_lines={"src/service.py": frozenset({5})},
+            changed_paths=("src/service.py",),
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        )
+        self.assertTrue(prep_method.verifications[0].contrary_evidence)
+        self.assertFalse(prep_method.result.comments[0].effective_blocking)
+        self.assertFalse(prep_method.result.comments[0].needs_human)
+
+        # 2. Unsubstantiated high-severity claim on non-trivial code with no grounded failure mechanism
+        snap_call = {
+            "src/service.py": ("def compute_total(items):\n    return sum(items)\n")
+        }
+        sha_call = _snapshot_digest(snap_call)
+        cand_unsubstantiated = CandidateFinding(
+            claim="compute_total could be clearer if refactored into a helper.",
+            triggering_conditions="Calling compute_total(items).",
+            impacted_path="src/service.py",
+            severity_rationale="High severity maintainability concern.",
+            evidence=(
+                EvidenceReference(
+                    path="src/service.py",
+                    line=2,
+                    snapshot_sha256=sha_call,
+                    excerpt="return sum(items)",
+                ),
+            ),
+            severity="high",
+            remedy="Extract a helper function for summing items.",
+        )
+        prep_unsubstantiated = prepare_publishable_review(
+            ReviewResult(
+                summary="Review.",
+                comments=(),
+                provider="ollama",
+                review_status="complete",
+            ),
+            candidates=(cand_unsubstantiated,),
+            snapshot=snap_call,
+            snapshot_sha256=sha_call,
+            evidence_policy="confirmed",
+            changed_lines={"src/service.py": frozenset({2})},
+            changed_paths=("src/service.py",),
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        )
+        comment = prep_unsubstantiated.result.comments[0]
+        self.assertFalse(comment.effective_blocking)
+        self.assertFalse(comment.needs_human)
+
 
 if __name__ == "__main__":
     unittest.main()

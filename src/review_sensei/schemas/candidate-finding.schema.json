@@ -39,6 +39,9 @@
     "required_contract": {
       "type": "string",
       "enum": [
+        "required-contract",
+        "api-contract",
+        "compatibility-contract",
         "changed-interface",
         "public-api",
         "persisted-state",

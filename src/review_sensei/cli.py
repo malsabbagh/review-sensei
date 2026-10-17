@@ -818,12 +818,32 @@ def _local_change_revision(label: str, content: str) -> str:
 _SKIP_REPLAY_DIRS = frozenset(
     {".git", "__pycache__", ".venv", "node_modules", ".mypy_cache", ".ruff_cache"}
 )
+_MAX_REPLAY_FILE_BYTES = 4 * 1024 * 1024
+_MAX_REPLAY_TREE_FILES = 2048
+_MAX_REPLAY_TREE_BYTES = 16 * 1024 * 1024
+_REPLAY_READ_CHUNK_BYTES = 65536
 
 
-def _replay_file_digest(path: Path) -> str | None:
+def _replay_file_digest(
+    path: Path,
+    *,
+    max_bytes: int | None = None,
+) -> str | None:
+    effective_max_bytes = _MAX_REPLAY_FILE_BYTES if max_bytes is None else max_bytes
     try:
         if path.is_file() and not path.is_symlink():
-            return hashlib.sha256(path.read_bytes()).hexdigest()
+            hasher = hashlib.sha256()
+            total_bytes = 0
+            with path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(_REPLAY_READ_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if total_bytes > effective_max_bytes:
+                        return "unbounded:" + os.urandom(16).hex()
+                    hasher.update(chunk)
+            return hasher.hexdigest()
     except OSError:
         return "unreadable:" + os.urandom(16).hex()
     return None
@@ -833,18 +853,23 @@ def _replay_tree_digest(
     root: Path,
     *,
     ignore_names: frozenset[str] = frozenset(),
+    max_files: int | None = None,
+    max_bytes: int | None = None,
 ) -> str | None:
+    effective_max_files = _MAX_REPLAY_TREE_FILES if max_files is None else max_files
+    effective_max_bytes = _MAX_REPLAY_TREE_BYTES if max_bytes is None else max_bytes
     try:
         if not root.exists() or root.is_symlink():
             return None
         if root.is_file():
             if root.name in ignore_names:
                 return None
-            return _replay_file_digest(root)
+            return _replay_file_digest(root, max_bytes=effective_max_bytes)
         if not root.is_dir():
             return None
         hasher = hashlib.sha256()
         file_count = 0
+        total_bytes = 0
         pending = [root]
         entries: list[tuple[str, Path]] = []
         while pending:
@@ -854,16 +879,29 @@ def _replay_tree_digest(
                     continue
                 if child.is_dir():
                     if child.name not in _SKIP_REPLAY_DIRS:
+                        if len(pending) >= effective_max_files:
+                            return "unbounded:" + os.urandom(16).hex()
                         pending.append(child)
                 elif child.is_file():
                     if child.name in ignore_names:
                         continue
+                    if len(entries) >= effective_max_files:
+                        return "unbounded:" + os.urandom(16).hex()
                     rel = child.relative_to(root).as_posix()
                     entries.append((rel, child))
         for rel, file_path in sorted(entries, key=lambda item: item[0]):
-            data = file_path.read_bytes()
             file_count += 1
-            hasher.update(rel.encode("utf-8") + b"\0" + data + b"\0")
+            hasher.update(rel.encode("utf-8") + b"\0")
+            with file_path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(_REPLAY_READ_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if total_bytes > effective_max_bytes:
+                        return "unbounded:" + os.urandom(16).hex()
+                    hasher.update(chunk)
+            hasher.update(b"\0")
         return hasher.hexdigest() if file_count or entries else None
     except OSError:
         return "unreadable:" + os.urandom(16).hex()

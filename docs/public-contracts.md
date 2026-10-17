@@ -742,9 +742,11 @@ it. Only an invocation rejected before inference writes no
 document: a review that was admitted writes the bounded document it produced,
 including one that could not complete, and a repeated local session whose
 round is already published writes no new document. The review exit contract is
-`0` for a completed review with no required fixes, `1` for a completed review
-with required fixes remaining, and `2` when the review could not complete, its
-input was invalid, or an operator must intervene. An unchanged repeated local
+`0` for a completed review with no required fixes or required decisions, `1`
+for a completed review with required fixes remaining and no pending human
+decisions, and `2` when the review could not complete, its input was invalid,
+or a human decision (`required_decisions`) or operator intervention is
+required (including when both required fixes and required decisions remain). An unchanged repeated local
 session exits `2` with `already_published`: the persisted round is served
 instead of paying for a second inference call. Exits `1` and `2` add one
 `review-sensei: reason=<token>` line on stderr, and the exit is unchanged by
@@ -938,9 +940,9 @@ The review exit contract is stable:
 
 | Code | Meaning |
 | --- | --- |
-| `0` | The review completed and no required fixes remain |
-| `1` | The review completed with required fixes remaining |
-| `2` | The review could not complete: invalid input, partial coverage, a failed provider or publication, an exhausted budget, an already-published session round (`already_published`), or a human decision |
+| `0` | The review completed and no required fixes or required decisions remain |
+| `1` | The review completed with required fixes remaining and no pending human decisions |
+| `2` | The review could not complete or requires human intervention: invalid input, partial coverage, a failed provider or publication, an exhausted budget, an already-published session round (`already_published`), or a human decision (`required_decisions`, including when required fixes also remain) |
 
 A review that could not complete writes a structured
 `review-sensei: reason=<token>` line to stderr naming the cause, and it still
@@ -1261,12 +1263,13 @@ enforce, never approve) or `github.reviews: advisory` (no ReviewSensei merge
 gate). When automatic review and GitHub writes are
 enabled, ReviewSensei publishes one exact-head review and one stable
 `ReviewSensei` check run that is the head-bound enforcement authority for that
-head (ADR 0057). A completed `auto-approve` review publishes `success`
-whether or not required fixes remain, and submits `REQUEST_CHANGES` when they
-remain and `COMMENT` otherwise. `blocking` publishes `success` when a complete
-review has no required fixes and `failure` when required fixes remain, and
-stays `COMMENT`. `advisory` publishes `neutral`, stays `COMMENT`, and never
-fails the check. `action_required` covers a partial, incomplete, or
+head (ADR 0057). A completed `auto-approve` or `blocking` review publishes
+`failure` on the check when required fixes remain, `action_required` when
+required human decisions remain without required fixes, and `success` when no
+required fixes or required decisions remain; `auto-approve` submits
+`REQUEST_CHANGES` when required fixes remain and `COMMENT` otherwise, while
+`blocking` stays `COMMENT`. `advisory` publishes `neutral`, stays `COMMENT`, and never
+fails the check. `action_required` also covers a partial, incomplete, or
 unpublished review in `auto-approve` and `blocking`, and `cancelled` is a run
 that ended without a conclusion.
 A new review first writes `in_progress`, so an earlier conclusion on the same

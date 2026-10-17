@@ -2909,6 +2909,7 @@ class ReviewPublisher:
                 ),
                 policy=policy,
                 required_fixes=replay_eligibility.facts.has_blocking_findings,
+                required_decisions=replay_eligibility.facts.has_human_adjudication_findings,
             ),
         )
         finalized = self.finalizer.finalize(
@@ -3354,6 +3355,7 @@ class ReviewPublisher:
                         ),
                         policy=effective_policy,
                         required_fixes=prospective_eligibility.facts.has_blocking_findings,
+                        required_decisions=prospective_eligibility.facts.has_human_adjudication_findings,
                     ),
                 )
         eligibility = approval_eligibility_from_result(

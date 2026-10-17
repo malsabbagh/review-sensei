@@ -1031,6 +1031,19 @@ def _assess_candidate_premises(
         if alleges_null and tree is not None:
             derefs = _dereferenced_expressions_on_line(tree, reference.line)
             if derefs:
+                non_implicit = {
+                    expr
+                    for expr in derefs
+                    if expr not in {"self", "cls"} or expr in words
+                }
+                candidate_derefs = non_implicit or derefs
+                targeted_derefs = {
+                    expr
+                    for expr in candidate_derefs
+                    if expr.lower() in combined_text
+                    or expr.split(".")[0].lower() in words
+                }
+                relevant_derefs = targeted_derefs or candidate_derefs
                 guards = _active_guards_at_line(
                     tree.body,
                     reference.line,
@@ -1039,7 +1052,7 @@ def _assess_candidate_premises(
                     neg_extractor=_extract_is_none_guards,
                 )
                 active_guards = guards if guards is not None else set()
-                if derefs.issubset(active_guards):
+                if relevant_derefs.issubset(active_guards):
                     contrary_evidence = True
                 else:
                     mechanism_supported = True
@@ -1047,6 +1060,16 @@ def _assess_candidate_premises(
         if alleges_div_zero and tree is not None:
             divisors = _divisor_expressions_on_line(tree, reference.line)
             if divisors:
+                targeted_divisors = {
+                    expr
+                    for expr in divisors
+                    if expr.lower() in combined_text
+                    or any(
+                        tok in words
+                        for tok in re.findall(r"[a-z_][a-z0-9_]*", expr.lower())
+                    )
+                }
+                relevant_divisors = targeted_divisors or divisors
                 guards = _active_guards_at_line(
                     tree.body,
                     reference.line,
@@ -1055,7 +1078,7 @@ def _assess_candidate_premises(
                     neg_extractor=_extract_is_zero_guards,
                 )
                 active_guards = guards if guards is not None else set()
-                if divisors.issubset(active_guards):
+                if relevant_divisors.issubset(active_guards):
                     contrary_evidence = True
                 else:
                     mechanism_supported = True
@@ -1368,15 +1391,18 @@ def _has_plausible_unverified_high_impact(
         or verification.contrary_evidence
     ):
         return False
-    if not candidate.assumptions:
-        return False
     required_premises = {
         "source-reference",
         "failure-mechanism",
         "absence-of-guard",
         "material-impact",
     }
-    return required_premises.issubset(set(verification.supported_premises))
+    if not required_premises.issubset(set(verification.supported_premises)):
+        return False
+    return bool(
+        candidate.assumptions
+        or "actionable-remedy" not in verification.supported_premises
+    )
 
 
 def _candidate_to_comment(candidate: CandidateFinding) -> ReviewComment:
@@ -1686,9 +1712,15 @@ def prepare_publishable_review(
                     blocking=True,
                     severity=comment.severity or candidate.severity or "high",
                 )
-            elif (
-                comment.severity in {"high", "critical"}
-                and verification.contrary_evidence
+            elif comment.severity in {"high", "critical"} and (
+                verification.contrary_evidence
+                or (
+                    blocker_candidates is None
+                    and input_blocker_candidates is None
+                    and not _has_plausible_unverified_high_impact(
+                        candidate, verification
+                    )
+                )
             ):
                 comment = replace(comment, severity=None)
         if changed_lines is not None and not _comment_in_changed_lines(
