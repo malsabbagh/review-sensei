@@ -1582,6 +1582,82 @@ class GitHubSessionLedgerTests(unittest.TestCase):
             ["GET", "GET", "GET", "PATCH", "GET"],
         )
 
+    def test_unreadable_candidate_is_not_patched(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        body = render_session_comment(repository_id=99, pull_request=136, record=record)
+        http, calls = make_http(
+            [
+                json_response([{"id": 7, "body": body}]),
+                json_response([{"id": 7, "body": body}]),
+                json_response({"head": {"sha": "a" * 40}}),
+            ]
+        )
+        attestation = self._grant_attestation()
+        verifier = self._GrantVerifier(returned=attestation)
+        ledger = self._grant_bound_ledger(http, verifier, attestation)
+
+        def broken(**kwargs):
+            text = render_session_comment(**kwargs)
+            return text.replace('"operator_paused":true', '"operator_paused":"no"', 1)
+
+        with patch(
+            "review_sensei_github.session_ledger.render_session_comment",
+            side_effect=broken,
+        ):
+            with self.assertRaisesRegex(ReviewInputError, "was not written"):
+                ledger.replace(
+                    IDENTITY,
+                    lambda current: current.evolve(
+                        operator_paused=True,
+                        generation=current.generation + 1,
+                        now=FIXED_NOW,
+                    ),
+                    now=FIXED_NOW,
+                )
+        self.assertNotIn("PATCH", [method for method, _url, _data in calls])
+
+    def test_readable_body_for_a_different_record_is_not_patched(self):
+        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
+        body = render_session_comment(repository_id=99, pull_request=136, record=record)
+        http, calls = make_http(
+            [
+                json_response([{"id": 7, "body": body}]),
+                json_response([{"id": 7, "body": body}]),
+                json_response({"head": {"sha": "a" * 40}}),
+            ]
+        )
+        attestation = self._grant_attestation()
+        verifier = self._GrantVerifier(returned=attestation)
+        ledger = self._grant_bound_ledger(http, verifier, attestation)
+
+        def other_record(**kwargs):
+            rendered = kwargs["record"].evolve(
+                generation=kwargs["record"].generation + 1,
+                now=FIXED_NOW,
+            )
+            return render_session_comment(
+                repository_id=kwargs["repository_id"],
+                pull_request=kwargs["pull_request"],
+                record=rendered,
+                consumed_grants=kwargs.get("consumed_grants", ()),
+            )
+
+        with patch(
+            "review_sensei_github.session_ledger.render_session_comment",
+            side_effect=other_record,
+        ):
+            with self.assertRaisesRegex(ReviewInputError, "candidate is unreadable"):
+                ledger.replace(
+                    IDENTITY,
+                    lambda current: current.evolve(
+                        operator_paused=True,
+                        generation=current.generation + 1,
+                        now=FIXED_NOW,
+                    ),
+                    now=FIXED_NOW,
+                )
+        self.assertNotIn("PATCH", [method for method, _url, _data in calls])
+
     def test_missing_grant_bound_session_applies_command_in_one_remote_create(self):
         initial = SessionRecord.create(IDENTITY, now=FIXED_NOW)
         paused = initial.evolve(

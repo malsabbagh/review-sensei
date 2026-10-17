@@ -214,6 +214,9 @@ class OverrideStabilityTests(unittest.TestCase):
         )
         record = SessionRecord.create(IDENTITY).evolve(dispositions=dispositions)
         self.assertEqual(len(record.dispositions), 32)
+        self.assertEqual(
+            len(SessionRecord.from_dict(record.to_dict()).dispositions), 32
+        )
         self.assertLessEqual(
             len(json.dumps(record.to_dict()).encode("utf-8")),
             MAX_SESSION_COMMENT_BYTES,

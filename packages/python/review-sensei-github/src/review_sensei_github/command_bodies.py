@@ -916,7 +916,9 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 receipts=tuple(getattr(result, "receipts", ()) or ()),
                 ledger_written=bool(getattr(result, "applied", False)),
             )
-            return 0
+            from review_sensei.disposition import command_exit_code
+
+            return command_exit_code(result)
         for flag, value in (
             ("--repository-id", getattr(args, "repository_id", None)),
             ("--source-comment-id", getattr(args, "source_comment_id", None)),
@@ -937,7 +939,9 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             ledger, session_identity, parsed
         )
         print(command_result.summary)
-        return 0
+        from review_sensei.disposition import command_exit_code
+
+        return command_exit_code(command_result)
 
     if not args.allow_write:
         raise ReviewInputError("github writes require --allow-write")
