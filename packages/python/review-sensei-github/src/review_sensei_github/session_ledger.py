@@ -1079,9 +1079,12 @@ class GitHubIssueCommentSessionLedger:
     def _require_readable_candidate(self, body: str, record: SessionRecord) -> None:
         try:
             preview = parse_session_comment(body, identity=record.identity())
-        except SessionLoadError as exc:
+        except (SessionLoadError, ReviewInputError) as exc:
             cause = exc.__cause__
-            detail = str(cause) if isinstance(cause, ReviewInputError) else str(exc)
+            if isinstance(exc, ReviewInputError):
+                detail = str(exc)
+            else:
+                detail = str(cause) if isinstance(cause, ReviewInputError) else str(exc)
             raise ReviewInputError(
                 f"session comment was not written: {detail}"
             ) from exc

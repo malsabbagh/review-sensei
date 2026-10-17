@@ -12,7 +12,10 @@
   the byte budget and per-head cap are unchanged. Ten short finding
   decisions in one comment persist together and read back. `verify` still
   exits 0 when approval is withheld for a real blocker, and exits 1 when
-  gate re-evaluation itself fails.
+  gate re-evaluation itself fails. A record with more than four
+  dispositions is not readable by the released 0.7.1 reader, so this
+  schema alignment ships with the engine, the hosted package, and the
+  workflow pin together.
 
 ## 0.7.1 - 2026-10-16
 

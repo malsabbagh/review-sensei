@@ -573,7 +573,7 @@ def command_exit_code(result: MaintainerCommandResult) -> int:
     like a successful workflow run.
     """
 
-    return 1 if result.evaluation_failed else 0
+    return 1 if getattr(result, "evaluation_failed", False) else 0
 
 
 def _reference_receipt(
