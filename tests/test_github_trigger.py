@@ -645,6 +645,7 @@ class InlineCallerResolverTests(unittest.TestCase):
 
         marker = INLINE_COMMAND_PREFILTER_START.encode("utf-8")
         pruned = {
+            ".claude",
             ".git",
             ".mypy_cache",
             ".pytest_cache",

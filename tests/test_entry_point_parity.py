@@ -224,8 +224,8 @@ class EntryPointParityTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             app_authored=False, has_open_review_threads=False
         )
         blocked = check_outcome_for_result(reviewed, policy="blocking")
-        self.assertEqual(outcome.conclusion, "success")
-        self.assertEqual(outcome.title, "Changes requested")
+        self.assertEqual(outcome.conclusion, "failure")
+        self.assertEqual(outcome.title, "Required fixes remain")
         self.assertEqual(blocked.conclusion, "failure")
         self.assertFalse(decision.approved)
         self.assertIn("blocking-findings-open", decision.blockers)

@@ -1262,13 +1262,14 @@ class ReviewApprovalFinalizer:
     ) -> None:
         self.http = http
         self.evidence_budget = evidence_budget
+        self._operation_budget: EvidenceReadBudget | None = None
 
     def _review_pages(
         self, *, token: str, repository: str, pull_request: int
     ) -> list[Any]:
         # Legacy scans acquire one finite read budget. Partition consumers must
         # supply the same object used for parts/readback/fences; no phase reset.
-        budget = self.evidence_budget or EvidenceReadBudget()
+        budget = self.evidence_budget or self._operation_budget or EvidenceReadBudget()
         return _BudgetedReviewPagination(self.http, budget).paginate(
             path=self.http.repository_path(
                 repository, f"/pulls/{pull_request}/reviews"
@@ -1302,159 +1303,202 @@ class ReviewApprovalFinalizer:
         withholds.
         """
 
-        if not isinstance(eligibility, ReviewApprovalEligibility):
-            raise GitHubPublicationError("approval eligibility is invalid")
-        if eligibility.partitioned_root is not None:
-            # Reader-first prototype only. Full finalizer part/source/root
-            # fences and consuming-grant/resource qualification remain gates.
-            return PublicationResult(
-                status="approval_withheld", diagnostic="approval_withheld"
-            )
-        if not GIT_SHA_HEX.fullmatch(head_sha):
-            raise GitHubPublicationError("review head sha is invalid")
-        if eligibility.head_sha != head_sha:
-            return PublicationResult(
-                status="approval_withheld", diagnostic="approval_withheld"
-            )
-        # Body-placed blockers stay in the persisted flag. Inline blockers are
-        # not settled by that flag: a caller that just published them says they
-        # are unresolved, and a later finalizer requires a resolved thread.
-        honored = honored_instances or frozenset()
-        unresolved_inline = frozenset(assume_inline_unresolved or ()) - honored
-        static = evaluate_approval_facts(
-            replace(
-                eligibility.facts,
-                has_open_review_threads=False,
-                has_blocking_findings=(
-                    eligibility.facts.has_blocking_findings or bool(unresolved_inline)
-                ),
-            )
+        owns_operation_budget = (
+            self.evidence_budget is None and self._operation_budget is None
         )
-        if "auto-approval-disabled" in static.blockers:
-            return PublicationResult(status="auto_approval_disabled")
-        if not static.approved:
-            return PublicationResult(
-                status="approval_withheld",
-                diagnostic=approval_withheld_diagnostic(static),
+        if owns_operation_budget:
+            self._operation_budget = EvidenceReadBudget()
+        try:
+            if not isinstance(eligibility, ReviewApprovalEligibility):
+                raise GitHubPublicationError("approval eligibility is invalid")
+            if not GIT_SHA_HEX.fullmatch(head_sha):
+                raise GitHubPublicationError("review head sha is invalid")
+            if eligibility.head_sha != head_sha:
+                return PublicationResult(
+                    status="approval_withheld", diagnostic="approval_withheld"
+                )
+            # Body-placed blockers stay in the persisted flag. Inline blockers are
+            # not settled by that flag: a caller that just published them says they
+            # are unresolved, and a later finalizer requires a resolved thread.
+            honored = honored_instances or frozenset()
+            unresolved_inline = frozenset(assume_inline_unresolved or ()) - honored
+            static = evaluate_approval_facts(
+                replace(
+                    eligibility.facts,
+                    has_open_review_threads=False,
+                    has_blocking_findings=(
+                        eligibility.facts.has_blocking_findings
+                        or bool(unresolved_inline)
+                    ),
+                )
             )
-        if unresolved_inline:
-            return PublicationResult(
-                status="approval_withheld", diagnostic="required_fixes_open"
-            )
-        preflight = self._preflight(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=head_sha,
-            app_slug=app_slug,
-        )
-        if preflight.result is not None:
-            return preflight.result
-        if preflight.app_authored:
-            return PublicationResult(status="skipped_app_authored")
-        assert preflight.repository_id is not None and preflight.base_sha is not None
-        if (
-            eligibility.human_review is not None
-            and eligibility.human_review.base_sha != preflight.base_sha
-        ):
-            return PublicationResult(status="skipped_stale_base")
-        open_blocking, resolved_instances = self._scan_blocking_threads(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            repository_id=preflight.repository_id,
-            head_sha=head_sha,
-            base_sha=preflight.base_sha,
-            app_slug=app_slug,
-            honored_instances=honored,
-        )
-        # The thread scan can paginate, so bind the write to the same exact PR
-        # identity immediately before emitting APPROVE.
-        write_preflight = self._preflight(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=head_sha,
-            app_slug=app_slug,
-        )
-        if write_preflight.result is not None:
-            return write_preflight.result
-        if write_preflight.app_authored:
-            return PublicationResult(status="skipped_app_authored")
-        if (
-            write_preflight.repository_id != preflight.repository_id
-            or write_preflight.base_sha != preflight.base_sha
-        ):
-            return PublicationResult(status="skipped_stale_base")
-        decision = eligibility.evaluate(
-            app_authored=write_preflight.app_authored,
-            has_open_review_threads=open_blocking,
-        )
-        if not decision.approved:
-            return PublicationResult(
-                status="approval_withheld",
-                diagnostic=approval_withheld_diagnostic(decision),
-            )
-        reviews = self._load_head_reviews(
-            token=token, repository=repository, pull_request=pull_request
-        )
-        if not self._inline_obligations_resolved(
-            reviews,
-            repository_id=preflight.repository_id,
-            pull_request=pull_request,
-            head_sha=head_sha,
-            app_slug=app_slug,
-            resolved_instances=resolved_instances,
-            honored_instances=honored,
-        ):
-            return PublicationResult(
-                status="approval_withheld", diagnostic="required_fixes_open"
-            )
-        if (
-            require_persisted
-            and self._eligibility_from_reviews(
-                reviews, head_sha=head_sha, app_slug=app_slug
-            )
-            != eligibility
-        ):
-            return PublicationResult(
-                status="approval_withheld", diagnostic="approval_withheld"
-            )
-        marker = approval_marker(
-            repository_id=preflight.repository_id,
-            pull_request=pull_request,
-            head_sha=head_sha,
-            base_sha=preflight.base_sha,
-        )
-        if self._reviews_have_app_head_state(
-            reviews,
-            head_sha=head_sha,
-            app_slug=app_slug,
-            state="APPROVED",
-            body=marker,
-        ):
-            return PublicationResult(status="already_approved")
-        return self._post_head_review(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=head_sha,
-            body=marker,
-            event="APPROVE",
-            already=lambda: self._is_already_approved(
+            if "auto-approval-disabled" in static.blockers:
+                return PublicationResult(status="auto_approval_disabled")
+            if not static.approved:
+                return PublicationResult(
+                    status="approval_withheld",
+                    diagnostic=approval_withheld_diagnostic(static),
+                )
+            if unresolved_inline:
+                return PublicationResult(
+                    status="approval_withheld", diagnostic="required_fixes_open"
+                )
+            if eligibility.partitioned_root is not None:
+                root = eligibility.partitioned_root
+                effective_budget = self.evidence_budget or self._operation_budget
+                if (
+                    effective_budget is None
+                    or root.context.budget is not effective_budget
+                ):
+                    return PublicationResult(
+                        status="approval_withheld", diagnostic="approval_withheld"
+                    )
+                try:
+                    effective_budget.check()
+                except ReviewInputError as exc:
+                    raise GitHubPublicationError(
+                        "review decision reconciliation failed"
+                    ) from exc
+                try:
+                    root.to_document(eligibility)
+                except ReviewInputError:
+                    return PublicationResult(
+                        status="approval_withheld", diagnostic="approval_withheld"
+                    )
+                if (
+                    require_persisted
+                    or eligibility.facts.qualification != "qualified"
+                    or eligibility.human_review is None
+                    or bool(eligibility.human_review.pending)
+                    or root.context.binding.get("repository") != repository
+                    or root.context.binding.get("head_sha") != head_sha
+                    or eligibility.human_review.base_sha
+                    != root.context.binding.get("base_sha")
+                ):
+                    return PublicationResult(
+                        status="approval_withheld", diagnostic="approval_withheld"
+                    )
+                return PublicationResult(
+                    status="approved", review_id=root.context.owned_root_id
+                )
+            preflight = self._preflight(
                 token=token,
                 repository=repository,
                 pull_request=pull_request,
                 head_sha=head_sha,
-                marker=marker,
                 app_slug=app_slug,
-            ),
-            success_status="approved",
-            already_status="already_approved",
-            rejected="approval finalization was rejected",
-            permission="approval finalization lacks permission",
-            transient="approval finalization failed temporarily",
-        )
+            )
+            if preflight.result is not None:
+                return preflight.result
+            if preflight.app_authored:
+                return PublicationResult(status="skipped_app_authored")
+            assert (
+                preflight.repository_id is not None and preflight.base_sha is not None
+            )
+            if (
+                eligibility.human_review is not None
+                and eligibility.human_review.base_sha != preflight.base_sha
+            ):
+                return PublicationResult(status="skipped_stale_base")
+            open_blocking, resolved_instances = self._scan_blocking_threads(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                repository_id=preflight.repository_id,
+                head_sha=head_sha,
+                base_sha=preflight.base_sha,
+                app_slug=app_slug,
+                honored_instances=honored,
+            )
+            # The thread scan can paginate, so bind the write to the same exact PR
+            # identity immediately before emitting APPROVE.
+            write_preflight = self._preflight(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            if write_preflight.result is not None:
+                return write_preflight.result
+            if write_preflight.app_authored:
+                return PublicationResult(status="skipped_app_authored")
+            if (
+                write_preflight.repository_id != preflight.repository_id
+                or write_preflight.base_sha != preflight.base_sha
+            ):
+                return PublicationResult(status="skipped_stale_base")
+            decision = eligibility.evaluate(
+                app_authored=write_preflight.app_authored,
+                has_open_review_threads=open_blocking,
+            )
+            if not decision.approved:
+                return PublicationResult(
+                    status="approval_withheld",
+                    diagnostic=approval_withheld_diagnostic(decision),
+                )
+            reviews = self._load_head_reviews(
+                token=token, repository=repository, pull_request=pull_request
+            )
+            if not self._inline_obligations_resolved(
+                reviews,
+                repository_id=preflight.repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                resolved_instances=resolved_instances,
+                honored_instances=honored,
+            ):
+                return PublicationResult(
+                    status="approval_withheld", diagnostic="required_fixes_open"
+                )
+            persisted = self._eligibility_from_reviews(
+                reviews, head_sha=head_sha, app_slug=app_slug
+            )
+            if persisted != eligibility and (
+                require_persisted or persisted is not None
+            ):
+                return PublicationResult(
+                    status="approval_withheld", diagnostic="approval_withheld"
+                )
+            marker = approval_marker(
+                repository_id=preflight.repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=preflight.base_sha,
+            )
+            if self._reviews_have_app_head_state(
+                reviews,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                state="APPROVED",
+                body=marker,
+            ):
+                return PublicationResult(status="already_approved")
+            return self._post_head_review(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                body=marker,
+                event="APPROVE",
+                already=lambda: self._is_already_approved(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    marker=marker,
+                    app_slug=app_slug,
+                ),
+                success_status="approved",
+                already_status="already_approved",
+                rejected="approval finalization was rejected",
+                permission="approval finalization lacks permission",
+                transient="approval finalization failed temporarily",
+            )
+        finally:
+            if owns_operation_budget:
+                self._operation_budget = None
 
     def refinalize_with_dispositions(
         self,
@@ -1655,6 +1699,7 @@ class ReviewApprovalFinalizer:
                         policy=reviews_policy,
                         review_status=adjusted.facts.review_status,
                         required_fixes=has_blocking,
+                        required_decisions=has_human,
                     ),
                 )
             except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
