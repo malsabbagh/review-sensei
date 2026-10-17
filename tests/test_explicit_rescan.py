@@ -27,6 +27,7 @@ from review_sensei.session import (
     checkpoint_review_analysis,
     complete_review_publication,
     prepare_review_transaction,
+    read_session_baseline,
     record_session_failed_attempt,
 )
 
@@ -74,6 +75,60 @@ def prepare(ledger, rescan=None, *, head=tx.HEAD_SHA):
         evidence_digest=tx.EVIDENCE_DIGEST,
         rescan_request=rescan,
     )
+
+
+def cli_arguments(root, *, base_sha=tx.BASE_SHA, diff=partial.gates.DIFF):
+    (root / "diff.patch").write_text(diff)
+    (root / "response.json").write_text('{"summary":"ok","comments":[]}')
+    return [
+        "--diff",
+        str(root / "diff.patch"),
+        "--provider",
+        "fixture",
+        "--fixture-response",
+        str(root / "response.json"),
+        "--model",
+        "fixture-model",
+        "--repository",
+        "owner/repo",
+        "--repository-id",
+        "99",
+        "--pull-request",
+        "146",
+        "--head-sha",
+        tx.HEAD_SHA,
+        "--base-sha",
+        base_sha,
+        "--format",
+        "json",
+        "--transaction",
+        "--github-session-ledger",
+        "--rescan",
+        "--no-learning-proposals",
+        "--output",
+        str(root / "review.json"),
+        "--outcome",
+        str(root / "outcome.json"),
+        "--configuration-context-output",
+        str(root / "configuration.json"),
+        "--admission-context-output",
+        str(root / "admission.json"),
+        "--exit-semantics",
+        "operational",
+    ]
+
+
+def ledger_hooks(ledger):
+    class Hooks(GitHubReviewHooks):
+        def resolve_ledger(self, args, **kwargs):
+            return ledger
+
+        def resolve_rescan(self, args, resolved_ledger):
+            return resolve_rescan(
+                args, resolved_ledger, actions_token="synthetic-actions-token"
+            )
+
+    return Hooks()
 
 
 class RescanAdmissionTests(unittest.TestCase):
@@ -227,6 +282,67 @@ class RescanAdmissionTests(unittest.TestCase):
         self.assertEqual(len(record.rescan_state["receipts"]), 6)
         self.assertEqual(record.rescan_state["workflow_dispatch"], 17)
         self.assertFalse(prepare(ledger, oldest, head=head).decision.admit)
+
+    def test_malformed_receipts_are_rejected_before_admission_or_persistence(self):
+        ledger, _ = seed()
+        admitted = prepare(ledger, request(ledger))
+        original = ledger.load(tx.IDENTITY).record
+        state = json.loads(json.dumps(original.rescan_state))
+        receipt = state["receipts"][0]
+        malformed = (
+            {**state, "receipts": []},
+            {**state, "workflow_dispatch": "10"},
+            {
+                **state,
+                "receipts": [
+                    {
+                        key: value
+                        for key, value in receipt.items()
+                        if key != "reservation"
+                    }
+                ],
+            },
+            {**state, "receipts": [{**receipt, "source": None}]},
+            {
+                **state,
+                "receipts": [
+                    {**receipt, "source": {**receipt["source"], "phase": "unknown"}}
+                ],
+            },
+        )
+        for invalid in malformed:
+            with self.subTest(state=invalid):
+                document = {**original.to_dict(), "rescan_state": invalid}
+                with self.assertRaises(ReviewInputError):
+                    SessionRecord.from_dict(document)
+                with self.assertRaises(ReviewInputError):
+                    ledger.replace(
+                        tx.IDENTITY, lambda record: record.evolve(rescan_state=invalid)
+                    )
+                self.assertEqual(ledger.load(tx.IDENTITY).record, original)
+        self.assertEqual(original.reservation_id, admitted.reservation_id)
+
+    def test_noncurrent_source_serialization_cannot_be_persisted(self):
+        from dataclasses import asdict
+
+        ledger, _ = seed()
+        original = ledger.load(tx.IDENTITY).record
+        source = original.transaction
+
+        class LegacySerializedTransaction(type(source)):
+            def to_dict(self):
+                document = super().to_dict()
+                document.pop("transaction_id")
+                return document
+
+        authority = replace(
+            request(ledger), source=LegacySerializedTransaction(**asdict(source))
+        )
+        with self.assertRaises(ReviewInputError):
+            prepare(ledger, authority)
+        self.assertEqual(ledger.load(tx.IDENTITY).record, original)
+        self.assertIsNone(original.reservation_id)
+        self.assertIsNone(original.rescan_state)
 
     def test_budget_pause_and_changed_head_fences(self):
         ledger, _ = seed()
@@ -401,6 +517,42 @@ class RescanHostTests(unittest.TestCase):
             )
         self.assertEqual(self.ledger.load(tx.IDENTITY).record, before)
 
+    def test_dispatch_rejects_wrong_run_identity_but_does_not_confuse_workflow_and_pr_heads(
+        self,
+    ):
+        original_request = self.http.request
+        for change, rejected in (
+            ({"id": 11}, True),
+            ({"actor": {"login": "another-maintainer"}}, True),
+            ({"head_sha": "f" * 40}, False),
+        ):
+            with self.subTest(change=change):
+
+                def request_with_changed_run(method, path, **kwargs):
+                    status, response = original_request(method, path, **kwargs)
+                    if "/actions/runs/" in path:
+                        response = {**response, **change}
+                    return status, response
+
+                with patch.object(
+                    self.http, "request", side_effect=request_with_changed_run
+                ):
+                    if rejected:
+                        with self.assertRaisesRegex(ReviewInputError, "run identity"):
+                            resolve_rescan(
+                                self.args,
+                                self.ledger,
+                                actions_token="synthetic-actions-token",
+                            )
+                    else:
+                        authority = resolve_rescan(
+                            self.args,
+                            self.ledger,
+                            actions_token="synthetic-actions-token",
+                        )
+                        self.assertEqual(authority.source.head_sha, tx.HEAD_SHA)
+                        self.assertEqual(authority.request_id, 10)
+
     def test_dispatch_cannot_broaden_the_humans_selected_pull_request(self):
         self.event["inputs"]["pull_request_number"] = "147"
         self.write_event()
@@ -436,57 +588,159 @@ class RescanHostTests(unittest.TestCase):
             )
         )
 
+    def test_changed_snapshot_rescan_reviews_full_diff_without_incremental_reuse(self):
+        from review_sensei.baseline import admission_context_from_document
+        from review_sensei.coverage import CoverageManifest, FileCoverage
+
+        ledger = InMemorySessionLedger()
+        initial = tx._checkpoint_with_baseline(ledger)
+        complete_review_publication(
+            ledger, tx.IDENTITY, initial.transaction, published=True
+        )
+        initial_baseline = read_session_baseline(
+            ledger, ledger.load(tx.IDENTITY).record
+        )
+        current_base = "c" * 40
+        previous_attempt = prepare_review_transaction(
+            ledger,
+            tx.IDENTITY,
+            tx.POLICY,
+            reservation_id="e" * 64,
+            base_sha=current_base,
+            head_sha=tx.HEAD_SHA,
+            configuration_digest=tx.CONFIGURATION_DIGEST,
+            evidence_digest=tx.EVIDENCE_DIGEST,
+        )
+        partial_result = checkpoint_review_analysis(
+            ledger, tx.IDENTITY, previous_attempt, partial.partial_result()
+        )
+        complete_review_publication(
+            ledger, tx.IDENTITY, partial_result.transaction, published=True
+        )
+        self.assertEqual(
+            read_session_baseline(ledger, ledger.load(tx.IDENTITY).record),
+            initial_baseline,
+        )
+        self.http = AuthorityHTTP(partial_result)
+        ledger.http, ledger.token = self.http, "synthetic-token"
+        full_diff = (
+            partial.gates.DIFF
+            + """diff --git a/src/util.py b/src/util.py
+--- a/src/util.py
++++ b/src/util.py
+@@ -1 +1,2 @@
+ existing
++new_util
+"""
+        )
+        root = Path(self.temp.name)
+        argv = cli_arguments(root, base_sha=current_base, diff=full_diff)
+        complete = replace(
+            tx._result(),
+            coverage=CoverageManifest(
+                files=(
+                    FileCoverage("src/app.py", "reviewed"),
+                    FileCoverage("src/util.py", "reviewed"),
+                ),
+                enumerated_paths=("src/app.py", "src/util.py"),
+            ),
+        )
+        with (
+            patch(
+                "review_sensei.cli.ReviewService.run",
+                return_value=ReviewRun(
+                    RunOutcome("reviewed", provider_calls=1), result=complete
+                ),
+            ) as provider,
+            patch(
+                "review_sensei.cli.plan_verification_scope",
+                side_effect=AssertionError(
+                    "explicit reanalysis must not plan inference reuse"
+                ),
+            ),
+            redirect_stderr(io.StringIO()) as errors,
+        ):
+            self.assertEqual(
+                main(argv, hosted_hooks=ledger_hooks(ledger)), 0, errors.getvalue()
+            )
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual(provider.call_args.args[0].diff, full_diff)
+        self.assertIsNone(provider.call_args.kwargs["incremental"])
+        self.assertEqual(provider.call_args.kwargs["trusted_base_sha"], current_base)
+        self.assertEqual(
+            provider.call_args.kwargs["current_key"].base_sha, current_base
+        )
+        prior, current = admission_context_from_document(
+            json.loads((root / "admission.json").read_text())
+        )
+        self.assertEqual(prior, initial_baseline)
+        self.assertEqual(current.base_sha, current_base)
+        self.assertEqual(current.head_sha, tx.HEAD_SHA)
+        refreshed = read_session_baseline(ledger, ledger.load(tx.IDENTITY).record)
+        self.assertEqual(refreshed.cache_key, current)
+        self.assertNotEqual(refreshed.cache_key, initial_baseline.cache_key)
+
+    def test_ordinary_retry_after_failed_rescan_publication_requires_recovery_without_inference(
+        self,
+    ):
+        root = Path(self.temp.name)
+        ledger = self.ledger
+        bound = checkpoint_review_analysis(
+            ledger,
+            tx.IDENTITY,
+            prepare(ledger, request(ledger)),
+            partial.partial_result(),
+        )
+        before = complete_review_publication(
+            ledger, tx.IDENTITY, bound.transaction, published=False
+        )
+        self.assertNotEqual(
+            bound.transaction.reservation_id,
+            before.rescan_state["receipts"][-1]["ordinary_reservation"],
+        )
+        from review_sensei.rescan import rescan_publication_recovery
+
+        self.assertTrue(rescan_publication_recovery(before, tx.HEAD_SHA))
+        self.assertFalse(rescan_publication_recovery(before, "d" * 40))
+        with self.assertRaises(ReviewInputError):
+            before.evolve(last_committed_reservation_id="d" * 64)
+
+        argv = cli_arguments(root)
+        argv.remove("--rescan")
+        # Even a different inference configuration cannot replace the pending
+        # current-head publication with a newly inferred result.
+        argv[argv.index("--model") + 1] = "changed-fixture-model"
+        hooks = ledger_hooks(ledger)
+        with (
+            patch.object(
+                hooks,
+                "resolve_rescan",
+                side_effect=AssertionError("ordinary retry requests no new authority"),
+            ),
+            patch(
+                "review_sensei.cli.ReviewService.run",
+                side_effect=AssertionError(
+                    "publication recovery must not invoke inference"
+                ),
+            ) as provider,
+            redirect_stderr(io.StringIO()) as errors,
+        ):
+            self.assertEqual(main(argv, hosted_hooks=hooks), 1, errors.getvalue())
+        provider.assert_not_called()
+        outcome = json.loads((root / "outcome.json").read_text())
+        self.assertEqual(outcome["status"], "action_required")
+        self.assertEqual(outcome["diagnostic"], "publication_recovery_required")
+        self.assertEqual(outcome["provider_calls"], 0)
+        self.assertEqual(outcome["head_sha"], tx.HEAD_SHA)
+        for filename in ("review.json", "configuration.json", "admission.json"):
+            self.assertFalse((root / filename).exists(), filename)
+        self.assertEqual(ledger.load(tx.IDENTITY).record, before)
+
     def test_real_cli_published_partial_rescan_and_duplicate_delivery(self):
         root = Path(self.temp.name)
-        (root / "diff.patch").write_text(partial.gates.DIFF)
-        (root / "response.json").write_text('{"summary":"ok","comments":[]}')
         ledger = self.ledger
-
-        class Hooks(GitHubReviewHooks):
-            def resolve_ledger(self, args, **kwargs):
-                return ledger
-
-            def resolve_rescan(self, args, resolved_ledger):
-                return resolve_rescan(
-                    args, resolved_ledger, actions_token="synthetic-actions-token"
-                )
-
-        argv = [
-            "--diff",
-            str(root / "diff.patch"),
-            "--provider",
-            "fixture",
-            "--fixture-response",
-            str(root / "response.json"),
-            "--model",
-            "fixture-model",
-            "--repository",
-            "owner/repo",
-            "--repository-id",
-            "99",
-            "--pull-request",
-            "146",
-            "--head-sha",
-            tx.HEAD_SHA,
-            "--base-sha",
-            tx.BASE_SHA,
-            "--format",
-            "json",
-            "--transaction",
-            "--github-session-ledger",
-            "--rescan",
-            "--no-learning-proposals",
-            "--output",
-            str(root / "review.json"),
-            "--outcome",
-            str(root / "outcome.json"),
-            "--configuration-context-output",
-            str(root / "configuration.json"),
-            "--admission-context-output",
-            str(root / "admission.json"),
-            "--exit-semantics",
-            "operational",
-        ]
+        argv = cli_arguments(root)
+        hooks = ledger_hooks(ledger)
         run = ReviewRun(
             RunOutcome("partial", diagnostic="partial_coverage", provider_calls=1),
             result=partial.partial_result(),
@@ -495,7 +749,7 @@ class RescanHostTests(unittest.TestCase):
             patch("review_sensei.cli.ReviewService.run", return_value=run) as provider,
             redirect_stderr(io.StringIO()) as err,
         ):
-            self.assertEqual(main(argv, hosted_hooks=Hooks()), 0, err.getvalue())
+            self.assertEqual(main(argv, hosted_hooks=hooks), 0, err.getvalue())
             self.assertEqual(provider.call_count, 1)
             rendered = json.loads((root / "review.json").read_text())
             self.assertEqual(rendered["review_status"], "partial")
@@ -503,7 +757,7 @@ class RescanHostTests(unittest.TestCase):
             complete_review_publication(
                 ledger, tx.IDENTITY, record.transaction, published=False
             )
-            self.assertEqual(main(argv, hosted_hooks=Hooks()), 1, err.getvalue())
+            self.assertEqual(main(argv, hosted_hooks=hooks), 1, err.getvalue())
             self.assertEqual(provider.call_count, 1)
             self.assertEqual(
                 json.loads((root / "outcome.json").read_text())["diagnostic"],
@@ -513,7 +767,7 @@ class RescanHostTests(unittest.TestCase):
             complete_review_publication(
                 ledger, tx.IDENTITY, record.transaction, published=True
             )
-            self.assertEqual(main(argv, hosted_hooks=Hooks()), 0, err.getvalue())
+            self.assertEqual(main(argv, hosted_hooks=hooks), 0, err.getvalue())
             self.assertEqual(provider.call_count, 1)
             self.assertEqual(
                 json.loads((root / "outcome.json").read_text())["provider_calls"], 0
@@ -586,6 +840,86 @@ class RescanPublicationTests(unittest.TestCase):
         self.assertIn("Review incomplete", bodies[0]["body"])
         self.assertEqual(checks.conclusions, [None, "action_required"])
         self.assertEqual(ledger.load(tx.IDENTITY).record.failed_attempts, 2)
+
+    def test_application_missing_or_mismatched_receipt_cannot_enable_reanalysis(self):
+        from review_sensei_github import (
+            GitHubApplication,
+            GitHubWriteOptions,
+            ReviewPublisher,
+        )
+
+        gates = partial.gates
+        for missing in (True, False):
+            with self.subTest(missing_receipt=missing):
+                ledger, old = seed()
+                result = checkpoint_review_analysis(
+                    ledger,
+                    tx.IDENTITY,
+                    prepare(ledger, request(ledger)),
+                    replace(partial.partial_result(), comments=()),
+                )
+                record = ledger.load(tx.IDENTITY).record
+                state = json.loads(json.dumps(record.rescan_state))
+                state["receipts"][0]["reservation"] = "f" * 64
+                ledger.replace(
+                    tx.IDENTITY,
+                    lambda current: current.evolve(
+                        rescan_state=None if missing else state
+                    ),
+                )
+                before = ledger.load(tx.IDENTITY).record
+                checks = gates.FakeCheckRuns()
+                payload = gates.pr_payload(head_sha=tx.HEAD_SHA)
+                payload["base"]["sha"] = tx.BASE_SHA
+                payload["base"]["repo"]["id"] = 99
+                http, calls = gates.make_http(
+                    [
+                        gates.json_response(payload),
+                        gates.json_response([AuthorityHTTP(old).review]),
+                    ],
+                    routes=((checks.matches, checks.respond),),
+                )
+                publisher = ReviewPublisher(http=http)
+                app = GitHubApplication(
+                    broker=tx._Broker(),
+                    http=http,
+                    reviewer=publisher,
+                    learner=tx._Noop(),
+                    replier=tx._Noop(),
+                    session_ledger=ledger,
+                )
+                with patch.object(
+                    publisher, "publish", wraps=publisher.publish
+                ) as publish:
+                    outcome = app.publish_review(
+                        options=GitHubWriteOptions(
+                            auto_review=True, github_writes=True
+                        ),
+                        oidc_token="oidc",
+                        repository=tx.IDENTITY.repository,
+                        repository_id=99,
+                        pull_request=146,
+                        head_sha=tx.HEAD_SHA,
+                        base_branch="main",
+                        base_sha=tx.BASE_SHA,
+                        result=result,
+                        diff=gates.DIFF,
+                        app_slug=gates.APP,
+                        convergence_policy=tx.POLICY,
+                        configuration_context=tx.CONFIGURATION,
+                        evidence_context=tx.EVIDENCE,
+                    )
+                self.assertEqual(outcome.status, "already_published")
+                self.assertNotIn("explicit_reanalysis", publish.call_args.kwargs)
+                self.assertFalse(
+                    any(
+                        method == "POST" and url.endswith("/reviews")
+                        for method, url, _ in calls
+                    )
+                )
+                after = ledger.load(tx.IDENTITY).record
+                self.assertEqual(after.rescan_state, before.rescan_state)
+                self.assertEqual(after.failed_attempts, before.failed_attempts)
 
     def test_reanalysis_does_not_reopen_a_newer_complete_publication(self):
         from review_sensei_github import ReviewPublisher
