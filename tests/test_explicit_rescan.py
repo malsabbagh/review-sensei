@@ -78,7 +78,7 @@ def prepare(ledger, rescan=None, *, head=tx.HEAD_SHA):
 
 
 def cli_arguments(root, *, base_sha=tx.BASE_SHA, diff=partial.gates.DIFF):
-    (root / "diff.patch").write_text(diff)
+    (root / "diff.patch").write_bytes(diff.encode("utf-8"))
     (root / "response.json").write_text('{"summary":"ok","comments":[]}')
     return [
         "--diff",
