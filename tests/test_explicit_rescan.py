@@ -322,6 +322,156 @@ class RescanAdmissionTests(unittest.TestCase):
                 self.assertEqual(ledger.load(tx.IDENTITY).record, original)
         self.assertEqual(original.reservation_id, admitted.reservation_id)
 
+    def test_receipt_for_a_different_head_is_not_this_head_source(self):
+        from review_sensei.models import ReviewTransaction
+        from review_sensei.rescan import (
+            ordinary_rescan_duplicate,
+            rescan_publication_recovery,
+            rescan_reservation,
+            rescan_source,
+        )
+
+        ledger, _bound = seed()
+        explicit = request(ledger)
+        admitted = prepare(ledger, explicit)
+        record_session_failed_attempt(
+            ledger,
+            tx.IDENTITY,
+            reservation_id=admitted.reservation_id,
+            head_sha=tx.HEAD_SHA,
+        )
+        released = ledger.load(tx.IDENTITY).record
+        self.assertIsNone(released.transaction)
+        published = explicit.source
+        other = (
+            ReviewTransaction.create(
+                repository=published.repository,
+                pull_request=published.pull_request,
+                base_sha=published.base_sha,
+                head_sha="c" * 40,
+                policy_digest=published.policy_digest,
+                configuration_digest=published.configuration_digest,
+                evidence_digest=published.evidence_digest,
+                reservation_id=published.reservation_id,
+                generation=published.generation,
+            )
+            .with_result(published.result_sha256)
+            .with_phase("publication_succeeded")
+        )
+        receipt = released.rescan_state["receipts"][0]
+        other_reservation = "cd" * 32
+        mismatched = released.evolve(
+            rescan_state={
+                **released.rescan_state,
+                "receipts": [
+                    receipt,
+                    {
+                        **receipt,
+                        "source": other.to_dict(),
+                        "reservation": other_reservation,
+                    },
+                ],
+            }
+        )
+        # receipts[-1] is a different head. Selection must keep this head's source.
+        self.assertEqual(
+            rescan_source(mismatched, tx.HEAD_SHA).transaction_id,
+            explicit.source.transaction_id,
+        )
+        self.assertEqual(rescan_source(mismatched, "c" * 40).head_sha, "c" * 40)
+        fresh = AuthorizedRescan(
+            explicit.kind,
+            int(mismatched.rescan_state[explicit.kind]) + 1,
+            explicit.source,
+            6,
+        )
+        self.assertEqual(len(rescan_reservation(mismatched, fresh, tx.HEAD_SHA)), 64)
+        self.assertFalse(rescan_publication_recovery(mismatched, tx.HEAD_SHA))
+        self.assertFalse(
+            ordinary_rescan_duplicate(mismatched, other_reservation, tx.HEAD_SHA)
+        )
+
+    def test_substantive_terminal_phases_are_not_publication_recovery(self):
+        from review_sensei.rescan import (
+            SUBSTANTIVE_TERMINAL_PHASES,
+            rescan_publication_recovery,
+        )
+
+        ledger, _bound = seed()
+        admitted = prepare(ledger, request(ledger))
+        record = admitted.record
+        self.assertFalse(rescan_publication_recovery(record, tx.HEAD_SHA))
+        pending = record.evolve(
+            transaction=record.transaction.with_result("ab" * 32).with_phase(
+                "publication_failed"
+            ),
+            reservation_id=None,
+            reserved_slot=None,
+            last_committed_reservation_id=record.transaction.reservation_id,
+        )
+        self.assertTrue(rescan_publication_recovery(pending, tx.HEAD_SHA))
+        for phase in sorted(SUBSTANTIVE_TERMINAL_PHASES):
+            if phase == "analysis_failed":
+                terminal = record.evolve(
+                    transaction=record.transaction.with_phase("analysis_failed"),
+                    reservation_id=None,
+                    reserved_slot=None,
+                    last_committed_reservation_id=record.transaction.reservation_id,
+                )
+            else:
+                terminal = pending.evolve(
+                    transaction=pending.transaction.with_phase(phase)
+                )
+            self.assertFalse(rescan_publication_recovery(terminal, tx.HEAD_SHA), phase)
+
+    def test_consumed_receipts_do_not_alias_the_source_record(self):
+        ledger, _bound = seed()
+        explicit = request(ledger)
+        first = prepare(ledger, explicit)
+        bound = checkpoint_review_analysis(
+            ledger, tx.IDENTITY, first, partial.partial_result()
+        )
+        published = complete_review_publication(
+            ledger, tx.IDENTITY, bound.transaction, published=True
+        )
+        first_receipts = published.rescan_state["receipts"]
+        original_reservation = first_receipts[0]["reservation"]
+        second = prepare(
+            ledger,
+            AuthorizedRescan(
+                explicit.kind, explicit.request_id + 1, published.transaction, 6
+            ),
+        )
+        first_receipts[0]["reservation"] = "f" * 64
+        stored = ledger.load(tx.IDENTITY).record.rescan_state["receipts"]
+        self.assertEqual(stored[0]["reservation"], original_reservation)
+        self.assertEqual(len(second.record.rescan_state["receipts"]), 2)
+
+    def test_negative_rescan_fixture_fails_for_the_watermark_not_an_empty_list(self):
+        from review_sensei.schemas import validate_public_document
+
+        document = json.loads(
+            (
+                Path(__file__).parents[1]
+                / "tests/fixtures/schemas/negative/rescan-state.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertGreaterEqual(len(document["receipts"]), 1)
+        with self.assertRaises(ReviewInputError):
+            validate_public_document(document, "rescan-state")
+        repaired = {**document, "issue_comment": 0}
+        validate_public_document(repaired, "rescan-state")
+
+    def test_empty_analysis_reservation_id_is_rejected(self):
+        from review_sensei_github.commands import run_hosted_provider
+
+        for value in ("", "   ", 12):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ReviewInputError, "non-empty"):
+                    run_hosted_provider(
+                        object(), object(), analysis_reservation_id=value
+                    )
+
     def test_noncurrent_source_serialization_cannot_be_persisted(self):
         from dataclasses import asdict
 
@@ -553,6 +703,116 @@ class RescanHostTests(unittest.TestCase):
                         self.assertEqual(authority.source.head_sha, tx.HEAD_SHA)
                         self.assertEqual(authority.request_id, 10)
 
+    def test_missing_triggering_actor_fails_closed(self):
+        before = self.ledger.load(tx.IDENTITY).record
+        os.environ.pop("GITHUB_TRIGGERING_ACTOR")
+        with self.assertRaisesRegex(ReviewInputError, "unauthorized"):
+            resolve_rescan(
+                self.args, self.ledger, actions_token="synthetic-actions-token"
+            )
+        os.environ["GITHUB_TRIGGERING_ACTOR"] = ""
+        with self.assertRaisesRegex(ReviewInputError, "unauthorized"):
+            resolve_rescan(
+                self.args, self.ledger, actions_token="synthetic-actions-token"
+            )
+        self.assertEqual(self.ledger.load(tx.IDENTITY).record, before)
+
+    def test_transient_authority_reads_do_not_consume_the_request(self):
+        from review_sensei_github.errors import GitHubHTTPTransientError
+
+        before = self.ledger.load(tx.IDENTITY).record
+        original = self.http.request
+        for status_code in (429, 503):
+
+            def request_with_status(method, path, status_code=status_code, **kwargs):
+                if path.endswith("/permission"):
+                    return status_code, {"message": "unavailable"}
+                return original(method, path, **kwargs)
+
+            with patch.object(self.http, "request", side_effect=request_with_status):
+                with self.assertRaises(GitHubHTTPTransientError):
+                    resolve_rescan(
+                        self.args,
+                        self.ledger,
+                        actions_token="synthetic-actions-token",
+                    )
+            self.assertEqual(self.ledger.load(tx.IDENTITY).record, before)
+        with patch.object(
+            self.http, "request", return_value=(404, {"message": "missing"})
+        ):
+            with self.assertRaisesRegex(ReviewInputError, "could not be verified"):
+                resolve_rescan(
+                    self.args, self.ledger, actions_token="synthetic-actions-token"
+                )
+        self.assertEqual(self.ledger.load(tx.IDENTITY).record, before)
+
+    def test_dispatch_without_rescan_intent_is_refused(self):
+        from review_sensei_github.rescan import cli_event_requests_rescan
+
+        self.assertTrue(cli_event_requests_rescan())
+        self.event["inputs"]["rescan"] = "false"
+        self.write_event()
+        self.assertFalse(cli_event_requests_rescan())
+        with self.assertRaisesRegex(ReviewInputError, "did not request a rescan"):
+            resolve_rescan(
+                self.args, self.ledger, actions_token="synthetic-actions-token"
+            )
+        self.event["inputs"]["rescan"] = "true"
+        self.event["inputs"]["operation"] = "reply"
+        self.write_event()
+        self.assertFalse(cli_event_requests_rescan())
+        with self.assertRaisesRegex(ReviewInputError, "did not request a rescan"):
+            resolve_rescan(
+                self.args, self.ledger, actions_token="synthetic-actions-token"
+            )
+
+    def test_offset_timestamps_compare_as_utc_instants(self):
+        original = self.http.request
+
+        def request_at(created_at):
+            def request_with_time(method, path, **kwargs):
+                status, response = original(method, path, **kwargs)
+                if "/actions/runs/" in path:
+                    response = {**response, "created_at": created_at}
+                return status, response
+
+            return request_with_time
+
+        with patch.object(
+            self.http,
+            "request",
+            side_effect=request_at("2026-10-16T21:00:00+02:00"),
+        ):
+            self.assertIsNone(
+                resolve_rescan(
+                    self.args, self.ledger, actions_token="synthetic-actions-token"
+                )
+            )
+        with patch.object(
+            self.http,
+            "request",
+            side_effect=request_at("2026-10-16T22:30:00+01:00"),
+        ):
+            authority = resolve_rescan(
+                self.args, self.ledger, actions_token="synthetic-actions-token"
+            )
+            self.assertEqual(authority.request_id, 10)
+
+    def test_comment_gate_requires_the_rescan_grammar(self):
+        from review_sensei_github.rescan import cli_event_requests_rescan
+
+        os.environ["GITHUB_EVENT_NAME"] = "issue_comment"
+        self.event.update(
+            action="created",
+            issue={"number": 146},
+            comment={"body": "@reviewsensei review"},
+        )
+        self.write_event()
+        self.assertFalse(cli_event_requests_rescan())
+        self.event["comment"]["body"] = "@reviewsensei rescan"
+        self.write_event()
+        self.assertTrue(cli_event_requests_rescan())
+
     def test_dispatch_cannot_broaden_the_humans_selected_pull_request(self):
         self.event["inputs"]["pull_request_number"] = "147"
         self.write_event()
@@ -769,8 +1029,10 @@ class RescanHostTests(unittest.TestCase):
             )
             self.assertEqual(main(argv, hosted_hooks=hooks), 0, err.getvalue())
             self.assertEqual(provider.call_count, 1)
-            self.assertEqual(
-                json.loads((root / "outcome.json").read_text())["provider_calls"], 0
+            duplicate = json.loads((root / "outcome.json").read_text())
+            self.assertEqual(duplicate["provider_calls"], 0)
+            self.assertNotEqual(
+                duplicate["diagnostic"], "publication_recovery_required"
             )
 
 
@@ -1063,23 +1325,29 @@ class RescanPublicationTests(unittest.TestCase):
             for step in job.get("steps", [])
             if step.get("id") == "provider-review"
         ]
-        serialized = [
-            job["concurrency"]
+        provider_jobs = [
+            job
             for job in workflow["jobs"].values()
-            if "concurrency" in job
+            if any(step.get("id") == "provider-review" for step in job.get("steps", []))
         ]
-        self.assertEqual(len(serialized), 3)
-        self.assertEqual(len({job["group"] for job in serialized}), 1)
-        self.assertIn(
-            "needs.authoritative-preflight.outputs.pull_request_number",
-            serialized[0]["group"],
-        )
-        self.assertTrue(all(job["cancel-in-progress"] is False for job in serialized))
+        self.assertEqual(len(provider_jobs), len(steps))
+        for job in provider_jobs:
+            concurrency = job["concurrency"]
+            self.assertIn(
+                "needs.authoritative-preflight.outputs.pull_request_number",
+                concurrency["group"],
+            )
+            self.assertIs(concurrency["cancel-in-progress"], False)
         self.assertEqual(len(steps), 2)
         for step in steps:
+            self.assertIn("cli_event_requests_rescan", step["run"])
             self.assertIn('"$GITHUB_EVENT_NAME" == "workflow_dispatch"', step["run"])
             self.assertIn('"$GITHUB_EVENT_NAME" == "issue_comment"', step["run"])
             self.assertIn("review_args+=(--rescan)", step["run"])
+            self.assertNotIn(
+                'if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" || "$GITHUB_EVENT_NAME" == "issue_comment" ]]; then\n            review_args+=(--rescan)\n          fi',
+                step["run"],
+            )
             self.assertIn(
                 'review-sensei-github" review "${review_args[@]}"', step["run"]
             )

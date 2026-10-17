@@ -1429,6 +1429,10 @@ def _run_review_provider(
     repository_id = kwargs.pop("repository_id", None)
     pull_request = kwargs.pop("pull_request", None)
     analysis_reservation = kwargs.pop("analysis_reservation_id", None)
+    if analysis_reservation is not None and (
+        not isinstance(analysis_reservation, str) or not analysis_reservation.strip()
+    ):
+        raise ReviewInputError("analysis reservation id must be a non-empty string")
     adjust = kwargs.pop("adjust", None)
     run_id = os.environ.get("GITHUB_RUN_ID", "").strip()
     app_id = _actions_app_id()

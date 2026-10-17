@@ -73,6 +73,7 @@ from .schemas import validate_public_document
 
 if TYPE_CHECKING:
     from .baseline import ReviewBaseline
+    from .rescan import AuthorizedRescan
 
 PUBLIC_SCHEMA_VERSION = "1.0"
 SESSION_LEDGER_ENV = "REVIEWSENSEI_SESSION_LEDGER"
@@ -1608,7 +1609,7 @@ class SessionLedger(Protocol):
         reservation_id: str,
         expected_generation: int,
         head_sha: str | None = None,
-        rescan_request: object | None = None,
+        rescan_request: AuthorizedRescan | None = None,
         now: datetime | None = None,
     ) -> SessionRecord: ...
 
@@ -1726,7 +1727,7 @@ def mutate_reserved(
     reservation_id: str,
     expected_generation: int,
     head_sha: str | None = None,
-    rescan_request: object | None = None,
+    rescan_request: AuthorizedRescan | None = None,
     now: datetime | None = None,
 ) -> SessionRecord:
     if record.last_committed_reservation_id == reservation_id:
@@ -1740,8 +1741,10 @@ def mutate_reserved(
     if record.reservation_id is not None:
         raise ReviewInputError("session reservation is already held")
     if rescan_request is not None:
-        from .rescan import consume_rescan_request
+        from .rescan import AuthorizedRescan, consume_rescan_request
 
+        if not isinstance(rescan_request, AuthorizedRescan):
+            raise ReviewInputError("explicit rescan authority is invalid")
         record = consume_rescan_request(record, rescan_request, reservation_id)
     if record.transaction is not None:
         # A completed transaction is historical metadata.  A new admitted
@@ -1848,7 +1851,7 @@ def prepare_session_round(
     reservation_id: str,
     now: datetime | None = None,
     head_sha: str | None = None,
-    rescan_request: object | None = None,
+    rescan_request: AuthorizedRescan | None = None,
     **state_flags: bool,
 ) -> PreparedSessionRound:
     """Reserve a counted slot when C1 would admit the round.
@@ -1981,7 +1984,7 @@ def prepare_review_transaction(
     configuration_digest: str,
     evidence_digest: str,
     now: datetime | None = None,
-    rescan_request: object | None = None,
+    rescan_request: AuthorizedRescan | None = None,
     **state_flags: bool,
 ) -> PreparedSessionRound:
     """Reserve and bind one logical analysis transaction before inference."""
@@ -2868,7 +2871,7 @@ class InMemorySessionLedger:
         reservation_id: str,
         expected_generation: int,
         head_sha: str | None = None,
-        rescan_request: object | None = None,
+        rescan_request: AuthorizedRescan | None = None,
         now: datetime | None = None,
     ) -> SessionRecord:
         return self.replace(
@@ -4390,7 +4393,7 @@ class LocalSessionLedger:
         reservation_id: str,
         expected_generation: int,
         head_sha: str | None = None,
-        rescan_request: object | None = None,
+        rescan_request: AuthorizedRescan | None = None,
         now: datetime | None = None,
     ) -> SessionRecord:
         return self.replace(

@@ -18,7 +18,15 @@ recovers expired or missing sessions; none authorizes fresh analysis.
 
 The hosted `review --rescan` path verifies an actual human Actions dispatch or
 an unedited PR issue-comment rescan, current maintainer permission, repository,
-PR and current head. Request creation must follow the latest App publication,
+PR and current head. Both provider lanes append `--rescan` only when the event
+asks for one: an issue comment must match the rescan grammar, and a
+`workflow_dispatch` counts only when its inputs select this review operation
+for a pull request. An explicit `rescan` input of false, or any other
+operation, is not a rescan. Callers that omit `rescan` keep the existing
+dispatch contract, because a maintainer dispatch of this review workflow is
+itself the explicit request. `GITHUB_TRIGGERING_ACTOR` must be present and
+match the sender; a missing value fails closed. Request creation must follow
+the latest App publication,
 so queued stale events and reruns of the original review cannot reopen it. The
 existing `review_actions` capability verifies a dispatch run without extending
 the session token. The broker still supplies the existing head-bound session
@@ -75,11 +83,25 @@ analysis results and publication retries.
 
 ## Validation
 
-Regression coverage exercises actual CLI admission and publication with synthetic
-GitHub responses, partial coverage, repeated delivery, complete reviews,
-unauthorized/edited/stale requests, active and conflicting reservations,
-failed analysis, budget exhaustion, new heads, and both reusable provider lanes.
-Run the repository gates and clean-wheel consumer checks before merge.
+Regression coverage is `tests/test_explicit_rescan.py`. It exercises actual CLI
+admission and publication with synthetic GitHub responses, partial coverage,
+repeated delivery, complete reviews, unauthorized/edited/stale requests, active
+and conflicting reservations, failed analysis, budget exhaustion, new heads,
+comment-body equality, current permission and run identity, replay watermarks,
+and both reusable provider lanes:
+
+- `test_dispatch_and_comment_bind_distinct_stable_request_identities`
+- `test_unauthorized_and_stale_events_make_no_mutation`
+- `test_dispatch_rejects_wrong_run_identity_but_does_not_confuse_workflow_and_pr_heads`
+- `test_published_partial_rescans_once_and_retains_truth_and_history`
+- `test_bounded_receipts_keep_watermarks_after_eviction`
+- `test_ordinary_retry_after_failed_rescan_publication_requires_recovery_without_inference`
+- `test_real_cli_published_partial_rescan_and_duplicate_delivery`
+- `test_reusable_runner_wires_both_provider_lanes_without_caller_upgrade`
+
+Status stays Proposed until a maintainer accepts this record. The tests above
+ship in the same pull request. Run the repository gates and clean-wheel
+consumer checks before merge.
 
 ## Rollout and rollback
 

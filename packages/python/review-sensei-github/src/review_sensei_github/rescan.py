@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.rescan import AuthorizedRescan, rescan_source
 from review_sensei.session import SessionIdentity
+from review_sensei_github.errors import GitHubHTTPTransientError
 from review_sensei_github.publication import (
     PUBLISHED_REVIEW_STATES,
     approval_eligibility_from_body,
@@ -28,6 +29,58 @@ def _object(value):
     if not isinstance(value, dict):
         raise ReviewInputError("explicit rescan metadata is invalid")
     return value
+
+
+def _dispatch_requests_rescan(inputs: dict) -> bool:
+    """Return whether a workflow_dispatch payload is an explicit rescan.
+
+    A maintainer dispatch of this review workflow is the request when it names
+    the review operation and a pull request. ``rescan: false`` or any other
+    operation is not a rescan. Callers that omit ``rescan`` keep today's
+    dispatch contract (ADR 0080).
+    """
+
+    if "pull_request_number" not in inputs:
+        return False
+    requested = inputs.get("rescan")
+    if requested is not None and str(requested).strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return False
+    return str(inputs.get("operation", "review")) == "review"
+
+
+def event_requests_rescan(event: dict, kind: str) -> bool:
+    """Return whether this event itself asked for an explicit rescan."""
+
+    if kind == "issue_comment":
+        comment = event.get("comment")
+        body = comment.get("body") if isinstance(comment, dict) else None
+        return isinstance(body, str) and issue_comment_requests_rescan(body)
+    if kind == "workflow_dispatch":
+        inputs = event.get("inputs")
+        return isinstance(inputs, dict) and _dispatch_requests_rescan(inputs)
+    return False
+
+
+def cli_event_requests_rescan() -> bool:
+    """Workflow gate: read the Actions event file and require rescan intent."""
+
+    kind = os.environ.get("GITHUB_EVENT_NAME")
+    if kind not in {"workflow_dispatch", "issue_comment"}:
+        return False
+    event_path = Path(os.environ.get("GITHUB_EVENT_PATH", ""))
+    if not event_path.is_file() or event_path.stat().st_size > 1024 * 1024:
+        return False
+    try:
+        event = json.loads(event_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(event, dict):
+        return False
+    return event_requests_rescan(event, kind)
 
 
 def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | None:
@@ -52,6 +105,7 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
     repo = _object(event.get("repository"))
     sender = _object(event.get("sender"))
     actor = sender.get("login")
+    triggering_actor = os.environ.get("GITHUB_TRIGGERING_ACTOR")
     if (
         repo.get("full_name") != args.repository
         or repo.get("id") != args.repository_id
@@ -59,7 +113,8 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
         or not isinstance(actor, str)
         or re.fullmatch(r"[A-Za-z0-9-]{1,39}", actor) is None
         or os.environ.get("GITHUB_ACTOR") != actor
-        or os.environ.get("GITHUB_TRIGGERING_ACTOR", actor) != actor
+        or not isinstance(triggering_actor, str)
+        or triggering_actor != actor
     ):
         raise ReviewInputError("explicit rescan event identity is unauthorized")
     http, token = ledger.http, ledger.token
@@ -68,6 +123,10 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
         status, payload = http.request(
             "GET", http.repository_path(args.repository, suffix), token=read_token
         )
+        if status in {429} or (isinstance(status, int) and status >= 500):
+            raise GitHubHTTPTransientError(
+                "explicit rescan authority is temporarily unavailable"
+            )
         if status != 200 or not isinstance(payload, dict):
             raise ReviewInputError("explicit rescan authority could not be verified")
         return payload
@@ -120,6 +179,8 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
             raise ReviewInputError(
                 "explicit rescan dispatch targets another pull request"
             )
+        if not _dispatch_requests_rescan(inputs):
+            raise ReviewInputError("explicit rescan dispatch did not request a rescan")
         run_id = os.environ.get("GITHUB_RUN_ID", "")
         if not run_id.isascii() or not run_id.isdecimal():
             raise ReviewInputError("explicit rescan run identity is invalid")
@@ -139,7 +200,7 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
         raise ReviewInputError("explicit rescan session is unavailable")
     if loaded.record is None:
         return None  # First review still uses ordinary admission.
-    source = rescan_source(loaded.record)
+    source = rescan_source(loaded.record, args.head_sha)
     if source is None or source.head_sha != args.head_sha:
         return None  # A changed head is ordinary new work.
     if source.phase != "publication_succeeded":
@@ -178,6 +239,8 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
         )
         if requested_time.tzinfo is None or published_time.tzinfo is None:
             raise ValueError("unscoped time")
+        requested_time = requested_time.astimezone(timezone.utc)
+        published_time = published_time.astimezone(timezone.utc)
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise ReviewInputError(
             "explicit rescan request/publication time is unverifiable"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from dataclasses import dataclass
@@ -13,6 +14,13 @@ from .session import SessionRecord
 
 MAX_RESCAN_RECEIPTS = 6
 KINDS = frozenset({"issue_comment", "workflow_dispatch"})
+# Recovery is only an unfinished publication of an already charged result.
+# analysis_failed and publication_suppressed are substantive terminal outcomes
+# and stay on the normal admission path.
+PUBLICATION_RECOVERY_PHASES = frozenset({"publication_pending", "publication_failed"})
+SUBSTANTIVE_TERMINAL_PHASES = frozenset(
+    {"analysis_failed", "publication_succeeded", "publication_suppressed"}
+)
 
 
 @dataclass(frozen=True)
@@ -55,16 +63,36 @@ def validate_rescan_state(state: object) -> dict[str, object]:
     return json.loads(json.dumps(state))
 
 
-def rescan_source(record: SessionRecord) -> ReviewTransaction | None:
-    """Retain the published source after a failed rescan releases its hold."""
+def rescan_source(
+    record: SessionRecord, head_sha: str | None = None
+) -> ReviewTransaction | None:
+    """Retain the published source after a failed rescan releases its hold.
+
+    Receipt order is consumption order, not a head timeline. When the live
+    transaction is gone, select the latest receipt for ``head_sha`` instead of
+    assuming ``receipts[-1]`` is that head.
+    """
 
     if record.transaction is not None:
         return record.transaction
-    if record.rescan_state is not None:
-        receipts = record.rescan_state["receipts"]
-        if isinstance(receipts, list) and receipts:
-            return ReviewTransaction.from_dict(receipts[-1]["source"])
-    return None
+    if record.rescan_state is None:
+        return None
+    receipts = record.rescan_state["receipts"]
+    if not isinstance(receipts, list) or not receipts:
+        return None
+    selected: dict[str, object] | None = None
+    for item in receipts:
+        if not isinstance(item, dict):
+            continue
+        source = item.get("source")
+        if not isinstance(source, dict):
+            continue
+        if head_sha is not None and source.get("head_sha") != head_sha:
+            continue
+        selected = source
+    if selected is None:
+        return None
+    return ReviewTransaction.from_dict(selected)
 
 
 def replayed_rescan(record: SessionRecord, request: AuthorizedRescan) -> bool:
@@ -78,7 +106,7 @@ def rescan_reservation(
 ) -> str:
     if not isinstance(request, AuthorizedRescan):
         raise ReviewInputError("explicit rescan authority is invalid")
-    source = rescan_source(record)
+    source = rescan_source(record, head_sha)
     if not replayed_rescan(record, request) and (
         source is None
         or source.transaction_id != request.source.transaction_id
@@ -112,15 +140,24 @@ def consume_rescan_request(
     if not isinstance(request, AuthorizedRescan) or replayed_rescan(record, request):
         raise ReviewInputError("explicit rescan request was already consumed")
     rescan_reservation(record, request, request.source.head_sha)
-    state = dict(
-        record.rescan_state
-        or {"issue_comment": 0, "workflow_dispatch": 0, "receipts": []}
-    )
+    prior = record.rescan_state
+    if prior is None:
+        carried: list[object] = []
+        state: dict[str, object] = {"issue_comment": 0, "workflow_dispatch": 0}
+    else:
+        state = {
+            "issue_comment": prior["issue_comment"],
+            "workflow_dispatch": prior["workflow_dispatch"],
+        }
+        receipts = prior["receipts"]
+        assert isinstance(receipts, list)
+        # Copy the list and each receipt so later mutation cannot alias the
+        # source record. The new state always includes this receipt; an empty
+        # list is never built or validated.
+        carried = copy.deepcopy(list(receipts))
     state[request.kind] = request.request_id
-    receipts = state["receipts"]
-    assert isinstance(receipts, list)
     state["receipts"] = [
-        *receipts[-(MAX_RESCAN_RECEIPTS - 1) :],
+        *carried[-(MAX_RESCAN_RECEIPTS - 1) :],
         {
             "kind": request.kind,
             "request_id": request.request_id,
@@ -131,6 +168,8 @@ def consume_rescan_request(
             "reservation": reservation,
         },
     ]
+    if not state["receipts"]:
+        raise ReviewInputError("explicit rescan receipt was not recorded")
     return record.evolve(rescan_state=state)
 
 
@@ -145,9 +184,9 @@ def is_rescan_transaction(record: SessionRecord) -> bool:
 
 
 def rescan_publication_recovery(record: SessionRecord, head_sha: str | None) -> bool:
-    return bool(
-        is_rescan_transaction(record)
-        and record.transaction is not None
-        and record.transaction.head_sha == head_sha
-        and record.transaction.phase in {"publication_pending", "publication_failed"}
-    )
+    transaction = record.transaction
+    if transaction is None or transaction.phase in SUBSTANTIVE_TERMINAL_PHASES:
+        return False
+    if transaction.phase not in PUBLICATION_RECOVERY_PHASES:
+        return False
+    return bool(is_rescan_transaction(record) and transaction.head_sha == head_sha)

@@ -1104,8 +1104,12 @@ jobs:
           # ledger rather than a runner-local file, so the publication step of
           # this run and the analysis of the next run read the same durable
           # rounds and baselines.
+          # Issue comments must ask for a rescan. A maintainer dispatch counts
+          # only when its inputs request this review workflow's rescan (ADR 0080).
           if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" || "$GITHUB_EVENT_NAME" == "issue_comment" ]]; then
-            review_args+=(--rescan)
+            if "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'from review_sensei_github.rescan import cli_event_requests_rescan; raise SystemExit(0 if cli_event_requests_rescan() else 1)'; then
+              review_args+=(--rescan)
+            fi
           fi
           review_args+=(--transaction --github-session-ledger \
             --repository-id "$REPOSITORY_ID" \
@@ -1651,8 +1655,12 @@ jobs:
           # ledger rather than a runner-local file, so the publication step of
           # this run and the analysis of the next run read the same durable
           # rounds and baselines.
+          # Issue comments must ask for a rescan. A maintainer dispatch counts
+          # only when its inputs request this review workflow's rescan (ADR 0080).
           if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" || "$GITHUB_EVENT_NAME" == "issue_comment" ]]; then
-            review_args+=(--rescan)
+            if "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'from review_sensei_github.rescan import cli_event_requests_rescan; raise SystemExit(0 if cli_event_requests_rescan() else 1)'; then
+              review_args+=(--rescan)
+            fi
           fi
           review_args+=(--transaction --github-session-ledger \
             --repository-id "$REPOSITORY_ID" \

@@ -3171,23 +3171,32 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 prepared_round.reservation_id if prepared_round.decision.admit else None
             )
             if should_skip_automation(prepared_round.decision, inference=True):
-                from .rescan import rescan_publication_recovery
+                from .rescan import (
+                    PUBLICATION_RECOVERY_PHASES,
+                    rescan_publication_recovery,
+                )
 
                 transaction = prepared_round.record.transaction
-                publication_recovery_required = (
+                # Ordinary duplicates of a successful rescan stay suppressed.
+                # Recovery is only publication_pending/publication_failed for
+                # this same reservation. A new rescan_request is not required:
+                # that request was consumed, and the retry republishes the
+                # result that already exists.
+                publication_recovery_required = False
+                if (
                     not getattr(args, "local_session", False)
                     and not prepared_round.decision.handoff
                     and prepared_round.reservation_id is None
                     and transaction is not None
+                    and transaction.phase in PUBLICATION_RECOVERY_PHASES
+                    and prepared_round.record.last_committed_reservation_id
+                    == transaction.reservation_id
                     and (
                         transaction.reservation_id == reservation
                         or rescan_publication_recovery(prepared_round.record, head_sha)
                     )
-                    and prepared_round.record.last_committed_reservation_id
-                    == transaction.reservation_id
-                    and transaction.phase
-                    in {"publication_pending", "publication_failed"}
-                )
+                ):
+                    publication_recovery_required = True
                 status = (
                     "action_required"
                     if prepared_round.decision.handoff or publication_recovery_required
@@ -3296,6 +3305,21 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
             # publication classification, never for inference reuse.
             verification_scope = None
             incremental = None
+            admitted_transaction = (
+                prepared_round.record.transaction
+                if prepared_round is not None
+                else None
+            )
+            if (
+                not isinstance(held_reservation, str)
+                or not held_reservation
+                or admitted_transaction is None
+                or held_reservation != admitted_transaction.reservation_id
+            ):
+                raise ReviewInputError(
+                    "explicit rescan analysis reservation does not match "
+                    "the admitted transaction"
+                )
         try:
             run_provider = (
                 hosted_hooks.run_provider  # type: ignore[attr-defined]
