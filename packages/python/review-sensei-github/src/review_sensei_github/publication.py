@@ -1292,6 +1292,8 @@ class ReviewApprovalFinalizer:
         require_persisted: bool = False,
         honored_instances: frozenset[str] | None = None,
         assume_inline_unresolved: frozenset[str] | None = None,
+        partition_reader: PartitionReader | None = None,
+        visible_reader: VisibleReader | None = None,
     ) -> PublicationResult:
         """Emit at most one exact-head APPROVE from trusted eligibility.
 
@@ -1345,16 +1347,17 @@ class ReviewApprovalFinalizer:
                 )
             if eligibility.partitioned_root is not None:
                 root = eligibility.partitioned_root
-                effective_budget = self.evidence_budget or self._operation_budget
                 if (
-                    effective_budget is None
-                    or root.context.budget is not effective_budget
+                    self.evidence_budget is None
+                    or root.context.budget is not self.evidence_budget
+                    or partition_reader is None
+                    or visible_reader is None
                 ):
                     return PublicationResult(
                         status="approval_withheld", diagnostic="approval_withheld"
                     )
                 try:
-                    effective_budget.check()
+                    self.evidence_budget.check()
                 except ReviewInputError as exc:
                     raise GitHubPublicationError(
                         "review decision reconciliation failed"
@@ -1366,8 +1369,7 @@ class ReviewApprovalFinalizer:
                         status="approval_withheld", diagnostic="approval_withheld"
                     )
                 if (
-                    require_persisted
-                    or eligibility.facts.qualification != "qualified"
+                    eligibility.facts.qualification != "qualified"
                     or eligibility.human_review is None
                     or bool(eligibility.human_review.pending)
                     or root.context.binding.get("repository") != repository
@@ -1378,9 +1380,6 @@ class ReviewApprovalFinalizer:
                     return PublicationResult(
                         status="approval_withheld", diagnostic="approval_withheld"
                     )
-                return PublicationResult(
-                    status="approved", review_id=root.context.owned_root_id
-                )
             preflight = self._preflight(
                 token=token,
                 repository=repository,
@@ -1448,19 +1447,49 @@ class ReviewApprovalFinalizer:
                 app_slug=app_slug,
                 resolved_instances=resolved_instances,
                 honored_instances=honored,
+                eligibility=eligibility,
             ):
                 return PublicationResult(
                     status="approval_withheld", diagnostic="required_fixes_open"
                 )
-            persisted = self._eligibility_from_reviews(
-                reviews, head_sha=head_sha, app_slug=app_slug
-            )
-            if persisted != eligibility and (
-                require_persisted or persisted is not None
-            ):
-                return PublicationResult(
-                    status="approval_withheld", diagnostic="approval_withheld"
+            if eligibility.partitioned_root is not None:
+                assert partition_reader is not None and visible_reader is not None
+                part_budget = eligibility.partitioned_root.context.budget
+                try:
+                    persisted = self._eligibility_from_reviews(
+                        reviews,
+                        head_sha=head_sha,
+                        app_slug=app_slug,
+                        partition_reader=partition_reader,
+                        expected_context=eligibility.partitioned_root.context,
+                        visible_reader=visible_reader,
+                    )
+                    if persisted is None and part_budget.calls >= 60:
+                        part_budget.consume()
+                    part_budget.check()
+                except ReviewInputError as exc:
+                    raise GitHubPublicationError(
+                        "review decision reconciliation failed"
+                    ) from exc
+                if (
+                    persisted is None
+                    or replace(persisted, partitioned_root=eligibility.partitioned_root)
+                    != eligibility
+                    or persisted.to_dict() != eligibility.to_dict()
+                ):
+                    return PublicationResult(
+                        status="approval_withheld", diagnostic="approval_withheld"
+                    )
+            else:
+                persisted = self._eligibility_from_reviews(
+                    reviews, head_sha=head_sha, app_slug=app_slug
                 )
+                if persisted != eligibility and (
+                    require_persisted or persisted is not None
+                ):
+                    return PublicationResult(
+                        status="approval_withheld", diagnostic="approval_withheld"
+                    )
             marker = approval_marker(
                 repository_id=preflight.repository_id,
                 pull_request=pull_request,
@@ -1669,25 +1698,40 @@ class ReviewApprovalFinalizer:
             return PublicationResult(
                 status="gate_reevaluation_failed", diagnostic="gate_reevaluation_failed"
             )
-        try:
-            status, _payload = self.http.request(
-                "PATCH",
-                self.http.repository_path(
-                    repository, f"/pulls/{pull_request}/reviews/{chosen['id']}"
-                ),
+        if new_body != body:
+            try:
+                status, _payload = self.http.request(
+                    "PATCH",
+                    self.http.repository_path(
+                        repository, f"/pulls/{pull_request}/reviews/{chosen['id']}"
+                    ),
+                    token=token,
+                    body={"body": new_body},
+                )
+            except (GitHubHTTPError, GitHubHTTPTransientError):
+                return PublicationResult(
+                    status="gate_reevaluation_failed",
+                    diagnostic="gate_reevaluation_failed",
+                )
+            if status != 200:
+                return PublicationResult(
+                    status="gate_reevaluation_failed",
+                    diagnostic="gate_reevaluation_failed",
+                )
+        if (
+            self.load_eligibility(
                 token=token,
-                body={"body": new_body},
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
             )
-        except (GitHubHTTPError, GitHubHTTPTransientError):
+            != adjusted
+        ):
             return PublicationResult(
-                status="gate_reevaluation_failed",
-                diagnostic="gate_reevaluation_failed",
+                status="gate_reevaluation_failed", diagnostic="gate_reevaluation_failed"
             )
-        if status != 200:
-            return PublicationResult(
-                status="gate_reevaluation_failed",
-                diagnostic="gate_reevaluation_failed",
-            )
+        check_failed = False
         if check_token:
             try:
                 ReviewCheckPublisher(http=self.http).complete(
@@ -1702,21 +1746,13 @@ class ReviewApprovalFinalizer:
                         required_decisions=has_human,
                     ),
                 )
-            except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
-                pass
-        if (
-            self.load_eligibility(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                app_slug=app_slug,
-            )
-            != adjusted
-        ):
-            return PublicationResult(
-                status="gate_reevaluation_failed", diagnostic="gate_reevaluation_failed"
-            )
+            except (
+                GitHubHTTPError,
+                GitHubHTTPTransientError,
+                GitHubPublicationError,
+                ReviewInputError,
+            ):
+                check_failed = True
         resolution = self.reconcile_decided_threads(
             token=token,
             repository=repository,
@@ -1744,15 +1780,23 @@ class ReviewApprovalFinalizer:
             finalized = PublicationResult(
                 status="approval_withheld", diagnostic="approval_withheld"
             )
+        thread_res = (
+            "unconfirmed"
+            if resolution.unconfirmed
+            else "resolved"
+            if resolution.resolved
+            else None
+        )
+        if check_failed:
+            return PublicationResult(
+                status="gate_reevaluation_failed",
+                diagnostic="check_reconciliation_failed",
+                review_id=finalized.review_id,
+                thread_resolution=thread_res,
+            )
         return replace(
             finalized,
-            thread_resolution=(
-                "unconfirmed"
-                if resolution.unconfirmed
-                else "resolved"
-                if resolution.resolved
-                else None
-            ),
+            thread_resolution=thread_res,
         )
 
     def _post_head_review(
@@ -2069,8 +2113,14 @@ class ReviewApprovalFinalizer:
         head_sha: str,
         app_slug: str,
         eligibility: ReviewApprovalEligibility,
+        check_token: str | None = None,
+        reviews_policy: str = "auto-approve",
+        partition_reader: PartitionReader | None = None,
+        visible_reader: VisibleReader | None = None,
     ) -> PublicationResult:
         """Keep a recorded decision successful when a later host operation fails."""
+        from .checks import ReviewCheckPublisher, review_check_outcome
+
         resolution = None
         try:
             live = self._preflight(
@@ -2113,13 +2163,45 @@ class ReviewApprovalFinalizer:
                 app_slug=app_slug,
                 eligibility=eligibility,
                 require_persisted=True,
+                partition_reader=partition_reader,
+                visible_reader=visible_reader,
             )
         except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
             result = PublicationResult(
                 status="approval_withheld", diagnostic="approval_withheld"
             )
+        check_failed = False
+        if check_token:
+            has_open_fixes = eligibility.facts.has_blocking_findings or (
+                result.status == "approval_withheld"
+                and result.diagnostic == "required_fixes_open"
+            )
+            has_open_decisions = eligibility.facts.has_human_adjudication_findings
+            try:
+                ReviewCheckPublisher(http=self.http).complete(
+                    token=check_token,
+                    repository=repository,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                    outcome=review_check_outcome(
+                        policy=reviews_policy,
+                        review_status=eligibility.facts.review_status,
+                        required_fixes=has_open_fixes,
+                        required_decisions=has_open_decisions,
+                    ),
+                )
+            except (
+                GitHubHTTPError,
+                GitHubHTTPTransientError,
+                GitHubPublicationError,
+                ReviewInputError,
+            ):
+                check_failed = True
         return replace(
             result,
+            diagnostic="check_reconciliation_failed"
+            if check_failed
+            else result.diagnostic,
             thread_resolution=(
                 "unconfirmed"
                 if resolution is None or resolution.unconfirmed
@@ -2139,6 +2221,7 @@ class ReviewApprovalFinalizer:
         app_slug: str,
         resolved_instances: frozenset[str],
         honored_instances: frozenset[str],
+        eligibility: ReviewApprovalEligibility | None = None,
     ) -> bool:
         """Require every unhonored inline blocker to have a resolved thread.
 
@@ -2155,6 +2238,7 @@ class ReviewApprovalFinalizer:
                 pull_request=pull_request,
                 head_sha=head_sha,
                 app_slug=app_slug,
+                eligibility=eligibility,
             )
         except (ReviewInputError, GitHubPublicationError):
             return False

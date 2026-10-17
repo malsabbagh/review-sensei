@@ -816,6 +816,65 @@ def _local_change_revision(label: str, content: str) -> str:
     return revision
 
 
+_SKIP_REPLAY_DIRS = frozenset({".git", "__pycache__", ".venv", "node_modules", ".mypy_cache", ".ruff_cache"})
+
+
+def _bounded_replay_file_digest(path: Path) -> str | None:
+    try:
+        if path.is_file() and not path.is_symlink():
+            stat = path.stat(follow_symlinks=False)
+            if 0 <= stat.st_size <= _MAX_REPLAY_CONFIG_BYTES:
+                return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+    return None
+
+
+def _bounded_replay_tree_digest(
+    root: Path,
+    *,
+    max_files: int = 64,
+    max_total_bytes: int = _MAX_REPLAY_CONFIG_BYTES,
+) -> str | None:
+    try:
+        if not root.exists() or root.is_symlink():
+            return None
+        if root.is_file():
+            return _bounded_replay_file_digest(root)
+        if not root.is_dir():
+            return None
+        hasher = hashlib.sha256()
+        file_count = 0
+        total_bytes = 0
+        pending = [root]
+        entries: list[tuple[str, Path]] = []
+        while pending and len(entries) < max_files:
+            current = pending.pop()
+            for child in sorted(current.iterdir(), key=lambda p: p.name):
+                if child.is_symlink():
+                    continue
+                if child.is_dir():
+                    if child.name not in _SKIP_REPLAY_DIRS:
+                        pending.append(child)
+                elif child.is_file():
+                    rel = child.relative_to(root).as_posix()
+                    entries.append((rel, child))
+                    if len(entries) >= max_files:
+                        break
+        for rel, file_path in sorted(entries, key=lambda item: item[0]):
+            stat = file_path.stat(follow_symlinks=False)
+            if stat.st_size < 0 or total_bytes + stat.st_size > max_total_bytes:
+                hasher.update(f"{rel}:size={stat.st_size}\0".encode("utf-8"))
+                continue
+            data = file_path.read_bytes()
+            total_bytes += len(data)
+            file_count += 1
+            hasher.update(rel.encode("utf-8") + b"\0" + data + b"\0")
+        return hasher.hexdigest() if file_count or entries else None
+    except OSError:
+        return None
+
+
 def _local_session_replay_context(args: argparse.Namespace) -> str:
     """Return a deterministic replay-context suffix for local session revisions."""
 
@@ -838,17 +897,28 @@ def _local_session_replay_context(args: argparse.Namespace) -> str:
         value = getattr(args, key, None)
         if value is not None and value is not False and value != "":
             fields[key] = str(value) if isinstance(value, Path) else value
-    config_path = getattr(args, "config", None)
-    if isinstance(config_path, Path):
-        try:
-            if config_path.is_file() and not config_path.is_symlink():
-                stat = config_path.stat(follow_symlinks=False)
-                if 0 <= stat.st_size <= _MAX_REPLAY_CONFIG_BYTES:
-                    fields["config_sha256"] = hashlib.sha256(
-                        config_path.read_bytes()
-                    ).hexdigest()
-        except OSError:
-            pass
+    raw_config = getattr(args, "config", None)
+    config_candidates: list[Path] = []
+    if isinstance(raw_config, Path):
+        config_candidates.append(raw_config)
+    elif isinstance(raw_config, str) and raw_config.strip():
+        config_candidates.append(Path(raw_config))
+    else:
+        raw_context_root = getattr(args, "context_root", None)
+        if isinstance(raw_context_root, (Path, str)) and str(raw_context_root).strip():
+            config_candidates.append(Path(raw_context_root) / ".reviewsensei.yml")
+        config_candidates.append(Path(".reviewsensei.yml"))
+    for candidate in config_candidates:
+        digest = _bounded_replay_file_digest(candidate)
+        if digest is not None:
+            fields["config_sha256"] = digest
+            break
+    for dir_key in ("learning_root", "context_root", "categories_dir", "stages_dir"):
+        raw_dir = getattr(args, dir_key, None)
+        if isinstance(raw_dir, (Path, str)) and str(raw_dir).strip():
+            tree_digest = _bounded_replay_tree_digest(Path(raw_dir))
+            if tree_digest is not None:
+                fields[f"{dir_key}_sha256"] = tree_digest
     if not fields:
         return ""
     return "\0" + json.dumps(fields, sort_keys=True, separators=(",", ":"))

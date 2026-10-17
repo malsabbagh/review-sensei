@@ -460,7 +460,7 @@ class Phase0PreservedInvariantsTests(unittest.TestCase):
 
 
 class Phase1BlockerAdmissionAndTaxonomyJourneyTests(unittest.TestCase):
-    """Phase 1 failing tests: causal blocker verification and 3-tier taxonomy."""
+    """Phase 1 contract tests: causal blocker verification, premise checking, and 3-tier taxonomy."""
 
     def test_required_decision_never_renders_as_optional_improvement(self) -> None:
         """A needs_human finding must render as 'Required decision', never 'Optional improvement'."""
@@ -486,7 +486,7 @@ class Phase1BlockerAdmissionAndTaxonomyJourneyTests(unittest.TestCase):
     def test_source_grounded_causal_defect_admits_as_required_fix_without_manual_candidate_injection(
         self,
     ) -> None:
-        """A candidate with verified excerpt + source-based causal evidence admits as Required fix."""
+        """A candidate with verified excerpt + structured severity/remedy + unguarded dereference admits as Required fix."""
         snapshot = {
             "src/auth.py": "def load_token(user):\n    return user.token.strip()\n    return None\n"
         }
@@ -495,7 +495,7 @@ class Phase1BlockerAdmissionAndTaxonomyJourneyTests(unittest.TestCase):
             claim="load_token dereferences user.token without guarding against None.",
             triggering_conditions="Call load_token(user) when user.token is None.",
             impacted_path="src/auth.py",
-            severity_rationale="High-severity correctness defect: raises AttributeError during authentication.",
+            severity_rationale="Raises AttributeError during authentication when user.token is None.",
             evidence=(
                 EvidenceReference(
                     path="src/auth.py",
@@ -504,6 +504,8 @@ class Phase1BlockerAdmissionAndTaxonomyJourneyTests(unittest.TestCase):
                     excerpt="return user.token.strip()",
                 ),
             ),
+            severity="high",
+            remedy="Return an empty string when user is None or user.token is None.",
         )
         result = ReviewResult(
             summary="Found null dereference.",
@@ -531,13 +533,17 @@ class Phase1BlockerAdmissionAndTaxonomyJourneyTests(unittest.TestCase):
             admitted.needs_human,
             "Well-grounded source-based causal defect must not be demoted to needs_human=True.",
         )
-        negated = replace(
-            candidate,
-            severity_rationale="Not a high severity issue: minor cleanup.",
+        # Prose severity words alone without structured severity/remedy must NOT admit as blocker
+        prose_only = CandidateFinding(
+            claim="load_token dereferences user.token without guarding against None.",
+            triggering_conditions="Call load_token(user) when user.token is None.",
+            impacted_path="src/auth.py",
+            severity_rationale="High-severity correctness defect: raises AttributeError.",
+            evidence=candidate.evidence,
         )
-        negated_prepared = prepare_publishable_review(
+        prose_prepared = prepare_publishable_review(
             result,
-            candidates=(negated,),
+            candidates=(prose_only,),
             snapshot=snapshot,
             snapshot_sha256=snapshot_sha256,
             evidence_policy="confirmed",
@@ -545,11 +551,153 @@ class Phase1BlockerAdmissionAndTaxonomyJourneyTests(unittest.TestCase):
             changed_paths=("src/auth.py",),
             convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
         )
-        self.assertFalse(negated_prepared.result.comments[0].effective_blocking)
+        self.assertFalse(prose_prepared.result.comments[0].effective_blocking)
+
+    def test_fabricated_blocker_on_harmless_code_is_rejected_or_demoted(self) -> None:
+        """A candidate with a matching excerpt, empty assumptions, and high severity on harmless code must not become a blocker."""
+        snapshot = {"src/config.py": "DEFAULT_TIMEOUT = 30\n"}
+        snapshot_sha256 = _snapshot_digest(snapshot)
+        fabricated = CandidateFinding(
+            claim="DEFAULT_TIMEOUT dereferences None and crashes the process.",
+            triggering_conditions="Import src.config when user is None.",
+            impacted_path="src/config.py",
+            severity_rationale="High severity crash.",
+            evidence=(
+                EvidenceReference(
+                    path="src/config.py",
+                    line=1,
+                    snapshot_sha256=snapshot_sha256,
+                    excerpt="DEFAULT_TIMEOUT = 30",
+                ),
+            ),
+            severity="high",
+            remedy="Guard DEFAULT_TIMEOUT against None.",
+        )
+        prepared = prepare_publishable_review(
+            ReviewResult(
+                summary="Review.",
+                comments=(),
+                provider="ollama",
+                review_status="complete",
+            ),
+            candidates=(fabricated,),
+            snapshot=snapshot,
+            snapshot_sha256=snapshot_sha256,
+            evidence_policy="confirmed",
+            changed_lines={"src/config.py": frozenset({1})},
+            changed_paths=("src/config.py",),
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        )
+        comment = prepared.result.comments[0]
+        self.assertFalse(comment.effective_blocking)
+        self.assertFalse(comment.needs_human)
+
+    def test_contrary_evidence_in_same_function_prevents_blocker_admission(
+        self,
+    ) -> None:
+        """A candidate alleging null dereference when the same function already guards against None must not admit as a blocker."""
+        snapshot = {
+            "src/auth.py": (
+                "def load_token(user):\n"
+                "    if user is None or user.token is None:\n"
+                "        return ''\n"
+                "    return user.token.strip()\n"
+            )
+        }
+        snapshot_sha256 = _snapshot_digest(snapshot)
+        guarded_claim = CandidateFinding(
+            claim="load_token dereferences user.token without guarding against None.",
+            triggering_conditions="Call load_token(user) when user.token is None.",
+            impacted_path="src/auth.py",
+            severity_rationale="Raises AttributeError when user.token is None.",
+            evidence=(
+                EvidenceReference(
+                    path="src/auth.py",
+                    line=4,
+                    snapshot_sha256=snapshot_sha256,
+                    excerpt="return user.token.strip()",
+                ),
+            ),
+            severity="high",
+            remedy="Check whether user.token is None before calling strip().",
+        )
+        prepared = prepare_publishable_review(
+            ReviewResult(
+                summary="Review.",
+                comments=(),
+                provider="ollama",
+                review_status="complete",
+            ),
+            candidates=(guarded_claim,),
+            snapshot=snapshot,
+            snapshot_sha256=snapshot_sha256,
+            evidence_policy="confirmed",
+            changed_lines={"src/auth.py": frozenset({4})},
+            changed_paths=("src/auth.py",),
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        )
+        self.assertTrue(prepared.verifications[0].contrary_evidence)
+        comment = prepared.result.comments[0]
+        self.assertFalse(comment.effective_blocking)
+        self.assertFalse(comment.needs_human)
+
+    def test_ambiguous_high_impact_concern_with_external_assumption_becomes_required_decision(
+        self,
+    ) -> None:
+        """A plausible high-impact concern that depends on an unverified assumption becomes Required decision, action_required, and exit 2."""
+        snapshot = {
+            "src/auth.py": "def load_token(user):\n    return user.token.strip()\n"
+        }
+        snapshot_sha256 = _snapshot_digest(snapshot)
+        ambiguous = CandidateFinding(
+            claim="load_token may raise AttributeError if upstream middleware passes an anonymous user with token=None.",
+            triggering_conditions="Anonymous request reaches load_token without token initialization.",
+            impacted_path="src/auth.py",
+            severity_rationale="Authentication handler fails with 500 error.",
+            assumptions=(
+                "Upstream auth middleware can invoke load_token with user.token=None.",
+            ),
+            evidence=(
+                EvidenceReference(
+                    path="src/auth.py",
+                    line=2,
+                    snapshot_sha256=snapshot_sha256,
+                    excerpt="return user.token.strip()",
+                ),
+            ),
+            severity="high",
+            remedy="Verify middleware contract or guard user.token against None.",
+        )
+        prepared = prepare_publishable_review(
+            ReviewResult(
+                summary="Review.",
+                comments=(),
+                provider="ollama",
+                review_status="complete",
+            ),
+            candidates=(ambiguous,),
+            snapshot=snapshot,
+            snapshot_sha256=snapshot_sha256,
+            evidence_policy="confirmed",
+            changed_lines={"src/auth.py": frozenset({2})},
+            changed_paths=("src/auth.py",),
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        )
+        comment = prepared.result.comments[0]
+        self.assertFalse(comment.effective_blocking)
+        self.assertTrue(comment.needs_human)
+        check = check_outcome_for_result(prepared.result, policy="auto-approve")
+        self.assertEqual(check.conclusion, "action_required")
+        exit_code = review_exit_code(
+            status="reviewed",
+            required_fixes=has_blocking_findings(prepared.result),
+            required_decisions=has_human_adjudication_findings(prepared.result),
+        )
+        self.assertEqual(exit_code, REVIEW_EXIT_INCOMPLETE)
 
 
 class Phase2CheckAndPrecedenceMatrixJourneyTests(unittest.TestCase):
-    """Phase 2 contract tests: state/policy precedence matrix across Check, Review, and CLI."""
+    """Phase 2 contract tests: state/policy precedence matrix and human-resolution reconciliation."""
 
     def test_completed_review_with_required_decisions_only_produces_action_required_check(
         self,
@@ -648,6 +796,185 @@ class Phase2CheckAndPrecedenceMatrixJourneyTests(unittest.TestCase):
             REVIEW_EXIT_INCOMPLETE,
         )
 
+    def test_human_resolution_reconciles_check_and_review_with_partial_failure_retry(
+        self,
+    ) -> None:
+        """Resolving the last human decision updates the check run and approves, and retries cleanly after partial check failure."""
+        import json as _json
+        from review_sensei_github.publication import (
+            IndexedFinding,
+            finding_index_marker,
+        )
+
+        comment = ReviewComment(
+            path="src/app.py",
+            line=1,
+            body="Confirm external contract compatibility.",
+            severity="high",
+            blocking=False,
+            effective_blocking=False,
+            needs_human=True,
+        )
+        result = ReviewResult(
+            summary="Human decision required.",
+            comments=(comment,),
+            provider="ollama",
+            review_status="complete",
+        )
+        eligibility = approval_eligibility_from_result(
+            result,
+            head_sha=HEAD,
+            base_sha=BASE,
+            enabled=True,
+            app_authored=False,
+        )
+        assert eligibility.human_review is not None
+        fp = eligibility.human_review.findings[0].fingerprint
+        idx_marker = finding_index_marker(
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD,
+            base_sha=BASE,
+            result_digest=eligibility.result_digest,
+            entries=(
+                IndexedFinding(
+                    instance=fp,
+                    lifecycle=fp,
+                    blocking=False,
+                    needs_human=True,
+                    body_placed=True,
+                ),
+            ),
+        )
+        reviews_on_server = [
+            {
+                "id": 10,
+                "commit_id": HEAD,
+                "state": "COMMENTED",
+                "body": (
+                    "Initial review.\n"
+                    + idx_marker
+                    + "\n"
+                    + approval_eligibility_marker(eligibility)
+                ),
+                "user": {"login": APP, "type": "Bot"},
+            }
+        ]
+        check_updates: list[dict[str, object]] = []
+        approve_posts: list[dict[str, object]] = []
+        fail_check_once = {"fail": True}
+
+        class _Disposition:
+            def __init__(self, fingerprint: str, head_sha: str) -> None:
+                self.fingerprint = fingerprint
+                self.head_sha = head_sha
+
+            def honors(self, candidate_fp: str, *, head_sha: str) -> bool:
+                return candidate_fp == self.fingerprint and head_sha == self.head_sha
+
+        def open_handler(request, timeout):
+            path = urlparse(request.full_url).path
+            payload = _json.loads(request.data.decode("utf-8")) if request.data else None
+            if path.endswith("/pulls/1"):
+                return json_response(
+                    {
+                        "state": "open",
+                        "draft": False,
+                        "user": {"login": "alice", "type": "User"},
+                        "head": {
+                            "sha": HEAD,
+                            "repo": {"full_name": "owner/repo", "fork": False},
+                        },
+                        "base": {
+                            "sha": BASE,
+                            "repo": {"id": 1, "full_name": "owner/repo", "fork": False},
+                        },
+                    }
+                )
+            if path == "/graphql":
+                return json_response(
+                    {
+                        "data": {
+                            "repository": {
+                                "pullRequest": {
+                                    "reviewThreads": {
+                                        "nodes": [],
+                                        "pageInfo": {
+                                            "hasNextPage": False,
+                                            "endCursor": None,
+                                        },
+                                    }
+                                }
+                            }
+                        }
+                    }
+                )
+            if path.endswith("/pulls/1/reviews") and request.method == "GET":
+                return json_response(reviews_on_server)
+            if path.endswith("/pulls/1/reviews/10") and request.method == "PATCH":
+                reviews_on_server[0]["body"] = payload["body"]
+                return json_response(reviews_on_server[0], 200)
+            if path.endswith("/pulls/1/reviews") and request.method == "POST":
+                approve_posts.append(payload)
+                created = {
+                    "id": 11,
+                    "commit_id": HEAD,
+                    "state": "APPROVED",
+                    "body": payload["body"],
+                    "user": {"login": APP, "type": "Bot"},
+                }
+                reviews_on_server.append(created)
+                return json_response(created, 200)
+            if path.endswith(f"/commits/{HEAD}/check-runs") and request.method == "GET":
+                return json_response({"check_runs": []})
+            if path.endswith("/check-runs") and request.method == "POST":
+                if fail_check_once["fail"]:
+                    fail_check_once["fail"] = False
+                    raise GitHubHTTPTransientError("check update failed temporarily")
+                check_updates.append(payload)
+                return json_response({"id": 500, "html_url": "https://github.test/checks/500"}, 201)
+            raise AssertionError(f"Unexpected request: {request.method} {path}")
+
+        http = GitHubHttp(api_url="https://api.github.test", opener=open_handler)
+        finalizer = ReviewApprovalFinalizer(http=http)
+        # First attempt: check update fails, review approval succeeds -> reports partial failure
+        first = finalizer.refinalize_with_dispositions(
+            token="synthetic",
+            check_token="check-token",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD,
+            app_slug=APP,
+            actor="maintainer",
+            finding_ids=(f"RS-{fp[:8].upper()}",),
+            dispositions=(_Disposition(fp, HEAD),),
+            reviews_policy="auto-approve",
+        )
+        self.assertEqual(first.status, "gate_reevaluation_failed")
+        self.assertEqual(first.diagnostic, "check_reconciliation_failed")
+        self.assertEqual(len(approve_posts), 1)
+        self.assertEqual(len(check_updates), 0)
+
+        # Retry: completes the check run update to 'success' without duplicating APPROVE
+        second = finalizer.refinalize_with_dispositions(
+            token="synthetic",
+            check_token="check-token",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD,
+            app_slug=APP,
+            actor="maintainer",
+            finding_ids=(f"RS-{fp[:8].upper()}",),
+            dispositions=(_Disposition(fp, HEAD),),
+            reviews_policy="auto-approve",
+        )
+        self.assertEqual(second.status, "already_approved")
+        self.assertEqual(len(approve_posts), 1)
+        self.assertEqual(len(check_updates), 1)
+        self.assertEqual(check_updates[0]["conclusion"], "success")
+
 
 class Phase3LocalLifecycleAndReplayIdentityJourneyTests(unittest.TestCase):
     """Phase 3 contract tests: local replay identity binding and local resolution lifecycle."""
@@ -655,22 +982,29 @@ class Phase3LocalLifecycleAndReplayIdentityJourneyTests(unittest.TestCase):
     def test_local_session_revision_binds_config_model_base_and_context_not_only_diff(
         self,
     ) -> None:
-        """Changing model, policy, or config on the same diff must produce a distinct local session identity."""
+        """Changing model, policy, implicit/explicit config, or context files on the same diff must produce a distinct local session identity."""
+        import os
+
         diff_text = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n"
         with tempfile.TemporaryDirectory() as tmp:
-            diff_path = Path(tmp) / "change.diff"
+            tmp_path = Path(tmp)
+            diff_path = tmp_path / "change.diff"
             diff_path.write_text(diff_text, encoding="utf-8")
-            cfg_path = Path(tmp) / ".reviewsensei.yml"
+            cfg_path = tmp_path / ".reviewsensei.yml"
             cfg_path.write_text("review:\n  mode: enforced\n", encoding="utf-8")
+            ctx_dir = tmp_path / "context"
+            ctx_dir.mkdir()
+            (ctx_dir / "module.py").write_text("x = 1\n", encoding="utf-8")
 
             def make_args(
                 *,
                 model: str = "qwen2.5-coder:7b",
                 review_mode: str = "enforced",
                 config: Path | None = None,
+                context_root: Path | None = None,
             ) -> tuple[str, str]:
                 ns = argparse.Namespace(
-                    session_ledger=Path(tmp) / "ledger",
+                    session_ledger=tmp_path / "ledger",
                     repository="local/workspace",
                     pull_request=1,
                     head_sha=None,
@@ -679,15 +1013,29 @@ class Phase3LocalLifecycleAndReplayIdentityJourneyTests(unittest.TestCase):
                     model=model,
                     review_mode=review_mode,
                     config=config,
+                    context_root=context_root,
                 )
                 _prepare_local_session(ns, hosted_session_ledger=False)
                 return (ns.base_sha, ns.head_sha)
 
-            baseline = make_args()
-            self.assertEqual(baseline, make_args())
-            self.assertNotEqual(baseline, make_args(model="deepseek-r1:70b"))
-            self.assertNotEqual(baseline, make_args(review_mode="shadow"))
-            self.assertNotEqual(baseline, make_args(config=cfg_path))
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(tmp_path)
+                baseline = make_args()
+                self.assertEqual(baseline, make_args())
+                self.assertNotEqual(baseline, make_args(model="deepseek-r1:70b"))
+                self.assertNotEqual(baseline, make_args(review_mode="shadow"))
+                # Editing implicit .reviewsensei.yml in cwd (without --config) must invalidate replay!
+                cfg_path.write_text("review:\n  mode: advisory\n", encoding="utf-8")
+                after_implicit_cfg_edit = make_args()
+                self.assertNotEqual(baseline, after_implicit_cfg_edit)
+                # Editing context_root files must invalidate replay!
+                with_ctx_1 = make_args(context_root=ctx_dir)
+                (ctx_dir / "module.py").write_text("x = 2\n", encoding="utf-8")
+                with_ctx_2 = make_args(context_root=ctx_dir)
+                self.assertNotEqual(with_ctx_1, with_ctx_2)
+            finally:
+                os.chdir(old_cwd)
 
 
 class Phase4MixedCoverageRecoveryJourneyTests(unittest.TestCase):
@@ -726,11 +1074,14 @@ class Phase4MixedCoverageRecoveryJourneyTests(unittest.TestCase):
 class Phase5PartitionedFinalizerAndReconciliationJourneyTests(unittest.TestCase):
     """Phase 5 contract tests: v4 partitioned finalizer and failure/reconciliation guarantees."""
 
-    def test_partitioned_v4_root_finalizes_to_approved_when_all_obligations_are_resolved(
-        self,
-    ) -> None:
-        """A clean/resolved v4 partitioned root must finalize to 'approved' once the v4 guard is lifted."""
-        bundle = Bundle(100)
+    @staticmethod
+    def _configure_partitioned_bundle(
+        count: int = 100,
+        *,
+        open_blocking_thread: bool = False,
+        tamper_root_after_stage: bool = False,
+    ):
+        bundle = Bundle(count)
         parsed = bundle.parse()
         resolved_inventory = replace(
             parsed.human_review,
@@ -748,6 +1099,107 @@ class Phase5PartitionedFinalizerAndReconciliationJourneyTests(unittest.TestCase)
                 qualification="qualified",
             ),
         )
+        persisted_doc = complete_eligibility.to_dict()
+        if tamper_root_after_stage:
+            persisted_doc = dict(persisted_doc)
+            persisted_doc["human_resolution"] = dict(persisted_doc["human_resolution"])
+            persisted_doc["human_resolution"]["resolved"] = []
+        bundle.reviews.items.append(
+            bundle.reviews.item(10000, "Partitioned root.\n" + bundle.marker(persisted_doc))
+        )
+        approve_calls: list[dict[str, object]] = []
+        orig_open = bundle.reviews.open
+
+        def custom_open(request, timeout):
+            parsed_url = urlparse(request.full_url)
+            if (
+                request.method == "GET"
+                and parsed_url.path == "/repos/owner/repo/pulls/1/reviews"
+                and parsed_url.query
+            ):
+                qs = parse_qs(parsed_url.query)
+                page = int(qs.get("page", ["1"])[0])
+                per_page = int(qs.get("per_page", ["1"])[0])
+                start = (page - 1) * per_page
+                return json_response(bundle.reviews.items[start : start + per_page])
+            return orig_open(request, timeout)
+
+        def hook(method, path, payload):
+            if path == "/repos/owner/repo/pulls/1" and method == "GET":
+                return json_response(
+                    {
+                        "state": "open",
+                        "draft": False,
+                        "user": {"login": "alice", "type": "User"},
+                        "head": {
+                            "sha": HEAD,
+                            "repo": {"full_name": "owner/repo", "fork": False},
+                        },
+                        "base": {
+                            "sha": BASE,
+                            "repo": {"id": 1, "full_name": "owner/repo", "fork": False},
+                        },
+                    }
+                )
+            if path == "/graphql" and method == "POST":
+                nodes = []
+                if open_blocking_thread:
+                    nodes.append(
+                        {
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "author": {"login": APP},
+                                        "body": "Blocking thread",
+                                    }
+                                ]
+                            },
+                        }
+                    )
+                return json_response(
+                    {
+                        "data": {
+                            "repository": {
+                                "pullRequest": {
+                                    "reviewThreads": {
+                                        "nodes": nodes,
+                                        "pageInfo": {
+                                            "hasNextPage": False,
+                                            "endCursor": None,
+                                        },
+                                    }
+                                }
+                            }
+                        }
+                    }
+                )
+            if path == "/repos/owner/repo/pulls/1/reviews" and method == "POST":
+                if isinstance(payload, dict) and payload.get("event") == "APPROVE":
+                    approve_calls.append(payload)
+                    item = {
+                        "id": 20000,
+                        "body": payload["body"],
+                        "state": "APPROVED",
+                        "commit_id": HEAD,
+                        "pull_request_url": "https://api.github.test/repos/owner/repo/pulls/1",
+                        "user": {"type": "Bot", "id": 7, "login": APP},
+                    }
+                    bundle.reviews.items.append(item)
+                    return json_response(item, 200)
+            return None
+
+        bundle.reviews.hook = hook
+        bundle.reviews.http = GitHubHttp(
+            api_url="https://api.github.test", opener=custom_open
+        )
+        return bundle, complete_eligibility, approve_calls
+
+    def test_partitioned_v4_root_finalizes_to_approved_when_all_obligations_are_resolved(
+        self,
+    ) -> None:
+        """A clean/resolved v4 partitioned root must run live preflight, thread scan, readback, and POST APPROVE."""
+        bundle, complete_eligibility, approve_calls = self._configure_partitioned_bundle(100)
         outcome = ReviewApprovalFinalizer(
             http=bundle.reviews.http,
             evidence_budget=bundle.budget,
@@ -758,8 +1210,73 @@ class Phase5PartitionedFinalizerAndReconciliationJourneyTests(unittest.TestCase)
             head_sha=HEAD,
             app_slug=APP,
             eligibility=complete_eligibility,
+            partition_reader=bundle.read,
+            visible_reader=bundle.visible,
         )
         self.assertEqual(outcome.status, "approved")
+        self.assertEqual(outcome.review_id, 20000)
+        self.assertEqual(len(approve_calls), 1)
+        self.assertEqual(approve_calls[0]["event"], "APPROVE")
+
+        # Also verify fail-closed when an open blocking thread exists on GitHub
+        bundle_blocked, elig_blocked, calls_blocked = self._configure_partitioned_bundle(
+            100, open_blocking_thread=True
+        )
+        withheld_thread = ReviewApprovalFinalizer(
+            http=bundle_blocked.reviews.http,
+            evidence_budget=bundle_blocked.budget,
+        ).finalize(
+            token="synthetic",
+            repository="owner/repo",
+            pull_request=1,
+            head_sha=HEAD,
+            app_slug=APP,
+            eligibility=elig_blocked,
+            partition_reader=bundle_blocked.read,
+            visible_reader=bundle_blocked.visible,
+        )
+        self.assertEqual(withheld_thread.status, "approval_withheld")
+        self.assertEqual(len(calls_blocked), 0)
+
+        # Also verify fail-closed when the persisted v4 root on the server differs from eligibility
+        bundle_tampered, elig_tampered, calls_tampered = self._configure_partitioned_bundle(
+            100, tamper_root_after_stage=True
+        )
+        withheld_tampered = ReviewApprovalFinalizer(
+            http=bundle_tampered.reviews.http,
+            evidence_budget=bundle_tampered.budget,
+        ).finalize(
+            token="synthetic",
+            repository="owner/repo",
+            pull_request=1,
+            head_sha=HEAD,
+            app_slug=APP,
+            eligibility=elig_tampered,
+            partition_reader=bundle_tampered.read,
+            visible_reader=bundle_tampered.visible,
+        )
+        self.assertEqual(withheld_tampered.status, "approval_withheld")
+        self.assertEqual(len(calls_tampered), 0)
+
+        # Also verify fail-closed when the shared EvidenceReadBudget is exhausted during readback
+        bundle_exhausted, elig_exhausted, calls_exhausted = self._configure_partitioned_bundle(100)
+        while bundle_exhausted.budget.calls < 59:
+            bundle_exhausted.budget.consume()
+        with self.assertRaises(GitHubPublicationError):
+            ReviewApprovalFinalizer(
+                http=bundle_exhausted.reviews.http,
+                evidence_budget=bundle_exhausted.budget,
+            ).finalize(
+                token="synthetic",
+                repository="owner/repo",
+                pull_request=1,
+                head_sha=HEAD,
+                app_slug=APP,
+                eligibility=elig_exhausted,
+                partition_reader=bundle_exhausted.read,
+                visible_reader=bundle_exhausted.visible,
+            )
+        self.assertEqual(len(calls_exhausted), 0)
 
     def test_same_head_mutation_to_authoritative_review_immediately_before_approve_withholds(
         self,
