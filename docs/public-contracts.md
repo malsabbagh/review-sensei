@@ -771,7 +771,13 @@ subdirectory of one Git checkout keeps one session, while renaming or moving
 that root starts a new one. A local session binds derived 40-character content
 digests, not Git object ids, as its base and head revisions (`base_sha` and
 `head_sha` in the outcome document); repeated runs of one change keep the same
-revision.
+revision. Local replay hashing also binds effective review inputs (such as
+configuration, model, review mode, instructions, and context/learning trees)
+under finite streaming bounds (`1 MiB` per config file, `512` files and `8 MiB`
+total per tree); when a tree or file exceeds those bounds or is unreadable,
+replay reuse is disabled for that invocation with a fresh non-reusable digest
+and an explicit `replay_disabled_reason` (`file_count_exceeded`,
+`byte_budget_exceeded`, or `io_error`).
 
 `REVIEWSENSEI_PROVIDER` selects the canonical backend and `REVIEWSENSEI_MODEL`
 overrides its model. Those are the two supported environment overrides for

@@ -2107,7 +2107,7 @@ class Phase5PartitionedFinalizerAndReconciliationJourneyTests(unittest.TestCase)
     def test_three_way_presentation_classification_across_summary_terminal_and_omission_budget(
         self,
     ) -> None:
-        """Item 3: Summary, review body, terminal output, and omission budgets must keep Required fix, Required decision, and Optional suggestion distinct."""
+        """Item 3: Summary, review body, terminal output, and omission budgets must keep Required fix, Required decision, and Optional improvement distinct."""
         from review_sensei_github.publication import (
             AssembledReview,
             BodyExplanation,
@@ -2594,6 +2594,620 @@ class Phase5PartitionedFinalizerAndReconciliationJourneyTests(unittest.TestCase)
                     prepared.result.comments[0].effective_blocking, expected_blocking
                 )
                 self.assertFalse(prepared.result.comments[0].needs_human)
+
+    def test_mixed_coverage_approval_reconciles_check_run_across_policies_obligations_and_retry(
+        self,
+    ) -> None:
+        """Item 1: Human media approval through GitHubApplication reconciles the check run while preserving AI partial status, honors remaining obligations and policy modes, and retries safely without duplicate APPROVE."""
+        import copy
+
+        from review_sensei_github.application import (
+            GitHubApplication,
+            GitHubWriteOptions,
+        )
+        from review_sensei_github.human_file_review import (
+            HumanFileReviewPolicy,
+            HumanFileReviewPublisher,
+        )
+
+        from review_sensei.coverage import CoverageManifest, FileCoverage
+        from tests import test_github_human_file_review as hfr_test
+
+        class CheckAwareMediaState(hfr_test.State):
+            def __init__(self) -> None:
+                super().__init__()
+                self.check_runs: list[dict[str, object]] = []
+                self.fail_check_writes = False
+
+            def request(self, method: str, path: str, **kwargs: object):
+                rel = path.removeprefix(hfr_test.REPO)
+                if method == "GET" and rel.startswith(
+                    f"/commits/{self.head}/check-runs"
+                ):
+                    return 200, {"check_runs": copy.deepcopy(self.check_runs)}
+                if method == "POST" and rel == "/check-runs":
+                    if self.fail_check_writes:
+                        return 500, {"message": "check write failed"}
+                    body = kwargs["body"]
+                    assert isinstance(body, dict)
+                    self.next_id += 1
+                    run = {
+                        "id": self.next_id,
+                        "name": body.get("name", "ReviewSensei"),
+                        "head_sha": body.get("head_sha", self.head),
+                        "status": body.get("status", "completed"),
+                        "conclusion": body.get("conclusion"),
+                        "output": copy.deepcopy(body.get("output", {})),
+                        "app": {"slug": "reviewsensei"},
+                    }
+                    self.check_runs.append(run)
+                    return 201, copy.deepcopy(run)
+                if method == "PATCH" and rel.startswith("/check-runs/"):
+                    if self.fail_check_writes:
+                        return 500, {"message": "check patch failed"}
+                    run_id = int(rel.rsplit("/", 1)[1])
+                    body = kwargs["body"]
+                    assert isinstance(body, dict)
+                    for run in self.check_runs:
+                        if run["id"] == run_id:
+                            run.update(
+                                {
+                                    "status": body.get("status", run["status"]),
+                                    "conclusion": body.get(
+                                        "conclusion", run.get("conclusion")
+                                    ),
+                                    "output": copy.deepcopy(
+                                        body.get("output", run.get("output", {}))
+                                    ),
+                                }
+                            )
+                            return 200, copy.deepcopy(run)
+                    return 404, {}
+                return super().request(method, path, **kwargs)
+
+        class StubBroker:
+            def request_oidc_token(self) -> str:
+                return "oidc-token"
+
+            def exchange(
+                self, oidc_token: str, *, capability: str | None = None
+            ) -> str:
+                return f"tok-{capability or 'default'}"
+
+        def make_publisher(state: CheckAwareMediaState) -> HumanFileReviewPublisher:
+            return HumanFileReviewPublisher(
+                http=state,
+                api_url=hfr_test.API,
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=2,
+                app_login=hfr_test.BOT["login"],
+                app_user_id=hfr_test.BOT["id"],
+                token="synthetic",
+                before_request=lambda: 5.0,
+                policy=HumanFileReviewPolicy(True),
+            )
+
+        def make_env():
+            state = CheckAwareMediaState()
+            req_id, req_doc = make_publisher(state).request_review(
+                review_id=10, result=state.result
+            )
+            state.permission = "maintain"
+            state.comments[20] = {
+                "id": 20,
+                "user": hfr_test.ALICE,
+                "author_association": "MEMBER",
+                "issue_url": f"{hfr_test.API}{hfr_test.REPO}/issues/2",
+                "updated_at": "2026-10-10T01:00:00Z",
+                "body": "@reviewsensei I reviewed the media files and I approve",
+            }
+            media_pub = make_publisher(state)
+            app = GitHubApplication(
+                broker=StubBroker(),  # type: ignore[arg-type]
+                http=state,  # type: ignore[arg-type]
+                reviewer=object(),  # type: ignore[arg-type]
+                learner=object(),  # type: ignore[arg-type]
+                replier=object(),  # type: ignore[arg-type]
+            )
+            return state, media_pub, req_id, req_doc, app
+
+        # 1. All eligible coverage gaps confirmed in auto-approve mode -> APPROVE + passing check + AI partial status preserved
+        state_ok, media_ok, req_id_ok, _req_doc_ok, app_ok = make_env()
+        cmd_ok = app_ok.apply_maintainer_command(
+            options=GitHubWriteOptions(
+                github_writes=True, reviews_policy="auto-approve"
+            ),
+            oidc_token="oidc",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=2,
+            head_sha=hfr_test.HEAD,
+            body="@reviewsensei I reviewed the media files and I approve",
+            actor_login="alice",
+            association="OWNER",
+            app_slug="reviewsensei[bot]",
+            source_comment_id=20,
+            media_publisher=media_ok,
+            review_result=state_ok.result,
+            request_comment_id=req_id_ok,
+        )
+        self.assertTrue(cmd_ok.applied)
+        self.assertFalse(cmd_ok.evaluation_failed)
+        self.assertEqual(state_ok.result.review_status, "partial")
+        self.assertEqual(
+            [r["state"] for r in state_ok.reviews if r["id"] != 10],
+            ["APPROVED"],
+        )
+        self.assertEqual(len(state_ok.check_runs), 1)
+        self.assertEqual(state_ok.check_runs[-1]["conclusion"], "success")
+
+        # 2. Another obligation remains (e.g. blocking finding) -> check stays non-passing ("failure") and no APPROVE
+        state_blk, media_blk, req_id_blk, _req_doc_blk, app_blk = make_env()
+        state_blk.set_result(state_blk.result, has_blocking_findings=True)
+        cmd_blk = app_blk.apply_maintainer_command(
+            options=GitHubWriteOptions(
+                github_writes=True, reviews_policy="auto-approve"
+            ),
+            oidc_token="oidc",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=2,
+            head_sha=hfr_test.HEAD,
+            body="@reviewsensei I reviewed the media files and I approve",
+            actor_login="alice",
+            association="OWNER",
+            app_slug="reviewsensei[bot]",
+            source_comment_id=20,
+            media_publisher=media_blk,
+            review_result=state_blk.result,
+            request_comment_id=req_id_blk,
+        )
+        self.assertFalse(cmd_blk.applied)
+        self.assertEqual([r["state"] for r in state_blk.reviews if r["id"] != 10], [])
+        self.assertEqual(state_blk.check_runs[-1]["conclusion"], "failure")
+
+        # 3. Blocking mode -> passing check ("success") without APPROVE; Advisory mode -> "neutral" check without APPROVE
+        for mode, expected_conclusion in (
+            ("blocking", "success"),
+            ("advisory", "neutral"),
+        ):
+            with self.subTest(mode=mode):
+                state_m, media_m, req_id_m, _req_doc_m, app_m = make_env()
+                cmd_m = app_m.apply_maintainer_command(
+                    options=GitHubWriteOptions(github_writes=True, reviews_policy=mode),
+                    oidc_token="oidc",
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=2,
+                    head_sha=hfr_test.HEAD,
+                    body="@reviewsensei I reviewed the media files and I approve",
+                    actor_login="alice",
+                    association="OWNER",
+                    app_slug="reviewsensei[bot]",
+                    source_comment_id=20,
+                    media_publisher=media_m,
+                    review_result=state_m.result,
+                    request_comment_id=req_id_m,
+                )
+                self.assertTrue(cmd_m.applied)
+                self.assertFalse(cmd_m.evaluation_failed)
+                self.assertEqual(
+                    [r["state"] for r in state_m.reviews if r["id"] != 10],
+                    [],
+                )
+                self.assertEqual(
+                    state_m.check_runs[-1]["conclusion"], expected_conclusion
+                )
+
+        # 4. APPROVE succeeds but check update fails -> evaluation_failed=True; retry completes check update without second APPROVE
+        state_retry, media_retry, req_id_retry, _req_doc_retry, app_retry = make_env()
+        state_retry.fail_check_writes = True
+        first_try = app_retry.apply_maintainer_command(
+            options=GitHubWriteOptions(
+                github_writes=True, reviews_policy="auto-approve"
+            ),
+            oidc_token="oidc",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=2,
+            head_sha=hfr_test.HEAD,
+            body="@reviewsensei I reviewed the media files and I approve",
+            actor_login="alice",
+            association="OWNER",
+            app_slug="reviewsensei[bot]",
+            source_comment_id=20,
+            media_publisher=media_retry,
+            review_result=state_retry.result,
+            request_comment_id=req_id_retry,
+        )
+        self.assertTrue(first_try.applied)
+        self.assertTrue(first_try.evaluation_failed)
+        self.assertEqual(
+            [r["state"] for r in state_retry.reviews if r["id"] != 10],
+            ["APPROVED"],
+        )
+        self.assertEqual(len(state_retry.check_runs), 0)
+
+        state_retry.fail_check_writes = False
+        second_try = app_retry.apply_maintainer_command(
+            options=GitHubWriteOptions(
+                github_writes=True, reviews_policy="auto-approve"
+            ),
+            oidc_token="oidc",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=2,
+            head_sha=hfr_test.HEAD,
+            body="@reviewsensei I reviewed the media files and I approve",
+            actor_login="alice",
+            association="OWNER",
+            app_slug="reviewsensei[bot]",
+            source_comment_id=20,
+            media_publisher=make_publisher(state_retry),
+            review_result=state_retry.result,
+            request_comment_id=req_id_retry,
+        )
+        self.assertTrue(second_try.applied)
+        self.assertFalse(second_try.evaluation_failed)
+        self.assertEqual(
+            [r["state"] for r in state_retry.reviews if r["id"] != 10],
+            ["APPROVED"],
+            "Retry must not emit a duplicate APPROVE review.",
+        )
+        self.assertEqual(len(state_retry.check_runs), 1)
+        self.assertEqual(state_retry.check_runs[-1]["conclusion"], "success")
+
+        # 5. Mixed coverage guidance maps each uncovered file to its valid recovery action
+        from review_sensei_github.checks import check_outcome_for_result
+
+        mixed_cov_result = ReviewResult(
+            summary="Partial coverage.",
+            comments=(),
+            provider="ollama",
+            review_status="partial",
+            coverage=CoverageManifest(
+                files=(
+                    FileCoverage("assets/logo.png", "unsupported", "binary"),
+                    FileCoverage(
+                        "src/main.py", "budget-exhausted", "provider-call-budget"
+                    ),
+                ),
+                enumerated_paths=("assets/logo.png", "src/main.py"),
+            ),
+        )
+        mixed_outcome = check_outcome_for_result(mixed_cov_result, policy="blocking")
+        self.assertIn(
+            "assets/logo.png (binary: confirm human file review)",
+            mixed_outcome.summary,
+        )
+        self.assertIn(
+            "src/main.py (provider-call-budget: rescan to complete coverage)",
+            mixed_outcome.summary,
+        )
+
+    def test_verifier_complete_expression_matching_per_reference_evidence_lookup_guards_and_rebinding(
+        self,
+    ) -> None:
+        """Items 2, 3, 4, & 5: Verifier matches complete target expressions without prefix/self pollution, isolates evidence per reference, honors lookup guards, and invalidates comprehension/walrus/same-line rebindings."""
+        # Item 2A: Guarded user.token on `return user.token.strip()` does not require a separate guard on `user`
+        snap_attr = {
+            "src/auth.py": (
+                "def normalize(user):\n"
+                "    if user.token is None:\n"
+                "        return ''\n"
+                "    return user.token.strip()\n"
+            )
+        }
+        sha_attr = _snapshot_digest(snap_attr)
+        cand_attr = CandidateFinding(
+            claim="Calling user.token.strip() when user.token is None raises AttributeError.",
+            triggering_conditions="Call normalize(user) when user.token is None.",
+            impacted_path="src/auth.py",
+            severity_rationale="Raises AttributeError when user.token is None.",
+            evidence=(
+                EvidenceReference(
+                    path="src/auth.py",
+                    line=4,
+                    snapshot_sha256=sha_attr,
+                    excerpt="return user.token.strip()",
+                ),
+            ),
+            severity="high",
+            remedy="Return early when user.token is None before calling strip().",
+        )
+        prep_attr = prepare_publishable_review(
+            ReviewResult(
+                summary="Review.",
+                comments=(),
+                provider="ollama",
+                review_status="complete",
+            ),
+            candidates=(cand_attr,),
+            snapshot=snap_attr,
+            snapshot_sha256=sha_attr,
+            evidence_policy="confirmed",
+            changed_lines={"src/auth.py": frozenset({4})},
+            changed_paths=("src/auth.py",),
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        )
+        self.assertTrue(prep_attr.verifications[0].contrary_evidence)
+        self.assertFalse(prep_attr.result.comments[0].effective_blocking)
+        self.assertFalse(prep_attr.result.comments[0].needs_human)
+
+        # Item 2B: Guarded self.session on `self.session.close()` does not treat bare `self` as an unguarded target
+        snap_self = {
+            "src/client.py": (
+                "class Client:\n"
+                "    def close(self):\n"
+                "        if self.session is None:\n"
+                "            return\n"
+                "        self.session.close()\n"
+            )
+        }
+        sha_self = _snapshot_digest(snap_self)
+        cand_self = CandidateFinding(
+            claim="Calling self.session.close() when self.session is None raises AttributeError.",
+            triggering_conditions="Call close() when self.session is None.",
+            impacted_path="src/client.py",
+            severity_rationale="Raises AttributeError when self.session is None.",
+            evidence=(
+                EvidenceReference(
+                    path="src/client.py",
+                    line=5,
+                    snapshot_sha256=sha_self,
+                    excerpt="self.session.close()",
+                ),
+            ),
+            severity="high",
+            remedy="Return early if self.session is None before calling close().",
+        )
+        prep_self = prepare_publishable_review(
+            ReviewResult(
+                summary="Review.",
+                comments=(),
+                provider="ollama",
+                review_status="complete",
+            ),
+            candidates=(cand_self,),
+            snapshot=snap_self,
+            snapshot_sha256=sha_self,
+            evidence_policy="confirmed",
+            changed_lines={"src/client.py": frozenset({5})},
+            changed_paths=("src/client.py",),
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        )
+        self.assertTrue(prep_self.verifications[0].contrary_evidence)
+        self.assertFalse(prep_self.result.comments[0].effective_blocking)
+        self.assertFalse(prep_self.result.comments[0].needs_human)
+
+        # Item 2C: Vague claim naming no target expression on the line does not fall back to all dereferences
+        cand_vague = CandidateFinding(
+            claim="This line raises AttributeError when the object is None.",
+            triggering_conditions="Invoke with a None value.",
+            impacted_path="src/auth.py",
+            severity_rationale="Raises AttributeError on None.",
+            evidence=(
+                EvidenceReference(
+                    path="src/auth.py",
+                    line=4,
+                    snapshot_sha256=sha_attr,
+                    excerpt="return user.token.strip()",
+                ),
+            ),
+            severity="high",
+            remedy="Check for None before calling strip().",
+        )
+        prep_vague = prepare_publishable_review(
+            ReviewResult(
+                summary="Review.",
+                comments=(),
+                provider="ollama",
+                review_status="complete",
+            ),
+            candidates=(cand_vague,),
+            snapshot=snap_attr,
+            snapshot_sha256=sha_attr,
+            evidence_policy="confirmed",
+            changed_lines={"src/auth.py": frozenset({4})},
+            changed_paths=("src/auth.py",),
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        )
+        self.assertFalse(prep_vague.verifications[0].contrary_evidence)
+        self.assertFalse(prep_vague.result.comments[0].effective_blocking)
+
+        # Item 3: Guarded reference does not suppress an unguarded failing reference in either evidence order
+        snap_two_refs = {
+            "src/auth.py": (
+                "def extract_tokens(primary, backup):\n"
+                "    first = primary.token.strip()\n"
+                "    if backup is not None and backup.token is not None:\n"
+                "        return first + backup.token.strip()\n"
+                "    return first\n"
+            )
+        }
+        sha_two_refs = _snapshot_digest(snap_two_refs)
+        unsafe_ref = EvidenceReference(
+            path="src/auth.py",
+            line=2,
+            snapshot_sha256=sha_two_refs,
+            excerpt="first = primary.token.strip()",
+        )
+        safe_ref = EvidenceReference(
+            path="src/auth.py",
+            line=4,
+            snapshot_sha256=sha_two_refs,
+            excerpt="return first + backup.token.strip()",
+        )
+        for order_name, refs in (
+            ("unsafe_then_safe", (unsafe_ref, safe_ref)),
+            ("safe_then_unsafe", (safe_ref, unsafe_ref)),
+        ):
+            with self.subTest(order=order_name):
+                cand_multi = CandidateFinding(
+                    claim="extract_tokens dereferences primary.token without a None guard while backup.token is guarded.",
+                    triggering_conditions="Call extract_tokens(primary, backup) when primary.token is None.",
+                    impacted_path="src/auth.py",
+                    severity_rationale="Raises AttributeError when primary.token is None.",
+                    evidence=refs,
+                    severity="high",
+                    remedy="Guard primary.token against None before calling strip().",
+                )
+                prep_multi = prepare_publishable_review(
+                    ReviewResult(
+                        summary="Review.",
+                        comments=(),
+                        provider="ollama",
+                        review_status="complete",
+                    ),
+                    candidates=(cand_multi,),
+                    snapshot=snap_two_refs,
+                    snapshot_sha256=sha_two_refs,
+                    evidence_policy="confirmed",
+                    changed_lines={"src/auth.py": frozenset({2, 4})},
+                    changed_paths=("src/auth.py",),
+                    convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+                )
+                self.assertFalse(prep_multi.verifications[0].contrary_evidence)
+                self.assertTrue(prep_multi.result.comments[0].effective_blocking)
+
+        # Item 4A: Guarded dictionary lookup sets contrary_evidence=True; unguarded/reversed lookup admits as Required fix
+        snap_lookup_safe = {
+            "src/store.py": (
+                "def read_value(data, key):\n"
+                "    if key not in data:\n"
+                "        return None\n"
+                "    return data[key]\n"
+            )
+        }
+        sha_lookup_safe = _snapshot_digest(snap_lookup_safe)
+        cand_lookup_safe = CandidateFinding(
+            claim="read_value accesses data[key] and raises KeyError when key is missing.",
+            triggering_conditions="Call read_value(data, key) with an absent key.",
+            impacted_path="src/store.py",
+            severity_rationale="Raises KeyError when key is not in data.",
+            evidence=(
+                EvidenceReference(
+                    path="src/store.py",
+                    line=4,
+                    snapshot_sha256=sha_lookup_safe,
+                    excerpt="return data[key]",
+                ),
+            ),
+            severity="high",
+            remedy="Check whether key is in data or use data.get(key).",
+        )
+        prep_lookup_safe = prepare_publishable_review(
+            ReviewResult(
+                summary="Review.",
+                comments=(),
+                provider="ollama",
+                review_status="complete",
+            ),
+            candidates=(cand_lookup_safe,),
+            snapshot=snap_lookup_safe,
+            snapshot_sha256=sha_lookup_safe,
+            evidence_policy="confirmed",
+            changed_lines={"src/store.py": frozenset({4})},
+            changed_paths=("src/store.py",),
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        )
+        self.assertTrue(prep_lookup_safe.verifications[0].contrary_evidence)
+        self.assertFalse(prep_lookup_safe.result.comments[0].effective_blocking)
+
+        # Item 4B: Comprehension target, walrus operator, and same-line semicolon rebinding invalidate prior guards
+        rebinding_cases = (
+            (
+                "comprehension_shadowing",
+                "def load(user):\n    if user is None:\n        return []\n    return [user.token for user in [None]]\n",
+                4,
+                "return [user.token for user in [None]]",
+            ),
+            (
+                "same_line_semicolon_rebinding",
+                "def load(user):\n    if user is None:\n        return ''\n    user = None; return user.token\n",
+                4,
+                "user = None; return user.token",
+            ),
+            (
+                "walrus_rebinding",
+                "def load(user):\n    if user is None:\n        return None\n    return (user := None, user.token)\n",
+                4,
+                "return (user := None, user.token)",
+            ),
+        )
+        for case_name, code_str, line_no, excerpt_str in rebinding_cases:
+            with self.subTest(rebinding=case_name):
+                snap_reb = {"src/reb.py": code_str}
+                sha_reb = _snapshot_digest(snap_reb)
+                cand_reb = CandidateFinding(
+                    claim="load dereferences user when user is None after rebinding.",
+                    triggering_conditions="Call load(user) where user is rebound to None.",
+                    impacted_path="src/reb.py",
+                    severity_rationale="Raises AttributeError when user is None.",
+                    evidence=(
+                        EvidenceReference(
+                            path="src/reb.py",
+                            line=line_no,
+                            snapshot_sha256=sha_reb,
+                            excerpt=excerpt_str,
+                        ),
+                    ),
+                    severity="high",
+                    remedy="Ensure user is not None before accessing user.token.",
+                )
+                prep_reb = prepare_publishable_review(
+                    ReviewResult(
+                        summary="Review.",
+                        comments=(),
+                        provider="ollama",
+                        review_status="complete",
+                    ),
+                    candidates=(cand_reb,),
+                    snapshot=snap_reb,
+                    snapshot_sha256=sha_reb,
+                    evidence_policy="confirmed",
+                    changed_lines={"src/reb.py": frozenset({line_no})},
+                    changed_paths=("src/reb.py",),
+                    convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+                )
+                self.assertFalse(prep_reb.verifications[0].contrary_evidence)
+                self.assertTrue(prep_reb.result.comments[0].effective_blocking)
+
+        # Item 5: Replay overflow records explicit replay_disabled_reason and publication uses ORDINARY_EVIDENCE_READ_LIMIT
+        import argparse
+        import tempfile
+        from unittest.mock import patch
+
+        from review_sensei_github.publication import (
+            ORDINARY_EVIDENCE_READ_LIMIT,
+            RESERVED_RECONCILIATION_READS,
+        )
+
+        from review_sensei.bounded_evidence import MAX_PART_READS
+        from review_sensei.cli import _local_session_replay_context
+
+        self.assertEqual(
+            ORDINARY_EVIDENCE_READ_LIMIT,
+            MAX_PART_READS - RESERVED_RECONCILIATION_READS,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "ctx.txt").write_text("hello", encoding="utf-8")
+            with patch("review_sensei.cli._MAX_REPLAY_TREE_FILES", 0):
+                ns_files = argparse.Namespace(context_root=root)
+                _local_session_replay_context(ns_files)
+                self.assertEqual(
+                    getattr(ns_files, "replay_disabled_reason", None),
+                    "file_count_exceeded",
+                )
+            with patch("review_sensei.cli._MAX_REPLAY_TREE_BYTES", 2):
+                ns_bytes = argparse.Namespace(context_root=root)
+                _local_session_replay_context(ns_bytes)
+                self.assertEqual(
+                    getattr(ns_bytes, "replay_disabled_reason", None),
+                    "byte_budget_exceeded",
+                )
 
 
 if __name__ == "__main__":

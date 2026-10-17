@@ -706,6 +706,194 @@ def _extract_is_zero_guards(test: ast.expr) -> set[str]:
     return guards
 
 
+def _add_nonempty_sequence_guards(target: ast.expr, guards: set[str]) -> None:
+    expr = _unparse_expr(target)
+    if expr:
+        guards.add(f"{expr}[0]")
+        guards.add(f"{expr}[-1]")
+
+
+def _extract_lookup_true_guards(test: ast.expr) -> set[str]:
+    """Return subscript expressions guaranteed valid when ``test`` evaluates to True."""
+    guards: set[str] = set()
+    if isinstance(test, ast.BoolOp):
+        if isinstance(test.op, ast.And):
+            for value in test.values:
+                guards.update(_extract_lookup_true_guards(value))
+        return guards
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        return _extract_lookup_false_guards(test.operand)
+    if (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and len(test.comparators) == 1
+    ):
+        op = test.ops[0]
+        left = test.left
+        right = test.comparators[0]
+        if isinstance(op, ast.In):
+            key_expr = _unparse_expr(left)
+            container_expr = _unparse_expr(right)
+            if key_expr and container_expr:
+                guards.add(f"{container_expr}[{key_expr}]")
+            return guards
+        if (
+            isinstance(left, ast.Call)
+            and isinstance(left.func, ast.Name)
+            and left.func.id == "len"
+            and len(left.args) == 1
+        ):
+            seq_expr = _unparse_expr(left.args[0])
+            if seq_expr:
+                if isinstance(op, ast.Gt):
+                    idx_expr = _unparse_expr(right)
+                    if idx_expr:
+                        guards.add(f"{seq_expr}[{idx_expr}]")
+                    if (
+                        isinstance(right, ast.Constant)
+                        and isinstance(right.value, int)
+                        and not isinstance(right.value, bool)
+                        and 0 <= right.value < 16
+                    ):
+                        _add_nonempty_sequence_guards(left.args[0], guards)
+                        for idx in range(right.value + 1):
+                            guards.add(f"{seq_expr}[{idx}]")
+                elif (
+                    isinstance(op, ast.GtE)
+                    and isinstance(right, ast.Constant)
+                    and isinstance(right.value, int)
+                    and not isinstance(right.value, bool)
+                    and 1 <= right.value <= 16
+                ):
+                    _add_nonempty_sequence_guards(left.args[0], guards)
+                    for idx in range(right.value):
+                        guards.add(f"{seq_expr}[{idx}]")
+                elif (
+                    isinstance(op, ast.NotEq)
+                    and isinstance(right, ast.Constant)
+                    and not isinstance(right.value, bool)
+                    and right.value == 0
+                ):
+                    _add_nonempty_sequence_guards(left.args[0], guards)
+        elif (
+            isinstance(right, ast.Call)
+            and isinstance(right.func, ast.Name)
+            and right.func.id == "len"
+            and len(right.args) == 1
+        ):
+            seq_expr = _unparse_expr(right.args[0])
+            if seq_expr and isinstance(op, ast.Lt):
+                idx_expr = _unparse_expr(left)
+                if idx_expr:
+                    guards.add(f"{seq_expr}[{idx_expr}]")
+                if (
+                    isinstance(left, ast.Constant)
+                    and isinstance(left.value, int)
+                    and not isinstance(left.value, bool)
+                    and 0 <= left.value < 16
+                ):
+                    _add_nonempty_sequence_guards(right.args[0], guards)
+                    for idx in range(left.value + 1):
+                        guards.add(f"{seq_expr}[{idx}]")
+        return guards
+    if (
+        isinstance(test, ast.Call)
+        and isinstance(test.func, ast.Name)
+        and test.func.id in {"len", "bool"}
+        and len(test.args) == 1
+    ):
+        _add_nonempty_sequence_guards(test.args[0], guards)
+        return guards
+    if isinstance(test, (ast.Name, ast.Attribute, ast.Subscript)):
+        _add_nonempty_sequence_guards(test, guards)
+    return guards
+
+
+def _extract_lookup_false_guards(test: ast.expr) -> set[str]:
+    """Return subscript expressions guaranteed valid when ``test`` evaluates to False."""
+    guards: set[str] = set()
+    if isinstance(test, ast.BoolOp):
+        if isinstance(test.op, ast.Or):
+            for value in test.values:
+                guards.update(_extract_lookup_false_guards(value))
+        return guards
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        return _extract_lookup_true_guards(test.operand)
+    if (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and len(test.comparators) == 1
+    ):
+        op = test.ops[0]
+        left = test.left
+        right = test.comparators[0]
+        if isinstance(op, ast.NotIn):
+            key_expr = _unparse_expr(left)
+            container_expr = _unparse_expr(right)
+            if key_expr and container_expr:
+                guards.add(f"{container_expr}[{key_expr}]")
+            return guards
+        if (
+            isinstance(left, ast.Call)
+            and isinstance(left.func, ast.Name)
+            and left.func.id == "len"
+            and len(left.args) == 1
+        ):
+            seq_expr = _unparse_expr(left.args[0])
+            if seq_expr:
+                if isinstance(op, ast.LtE):
+                    idx_expr = _unparse_expr(right)
+                    if idx_expr:
+                        guards.add(f"{seq_expr}[{idx_expr}]")
+                    if (
+                        isinstance(right, ast.Constant)
+                        and isinstance(right.value, int)
+                        and not isinstance(right.value, bool)
+                        and 0 <= right.value < 16
+                    ):
+                        _add_nonempty_sequence_guards(left.args[0], guards)
+                        for idx in range(right.value + 1):
+                            guards.add(f"{seq_expr}[{idx}]")
+                elif (
+                    isinstance(op, ast.Lt)
+                    and isinstance(right, ast.Constant)
+                    and isinstance(right.value, int)
+                    and not isinstance(right.value, bool)
+                    and 1 <= right.value <= 16
+                ):
+                    _add_nonempty_sequence_guards(left.args[0], guards)
+                    for idx in range(right.value):
+                        guards.add(f"{seq_expr}[{idx}]")
+                elif (
+                    isinstance(op, ast.Eq)
+                    and isinstance(right, ast.Constant)
+                    and not isinstance(right.value, bool)
+                    and right.value == 0
+                ):
+                    _add_nonempty_sequence_guards(left.args[0], guards)
+        elif (
+            isinstance(right, ast.Call)
+            and isinstance(right.func, ast.Name)
+            and right.func.id == "len"
+            and len(right.args) == 1
+        ):
+            seq_expr = _unparse_expr(right.args[0])
+            if seq_expr and isinstance(op, ast.GtE):
+                idx_expr = _unparse_expr(left)
+                if idx_expr:
+                    guards.add(f"{seq_expr}[{idx_expr}]")
+                if (
+                    isinstance(left, ast.Constant)
+                    and isinstance(left.value, int)
+                    and not isinstance(left.value, bool)
+                    and 0 <= left.value < 16
+                ):
+                    _add_nonempty_sequence_guards(right.args[0], guards)
+                    for idx in range(left.value + 1):
+                        guards.add(f"{seq_expr}[{idx}]")
+    return guards
+
+
 def _block_terminates(stmts: Sequence[ast.stmt]) -> bool:
     """Return True if execution of ``stmts`` unconditionally exits the current block."""
     if not stmts:
@@ -716,6 +904,25 @@ def _block_terminates(stmts: Sequence[ast.stmt]) -> bool:
     if isinstance(last, ast.If) and last.orelse:
         return _block_terminates(last.body) and _block_terminates(last.orelse)
     return False
+
+
+def _target_names_in_node(node: ast.AST | None) -> set[str]:
+    """Return variable and attribute targets bound by an assignment/loop/comprehension target node."""
+    if node is None:
+        return set()
+    names: set[str] = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name) and isinstance(child.ctx, (ast.Store, ast.Del)):
+            names.add(child.id)
+        elif isinstance(child, (ast.Attribute, ast.Subscript)) and isinstance(
+            child.ctx, (ast.Store, ast.Del)
+        ):
+            expr = _unparse_expr(child)
+            if expr:
+                names.add(expr)
+        elif isinstance(child, ast.NamedExpr) and isinstance(child.target, ast.Name):
+            names.add(child.target.id)
+    return names
 
 
 def _assigned_targets_in_stmt(stmt: ast.stmt) -> set[str]:
@@ -737,6 +944,8 @@ def _assigned_targets_in_stmt(stmt: ast.stmt) -> set[str]:
                 names.add(expr)
         elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
             names.add(node.target.id)
+        elif isinstance(node, ast.ExceptHandler) and isinstance(node.name, str):
+            names.add(node.name)
     return names
 
 
@@ -752,6 +961,15 @@ def _invalidate_reassigned_guards(guards: set[str], assigned: set[str]) -> set[s
                 or guard.startswith(f"{target}.")
                 or guard.startswith(f"{target}[")
                 or f"({target})" in guard
+                or f"[{target}]" in guard
+                or (
+                    re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", target) is not None
+                    and re.search(
+                        rf"(?<![A-Za-z0-9_.]){re.escape(target)}(?![A-Za-z0-9_])",
+                        guard,
+                    )
+                    is not None
+                )
             ):
                 invalidated = True
                 break
@@ -767,58 +985,104 @@ def _collect_expression_branch_guards(
     pos_extractor: Callable[[ast.expr], set[str]],
     neg_extractor: Callable[[ast.expr], set[str]],
     out: dict[int, frozenset[str]],
-) -> None:
+) -> frozenset[str]:
     """Attach branch-specific guard sets to each AST node id along its execution path."""
     out[id(node)] = active_guards
-    if isinstance(node, ast.IfExp):
+    if isinstance(node, ast.NamedExpr):
+        post_val = _collect_expression_branch_guards(
+            node.value,
+            active_guards,
+            pos_extractor=pos_extractor,
+            neg_extractor=neg_extractor,
+            out=out,
+        )
+        rebound = _target_names_in_node(node.target)
+        post_guards = frozenset(_invalidate_reassigned_guards(set(post_val), rebound))
         _collect_expression_branch_guards(
+            node.target,
+            post_guards,
+            pos_extractor=pos_extractor,
+            neg_extractor=neg_extractor,
+            out=out,
+        )
+        return post_guards
+    if isinstance(node, ast.Lambda):
+        param_names = {
+            arg.arg
+            for arg in (
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            )
+        }
+        if node.args.vararg is not None:
+            param_names.add(node.args.vararg.arg)
+        if node.args.kwarg is not None:
+            param_names.add(node.args.kwarg.arg)
+        lambda_guards = frozenset(
+            _invalidate_reassigned_guards(set(active_guards), param_names)
+        )
+        _collect_expression_branch_guards(
+            node.body,
+            lambda_guards,
+            pos_extractor=pos_extractor,
+            neg_extractor=neg_extractor,
+            out=out,
+        )
+        return active_guards
+    if isinstance(node, ast.IfExp):
+        post_test = _collect_expression_branch_guards(
             node.test,
             active_guards,
             pos_extractor=pos_extractor,
             neg_extractor=neg_extractor,
             out=out,
         )
-        body_guards = active_guards | frozenset(pos_extractor(node.test))
-        _collect_expression_branch_guards(
+        body_guards = post_test | frozenset(pos_extractor(node.test))
+        post_body = _collect_expression_branch_guards(
             node.body,
             body_guards,
             pos_extractor=pos_extractor,
             neg_extractor=neg_extractor,
             out=out,
         )
-        else_guards = active_guards | frozenset(neg_extractor(node.test))
-        _collect_expression_branch_guards(
+        else_guards = post_test | frozenset(neg_extractor(node.test))
+        post_else = _collect_expression_branch_guards(
             node.orelse,
             else_guards,
             pos_extractor=pos_extractor,
             neg_extractor=neg_extractor,
             out=out,
         )
-        return
+        return post_body & post_else
     if isinstance(node, ast.BoolOp):
         branch_guards = set(active_guards)
         for value in node.values:
-            _collect_expression_branch_guards(
+            post_val = _collect_expression_branch_guards(
                 value,
                 frozenset(branch_guards),
                 pos_extractor=pos_extractor,
                 neg_extractor=neg_extractor,
                 out=out,
             )
+            branch_guards = set(post_val)
             if isinstance(node.op, ast.And):
                 branch_guards.update(pos_extractor(value))
             elif isinstance(node.op, ast.Or):
                 branch_guards.update(neg_extractor(value))
-        return
+        return frozenset(branch_guards)
     if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
         comp_guards = set(active_guards)
         for gen in node.generators:
-            _collect_expression_branch_guards(
+            post_iter = _collect_expression_branch_guards(
                 gen.iter,
                 frozenset(comp_guards),
                 pos_extractor=pos_extractor,
                 neg_extractor=neg_extractor,
                 out=out,
+            )
+            comp_guards = _invalidate_reassigned_guards(
+                set(post_iter), _target_names_in_node(gen.target)
             )
             _collect_expression_branch_guards(
                 gen.target,
@@ -828,16 +1092,17 @@ def _collect_expression_branch_guards(
                 out=out,
             )
             for if_clause in gen.ifs:
-                _collect_expression_branch_guards(
+                post_if = _collect_expression_branch_guards(
                     if_clause,
                     frozenset(comp_guards),
                     pos_extractor=pos_extractor,
                     neg_extractor=neg_extractor,
                     out=out,
                 )
+                comp_guards = set(post_if)
                 comp_guards.update(pos_extractor(if_clause))
         if isinstance(node, ast.DictComp):
-            _collect_expression_branch_guards(
+            post_key = _collect_expression_branch_guards(
                 node.key,
                 frozenset(comp_guards),
                 pos_extractor=pos_extractor,
@@ -846,7 +1111,7 @@ def _collect_expression_branch_guards(
             )
             _collect_expression_branch_guards(
                 node.value,
-                frozenset(comp_guards),
+                post_key,
                 pos_extractor=pos_extractor,
                 neg_extractor=neg_extractor,
                 out=out,
@@ -859,42 +1124,97 @@ def _collect_expression_branch_guards(
                 neg_extractor=neg_extractor,
                 out=out,
             )
-        return
+        return active_guards
     if isinstance(node, ast.If):
-        _collect_expression_branch_guards(
+        post_test = _collect_expression_branch_guards(
             node.test,
             active_guards,
             pos_extractor=pos_extractor,
             neg_extractor=neg_extractor,
             out=out,
         )
-        body_guards = active_guards | frozenset(pos_extractor(node.test))
+        body_guards = post_test | frozenset(pos_extractor(node.test))
         for child_stmt in node.body:
-            _collect_expression_branch_guards(
+            body_guards = _collect_expression_branch_guards(
                 child_stmt,
                 body_guards,
                 pos_extractor=pos_extractor,
                 neg_extractor=neg_extractor,
                 out=out,
             )
-        else_guards = active_guards | frozenset(neg_extractor(node.test))
+            body_guards = frozenset(
+                _invalidate_reassigned_guards(
+                    set(body_guards), _assigned_targets_in_stmt(child_stmt)
+                )
+            )
+        else_guards = post_test | frozenset(neg_extractor(node.test))
         for child_stmt in node.orelse:
-            _collect_expression_branch_guards(
+            else_guards = _collect_expression_branch_guards(
                 child_stmt,
                 else_guards,
                 pos_extractor=pos_extractor,
                 neg_extractor=neg_extractor,
                 out=out,
             )
-        return
-    for child in ast.iter_child_nodes(node):
-        _collect_expression_branch_guards(
-            child,
+            else_guards = frozenset(
+                _invalidate_reassigned_guards(
+                    set(else_guards), _assigned_targets_in_stmt(child_stmt)
+                )
+            )
+        return active_guards
+    if isinstance(node, ast.Assign):
+        post_val = _collect_expression_branch_guards(
+            node.value,
             active_guards,
             pos_extractor=pos_extractor,
             neg_extractor=neg_extractor,
             out=out,
         )
+        cur_guards = post_val
+        for target_node in node.targets:
+            cur_guards = _collect_expression_branch_guards(
+                target_node,
+                cur_guards,
+                pos_extractor=pos_extractor,
+                neg_extractor=neg_extractor,
+                out=out,
+            )
+            cur_guards = frozenset(
+                _invalidate_reassigned_guards(
+                    set(cur_guards), _target_names_in_node(target_node)
+                )
+            )
+        return cur_guards
+    if isinstance(node, ast.AnnAssign) and node.value is not None:
+        post_val = _collect_expression_branch_guards(
+            node.value,
+            active_guards,
+            pos_extractor=pos_extractor,
+            neg_extractor=neg_extractor,
+            out=out,
+        )
+        _collect_expression_branch_guards(
+            node.target,
+            post_val,
+            pos_extractor=pos_extractor,
+            neg_extractor=neg_extractor,
+            out=out,
+        )
+        return frozenset(
+            _invalidate_reassigned_guards(
+                set(post_val), _target_names_in_node(node.target)
+            )
+        )
+    cur_guards = active_guards
+    for child in ast.iter_child_nodes(node):
+        cur_guards = _collect_expression_branch_guards(
+            child,
+            cur_guards,
+            pos_extractor=pos_extractor,
+            neg_extractor=neg_extractor,
+            out=out,
+        )
+    return cur_guards
 
 
 def _branch_guards_for_stmt(
@@ -915,6 +1235,50 @@ def _branch_guards_for_stmt(
     return out
 
 
+def _advance_stmt_guards(
+    stmt: ast.stmt,
+    current_guards: set[str],
+    *,
+    pos_extractor: Callable[[ast.expr], set[str]],
+    neg_extractor: Callable[[ast.expr], set[str]],
+) -> set[str]:
+    """Return the updated guard set after ``stmt`` finishes executing without exiting the block."""
+    if isinstance(stmt, ast.If):
+        test_rebound = _target_names_in_node(stmt.test)
+        base_guards = _invalidate_reassigned_guards(current_guards, test_rebound)
+        body_exits = _block_terminates(stmt.body)
+        else_exits = bool(stmt.orelse) and _block_terminates(stmt.orelse)
+        if body_exits and not else_exits:
+            assigned_in_else: set[str] = set()
+            for else_stmt in stmt.orelse:
+                assigned_in_else.update(_assigned_targets_in_stmt(else_stmt))
+            updated = _invalidate_reassigned_guards(base_guards, assigned_in_else)
+            updated |= _invalidate_reassigned_guards(
+                neg_extractor(stmt.test),
+                assigned_in_else,
+            )
+            return updated
+        if else_exits and not body_exits:
+            assigned_in_body: set[str] = set()
+            for body_stmt in stmt.body:
+                assigned_in_body.update(_assigned_targets_in_stmt(body_stmt))
+            updated = _invalidate_reassigned_guards(base_guards, assigned_in_body)
+            updated |= _invalidate_reassigned_guards(
+                pos_extractor(stmt.test),
+                assigned_in_body,
+            )
+            return updated
+        assigned_both = _assigned_targets_in_stmt(stmt)
+        return _invalidate_reassigned_guards(base_guards, assigned_both)
+    if isinstance(stmt, ast.Assert):
+        test_rebound = _target_names_in_node(stmt.test)
+        updated = _invalidate_reassigned_guards(current_guards, test_rebound)
+        return updated | pos_extractor(stmt.test)
+    return _invalidate_reassigned_guards(
+        current_guards, _assigned_targets_in_stmt(stmt)
+    )
+
+
 def _active_node_guards_at_line(
     stmts: Sequence[ast.stmt],
     target_line: int,
@@ -925,6 +1289,9 @@ def _active_node_guards_at_line(
 ) -> dict[int, frozenset[str]] | None:
     """Walk AST statements in control-flow order and return per-node guards active at ``target_line``."""
     current_guards = set(active_guards)
+    matched_on_line: dict[int, frozenset[str]] = {}
+    saw_target_line = False
+
     for stmt in stmts:
         start = getattr(stmt, "lineno", None)
         end = getattr(stmt, "end_lineno", start)
@@ -934,6 +1301,7 @@ def _active_node_guards_at_line(
             end = start
 
         if start <= target_line <= end:
+            saw_target_line = True
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 found = _active_node_guards_at_line(
                     stmt.body,
@@ -942,22 +1310,53 @@ def _active_node_guards_at_line(
                     pos_extractor=pos_extractor,
                     neg_extractor=neg_extractor,
                 )
-                return found if found is not None else {}
+                if found is not None:
+                    matched_on_line.update(found)
+                current_guards = _advance_stmt_guards(
+                    stmt,
+                    current_guards,
+                    pos_extractor=pos_extractor,
+                    neg_extractor=neg_extractor,
+                )
+                continue
             if isinstance(stmt, ast.If):
                 test_end = getattr(stmt.test, "end_lineno", start) or start
-                if target_line <= test_end:
-                    return _branch_guards_for_stmt(
+                if target_line <= test_end and start == end:
+                    matched_on_line.update(
+                        _branch_guards_for_stmt(
+                            stmt,
+                            current_guards,
+                            pos_extractor=pos_extractor,
+                            neg_extractor=neg_extractor,
+                        )
+                    )
+                    current_guards = _advance_stmt_guards(
                         stmt,
                         current_guards,
                         pos_extractor=pos_extractor,
                         neg_extractor=neg_extractor,
                     )
+                    continue
+                if target_line <= test_end:
+                    matched_on_line.update(
+                        _branch_guards_for_stmt(
+                            stmt,
+                            current_guards,
+                            pos_extractor=pos_extractor,
+                            neg_extractor=neg_extractor,
+                        )
+                    )
+                    continue
+                test_rebound = _target_names_in_node(stmt.test)
+                post_test_guards = _invalidate_reassigned_guards(
+                    current_guards, test_rebound
+                )
                 body_end = max(
                     (getattr(s, "end_lineno", getattr(s, "lineno", start)) or start)
                     for s in stmt.body
                 )
                 if target_line <= body_end:
-                    branch_guards = current_guards | pos_extractor(stmt.test)
+                    branch_guards = post_test_guards | pos_extractor(stmt.test)
                     found = _active_node_guards_at_line(
                         stmt.body,
                         target_line,
@@ -965,7 +1364,7 @@ def _active_node_guards_at_line(
                         pos_extractor=pos_extractor,
                         neg_extractor=neg_extractor,
                     )
-                    return (
+                    matched_on_line.update(
                         found
                         if found is not None
                         else _branch_guards_for_stmt(
@@ -975,8 +1374,9 @@ def _active_node_guards_at_line(
                             neg_extractor=neg_extractor,
                         )
                     )
+                    continue
                 if stmt.orelse:
-                    else_guards = current_guards | neg_extractor(stmt.test)
+                    else_guards = post_test_guards | neg_extractor(stmt.test)
                     found = _active_node_guards_at_line(
                         stmt.orelse,
                         target_line,
@@ -984,7 +1384,7 @@ def _active_node_guards_at_line(
                         pos_extractor=pos_extractor,
                         neg_extractor=neg_extractor,
                     )
-                    return (
+                    matched_on_line.update(
                         found
                         if found is not None
                         else _branch_guards_for_stmt(
@@ -994,77 +1394,85 @@ def _active_node_guards_at_line(
                             neg_extractor=neg_extractor,
                         )
                     )
+                    continue
+            inner_guards = set(current_guards)
+            if isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
+                inner_guards = _invalidate_reassigned_guards(
+                    inner_guards, _assigned_targets_in_stmt(stmt)
+                )
+            elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+                with_targets: set[str] = set()
+                for item in stmt.items:
+                    with_targets.update(_target_names_in_node(item.optional_vars))
+                inner_guards = _invalidate_reassigned_guards(inner_guards, with_targets)
+            found_in_block = False
             for block_attr in ("body", "orelse", "finalbody"):
                 block = getattr(stmt, block_attr, None)
                 if isinstance(block, list) and block:
+                    block_guards = set(inner_guards)
+                    if block_attr == "finalbody":
+                        block_guards = _invalidate_reassigned_guards(
+                            block_guards, _assigned_targets_in_stmt(stmt)
+                        )
                     found = _active_node_guards_at_line(
                         block,
                         target_line,
-                        current_guards,
+                        block_guards,
                         pos_extractor=pos_extractor,
                         neg_extractor=neg_extractor,
                     )
                     if found is not None:
-                        return found
+                        matched_on_line.update(found)
+                        found_in_block = True
             handlers = getattr(stmt, "handlers", None)
             if isinstance(handlers, list):
+                body_assigned: set[str] = set()
+                for body_stmt in getattr(stmt, "body", ()):
+                    body_assigned.update(_assigned_targets_in_stmt(body_stmt))
                 for handler in handlers:
                     h_body = getattr(handler, "body", None)
                     if isinstance(h_body, list):
+                        handler_assigned = set(body_assigned)
+                        if isinstance(getattr(handler, "name", None), str):
+                            handler_assigned.add(handler.name)
+                        handler_guards = _invalidate_reassigned_guards(
+                            inner_guards, handler_assigned
+                        )
                         found = _active_node_guards_at_line(
                             h_body,
                             target_line,
-                            current_guards,
+                            handler_guards,
                             pos_extractor=pos_extractor,
                             neg_extractor=neg_extractor,
                         )
                         if found is not None:
-                            return found
-            return _branch_guards_for_stmt(
+                            matched_on_line.update(found)
+                            found_in_block = True
+            if not found_in_block:
+                matched_on_line.update(
+                    _branch_guards_for_stmt(
+                        stmt,
+                        inner_guards,
+                        pos_extractor=pos_extractor,
+                        neg_extractor=neg_extractor,
+                    )
+                )
+            current_guards = _advance_stmt_guards(
                 stmt,
                 current_guards,
                 pos_extractor=pos_extractor,
                 neg_extractor=neg_extractor,
             )
+            continue
 
         if end < target_line:
-            if isinstance(stmt, ast.If):
-                body_exits = _block_terminates(stmt.body)
-                else_exits = bool(stmt.orelse) and _block_terminates(stmt.orelse)
-                if body_exits and not else_exits:
-                    assigned_in_else: set[str] = set()
-                    for else_stmt in stmt.orelse:
-                        assigned_in_else.update(_assigned_targets_in_stmt(else_stmt))
-                    current_guards = _invalidate_reassigned_guards(
-                        current_guards, assigned_in_else
-                    )
-                    current_guards |= _invalidate_reassigned_guards(
-                        neg_extractor(stmt.test),
-                        assigned_in_else,
-                    )
-                elif else_exits and not body_exits:
-                    assigned_in_body: set[str] = set()
-                    for body_stmt in stmt.body:
-                        assigned_in_body.update(_assigned_targets_in_stmt(body_stmt))
-                    current_guards = _invalidate_reassigned_guards(
-                        current_guards, assigned_in_body
-                    )
-                    current_guards |= _invalidate_reassigned_guards(
-                        pos_extractor(stmt.test),
-                        assigned_in_body,
-                    )
-                else:
-                    assigned_both = _assigned_targets_in_stmt(stmt)
-                    current_guards = _invalidate_reassigned_guards(
-                        current_guards, assigned_both
-                    )
-            elif isinstance(stmt, ast.Assert):
-                current_guards |= pos_extractor(stmt.test)
-            else:
-                current_guards = _invalidate_reassigned_guards(
-                    current_guards, _assigned_targets_in_stmt(stmt)
-                )
-    return None
+            current_guards = _advance_stmt_guards(
+                stmt,
+                current_guards,
+                pos_extractor=pos_extractor,
+                neg_extractor=neg_extractor,
+            )
+    return matched_on_line if saw_target_line else None
 
 
 def _remedy_addresses_mechanism(
@@ -1148,6 +1556,29 @@ def _remedy_addresses_mechanism(
     return False
 
 
+def _expr_mentioned_in_text(expr: str, text_lower: str) -> bool:
+    """Return True when ``expr`` appears in ``text_lower`` at token boundaries."""
+    expr_lower = expr.strip().lower()
+    if not expr_lower:
+        return False
+    pattern = rf"(?<![a-z0-9_.]){re.escape(expr_lower)}(?![a-z0-9_])"
+    return re.search(pattern, text_lower) is not None
+
+
+def _expr_explicitly_alleged_null(expr: str, text_lower: str) -> bool:
+    """Return True when ``text_lower`` directly alleges ``expr`` itself (not ``expr.attr``) is None/null."""
+    expr_lower = expr.strip().lower()
+    if not expr_lower:
+        return False
+    esc = re.escape(expr_lower)
+    patterns = (
+        rf"(?<![a-z0-9_.]){esc}(?![a-z0-9_.\[])\s*(?:is\s+none|is\s+null|==\s*none|=\s*none|(?:can|may|might|could)\s+(?:be|return)\s+none)",
+        rf"(?:none|null)\s+{esc}(?![a-z0-9_.\[])",
+        rf"dereferences\s+{esc}(?![a-z0-9_.\[])",
+    )
+    return any(re.search(pat, text_lower) is not None for pat in patterns)
+
+
 def _assess_candidate_premises(
     candidate: CandidateFinding,
     snapshot: Mapping[str, str],
@@ -1170,8 +1601,8 @@ def _assess_candidate_premises(
     )
     alleges_unsafe = bool(words & _UNSAFE_OP_KEYWORDS)
 
-    mechanism_supported = False
-    contrary_evidence = False
+    any_ref_supported = False
+    any_ref_contrary = False
     target_identifiers: set[str] = set()
     saw_harmless_only = False
     saw_non_harmless = False
@@ -1191,6 +1622,9 @@ def _assess_candidate_premises(
             continue
         saw_non_harmless = True
 
+        ref_supported = False
+        ref_contrary = False
+
         try:
             tree = ast.parse(content)
         except (SyntaxError, ValueError):
@@ -1199,40 +1633,46 @@ def _assess_candidate_premises(
         if alleges_null and tree is not None:
             deref_nodes = _dereferenced_nodes_on_line(tree, reference.line)
             if deref_nodes:
-                derefs = {expr for _, expr in deref_nodes}
-                non_implicit = {
-                    expr
-                    for expr in derefs
-                    if expr not in {"self", "cls"} or expr in words
+                candidate_derefs = {
+                    expr for _, expr in deref_nodes if expr not in {"self", "cls"}
                 }
-                candidate_derefs = non_implicit or derefs
-                targeted_derefs = {
+                raw_targeted = {
                     expr
                     for expr in candidate_derefs
-                    if expr.lower() in combined_text
-                    or expr.split(".")[0].lower() in words
+                    if _expr_mentioned_in_text(expr, combined_text)
                 }
-                relevant_derefs = targeted_derefs or candidate_derefs
+                # Prune prefix objects (e.g. `user` when `user.token` is matched)
+                # unless the claim explicitly alleges the prefix itself is None.
+                targeted_derefs = {
+                    expr
+                    for expr in raw_targeted
+                    if not any(
+                        other != expr and other.startswith(f"{expr}.")
+                        for other in raw_targeted
+                    )
+                    or _expr_explicitly_alleged_null(expr, combined_text)
+                }
                 relevant_nodes = [
                     (node, expr)
                     for node, expr in deref_nodes
-                    if expr in relevant_derefs
+                    if expr in targeted_derefs
                 ]
-                guards = _active_node_guards_at_line(
-                    tree.body,
-                    reference.line,
-                    set(),
-                    pos_extractor=_extract_non_none_guards,
-                    neg_extractor=_extract_is_none_guards,
-                )
-                node_guards = guards if guards is not None else {}
-                if relevant_nodes and all(
-                    expr in node_guards.get(id(node), frozenset())
-                    for node, expr in relevant_nodes
-                ):
-                    contrary_evidence = True
-                else:
-                    mechanism_supported = True
+                if relevant_nodes:
+                    guards = _active_node_guards_at_line(
+                        tree.body,
+                        reference.line,
+                        set(),
+                        pos_extractor=_extract_non_none_guards,
+                        neg_extractor=_extract_is_none_guards,
+                    )
+                    node_guards = guards if guards is not None else {}
+                    if all(
+                        expr in node_guards.get(id(node), frozenset())
+                        for node, expr in relevant_nodes
+                    ):
+                        ref_contrary = True
+                    else:
+                        ref_supported = True
 
         if alleges_div_zero and tree is not None:
             divisor_nodes = _divisor_nodes_on_line(tree, reference.line)
@@ -1241,53 +1681,80 @@ def _assess_candidate_premises(
                 targeted_divisors = {
                     expr
                     for expr in divisors
-                    if expr.lower() in combined_text
-                    or any(
-                        tok in words
-                        for tok in re.findall(r"[a-z_][a-z0-9_]*", expr.lower())
+                    if _expr_mentioned_in_text(expr, combined_text)
+                    or (
+                        expr.startswith("len(")
+                        and expr.endswith(")")
+                        and _expr_mentioned_in_text(expr[4:-1], combined_text)
                     )
                 }
-                relevant_divisors = targeted_divisors or divisors
                 relevant_nodes = [
                     (node, expr)
                     for node, expr in divisor_nodes
-                    if expr in relevant_divisors
+                    if expr in targeted_divisors
                 ]
-                guards = _active_node_guards_at_line(
-                    tree.body,
-                    reference.line,
-                    set(),
-                    pos_extractor=_extract_non_zero_guards,
-                    neg_extractor=_extract_is_zero_guards,
-                )
-                node_guards = guards if guards is not None else {}
-                if relevant_nodes and all(
-                    expr in node_guards.get(id(node), frozenset())
-                    for node, expr in relevant_nodes
-                ):
-                    contrary_evidence = True
-                else:
-                    mechanism_supported = True
+                if relevant_nodes:
+                    guards = _active_node_guards_at_line(
+                        tree.body,
+                        reference.line,
+                        set(),
+                        pos_extractor=_extract_non_zero_guards,
+                        neg_extractor=_extract_is_zero_guards,
+                    )
+                    node_guards = guards if guards is not None else {}
+                    if all(
+                        expr in node_guards.get(id(node), frozenset())
+                        for node, expr in relevant_nodes
+                    ):
+                        ref_contrary = True
+                    else:
+                        ref_supported = True
 
         if alleges_lookup and tree is not None:
-            has_subscript = any(
-                isinstance(node, ast.Subscript)
-                and getattr(node, "lineno", None) == reference.line
+            subscript_nodes = [
+                (node, _unparse_expr(node), _unparse_expr(node.value))
                 for node in ast.walk(tree)
-            )
-            if has_subscript and ".get(" not in target_line:
-                mechanism_supported = True
+                if isinstance(node, ast.Subscript)
+                and getattr(node, "lineno", None) == reference.line
+                and isinstance(getattr(node, "ctx", ast.Load()), ast.Load)
+                and _unparse_expr(node)
+            ]
+            if subscript_nodes:
+                targeted_subscripts = [
+                    (node, sub_expr)
+                    for node, sub_expr, container_expr in subscript_nodes
+                    if _expr_mentioned_in_text(sub_expr, combined_text)
+                    or _expr_mentioned_in_text(container_expr, combined_text)
+                ]
+                if targeted_subscripts:
+                    guards = _active_node_guards_at_line(
+                        tree.body,
+                        reference.line,
+                        set(),
+                        pos_extractor=_extract_lookup_true_guards,
+                        neg_extractor=_extract_lookup_false_guards,
+                    )
+                    node_guards = guards if guards is not None else {}
+                    if all(
+                        sub_expr in node_guards.get(id(node), frozenset())
+                        for node, sub_expr in targeted_subscripts
+                    ):
+                        ref_contrary = True
+                    elif ".get(" not in target_line:
+                        ref_supported = True
+            elif ".get(" in target_line:
+                ref_contrary = True
 
         if alleges_unsafe:
             if "subprocess." in target_line:
                 if "shell=True" in target_line or "shell = True" in target_line:
-                    mechanism_supported = True
+                    ref_supported = True
                 elif (
                     "shell=False" in target_line
                     or "shell = False" in target_line
                     or re.search(r"subprocess\.[a-z_]+\(\s*\[", target_line)
                 ):
-                    contrary_evidence = True
+                    ref_contrary = True
             elif any(
                 token in target_line
                 for token in (
@@ -1298,21 +1765,29 @@ def _assess_candidate_premises(
                     "os.system",
                 )
             ):
-                mechanism_supported = True
+                ref_supported = True
             elif any(
                 sql_kw in target_line
                 for sql_kw in ("SELECT ", "INSERT ", "UPDATE ", "DELETE ")
             ) and any(
                 interp in target_line for interp in ('f"', "f'", ".format(", "%", "+")
             ):
-                mechanism_supported = True
+                ref_supported = True
 
-    if (
-        saw_harmless_only
-        and not saw_non_harmless
-        and (alleges_null or alleges_div_zero or alleges_lookup or alleges_unsafe)
-    ):
-        contrary_evidence = True
+        if ref_supported:
+            any_ref_supported = True
+        elif ref_contrary:
+            any_ref_contrary = True
+
+    mechanism_supported = any_ref_supported
+    contrary_evidence = (not any_ref_supported) and (
+        any_ref_contrary
+        or (
+            saw_harmless_only
+            and not saw_non_harmless
+            and (alleges_null or alleges_div_zero or alleges_lookup or alleges_unsafe)
+        )
+    )
 
     if mechanism_supported and not contrary_evidence:
         premises.append("failure-mechanism")

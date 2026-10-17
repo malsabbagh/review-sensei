@@ -841,7 +841,7 @@ def _replay_file_digest(
                         break
                     total_bytes += len(chunk)
                     if total_bytes > effective_max_bytes:
-                        return "unbounded:" + os.urandom(16).hex()
+                        return "unbounded:byte_budget:" + os.urandom(16).hex()
                     hasher.update(chunk)
             return hasher.hexdigest()
     except OSError:
@@ -880,13 +880,13 @@ def _replay_tree_digest(
                 if child.is_dir():
                     if child.name not in _SKIP_REPLAY_DIRS:
                         if len(pending) >= effective_max_files:
-                            return "unbounded:" + os.urandom(16).hex()
+                            return "unbounded:file_count:" + os.urandom(16).hex()
                         pending.append(child)
                 elif child.is_file():
                     if child.name in ignore_names:
                         continue
                     if len(entries) >= effective_max_files:
-                        return "unbounded:" + os.urandom(16).hex()
+                        return "unbounded:file_count:" + os.urandom(16).hex()
                     rel = child.relative_to(root).as_posix()
                     entries.append((rel, child))
         for rel, file_path in sorted(entries, key=lambda item: item[0]):
@@ -899,12 +899,23 @@ def _replay_tree_digest(
                         break
                     total_bytes += len(chunk)
                     if total_bytes > effective_max_bytes:
-                        return "unbounded:" + os.urandom(16).hex()
+                        return "unbounded:byte_budget:" + os.urandom(16).hex()
                     hasher.update(chunk)
             hasher.update(b"\0")
         return hasher.hexdigest() if file_count or entries else None
     except OSError:
         return "unreadable:" + os.urandom(16).hex()
+
+
+def _record_replay_disabled_reason(args: argparse.Namespace, digest: str) -> None:
+    if getattr(args, "replay_disabled_reason", None) is not None:
+        return
+    if digest.startswith("unbounded:file_count:"):
+        args.replay_disabled_reason = "file_count_exceeded"
+    elif digest.startswith("unbounded:"):
+        args.replay_disabled_reason = "byte_budget_exceeded"
+    elif digest.startswith("unreadable:"):
+        args.replay_disabled_reason = "io_error"
 
 
 def _local_session_replay_context(args: argparse.Namespace) -> str:
@@ -939,6 +950,7 @@ def _local_session_replay_context(args: argparse.Namespace) -> str:
     digest = _replay_file_digest(active_config)
     if digest is not None:
         fields["config_sha256"] = digest
+        _record_replay_disabled_reason(args, digest)
     for dir_key in ("learning_root", "context_root", "categories_dir", "stages_dir"):
         raw_dir = getattr(args, dir_key, None)
         if isinstance(raw_dir, (Path, str)) and str(raw_dir).strip():
@@ -950,6 +962,10 @@ def _local_session_replay_context(args: argparse.Namespace) -> str:
             tree_digest = _replay_tree_digest(Path(raw_dir), ignore_names=ignored)
             if tree_digest is not None:
                 fields[f"{dir_key}_sha256"] = tree_digest
+                _record_replay_disabled_reason(args, tree_digest)
+    disabled_reason = getattr(args, "replay_disabled_reason", None)
+    if isinstance(disabled_reason, str) and disabled_reason:
+        fields["replay_disabled_reason"] = disabled_reason
     if not fields:
         return ""
     return "\0" + json.dumps(fields, sort_keys=True, separators=(",", ":"))

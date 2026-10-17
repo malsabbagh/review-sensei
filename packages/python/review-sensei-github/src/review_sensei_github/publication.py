@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from review_sensei.baseline import ReviewBaseline
-from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.bounded_evidence import MAX_PART_READS, EvidenceReadBudget
 from review_sensei.context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from review_sensei.convergence import (
     LEGACY_REVIEW_MODE,
@@ -111,6 +111,8 @@ DISCUSSION_INSTRUCTION = (
 # against this transport ceiling before any write.
 MAX_PUBLISHED_REVIEW_BODY_BYTES = 65_536
 MAX_REVIEW_THREAD_PAGES = 10
+RESERVED_RECONCILIATION_READS = 4
+ORDINARY_EVIDENCE_READ_LIMIT = MAX_PART_READS - RESERVED_RECONCILIATION_READS
 
 _REVIEW_THREADS_QUERY = """
 query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
@@ -1464,7 +1466,10 @@ class ReviewApprovalFinalizer:
                         expected_context=eligibility.partitioned_root.context,
                         visible_reader=visible_reader,
                     )
-                    if persisted is None and part_budget.calls >= 60:
+                    if (
+                        persisted is None
+                        and part_budget.calls >= ORDINARY_EVIDENCE_READ_LIMIT
+                    ):
                         part_budget.consume()
                     part_budget.check()
                 except ReviewInputError as exc:
@@ -1549,7 +1554,44 @@ class ReviewApprovalFinalizer:
         Adjusted eligibility is patched into the original review before approval.
         A failed patch does not submit an approval.
         """
+        owns_operation_budget = (
+            self.evidence_budget is None and self._operation_budget is None
+        )
+        if owns_operation_budget:
+            self._operation_budget = EvidenceReadBudget()
+        try:
+            return self._refinalize_with_dispositions_impl(
+                token=token,
+                check_token=check_token,
+                repository=repository,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                actor=actor,
+                finding_ids=finding_ids,
+                dispositions=dispositions,
+                reviews_policy=reviews_policy,
+            )
+        finally:
+            if owns_operation_budget:
+                self._operation_budget = None
 
+    def _refinalize_with_dispositions_impl(
+        self,
+        *,
+        token: str,
+        check_token: str | None,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        app_slug: str,
+        actor: str,
+        finding_ids: Sequence[str],
+        dispositions: Sequence[Any],
+        reviews_policy: str = "auto-approve",
+    ) -> PublicationResult:
         from .checks import ReviewCheckPublisher, review_check_outcome
 
         reviews = self._load_head_reviews(
@@ -2963,6 +3005,89 @@ class ReviewPublisher:
         explicit_reanalysis: bool = False,
         source_guard: Callable[[], bool] | None = None,
     ) -> PublicationResult:
+        owns_operation_budget = (
+            self.finalizer.evidence_budget is None
+            and self.finalizer._operation_budget is None
+        )
+        if owns_operation_budget:
+            self.finalizer._operation_budget = EvidenceReadBudget()
+        try:
+            return self._publish_impl(
+                token=token,
+                repository=repository,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_branch=base_branch,
+                base_sha=base_sha,
+                result=result,
+                diff=diff,
+                app_slug=app_slug,
+                auto_approve=auto_approve,
+                reviews_policy=reviews_policy,
+                check_token=check_token,
+                qualification=qualification,
+                candidates=candidates,
+                snapshot=snapshot,
+                snapshot_sha256=snapshot_sha256,
+                evidence_policy=evidence_policy,
+                convergence_policy=convergence_policy,
+                _allow_retired_legacy_policy=allow_retired_legacy_policy,
+                blocker_candidates=blocker_candidates,
+                input_blocker_candidates=input_blocker_candidates,
+                baseline=baseline,
+                current_key=current_key,
+                changed_paths=changed_paths,
+                related_paths=related_paths,
+                evidence_confirmed_concerns=evidence_confirmed_concerns,
+                authorized_dispositions=authorized_dispositions,
+                prepared_review=prepared_review,
+                retained_eligibility=retained_eligibility,
+                continuation_digest=continuation_digest,
+                explicit_reanalysis=explicit_reanalysis,
+                source_guard=source_guard,
+            )
+        finally:
+            if owns_operation_budget:
+                self.finalizer._operation_budget = None
+
+    def _publish_impl(
+        self,
+        *,
+        token: str,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        base_branch: str,
+        base_sha: str,
+        result: ReviewResult,
+        diff: str,
+        app_slug: str,
+        auto_approve: bool = True,
+        reviews_policy: str = "auto-approve",
+        check_token: str | None = None,
+        qualification: str = "not-required",
+        candidates: Sequence[CandidateFinding] | None = None,
+        snapshot: Mapping[str, str] | None = None,
+        snapshot_sha256: str | None = None,
+        evidence_policy: str = "legacy",
+        convergence_policy: ReviewConvergencePolicy | None = None,
+        _allow_retired_legacy_policy: bool = False,
+        blocker_candidates: Sequence[BlockerCandidate] | None = None,
+        input_blocker_candidates: Sequence[BlockerCandidate] | None = None,
+        baseline: ReviewBaseline | None = None,
+        current_key: ReviewContextCacheKey | None = None,
+        changed_paths: Sequence[str] | None = None,
+        related_paths: Sequence[str] = (),
+        evidence_confirmed_concerns: Sequence[str] = (),
+        authorized_dispositions: Sequence[object] = (),
+        prepared_review: PublishableReview | None = None,
+        retained_eligibility: ReviewApprovalEligibility | None = None,
+        continuation_digest: str | None = None,
+        explicit_reanalysis: bool = False,
+        source_guard: Callable[[], bool] | None = None,
+    ) -> PublicationResult:
         if not isinstance(auto_approve, bool):
             raise GitHubPublicationError("review auto_approve must be a boolean")
         if (
@@ -3007,13 +3132,13 @@ class ReviewPublisher:
             convergence_policy = ReviewConvergencePolicy()
         elif not isinstance(convergence_policy, ReviewConvergencePolicy):
             raise GitHubPublicationError("review convergence policy is invalid")
-        if not isinstance(allow_retired_legacy_policy, bool):
+        if not isinstance(_allow_retired_legacy_policy, bool):
             raise GitHubPublicationError(
                 "review legacy policy opt-in must be a boolean"
             )
         if (
             convergence_policy.mode == LEGACY_REVIEW_MODE
-            and not allow_retired_legacy_policy
+            and not _allow_retired_legacy_policy
         ):
             raise GitHubPublicationError(
                 "the legacy review mode is retired and cannot be published "

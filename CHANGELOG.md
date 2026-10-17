@@ -21,14 +21,15 @@
   - `github.reviews: auto-approve` and `blocking` now both report `failure` on
     the `ReviewSensei` check when required fixes remain, `action_required` when
     required human decisions remain without required fixes, and `success` only
-    when all obligations are satisfied; human reassessment and media/generated
-    confirmations reconcile the check run on the same head.
+    when all obligations are satisfied; human reassessment and validated
+    human-confirmed media/generated coverage reconcile the check run on the
+    same head while preserving the AI review's `partial` status.
   - CLI review exit code `2` takes precedence whenever required human decisions
     remain (including mixed required-fix and required-decision reviews), while
     exit code `1` indicates completed reviews with only required fixes.
   - Review summaries, body sections, and terminal output use a consistent
     three-way classification (`Required fix`, `Required decision`,
-    `Optional suggestion`).
+    `Optional improvement`).
 
 ## 0.7.1 - 2026-10-16
 
