@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Report an incomplete media-command gate update when the check capability is
+  unavailable, preserving the confirmation and providing explicit retry guidance.
 - Let an authorized explicit rescan reanalyze a published incomplete review on
   the same head, with durable request replay protection and existing budgets.
   Ordinary duplicates and complete reviews remain suppressed; excluded content

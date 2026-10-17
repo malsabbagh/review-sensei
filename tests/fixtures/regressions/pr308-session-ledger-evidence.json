@@ -1,0 +1,40 @@
+{
+  "authentication_limit": "Exact public comment body and GitHub-returned Bot metadata are preserved. The ledger uses a canonical digest, not a signature. Original broker grant, session attestation response and signing material are not retained in run artifacts (artifact count 0). Their cryptographic authenticity cannot be replayed offline. Continuation tests use an explicitly synthetic verifier and do not prove original broker authentication.",
+  "body_sha256": "55150616bd9ee1ca726cd46381531147082af542485622b8f69ba07a841913bb",
+  "candidate_sha": "3fe7cfba58a50285b66740d91107718a03c26311",
+  "failing_run": {
+    "actor": "malsabbagh",
+    "conclusion": "failure",
+    "created_at": "2026-10-17T22:49:25Z",
+    "event": "pull_request",
+    "head_sha": "3fe7cfba58a50285b66740d91107718a03c26311",
+    "id": 39076608917,
+    "path": ".github/workflows/review-sensei-review.yml",
+    "repository": {
+      "full_name": "malsabbagh/review-sensei",
+      "id": 1336322077
+    },
+    "run_attempt": 1,
+    "status": "completed",
+    "updated_at": "2026-10-17T22:50:28Z"
+  },
+  "fixture_sha256": "445253c89fac77d750e13a3971fb23b37a9270dbe914630c6656d81bcf75f618",
+  "history_limit": "Comment updated_at precedes the failing run and the re-fetch returned identical body/updated_at. No historical GitHub response artifact exists, so this is the unchanged API snapshot, not an independently archived response from the failing run.",
+  "record_sha256": "cc8d4d1d76f4df4838b596e13b902545b35b004c3c9117830b480ca6357d88c2",
+  "rejection": {
+    "actual_items": 5,
+    "path": [
+      "dispositions"
+    ],
+    "released_limit": 4,
+    "validator": "maxItems"
+  },
+  "released_engine": "0.7.1",
+  "released_integration": "0.2.1",
+  "released_workflow_sha": "7c85643af40ed9baf2ea8a1e3c2a43a6fded759b",
+  "repository": {
+    "full_name": "malsabbagh/review-sensei",
+    "id": 1336322077,
+    "visibility": "public"
+  }
+}

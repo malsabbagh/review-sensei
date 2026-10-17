@@ -1727,7 +1727,12 @@ class GitHubApplication:
                 action="approve-media",
                 applied=applied,
                 operator_paused=False,
-                summary=base_summary,
+                summary=(
+                    f"{base_summary}; gate re-evaluation failed: "
+                    "check capability unavailable; retry media approval "
+                    "to complete check update"
+                ),
+                evaluation_failed=True,
             )
 
         req_fixes = (
