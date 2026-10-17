@@ -51,6 +51,7 @@ from review_sensei.history_association import (
     associate_history,
     read_associated_history,
 )
+from review_sensei.rescan import AuthorizedRescan
 from review_sensei.session import (
     MAX_SESSION_COMMENT_BYTES,
     SessionIdentity,
@@ -2198,8 +2199,13 @@ class GitHubIssueCommentSessionLedger:
         reservation_id: str,
         expected_generation: int,
         head_sha: str | None = None,
+        rescan_request: AuthorizedRescan | None = None,
         now: datetime | None = None,
     ) -> SessionRecord:
+        if rescan_request is not None and not isinstance(
+            rescan_request, AuthorizedRescan
+        ):
+            raise ReviewInputError("explicit rescan authority is invalid")
         return self.replace(
             identity,
             lambda record: self._own_reservation(
@@ -2210,6 +2216,7 @@ class GitHubIssueCommentSessionLedger:
                     reservation_id=reservation_id,
                     expected_generation=expected_generation,
                     head_sha=head_sha,
+                    rescan_request=rescan_request,
                     now=now,
                 ),
             ),

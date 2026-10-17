@@ -851,3 +851,20 @@ Community / Managed / Enterprise boundary, see
 [`docs/ownership-and-licensing.md`](docs/ownership-and-licensing.md),
 [`TRADEMARKS.md`](TRADEMARKS.md), [`CONTRIBUTING.md`](CONTRIBUTING.md), and
 [ADR 0040](docs/adr/0040-community-managed-enterprise-boundary.md).
+
+### Retry a published incomplete review
+
+After resolving the cause of incomplete analysis, a maintainer can request a new
+manual workflow dispatch for the PR or comment `@reviewsensei rescan` (optionally
+`commit <current-head-sha>`). The hosted runtime verifies the current human
+authorization and publication, then admits one fresh full analysis on that same
+head. Re-running the same Actions run or delivering the same comment again does
+not authorize another attempt. A failed analysis requires a new explicit request
+and still consumes the existing per-head failure budget. A publication failure
+requires recovery of its original result and contexts.
+
+A rescan never marks policy-excluded files reviewed. If the same exclusion or
+provider limit remains, the result can remain partial and approval stays withheld.
+`review continue` unpauses; `verify` checks approval without inference; `review
+reenroll` is only for expired or missing sessions. Complete reviews retain
+ordinary duplicate suppression. See [ADR 0080](docs/adr/0080-explicit-incomplete-review-rescans.md).

@@ -22,6 +22,7 @@
     "record_sha256"
   ],
   "properties": {
+    "rescan_state": {"$ref": "https://reviewsensei.dev/schemas/v1/rescan-state.schema.json"},
     "schema_version": {"const": "1.0"},
     "repository": {"type": "string", "minLength": 1, "maxLength": 256},
     "pull_request": {"type": "integer", "minimum": 1, "maximum": 2147483647},

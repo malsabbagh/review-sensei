@@ -1,0 +1,27 @@
+{
+  "issue_comment": 0,
+  "workflow_dispatch": 10,
+  "receipts": [
+    {
+      "kind": "workflow_dispatch",
+      "request_id": 10,
+      "review_id": 5,
+      "source": {
+        "transaction_id": "c0dd9d963a6e0b55862af46f57071a2dec3eefc6dd6063905d983a660f2cf24d",
+        "repository": "owner/repo",
+        "pull_request": 146,
+        "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "policy_digest": "50b9b4171a56768cfef4d7dc415019f614fb7b5985050e0b33e93d9a8dd0a512",
+        "configuration_digest": "9d24c1d7e472217e3648af6771a1249e54a8f023b4cd57d7f5be9e8dd2ac638b",
+        "evidence_digest": "40b3259bb30ffa4869cb909bf5ff99539086b07a075f27f55eb70744cfe9c7d8",
+        "reservation_id": "49bcd5fb32e6ba1711dc15a7fac0b303e7dc6ce7f7a6df730ffd258d92ec3520",
+        "generation": 3,
+        "phase": "publication_succeeded",
+        "result_sha256": "87e620d087e29f661c68a2d353fd78374cf97f20ef01ab55e65dd38364d98b83"
+      },
+      "ordinary_reservation": "49bcd5fb32e6ba1711dc15a7fac0b303e7dc6ce7f7a6df730ffd258d92ec3520",
+      "reservation": "193ad11b99f0f305267c4818e2c838c6faa3cbd5b2de9f1967de9146ff8d9f1a"
+    }
+  ]
+}

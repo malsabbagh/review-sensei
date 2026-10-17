@@ -28,6 +28,15 @@ class GitHubReviewHooks:
             app_slug=getattr(args, "app_slug", None),
         )
 
+    def resolve_rescan(self, args, ledger):
+        from .rescan import resolve_rescan
+
+        broker = BrokerClient()
+        actions_token = broker.exchange(
+            args.oidc_token or broker.request_oidc_token(), capability="review_actions"
+        )
+        return resolve_rescan(args, ledger, actions_token=actions_token)
+
     def run_provider(
         self, service: object, request: object, **kwargs: object
     ) -> object:

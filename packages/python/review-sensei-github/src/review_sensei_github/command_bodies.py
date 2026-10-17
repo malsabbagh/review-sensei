@@ -1428,6 +1428,11 @@ def _run_review_provider(
     repository = kwargs.pop("repository", None)
     repository_id = kwargs.pop("repository_id", None)
     pull_request = kwargs.pop("pull_request", None)
+    analysis_reservation = kwargs.pop("analysis_reservation_id", None)
+    if analysis_reservation is not None and (
+        not isinstance(analysis_reservation, str) or not analysis_reservation.strip()
+    ):
+        raise ReviewInputError("analysis reservation id must be a non-empty string")
     adjust = kwargs.pop("adjust", None)
     run_id = os.environ.get("GITHUB_RUN_ID", "").strip()
     app_id = _actions_app_id()
@@ -1472,7 +1477,7 @@ def _run_review_provider(
     )
     from review_sensei_github.operation_host import OperationRefusal
 
-    reservation = session_reservation_id(
+    reservation = analysis_reservation or session_reservation_id(
         repository=repository,
         pull_request=pull_request,
         head_sha=head_sha,

@@ -2766,6 +2766,7 @@ class ReviewPublisher:
         prepared_review: PublishableReview | None = None,
         retained_eligibility: ReviewApprovalEligibility | None = None,
         continuation_digest: str | None = None,
+        explicit_reanalysis: bool = False,
         source_guard: Callable[[], bool] | None = None,
     ) -> PublicationResult:
         if not isinstance(auto_approve, bool):
@@ -2963,7 +2964,21 @@ class ReviewPublisher:
                     app_slug=app_slug,
                 )
             )
-            if retained_eligibility is not None:
+            if explicit_reanalysis and not result_states:
+                # Only the application can bind this to a consumed durable
+                # rescan receipt. The latest publication must still be
+                # incomplete; ordinary per-head reconciliation remains below.
+                if (
+                    result.transaction is None
+                    or persisted_eligibility is None
+                    or (
+                        persisted_eligibility.facts.review_status == "complete"
+                        and persisted_eligibility.facts.coverage_blocker is None
+                    )
+                    or "APPROVED" in identity_states
+                ):
+                    return PublicationResult(status="already_published")
+            elif retained_eligibility is not None:
                 if result_states:
                     current = persisted_eligibility
                     if (

@@ -1242,6 +1242,11 @@ def _parser(*, include_hosted: bool = False) -> argparse.ArgumentParser:
     )
     if include_hosted:
         parser.add_argument(
+            "--rescan",
+            action="store_true",
+            help="Authorize one fresh attempt for a published incomplete head from a verified human Actions event.",
+        )
+        parser.add_argument(
             "--github-session-ledger",
             action="store_true",
             help=(
@@ -2332,6 +2337,14 @@ def _run_review_provider(
     operation_entry = kwargs.pop("operation_entry", "disabled")
     for hosted_key in ("ledger", "repository", "repository_id", "pull_request"):
         kwargs.pop(hosted_key, None)
+    supplied_reservation = kwargs.pop("analysis_reservation_id", None)
+    # This engine provider does not accept a reservation argument. Reject an
+    # empty or non-string value here so a caller cannot smuggle one through.
+    # A real reservation is applied by the hosted provider, not by dropping it.
+    if supplied_reservation is not None and (
+        not isinstance(supplied_reservation, str) or not supplied_reservation.strip()
+    ):
+        raise ReviewInputError("analysis reservation id must be a non-empty string")
     adjust = kwargs.pop("adjust", None)
     if hosted is True and operation_entry == "enabled":
         raise ReviewInputError("Actions operation entry requires review-sensei-github")
@@ -2719,6 +2732,17 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
             ledger = hosted_hooks.resolve_ledger(  # type: ignore[attr-defined]
                 args, resolved_head_sha=resolved_head_sha
             )
+        rescan_request = None
+        if getattr(args, "rescan", False):
+            if not hosted_session_ledger or not transaction_requested or ledger is None:
+                raise ReviewInputError(
+                    "--rescan requires a hosted identity-bound transaction"
+                )
+            if hosted_hooks is None or not hasattr(hosted_hooks, "resolve_rescan"):
+                raise ReviewInputError(
+                    "--rescan requires verified hosted event authority"
+                )
+            rescan_request = hosted_hooks.resolve_rescan(args, ledger)
         identity = None
         reservation = None
         held_reservation: str | None = None
@@ -3139,6 +3163,7 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                     head_sha=head_sha,
                     configuration_digest=transaction_configuration_digest,
                     evidence_digest=transaction_evidence_digest,
+                    rescan_request=rescan_request,
                 )
                 prepared_transaction = prepared_round.transaction
             else:
@@ -3153,18 +3178,32 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 prepared_round.reservation_id if prepared_round.decision.admit else None
             )
             if should_skip_automation(prepared_round.decision, inference=True):
+                from .rescan import (
+                    PUBLICATION_RECOVERY_PHASES,
+                    rescan_publication_recovery,
+                )
+
                 transaction = prepared_round.record.transaction
-                publication_recovery_required = (
+                # Ordinary duplicates of a successful rescan stay suppressed.
+                # Recovery is only publication_pending/publication_failed for
+                # this same reservation. A new rescan_request is not required:
+                # that request was consumed, and the retry republishes the
+                # result that already exists.
+                publication_recovery_required = False
+                if (
                     not getattr(args, "local_session", False)
                     and not prepared_round.decision.handoff
                     and prepared_round.reservation_id is None
                     and transaction is not None
-                    and transaction.reservation_id == reservation
+                    and transaction.phase in PUBLICATION_RECOVERY_PHASES
                     and prepared_round.record.last_committed_reservation_id
-                    == reservation
-                    and transaction.phase
-                    in {"publication_pending", "publication_failed"}
-                )
+                    == transaction.reservation_id
+                    and (
+                        transaction.reservation_id == reservation
+                        or rescan_publication_recovery(prepared_round.record, head_sha)
+                    )
+                ):
+                    publication_recovery_required = True
                 status = (
                     "action_required"
                     if prepared_round.decision.handoff or publication_recovery_required
@@ -3242,31 +3281,52 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 stages=service.stages,
                 profile=effective_profile,
             )
-            scope = plan_verification_scope(
-                policy=policy,
-                baseline=persisted_baseline,
-                current_key=current_key,
-                changed_paths=analysis.changed_paths,
-                baseline_bytes=checkpoint_baseline_capacity(prepared_round.record),
-            )
-            if scope.status != "verify" or scope.incremental is None:
-                if not (
-                    scope.coverage_mode == "fallback-full"
-                    and scope.invalidation_reason in RECOVERABLE_FALLBACK_REASONS
-                ):
-                    return emit_durable_baseline_recovery(
-                        scope.invalidation_reason or "unverifiable-scope"
-                    )
-                # Reuse is invalid, not fresh analysis authority. Keep the old
-                # baseline for publication classification but supply no prior
-                # findings, scope, or cache reuse to this bounded full review.
-                print(
-                    "review-sensei: baseline refresh: full review required: "
-                    + scope.invalidation_reason,
-                    file=sys.stderr,
+            if rescan_request is None:
+                scope = plan_verification_scope(
+                    policy=policy,
+                    baseline=persisted_baseline,
+                    current_key=current_key,
+                    changed_paths=analysis.changed_paths,
+                    baseline_bytes=checkpoint_baseline_capacity(prepared_round.record),
                 )
-            verification_scope = scope
-            incremental = scope.incremental
+                if scope.status != "verify" or scope.incremental is None:
+                    if not (
+                        scope.coverage_mode == "fallback-full"
+                        and scope.invalidation_reason in RECOVERABLE_FALLBACK_REASONS
+                    ):
+                        return emit_durable_baseline_recovery(
+                            scope.invalidation_reason or "unverifiable-scope"
+                        )
+                    # Reuse is invalid, not fresh analysis authority. Keep the old
+                    # baseline for publication classification but supply no prior
+                    # findings, scope, or cache reuse to this bounded full review.
+                    print(
+                        "review-sensei: baseline refresh: full review required: "
+                        + scope.invalidation_reason,
+                        file=sys.stderr,
+                    )
+                verification_scope = scope
+                incremental = scope.incremental
+        if rescan_request is not None:
+            # Reinspect the full snapshot; retain the baseline only for
+            # publication classification, never for inference reuse.
+            verification_scope = None
+            incremental = None
+            admitted_transaction = (
+                prepared_round.record.transaction
+                if prepared_round is not None
+                else None
+            )
+            if (
+                not isinstance(held_reservation, str)
+                or not held_reservation
+                or admitted_transaction is None
+                or held_reservation != admitted_transaction.reservation_id
+            ):
+                raise ReviewInputError(
+                    "explicit rescan analysis reservation does not match "
+                    "the admitted transaction"
+                )
         try:
             run_provider = (
                 hosted_hooks.run_provider  # type: ignore[attr-defined]
@@ -3289,6 +3349,7 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 repository=args.repository,
                 repository_id=getattr(args, "repository_id", None),
                 pull_request=args.pull_request,
+                analysis_reservation_id=held_reservation,
                 adjust=_reconcile_hosted_result(
                     service,
                     admission_baseline=admission_baseline,
