@@ -710,6 +710,7 @@ def _review_exit_status(
     outcome: RunOutcome,
     *,
     required_fixes: bool = False,
+    required_decisions: bool = False,
 ) -> int:
     """Return the review exit code and report its structured reason.
 
@@ -721,10 +722,15 @@ def _review_exit_status(
 
     if getattr(args, "exit_semantics", "review") == "operational":
         return run_outcome_exit_code(outcome.status)
-    code = review_exit_code(status=outcome.status, required_fixes=required_fixes)
+    code = review_exit_code(
+        status=outcome.status,
+        required_fixes=required_fixes,
+        required_decisions=required_decisions,
+    )
     if code == REVIEW_EXIT_INCOMPLETE:
-        reason = review_exit_reason(
-            status=outcome.status, diagnostic=outcome.diagnostic
+        reason = (
+            review_exit_reason(status=outcome.status, diagnostic=outcome.diagnostic)
+            or "human-intervention-required"
         )
     elif code == REVIEW_EXIT_REQUIRED_FIXES:
         reason = "required-fixes-remain"
@@ -805,6 +811,42 @@ def _local_change_revision(label: str, content: str) -> str:
     return revision
 
 
+def _local_session_replay_context(args: argparse.Namespace) -> str:
+    """Return a deterministic replay-context suffix for local session revisions."""
+
+    fields: dict[str, object] = {}
+    for key in (
+        "config",
+        "profile",
+        "provider",
+        "base_url",
+        "model",
+        "review_mode",
+        "instructions",
+        "learning_root",
+        "context_root",
+        "categories_dir",
+        "stages_dir",
+        "enable_symbol_context",
+        "orchestrate_large_changes",
+    ):
+        value = getattr(args, key, None)
+        if value is not None and value is not False and value != "":
+            fields[key] = str(value) if isinstance(value, Path) else value
+    config_path = getattr(args, "config", None)
+    if isinstance(config_path, Path):
+        try:
+            if config_path.is_file() and not config_path.is_symlink():
+                fields["config_sha256"] = hashlib.sha256(
+                    config_path.read_bytes()
+                ).hexdigest()
+        except OSError:
+            pass
+    if not fields:
+        return ""
+    return "\0" + json.dumps(fields, sort_keys=True, separators=(",", ":"))
+
+
 def _prepare_local_session(
     args: argparse.Namespace, *, hosted_session_ledger: bool
 ) -> None:
@@ -813,9 +855,9 @@ def _prepare_local_session(
     A local session reuses the durable session/transaction state under the
     platform per-user state directory, so the caller never has to supply a
     ledger path, a pull-request identity, or commit SHAs.  The head revision
-    is derived from the supplied diff, so the same change stays stable across
-    repeated local runs and an edited diff is a new round against the same
-    stable local base revision.
+    is derived from the supplied diff and effective replay context, so the
+    same change stays stable across repeated local runs and an edited diff or
+    changed review configuration/model/policy starts a distinct revision.
     """
 
     if hosted_session_ledger:
@@ -830,16 +872,19 @@ def _prepare_local_session(
         args.repository = _local_session_repository()
     if args.pull_request is None:
         args.pull_request = DEFAULT_LOCAL_SESSION_SLOT
+    replay_context = _local_session_replay_context(args)
     if args.head_sha is None:
         diff = read_bounded_utf8(
             args.diff,
             maximum=DEFAULT_TOTAL_WORK_BUDGET.max_total_diff_bytes,
             label="diff",
         )
-        args.head_sha = _local_change_revision("review-sensei-local-head", diff)
+        args.head_sha = _local_change_revision(
+            "review-sensei-local-head", diff + replay_context
+        )
     if args.base_sha is None:
         args.base_sha = _local_change_revision(
-            "review-sensei-local-base", args.repository
+            "review-sensei-local-base", args.repository + replay_context
         )
 
 
@@ -3650,6 +3695,7 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
             args,
             outcome,
             required_fixes=any(comment.blocks_approval for comment in result.comments),
+            required_decisions=any(comment.needs_human for comment in result.comments),
         )
     except BaseException as exc:
         if analysis_cleanup is not None:

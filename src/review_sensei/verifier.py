@@ -501,15 +501,51 @@ def format_candidate_finding(candidate: CandidateFinding) -> str:
     return "\n".join(lines)
 
 
-def _candidate_to_comment(candidate: CandidateFinding) -> ReviewComment:
-    """Render a confirmed candidate as a comment without minting classification.
+_MATERIAL_SEVERITY_RATIONALE_RE = re.compile(
+    r"\b(?P<severity>critical|high)\b", re.IGNORECASE
+)
 
-    ``CandidateFinding`` has claim, trigger, evidence, and a free-text
-    severity rationale. It has no ``blocking``, ``severity``,
-    ``defect_kind``, ``fix_effort``, or ``category``. Operator-mode
-    admission of a confirmed finding therefore requires caller-supplied
-    ``blocker_candidates`` / ``input_blocker_candidates``; derived facts
-    stay fail-closed.
+
+def _candidate_material_severity(candidate: CandidateFinding) -> str | None:
+    match = _MATERIAL_SEVERITY_RATIONALE_RE.search(candidate.severity_rationale)
+    if match is None:
+        return None
+    return match.group("severity").lower()
+
+
+def _candidate_has_excerpt_evidence(candidate: CandidateFinding) -> bool:
+    return any(
+        reference.excerpt is not None and bool(reference.excerpt.strip())
+        for reference in candidate.evidence
+    )
+
+
+def _has_verified_causal_defect(
+    candidate: CandidateFinding | None,
+    verification: VerificationResult,
+) -> bool:
+    if candidate is None:
+        return False
+    if (
+        verification.disposition != "confirmed"
+        or not verification.evidence_valid
+        or not verification.actionable
+    ):
+        return False
+    if candidate.assumptions:
+        return False
+    if not _candidate_has_excerpt_evidence(candidate):
+        return False
+    return _candidate_material_severity(candidate) is not None
+
+
+def _candidate_to_comment(candidate: CandidateFinding) -> ReviewComment:
+    """Render a confirmed candidate as a comment.
+
+    When a candidate has excerpt-backed evidence, no unverified assumptions,
+    and an explicit high/critical severity rationale, carry its material
+    severity and proposed blocking intent onto the comment; otherwise keep
+    classification fields unset so unsubstantiated candidates fail closed.
     """
 
     # Anchor the finding at the first evidence reference on impacted_path when
@@ -523,10 +559,18 @@ def _candidate_to_comment(candidate: CandidateFinding) -> ReviewComment:
         ),
         candidate.evidence[0],
     )
+    severity = _candidate_material_severity(candidate)
+    causal_blocker = (
+        severity is not None
+        and not candidate.assumptions
+        and _candidate_has_excerpt_evidence(candidate)
+    )
     return ReviewComment(
         path=located.path,
         line=located.line,
         body=format_candidate_finding(candidate),
+        severity=severity,
+        blocking=True if causal_blocker else None,
     )
 
 
@@ -587,27 +631,32 @@ def _blocker_candidate_from_verification(
     comment: ReviewComment,
     verification: VerificationResult,
     *,
+    candidate: CandidateFinding | None = None,
     changed_lines: Mapping[str, frozenset[int]] | None = None,
     deleted_lines: Mapping[str, frozenset[int]] | None = None,
 ) -> BlockerCandidate:
-    """Map trusted verification facts without minting a failure condition.
+    """Map trusted verification facts for blocker admission.
 
-    Snapshot confirmation proves evidence locations. Confirmed comments
-    rendered from ``CandidateFinding`` do not carry ``blocking``,
-    ``severity``, ``defect_kind``, ``fix_effort``, or ``category``, so
-    derived facts stay fail-closed unless the caller supplies
-    ``blocker_candidates`` or ``input_blocker_candidates``. Trigger text
-    is not a trusted failure condition or remedy. Attribution is
-    ``pr-change`` only when the finding targets a changed line on its
-    declared side.
+    Snapshot confirmation proves evidence locations. When the confirmed
+    candidate also establishes a high/critical causal defect with verified
+    snapshot excerpts, no unverified assumptions, and the comment is not
+    explicitly marked non-blocking, populate causal failure and violation
+    facts; otherwise stay fail-closed unless caller-supplied blocker
+    candidates are provided.
     """
 
+    causal_defect = comment.blocking is not False and _has_verified_causal_defect(
+        candidate, verification
+    )
     return derive_blocker_candidate(
         comment,
         on_changed_path=_comment_in_changed_lines(
             comment, changed_lines, deleted_lines
         ),
         evidence_locations_validated=verification.evidence_valid,
+        has_failure_condition=causal_defect,
+        has_actionable_remedy=True if causal_defect else None,
+        has_specific_violation=True if causal_defect else None,
     )
 
 
@@ -807,6 +856,7 @@ def prepare_publishable_review(
             _blocker_candidate_from_verification(
                 comment,
                 verification,
+                candidate=candidate,
                 changed_lines=changed_lines,
                 deleted_lines=deleted_lines,
             )

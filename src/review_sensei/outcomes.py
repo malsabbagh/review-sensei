@@ -631,14 +631,23 @@ _REVIEW_EXIT_REASONS = {
 }
 
 
-def review_exit_code(*, status: str, required_fixes: bool) -> int:
+def review_exit_code(
+    *,
+    status: str,
+    required_fixes: bool,
+    required_decisions: bool = False,
+) -> int:
     """Return the documented local review exit code for one run outcome.
 
     Only a run that produced a review document can exit 0 or 1; every other
-    status means this invocation produced no review for its caller.
+    status means this invocation produced no review for its caller. When a
+    completed review still has findings requiring a human decision, exit 2
+    takes precedence over exit 1 and exit 0.
     """
 
     if status not in COMPLETED_REVIEW_STATUSES:
+        return REVIEW_EXIT_INCOMPLETE
+    if required_decisions:
         return REVIEW_EXIT_INCOMPLETE
     return REVIEW_EXIT_REQUIRED_FIXES if required_fixes else REVIEW_EXIT_CLEAN
 

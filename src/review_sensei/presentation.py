@@ -459,12 +459,12 @@ def render_finding(view: FindingView) -> str:
         # enforcement is disabled and stated once in the summary. Optional
         # feedback keeps its own wording, which never asserts a defect.
         header = "Defect"
+    elif view.requirement == REQUIRED_FINDING:
+        header = "Required fix"
+    elif view.needs_human:
+        header = "Required decision"
     else:
-        header = (
-            "Required fix"
-            if view.requirement == REQUIRED_FINDING
-            else "Optional improvement"
-        )
+        header = "Optional improvement"
     segments = [header]
     impact = _impact_label(view.severity)
     if impact is not None:
@@ -476,7 +476,7 @@ def render_finding(view: FindingView) -> str:
     if view.location is not None:
         lines.extend([view.location, ""])
     lines.append(view.detail or "")
-    if view.requirement == OPTIONAL_FINDING:
+    if view.requirement == OPTIONAL_FINDING and not view.needs_human:
         lines.extend(["", _OPTIONAL_NOT_REQUIRED])
     lines.extend(["", f"`{view.identifier}`"])
     return "\n".join(lines)

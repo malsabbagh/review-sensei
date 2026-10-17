@@ -422,8 +422,8 @@ class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
         self.assertEqual(outcome.status, "published")
         self.assertEqual(posted_events(calls), ["REQUEST_CHANGES"])
         self.assertEqual(outcome.diagnostic, "required_fixes_open")
-        self.assertEqual(checks.conclusions, [None, "success"])
-        self.assertEqual(checks.writes[1]["output"]["title"], "Changes requested")
+        self.assertEqual(checks.conclusions, [None, "failure"])
+        self.assertEqual(checks.writes[1]["output"]["title"], "Required fixes remain")
         self.assertEqual(review_payloads(calls)[0]["comments"][0]["path"], "src/app.py")
         # The withheld approval costs no reads: the required finding is decided
         # from the same result the review published.
@@ -448,13 +448,13 @@ class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
         self.assertEqual(outcome.status, "published")
         self.assertEqual(posted_events(calls), ["REQUEST_CHANGES"])
         self.assertEqual(outcome.diagnostic, "required_fixes_open")
-        self.assertEqual(checks.conclusions, [None, "success"])
+        self.assertEqual(checks.conclusions, [None, "failure"])
         comment = review_payloads(calls)[0]
         self.assertEqual(comment["comments"], [])
         self.assertIn("This file needs a tighter contract.", comment["body"])
         # An unanchored required finding is carried by the body without any
-        # thread read. auto-approve still withholds approval and keeps the
-        # check successful.
+        # thread read. auto-approve still withholds approval and fails the
+        # check while required fixes remain open.
         self.assertEqual(len(non_check_calls(calls)), 4)
 
     def test_blocking_required_finding_fails_the_check_and_comments(self):
@@ -1002,8 +1002,8 @@ class CheckPublisherContractTests(unittest.TestCase):
         unfinished = review_check_outcome(
             policy="auto-approve", review_status="incomplete", required_fixes=True
         )
-        self.assertEqual(requested.conclusion, "success")
-        self.assertEqual(requested.title, "Changes requested")
+        self.assertEqual(requested.conclusion, "failure")
+        self.assertEqual(requested.title, "Required fixes remain")
         self.assertEqual(clean.conclusion, "success")
         self.assertEqual(clean.title, "No required fixes")
         self.assertEqual(blocked.conclusion, "failure")
