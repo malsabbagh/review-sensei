@@ -27,6 +27,7 @@ from review_sensei.cli import (
     main,
     resolve_review_inference,
 )
+from review_sensei.disposition import MaintainerCommandResult
 from review_sensei.errors import ReviewInputError
 from review_sensei.outcomes import RunOutcome
 
@@ -1570,7 +1571,12 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
 
             def apply_maintainer_command(self, **kwargs):
                 self.calls.append(kwargs)
-                return SimpleNamespace(summary="paused")
+                return MaintainerCommandResult(
+                    action="pause",
+                    applied=True,
+                    operator_paused=True,
+                    summary="paused",
+                )
 
         attestation = {
             "version": 1,
