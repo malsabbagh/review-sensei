@@ -1345,15 +1345,16 @@ class ReviewApprovalFinalizer:
                 )
             if eligibility.partitioned_root is not None:
                 root = eligibility.partitioned_root
+                effective_budget = self.evidence_budget or self._operation_budget
                 if (
-                    self.evidence_budget is None
-                    or root.context.budget is not self.evidence_budget
+                    effective_budget is None
+                    or root.context.budget is not effective_budget
                 ):
                     return PublicationResult(
                         status="approval_withheld", diagnostic="approval_withheld"
                     )
                 try:
-                    self.evidence_budget.check()
+                    effective_budget.check()
                 except ReviewInputError as exc:
                     raise GitHubPublicationError(
                         "review decision reconciliation failed"

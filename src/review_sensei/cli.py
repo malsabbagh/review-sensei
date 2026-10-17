@@ -729,8 +729,12 @@ def _review_exit_status(
     )
     if code == REVIEW_EXIT_INCOMPLETE:
         reason = (
-            review_exit_reason(status=outcome.status, diagnostic=outcome.diagnostic)
-            or "human-intervention-required"
+            review_exit_reason(
+                status=outcome.status,
+                diagnostic=outcome.diagnostic,
+                required_decisions=required_decisions,
+            )
+            or "review-incomplete"
         )
     elif code == REVIEW_EXIT_REQUIRED_FIXES:
         reason = "required-fixes-remain"
@@ -787,6 +791,7 @@ def _local_session_repository() -> str:
 
 
 _LOCAL_REVISION = re.compile(r"^[a-f0-9]{40}$")
+_MAX_REPLAY_CONFIG_BYTES = 65536
 
 
 def _local_change_revision(label: str, content: str) -> str:
@@ -837,9 +842,11 @@ def _local_session_replay_context(args: argparse.Namespace) -> str:
     if isinstance(config_path, Path):
         try:
             if config_path.is_file() and not config_path.is_symlink():
-                fields["config_sha256"] = hashlib.sha256(
-                    config_path.read_bytes()
-                ).hexdigest()
+                stat = config_path.stat(follow_symlinks=False)
+                if 0 <= stat.st_size <= _MAX_REPLAY_CONFIG_BYTES:
+                    fields["config_sha256"] = hashlib.sha256(
+                        config_path.read_bytes()
+                    ).hexdigest()
         except OSError:
             pass
     if not fields:

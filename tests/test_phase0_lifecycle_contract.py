@@ -531,10 +531,25 @@ class Phase1BlockerAdmissionAndTaxonomyJourneyTests(unittest.TestCase):
             admitted.needs_human,
             "Well-grounded source-based causal defect must not be demoted to needs_human=True.",
         )
+        negated = replace(
+            candidate,
+            severity_rationale="Not a high severity issue: minor cleanup.",
+        )
+        negated_prepared = prepare_publishable_review(
+            result,
+            candidates=(negated,),
+            snapshot=snapshot,
+            snapshot_sha256=snapshot_sha256,
+            evidence_policy="confirmed",
+            changed_lines={"src/auth.py": frozenset({2})},
+            changed_paths=("src/auth.py",),
+            convergence_policy=ReviewConvergencePolicy(mode="merge-focused"),
+        )
+        self.assertFalse(negated_prepared.result.comments[0].effective_blocking)
 
 
 class Phase2CheckAndPrecedenceMatrixJourneyTests(unittest.TestCase):
-    """Phase 2 failing tests: state/policy precedence matrix across Check, Review, and CLI."""
+    """Phase 2 contract tests: state/policy precedence matrix across Check, Review, and CLI."""
 
     def test_completed_review_with_required_decisions_only_produces_action_required_check(
         self,
@@ -635,7 +650,7 @@ class Phase2CheckAndPrecedenceMatrixJourneyTests(unittest.TestCase):
 
 
 class Phase3LocalLifecycleAndReplayIdentityJourneyTests(unittest.TestCase):
-    """Phase 3 failing tests: local replay identity binding and local resolution lifecycle."""
+    """Phase 3 contract tests: local replay identity binding and local resolution lifecycle."""
 
     def test_local_session_revision_binds_config_model_base_and_context_not_only_diff(
         self,
@@ -645,39 +660,38 @@ class Phase3LocalLifecycleAndReplayIdentityJourneyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             diff_path = Path(tmp) / "change.diff"
             diff_path.write_text(diff_text, encoding="utf-8")
-            args_a = argparse.Namespace(
-                session_ledger=Path(tmp) / "ledger",
-                repository="local/workspace",
-                pull_request=1,
-                head_sha=None,
-                base_sha=None,
-                diff=diff_path,
-                model="qwen2.5-coder:7b",
-                review_mode="enforced",
-                config=None,
-            )
-            args_b = argparse.Namespace(
-                session_ledger=Path(tmp) / "ledger",
-                repository="local/workspace",
-                pull_request=1,
-                head_sha=None,
-                base_sha=None,
-                diff=diff_path,
-                model="deepseek-r1:70b",
-                review_mode="shadow",
-                config=None,
-            )
-            _prepare_local_session(args_a, hosted_session_ledger=False)
-            _prepare_local_session(args_b, hosted_session_ledger=False)
-            self.assertNotEqual(
-                (args_a.base_sha, args_a.head_sha),
-                (args_b.base_sha, args_b.head_sha),
-                "Local session identity must bind model/policy/context in addition to diff text.",
-            )
+            cfg_path = Path(tmp) / ".reviewsensei.yml"
+            cfg_path.write_text("review:\n  mode: enforced\n", encoding="utf-8")
+
+            def make_args(
+                *,
+                model: str = "qwen2.5-coder:7b",
+                review_mode: str = "enforced",
+                config: Path | None = None,
+            ) -> tuple[str, str]:
+                ns = argparse.Namespace(
+                    session_ledger=Path(tmp) / "ledger",
+                    repository="local/workspace",
+                    pull_request=1,
+                    head_sha=None,
+                    base_sha=None,
+                    diff=diff_path,
+                    model=model,
+                    review_mode=review_mode,
+                    config=config,
+                )
+                _prepare_local_session(ns, hosted_session_ledger=False)
+                return (ns.base_sha, ns.head_sha)
+
+            baseline = make_args()
+            self.assertEqual(baseline, make_args())
+            self.assertNotEqual(baseline, make_args(model="deepseek-r1:70b"))
+            self.assertNotEqual(baseline, make_args(review_mode="shadow"))
+            self.assertNotEqual(baseline, make_args(config=cfg_path))
 
 
 class Phase4MixedCoverageRecoveryJourneyTests(unittest.TestCase):
-    """Phase 4 failing tests: actionable recovery guidance for unsatisfied coverage obligations."""
+    """Phase 4 contract tests: actionable recovery guidance for unsatisfied coverage obligations."""
 
     def test_unsatisfied_coverage_check_summary_names_specific_recovery_actions(
         self,
@@ -710,7 +724,7 @@ class Phase4MixedCoverageRecoveryJourneyTests(unittest.TestCase):
 
 
 class Phase5PartitionedFinalizerAndReconciliationJourneyTests(unittest.TestCase):
-    """Phase 5 failing tests: v4 partitioned finalizer and failure/reconciliation guarantees."""
+    """Phase 5 contract tests: v4 partitioned finalizer and failure/reconciliation guarantees."""
 
     def test_partitioned_v4_root_finalizes_to_approved_when_all_obligations_are_resolved(
         self,
@@ -870,11 +884,6 @@ class Phase5PartitionedFinalizerAndReconciliationJourneyTests(unittest.TestCase)
             head_sha=HEAD,
             base_sha=BASE,
         )
-        # 998 prior reviews + 1 current review = 999 items (10 pages of 100 items per scan).
-        # Wait: if each scan uses 40 calls (e.g. adaptive fallback to page size 25 -> 40 pages),
-        # two scans within the same finalize() call consume 80 calls (> 60 call limit).
-        # Today, _review_pages() creates a fresh EvidenceReadBudget() on each call when
-        # self.evidence_budget is None, allowing 80 calls to succeed instead of failing closed!
         reviews_on_server = [
             {
                 "id": idx,
@@ -961,6 +970,7 @@ class Phase5PartitionedFinalizerAndReconciliationJourneyTests(unittest.TestCase)
                 eligibility=clean,
                 require_persisted=True,
             )
+        self.assertEqual(len(review_get_calls), 60)
 
 
 if __name__ == "__main__":

@@ -502,15 +502,23 @@ def format_candidate_finding(candidate: CandidateFinding) -> str:
 
 
 _MATERIAL_SEVERITY_RATIONALE_RE = re.compile(
-    r"\b(?P<severity>critical|high)\b", re.IGNORECASE
+    r"(?:^\s*(?P<leading>critical|high)\b|\b(?P<severity>critical|high)(?:\s*[:-]|\s+(?:severity|impact|risk|defect|failure|crash|regression|vulnerability|priority|issue|bug|flaw))\b)",
+    re.IGNORECASE,
+)
+_NEGATED_MATERIAL_SEVERITY_RE = re.compile(
+    r"\b(?:not|no|never|non[-\s]|hardly|barely|rarely)\s+(?:a\s+|an\s+)?(?:critical|high)\b",
+    re.IGNORECASE,
 )
 
 
 def _candidate_material_severity(candidate: CandidateFinding) -> str | None:
+    if _NEGATED_MATERIAL_SEVERITY_RE.search(candidate.severity_rationale):
+        return None
     match = _MATERIAL_SEVERITY_RATIONALE_RE.search(candidate.severity_rationale)
     if match is None:
         return None
-    return match.group("severity").lower()
+    token = match.group("severity") or match.group("leading")
+    return token.lower() if token is not None else None
 
 
 def _candidate_has_excerpt_evidence(candidate: CandidateFinding) -> bool:

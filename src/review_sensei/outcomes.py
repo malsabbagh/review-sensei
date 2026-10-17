@@ -652,7 +652,12 @@ def review_exit_code(
     return REVIEW_EXIT_REQUIRED_FIXES if required_fixes else REVIEW_EXIT_CLEAN
 
 
-def review_exit_reason(*, status: str, diagnostic: str | None = None) -> str | None:
+def review_exit_reason(
+    *,
+    status: str,
+    diagnostic: str | None = None,
+    required_decisions: bool = False,
+) -> str | None:
     """Return the structured reason for a non-completing review exit.
 
     The reason is a closed token: the published run-outcome diagnostic when the
@@ -660,7 +665,7 @@ def review_exit_reason(*, status: str, diagnostic: str | None = None) -> str | N
     """
 
     if status in COMPLETED_REVIEW_STATUSES:
-        return None
+        return "human-intervention-required" if required_decisions else None
     token = sanitize_diagnostic(diagnostic)
     if token is not None and token != "secret_redacted":
         return token

@@ -232,7 +232,13 @@ def check_outcome_for_result(
     if result.review_status != "complete" and result.coverage is not None:
         guidance = _coverage_recovery_guidance(result)
         if guidance:
-            summary = (outcome.summary + guidance)[:MAX_CHECK_SUMMARY_CHARS]
+            if len(outcome.summary) + len(guidance) <= MAX_CHECK_SUMMARY_CHARS:
+                summary = outcome.summary + guidance
+            else:
+                head_limit = max(0, MAX_CHECK_SUMMARY_CHARS - len(guidance))
+                summary = (outcome.summary[:head_limit] + guidance)[
+                    :MAX_CHECK_SUMMARY_CHARS
+                ]
             return CheckOutcome(
                 conclusion=outcome.conclusion,
                 title=outcome.title,
