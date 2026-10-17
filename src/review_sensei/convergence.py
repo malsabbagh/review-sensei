@@ -745,7 +745,16 @@ def evaluate_blocker_admission(
 
 
 REQUIRED_CONTRACT_KINDS = frozenset(
-    {"required-contract", "api-contract", "compatibility-contract"}
+    {
+        "required-contract",
+        "api-contract",
+        "compatibility-contract",
+        "changed-interface",
+        "public-api",
+        "persisted-state",
+        "security-boundary",
+        "test-expectation",
+    }
 )
 PREFERENCE_CATEGORIES = frozenset({"style", "nit", "preference"})
 

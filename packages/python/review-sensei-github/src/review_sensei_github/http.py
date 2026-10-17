@@ -401,7 +401,9 @@ class GitHubHttp:
                 )
             reads += 1
             if before_read is not None:
-                deadline = min(deadline, monotonic() + _read_allowance(before_read))
+                shared = _read_allowance(before_read)
+                deadline = min(deadline, monotonic() + shared)
+                return min(remaining(), shared)
             return remaining()
 
         pr_path = self.repository_path(

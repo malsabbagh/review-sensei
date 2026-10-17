@@ -710,6 +710,7 @@ def _review_exit_status(
     outcome: RunOutcome,
     *,
     required_fixes: bool = False,
+    required_decisions: bool = False,
 ) -> int:
     """Return the review exit code and report its structured reason.
 
@@ -721,10 +722,19 @@ def _review_exit_status(
 
     if getattr(args, "exit_semantics", "review") == "operational":
         return run_outcome_exit_code(outcome.status)
-    code = review_exit_code(status=outcome.status, required_fixes=required_fixes)
+    code = review_exit_code(
+        status=outcome.status,
+        required_fixes=required_fixes,
+        required_decisions=required_decisions,
+    )
     if code == REVIEW_EXIT_INCOMPLETE:
-        reason = review_exit_reason(
-            status=outcome.status, diagnostic=outcome.diagnostic
+        reason = (
+            review_exit_reason(
+                status=outcome.status,
+                diagnostic=outcome.diagnostic,
+                required_decisions=required_decisions,
+            )
+            or "review-incomplete"
         )
     elif code == REVIEW_EXIT_REQUIRED_FIXES:
         reason = "required-fixes-remain"
@@ -805,6 +815,162 @@ def _local_change_revision(label: str, content: str) -> str:
     return revision
 
 
+_SKIP_REPLAY_DIRS = frozenset(
+    {".git", "__pycache__", ".venv", "node_modules", ".mypy_cache", ".ruff_cache"}
+)
+_MAX_REPLAY_FILE_BYTES = 4 * 1024 * 1024
+_MAX_REPLAY_TREE_FILES = 2048
+_MAX_REPLAY_TREE_BYTES = 16 * 1024 * 1024
+_REPLAY_READ_CHUNK_BYTES = 65536
+
+
+def _replay_file_digest(
+    path: Path,
+    *,
+    max_bytes: int | None = None,
+) -> str | None:
+    effective_max_bytes = _MAX_REPLAY_FILE_BYTES if max_bytes is None else max_bytes
+    try:
+        if path.is_file() and not path.is_symlink():
+            hasher = hashlib.sha256()
+            total_bytes = 0
+            with path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(_REPLAY_READ_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if total_bytes > effective_max_bytes:
+                        return "unbounded:byte_budget:" + os.urandom(16).hex()
+                    hasher.update(chunk)
+            return hasher.hexdigest()
+    except OSError:
+        return "unreadable:" + os.urandom(16).hex()
+    return None
+
+
+def _replay_tree_digest(
+    root: Path,
+    *,
+    ignore_names: frozenset[str] = frozenset(),
+    max_files: int | None = None,
+    max_bytes: int | None = None,
+) -> str | None:
+    effective_max_files = _MAX_REPLAY_TREE_FILES if max_files is None else max_files
+    effective_max_bytes = _MAX_REPLAY_TREE_BYTES if max_bytes is None else max_bytes
+    try:
+        if not root.exists() or root.is_symlink():
+            return None
+        if root.is_file():
+            if root.name in ignore_names:
+                return None
+            return _replay_file_digest(root, max_bytes=effective_max_bytes)
+        if not root.is_dir():
+            return None
+        hasher = hashlib.sha256()
+        file_count = 0
+        total_bytes = 0
+        pending = [root]
+        entries: list[tuple[str, Path]] = []
+        while pending:
+            current = pending.pop()
+            for child in sorted(current.iterdir(), key=lambda p: p.name):
+                if child.is_symlink():
+                    continue
+                if child.is_dir():
+                    if child.name not in _SKIP_REPLAY_DIRS:
+                        if len(pending) >= effective_max_files:
+                            return "unbounded:file_count:" + os.urandom(16).hex()
+                        pending.append(child)
+                elif child.is_file():
+                    if child.name in ignore_names:
+                        continue
+                    if len(entries) >= effective_max_files:
+                        return "unbounded:file_count:" + os.urandom(16).hex()
+                    rel = child.relative_to(root).as_posix()
+                    entries.append((rel, child))
+        for rel, file_path in sorted(entries, key=lambda item: item[0]):
+            file_count += 1
+            hasher.update(rel.encode("utf-8") + b"\0")
+            with file_path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(_REPLAY_READ_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if total_bytes > effective_max_bytes:
+                        return "unbounded:byte_budget:" + os.urandom(16).hex()
+                    hasher.update(chunk)
+            hasher.update(b"\0")
+        return hasher.hexdigest() if file_count or entries else None
+    except OSError:
+        return "unreadable:" + os.urandom(16).hex()
+
+
+def _record_replay_disabled_reason(args: argparse.Namespace, digest: str) -> None:
+    if getattr(args, "replay_disabled_reason", None) is not None:
+        return
+    if digest.startswith("unbounded:file_count:"):
+        args.replay_disabled_reason = "file_count_exceeded"
+    elif digest.startswith("unbounded:"):
+        args.replay_disabled_reason = "byte_budget_exceeded"
+    elif digest.startswith("unreadable:"):
+        args.replay_disabled_reason = "io_error"
+
+
+def _local_session_replay_context(args: argparse.Namespace) -> str:
+    """Return a deterministic replay-context suffix for local session revisions."""
+
+    fields: dict[str, object] = {}
+    for key in (
+        "config",
+        "profile",
+        "provider",
+        "base_url",
+        "model",
+        "review_mode",
+        "instructions",
+        "learning_root",
+        "context_root",
+        "categories_dir",
+        "stages_dir",
+        "enable_symbol_context",
+        "orchestrate_large_changes",
+    ):
+        value = getattr(args, key, None)
+        if value is not None and value is not False and value != "":
+            fields[key] = str(value) if isinstance(value, Path) else value
+    raw_config = getattr(args, "config", None)
+    if isinstance(raw_config, Path):
+        active_config = raw_config
+    elif isinstance(raw_config, str) and raw_config.strip():
+        active_config = Path(raw_config)
+    else:
+        active_config = Path(".reviewsensei.yml")
+    digest = _replay_file_digest(active_config)
+    if digest is not None:
+        fields["config_sha256"] = digest
+        _record_replay_disabled_reason(args, digest)
+    for dir_key in ("learning_root", "context_root", "categories_dir", "stages_dir"):
+        raw_dir = getattr(args, dir_key, None)
+        if isinstance(raw_dir, (Path, str)) and str(raw_dir).strip():
+            ignored = (
+                frozenset({".reviewsensei.yml"})
+                if dir_key in {"context_root", "learning_root"}
+                else frozenset()
+            )
+            tree_digest = _replay_tree_digest(Path(raw_dir), ignore_names=ignored)
+            if tree_digest is not None:
+                fields[f"{dir_key}_sha256"] = tree_digest
+                _record_replay_disabled_reason(args, tree_digest)
+    disabled_reason = getattr(args, "replay_disabled_reason", None)
+    if isinstance(disabled_reason, str) and disabled_reason:
+        fields["replay_disabled_reason"] = disabled_reason
+    if not fields:
+        return ""
+    return "\0" + json.dumps(fields, sort_keys=True, separators=(",", ":"))
+
+
 def _prepare_local_session(
     args: argparse.Namespace, *, hosted_session_ledger: bool
 ) -> None:
@@ -813,9 +979,9 @@ def _prepare_local_session(
     A local session reuses the durable session/transaction state under the
     platform per-user state directory, so the caller never has to supply a
     ledger path, a pull-request identity, or commit SHAs.  The head revision
-    is derived from the supplied diff, so the same change stays stable across
-    repeated local runs and an edited diff is a new round against the same
-    stable local base revision.
+    is derived from the supplied diff and effective replay context, so the
+    same change stays stable across repeated local runs and an edited diff or
+    changed review configuration/model/policy starts a distinct revision.
     """
 
     if hosted_session_ledger:
@@ -830,16 +996,19 @@ def _prepare_local_session(
         args.repository = _local_session_repository()
     if args.pull_request is None:
         args.pull_request = DEFAULT_LOCAL_SESSION_SLOT
+    replay_context = _local_session_replay_context(args)
     if args.head_sha is None:
         diff = read_bounded_utf8(
             args.diff,
             maximum=DEFAULT_TOTAL_WORK_BUDGET.max_total_diff_bytes,
             label="diff",
         )
-        args.head_sha = _local_change_revision("review-sensei-local-head", diff)
+        args.head_sha = _local_change_revision(
+            "review-sensei-local-head", diff + replay_context
+        )
     if args.base_sha is None:
         args.base_sha = _local_change_revision(
-            "review-sensei-local-base", args.repository
+            "review-sensei-local-base", args.repository + replay_context
         )
 
 
@@ -3650,6 +3819,7 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
             args,
             outcome,
             required_fixes=any(comment.blocks_approval for comment in result.comments),
+            required_decisions=any(comment.needs_human for comment in result.comments),
         )
     except BaseException as exc:
         if analysis_cleanup is not None:

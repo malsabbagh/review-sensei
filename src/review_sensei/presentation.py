@@ -433,7 +433,9 @@ def build_finding_view(
 
     requirement = REQUIRED_FINDING if comment.blocks_approval else OPTIONAL_FINDING
     repeat = not (
-        requirement == OPTIONAL_FINDING and lifecycle_state == "still-present"
+        requirement == OPTIONAL_FINDING
+        and not comment.needs_human
+        and lifecycle_state == "still-present"
     )
     return FindingView(
         identifier=identifier or finding_identifier(fingerprint),
@@ -459,12 +461,12 @@ def render_finding(view: FindingView) -> str:
         # enforcement is disabled and stated once in the summary. Optional
         # feedback keeps its own wording, which never asserts a defect.
         header = "Defect"
+    elif view.requirement == REQUIRED_FINDING:
+        header = "Required fix"
+    elif view.needs_human:
+        header = "Required decision"
     else:
-        header = (
-            "Required fix"
-            if view.requirement == REQUIRED_FINDING
-            else "Optional improvement"
-        )
+        header = "Optional improvement"
     segments = [header]
     impact = _impact_label(view.severity)
     if impact is not None:
@@ -476,7 +478,7 @@ def render_finding(view: FindingView) -> str:
     if view.location is not None:
         lines.extend([view.location, ""])
     lines.append(view.detail or "")
-    if view.requirement == OPTIONAL_FINDING:
+    if view.requirement == OPTIONAL_FINDING and not view.needs_human:
         lines.extend(["", _OPTIONAL_NOT_REQUIRED])
     lines.extend(["", f"`{view.identifier}`"])
     return "\n".join(lines)
@@ -495,7 +497,11 @@ def render_finding_reference(view: FindingView) -> str:
         if view.placement == "inline"
         else _DISCUSSION_REFERENCE_BODY
     )
-    if view.requirement == OPTIONAL_FINDING and not view.repeat:
+    if (
+        view.requirement == OPTIONAL_FINDING
+        and not view.needs_human
+        and not view.repeat
+    ):
         reference = "Previously reported and unchanged."
     subject = view.reference
     if subject and subject[-1] not in ".!?…":
@@ -504,12 +510,14 @@ def render_finding_reference(view: FindingView) -> str:
 
 
 def order_findings(views: Iterable[FindingView]) -> tuple[FindingView, ...]:
-    """Order findings deterministically: required first, then severity and ID."""
+    """Order findings deterministically: required fixes, required decisions, optional, then severity and ID."""
 
     def sort_key(view: FindingView) -> tuple[int, int, str]:
-        requirement = 0 if view.requirement == REQUIRED_FINDING else 1
+        tier = (
+            0 if view.requirement == REQUIRED_FINDING else 1 if view.needs_human else 2
+        )
         severity = _SEVERITY_ORDER.get((view.severity or "").strip().lower(), 4)
-        return (requirement, severity, view.identifier)
+        return (tier, severity, view.identifier)
 
     return tuple(sorted(views, key=sort_key))
 
@@ -542,9 +550,20 @@ def _required_heading(required: Sequence[FindingView], *, advisory: bool) -> str
 
 
 def _count_line(
-    required: Sequence[FindingView], optional_total: int, *, advisory: bool
+    required: Sequence[FindingView],
+    optional_total: int,
+    *,
+    advisory: bool,
+    decisions_total: int = 0,
 ) -> str | None:
     required_part = _required_heading(required, advisory=advisory)
+    decisions_part = (
+        "1 required decision"
+        if decisions_total == 1
+        else f"{decisions_total} required decisions"
+        if decisions_total > 1
+        else ""
+    )
     optional_part = (
         f"{optional_total} optional improvement"
         if optional_total == 1
@@ -552,19 +571,22 @@ def _count_line(
         if optional_total > 1
         else ""
     )
-    if not optional_part:
+    if not decisions_part and not optional_part:
         return f"**{required_part}**" if len(required) else None
-    return f"**{required_part} · {optional_part}**"
+    parts = [required_part, *(p for p in (decisions_part, optional_part) if p)]
+    return f"**{' · '.join(parts)}**"
 
 
 def _next_action(
     *,
     state: str,
     required: Sequence[FindingView],
+    decisions: Sequence[FindingView] = (),
     optional_total: int,
     reason: str | None,
 ) -> str:
     identifiers = [view.identifier for view in required]
+    decision_ids = [view.identifier for view in decisions]
     if state == ADVISORY_STATE:
         return (
             "Advisory mode: ReviewSensei enforcement is disabled, so these findings "
@@ -578,7 +600,7 @@ def _next_action(
     if state == WITHHELD_STATE:
         detail = reason or "automatic approval is disabled for this repository"
         return f"Approval was withheld because {detail}."
-    if state == NO_REQUIRED_FIXES_STATE:
+    if state == NO_REQUIRED_FIXES_STATE and not decision_ids:
         # The approval itself is a separate, later review operation, so this
         # summary never claims that an approval has already happened.
         action = "ReviewSensei records its decision in the separate approval review."
@@ -590,7 +612,25 @@ def _next_action(
             addressed = " and ".join(identifiers)
         else:
             addressed = "the required fixes above"
-        action = f"Address {addressed} and run verification."
+        if decision_ids:
+            decided = (
+                " and ".join(decision_ids)
+                if len(decision_ids) <= 4
+                else "the required decisions above"
+            )
+            action = f"Address {addressed}, resolve {decided}, and run verification."
+        else:
+            action = f"Address {addressed} and run verification."
+        if optional_total:
+            action = f"{action} Optional suggestions do not affect the review gate."
+        return action
+    if decision_ids:
+        decided = (
+            " and ".join(decision_ids)
+            if len(decision_ids) <= 4
+            else "the required decisions above"
+        )
+        action = f"Resolve {decided} before approval can proceed."
         if optional_total:
             action = f"{action} Optional suggestions do not affect the review gate."
         return action
@@ -608,6 +648,7 @@ class ReviewSummaryView:
     overview: str | None = None
     coverage_line: str | None = None
     required: tuple[FindingView, ...] = ()
+    decisions: tuple[FindingView, ...] = ()
     optional: tuple[FindingView, ...] = ()
     optional_grouped: int = 0
     limitations: tuple[str, ...] = ()
@@ -618,6 +659,15 @@ class ReviewSummaryView:
     def __post_init__(self) -> None:
         if self.state not in _HEADING_STATES:
             raise ReviewInputError("review summary state is invalid")
+        if any(item.needs_human for item in self.optional):
+            merged_decisions = order_findings(
+                (*self.decisions, *(item for item in self.optional if item.needs_human))
+            )
+            pure_optional = tuple(
+                item for item in self.optional if not item.needs_human
+            )
+            object.__setattr__(self, "decisions", merged_decisions)
+            object.__setattr__(self, "optional", pure_optional)
         if len(self.optional) > _HIGHLIGHTED_OPTIONAL_LIMIT:
             raise ReviewInputError("review summary highlights too many optional items")
         if (
@@ -635,6 +685,7 @@ def build_review_summary_view(
     overview: str | None = None,
     coverage_line: str | None = None,
     required: Sequence[FindingView] = (),
+    decisions: Sequence[FindingView] = (),
     optional: Sequence[FindingView] = (),
     optional_grouped: int = 0,
     limitations: Sequence[str] = (),
@@ -645,13 +696,17 @@ def build_review_summary_view(
     """Order and bound summary content deterministically before rendering."""
 
     required_views = order_findings(required)
-    ordered_optional = order_findings(optional)
+    decision_views = order_findings(
+        (*decisions, *(item for item in optional if item.needs_human))
+    )
+    ordered_optional = order_findings(item for item in optional if not item.needs_human)
     return ReviewSummaryView(
         state=state,
         head_sha=head_sha,
         overview=sanitize_finding_markdown(overview) if overview else None,
         coverage_line=coverage_line,
         required=required_views,
+        decisions=decision_views,
         optional=ordered_optional[:_HIGHLIGHTED_OPTIONAL_LIMIT],
         optional_grouped=max(
             0, optional_grouped + len(ordered_optional[_HIGHLIGHTED_OPTIONAL_LIMIT:])
@@ -684,13 +739,22 @@ def render_review_summary(view: ReviewSummaryView) -> str:
     if view.placement_note:
         lines.extend(["", view.placement_note])
     optional_total = len(view.optional) + view.optional_grouped
+    decisions_total = len(view.decisions)
     advisory = view.state == ADVISORY_STATE
-    count_line = _count_line(view.required, optional_total, advisory=advisory)
+    count_line = _count_line(
+        view.required,
+        optional_total,
+        advisory=advisory,
+        decisions_total=decisions_total,
+    )
     if count_line:
         lines.extend(["", count_line])
     if view.required:
         lines.extend(["", "### Defects" if advisory else "### Required"])
         lines.extend(render_finding_reference(item) for item in view.required)
+    if view.decisions:
+        lines.extend(["", "### Required decisions"])
+        lines.extend(render_finding_reference(item) for item in view.decisions)
     if view.optional or view.optional_grouped:
         lines.extend(["", "### Optional"])
         lines.extend(render_finding_reference(item) for item in view.optional)
@@ -711,16 +775,18 @@ def render_review_summary(view: ReviewSummaryView) -> str:
                 else f"{view.optional_grouped} additional optional suggestions are"
             )
             lines.append(f"- {label} covered in this review body.")
-        if view.omitted_explanations:
-            notice = (
-                "1 finding explanation was omitted for size. That finding remains open."
-                if view.omitted_explanations == 1
-                else (
-                    f"{view.omitted_explanations} finding explanations were omitted "
-                    "for size. Those findings remain open."
-                )
+    if (
+        view.optional or view.optional_grouped or view.decisions or view.required
+    ) and view.omitted_explanations:
+        notice = (
+            "1 finding explanation was omitted for size. That finding remains open."
+            if view.omitted_explanations == 1
+            else (
+                f"{view.omitted_explanations} finding explanations were omitted "
+                "for size. Those findings remain open."
             )
-            lines.extend(["", notice])
+        )
+        lines.extend(["", notice])
     if view.limitations:
         lines.extend(["", "### Limitations"])
         lines.extend(f"- {item}" for item in view.limitations)
@@ -731,6 +797,7 @@ def render_review_summary(view: ReviewSummaryView) -> str:
             _next_action(
                 state=view.state,
                 required=view.required,
+                decisions=view.decisions,
                 optional_total=optional_total,
                 reason=view.reason,
             ),
@@ -752,9 +819,22 @@ def _finding_groups(
     result: ReviewResult,
 ) -> tuple[tuple[str, tuple[ReviewComment, ...]], ...]:
     required = tuple(comment for comment in result.comments if comment.blocks_approval)
-    optional = tuple(
-        comment for comment in result.comments if not comment.blocks_approval
+    decisions = tuple(
+        comment
+        for comment in result.comments
+        if not comment.blocks_approval and comment.needs_human
     )
+    optional = tuple(
+        comment
+        for comment in result.comments
+        if not comment.blocks_approval and not comment.needs_human
+    )
+    if decisions:
+        return (
+            ("Required fixes", required),
+            ("Required decisions", decisions),
+            ("Optional findings", optional),
+        )
     return (("Required fixes", required), ("Optional findings", optional))
 
 
@@ -765,7 +845,13 @@ def _finding_location(comment: ReviewComment) -> str:
 
 
 def _finding_labels(comment: ReviewComment) -> str:
-    labels = ["required fix" if comment.blocks_approval else "optional"]
+    if comment.blocks_approval:
+        primary = "required fix"
+    elif comment.needs_human:
+        primary = "required decision"
+    else:
+        primary = "optional"
+    labels = [primary]
     if comment.severity is not None:
         labels.append(f"severity: {comment.severity.lower()}")
     if comment.category is not None:

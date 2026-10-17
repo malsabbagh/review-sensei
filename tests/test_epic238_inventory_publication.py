@@ -420,7 +420,7 @@ class ProsePublicationTests(unittest.TestCase):
         self.assertNotIn("APPROVE", state.events())
         body = state.reviews[-1]["body"]
         authoritative = body.split("### Provider narrative", 1)[0]
-        self.assertIn("No required fixes · 8 optional improvements", authoritative)
+        self.assertIn("No required fixes · 8 required decisions", authoritative)
         self.assertNotIn("must be fixed before merge", authoritative)
         self.assertIn("Review incomplete", authoritative)
         self.assertIn("explained in this review body", authoritative)

@@ -793,9 +793,12 @@ explicit error rather than allowing a stale or ambiguous review.
 The automatic-review and GitHub-writes caller path defaults to automatic
 approval. Review publication is one exact-head review, and
 enforcement is one stable `ReviewSensei` check run bound to that head and to
-its producing App (ADR 0057). A completed `auto-approve` review publishes
-`success` whether or not required fixes remain, and submits `REQUEST_CHANGES`
-when they remain and `COMMENT` otherwise. `blocking` publishes `failure` when
+its producing App (ADR 0057). A completed `auto-approve` or `blocking` review
+publishes `failure` on the check when required fixes remain, `action_required`
+when required human decisions remain without required fixes, and `success` when
+all required fixes and required decisions are satisfied; `auto-approve` submits
+`REQUEST_CHANGES` when required fixes remain and `COMMENT` otherwise, while
+`blocking` publishes `failure` when
 required fixes remain and stays `COMMENT`. `advisory` publishes `neutral`,
 stays `COMMENT`, and never fails the check. `action_required` covers a
 partial, incomplete, or unpublished review in `auto-approve` and `blocking`,

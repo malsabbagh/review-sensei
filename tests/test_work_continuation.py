@@ -671,7 +671,9 @@ class WorkContinuationTests(unittest.TestCase):
             persisted.human_review.pending[0].evidence_paths,
             ("src/app.py", "src/other.py"),
         )
-        self.assertEqual(broker.capabilities, ["issue_reply", "review_publish"])
+        self.assertEqual(
+            broker.capabilities, ["issue_reply", "review_publish", "check_publish"]
+        )
 
     def test_discovery_joint_requirement_uses_same_remaining_call_envelope(self):
         pending, bundle = self.fixture()

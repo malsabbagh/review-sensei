@@ -729,6 +729,8 @@ class HumanAssessmentPublisher:
         prepared: PreparedHumanAssessment,
         reply: HumanAssessmentReply | HumanAssessmentWork,
         app_slug: str,
+        check_token: str | None = None,
+        reviews_policy: str = "auto-approve",
     ) -> ReplyResult:
         conversation = prepared.conversation
         if prepared.feedback is not None and self.before_read is None:
@@ -982,6 +984,8 @@ class HumanAssessmentPublisher:
                 head_sha=conversation.head_sha,
                 app_slug=app_slug,
                 eligibility=refreshed,
+                check_token=check_token,
+                reviews_policy=reviews_policy,
             )
             return ReplyResult(
                 status=finalized.status
@@ -1068,6 +1072,8 @@ class HumanAssessmentPublisher:
             head_sha=conversation.head_sha,
             app_slug=app_slug,
             eligibility=refreshed,
+            check_token=check_token,
+            reviews_policy=reviews_policy,
         )
         return replace(
             outcome,

@@ -27,6 +27,33 @@
       "maxItems": 16,
       "items": {"type": "string", "minLength": 1, "maxLength": 1024}
     },
+    "severity": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "critical"]
+    },
+    "remedy": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "required_contract": {
+      "type": "string",
+      "enum": [
+        "required-contract",
+        "api-contract",
+        "compatibility-contract",
+        "changed-interface",
+        "public-api",
+        "persisted-state",
+        "security-boundary",
+        "test-expectation"
+      ]
+    },
+    "named_mandatory_rule": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
     "evidence": {
       "type": "array",
       "minItems": 1,
