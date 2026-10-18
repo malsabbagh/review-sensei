@@ -350,10 +350,13 @@ class OverrideStabilityTests(unittest.TestCase):
 
         def respond(request):
             if request.method == "PATCH":
+                return json_response({}, 405)
+            if request.method == "PUT":
                 stored["body"] = json.loads(request.data.decode("utf-8"))["body"]
                 return json_response(stored)
             if request.method == "POST":
                 return json_response({"id": 9}, 200)
+            self.assertEqual(request.method, "GET")
             return json_response([stored])
 
         finalizer_http, finalizer_calls = make_http(
@@ -392,6 +395,8 @@ class OverrideStabilityTests(unittest.TestCase):
             dispositions=(disposition,),
         )
         self.assertEqual(outcome.status, "approved", outcome.diagnostic)
+        self.assertTrue(any(method == "PUT" for method, _, _ in finalizer_calls))
+        self.assertFalse(any(method == "PATCH" for method, _, _ in finalizer_calls))
         approval = json.loads(finalizer_calls[-1][2].decode("utf-8"))
         self.assertEqual(approval["event"], "APPROVE")
 

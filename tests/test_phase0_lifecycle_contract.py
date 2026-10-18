@@ -1104,6 +1104,8 @@ class Phase2CheckAndPrecedenceMatrixJourneyTests(unittest.TestCase):
             if path.endswith("/pulls/1/reviews") and request.method == "GET":
                 return json_response(reviews_on_server)
             if path.endswith("/pulls/1/reviews/10") and request.method == "PATCH":
+                return json_response({}, 405)
+            if path.endswith("/pulls/1/reviews/10") and request.method == "PUT":
                 reviews_on_server[0]["body"] = payload["body"]
                 return json_response(reviews_on_server[0], 200)
             if path.endswith("/pulls/1/reviews") and request.method == "POST":

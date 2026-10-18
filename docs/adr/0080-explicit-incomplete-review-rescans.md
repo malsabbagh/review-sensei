@@ -4,7 +4,7 @@
 - Date: 2026-10-16
 - Decision owner / reviewers: ReviewSensei maintainers
 - Linked GitHub Issue: none; targeted maintainer-authorized bug fix
-- Linked PR: [#305](https://github.com/malsabbagh/review-sensei/pull/305)
+- Linked PR: [#305](https://github.com/malsabbagh/review-sensei/pull/305); parser/guidance amendment [#312](https://github.com/malsabbagh/review-sensei/pull/312)
 
 ## Context
 
@@ -120,3 +120,45 @@ make an old writer proceed. Roll forward with a corrected compatible reader.
 Wire the existing human-file attestation lifecycle into the actual approval
 command flow separately. Reanalysis does not grant human coverage or approve
 policy-excluded content.
+
+
+## Amendment proposed 2026-10-18: explicit comment grammar and user actions
+
+An 8,702-byte engineering summary containing a bot mention and the word
+“rescan” was incorrectly routed as fresh analysis, then rejected by the hosted
+4,096-byte authority bound with a generic unauthorized-or-edited error. The
+summary was an unedited owner comment; neither permission loss nor a test
+failure caused that result.
+
+The current caller and both trigger-module entry points now require the entire
+trimmed comment to be `@reviewsensei rescan`, optionally `commit <sha>` with
+7-40 hexadecimal characters naming the current head. Canonical ASCII case
+variants, the lowercase `@sensei` alias and standalone `re-scan` / `re scan`
+spellings remain; Unicode whitespace separators remain except CR/LF. Narrative
+requests (“please rescan this PR”), quoted/fenced examples, trailing summaries
+and malformed selectors are discussions. This intentionally narrows the old
+keyword search; it does not broaden authority. Commands include surrounding
+whitespace in the 4,096-byte limit and fail with an explicit size diagnostic
+before hosted analysis. Independent hosted checks keep actor, permission,
+comment freshness, exact-head, replay and budget fences.
+
+Published guidance and conversation prompts distinguish discussion (possibly an
+AI reply), `verify` (existing-evidence approval check), explicit fresh analysis
+(existing budgets) and real maintainer assessments. Editing comments does not
+start a run. A new AI review does not substitute for required human decisions.
+
+Current CLI and web caller generators are changed together and tested against
+actual embedded Python execution. Frozen prior v5 bytes, identified by SHA-256
+`cea8cc8e3905d30c973a76ec42afb1e999032f63c678e8f78e208ac110e7bbaf`,
+allow exact managed-caller upgrades; custom edits remain untouched. Historical
+fixtures retain their original bytes and grammar. Existing installed callers
+need a reviewed setup update; updating the reusable tag alone does not replace
+their inline fallback. Package release, tag promotion and Worker deployment
+remain separate maintainer actions. Rollback restores prior caller generation
+and package code together without changing ledger history or authority state.
+
+Regression evidence covers the sanitized long-summary reproduction, quoted and
+narrative mentions, valid aliases/selectors, malformed selectors, byte and
+multibyte boundaries, package/stdlib/embedded parity, unchanged-ledger refusals,
+actual published guidance, and exact managed-versus-edited setup migration.
+This amendment remains Proposed; it is not maintainer acceptance of the ADR.

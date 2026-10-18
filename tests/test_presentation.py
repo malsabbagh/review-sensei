@@ -30,6 +30,33 @@ def _comment(**overrides):
     return ReviewComment(**values)
 
 
+class ReviewActionGuidanceTests(unittest.TestCase):
+    def test_guidance_distinguishes_discussion_checks_analysis_and_real_assessments(
+        self,
+    ):
+        from review_sensei_github.trigger import issue_comment_requests_rescan
+
+        from review_sensei.presentation import MAINTAINER_RESPONSE_INSTRUCTIONS
+
+        text = MAINTAINER_RESPONSE_INSTRUCTIONS
+        for phrase in (
+            "Discussion may generate an AI reply",
+            "does not request a fresh review",
+            "@reviewsensei verify",
+            "@reviewsensei rescan",
+            "4,096 UTF-8 bytes",
+            "Editing a comment does not trigger",
+            "existing review budgets",
+            "required human decisions",
+            "engineering reply alone is not approval",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+        self.assertTrue(issue_comment_requests_rescan("@reviewsensei rescan"))
+        self.assertFalse(issue_comment_requests_rescan("@reviewsensei verify"))
+        self.assertFalse(issue_comment_requests_rescan(text))
+
+
 class FindingIdentifierTests(unittest.TestCase):
     def test_projects_a_fingerprint_onto_one_stable_readable_id(self):
         self.assertEqual(finding_identifier(FINGERPRINT), "RS-012345")

@@ -1143,6 +1143,52 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         written = {file.path: file.content for file in branch_request[6]}
         self.assertEqual(written, {file.path: file.content for file in plan.files})
 
+    def test_released_keyword_rescan_caller_upgrades_but_operator_edits_do_not(self):
+        from review_sensei_github.setup import _keyword_rescan_v5_workflow
+
+        prior = _keyword_rescan_v5_workflow("v5")
+        self.assertEqual(
+            hashlib.sha256(prior.encode()).hexdigest(),
+            "cea8cc8e3905d30c973a76ec42afb1e999032f63c678e8f78e208ac110e7bbaf",
+        )
+        self.assertEqual(
+            (
+                Path(__file__).resolve().parents[1]
+                / "deploy/cloudflare/fixtures/released-v5-keyword-rescan-caller.yml"
+            ).read_text(),
+            prior,
+        )
+        self.assertNotEqual(prior, _tagged_workflow("v5"))
+        for edited in (False, True):
+            with self.subTest(edited=edited):
+                plan = SetupPlanBuilder().build("owner/repo")
+                files = {file.path: file.content for file in plan.files}
+                files[WORKFLOW_PATH] = prior + (
+                    "# operator-owned edit\n" if edited else ""
+                )
+                transport = FileTransport(files=files)
+                results = SetupPullRequestService(transport).ensure_setup_pull_requests(
+                    delivery(), installation_token="synthetic-installation-token"
+                )
+                self.assertEqual(
+                    results[0].status, "skipped_unknown_setup" if edited else "created"
+                )
+                if edited:
+                    self.assertFalse(
+                        any(
+                            r[0] == "create_or_update_branch"
+                            for r in transport.requests
+                        )
+                    )
+                else:
+                    request = next(
+                        r
+                        for r in transport.requests
+                        if r[0] == "create_or_update_branch"
+                    )
+                    written = {file.path: file.content for file in request[6]}
+                    self.assertEqual(written[WORKFLOW_PATH], _tagged_workflow("v5"))
+
     def test_unreleased_caller_edition_is_not_overwritten(self):
         # A caller that carries the release marker but matches neither the
         # current bytes nor a frozen released shape (an unreleased edition, or

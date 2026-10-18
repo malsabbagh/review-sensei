@@ -404,8 +404,8 @@ class CloudflarePackageTests(unittest.TestCase):
     def test_user_guidance_describes_setup_v5_publication_contract(self):
         from review_sensei_github.setup import SETUP_FILE_PATHS
 
-        readme = (ROOT / "README.md").read_text()
-        installation = (ROOT / "docs" / "installation.md").read_text()
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        installation = (ROOT / "docs" / "installation.md").read_text(encoding="utf-8")
         for content in (readme, installation):
             normalized = " ".join(content.split())
             self.assertIn("setup-v5", content)

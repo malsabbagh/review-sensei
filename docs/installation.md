@@ -809,3 +809,37 @@ matching is ASCII case-insensitive; legacy conversations stay case-insensitive,
 while legacy command and re-scan gates keep requiring lowercase `@sensei`.
 See [the caller rollout guide](mention-handle-rollout.md): a reusable-workflow
 channel update cannot change an installed caller's event filter or inline resolver.
+
+
+### Discuss, verify, or request fresh analysis
+
+Choose the action that matches the work:
+
+| Goal | What to post | Effect |
+| --- | --- | --- |
+| Discuss a finding or explain a fix | Reply in the finding thread with `@reviewsensei` and your question or exact fix commit; name the RS-id in a PR comment for a body-only finding | May generate an AI reply and verify the claim against the current head; does not request fresh review analysis or grant approval |
+| Recheck approval | A new standalone PR comment: `@reviewsensei verify` | Re-evaluates existing evidence without a new AI review; does not complete partial analysis |
+| Request fresh analysis of an incomplete review | A new standalone PR comment: `@reviewsensei rescan` | Requests a new AI review within existing budgets and authority checks; does not replace required human decisions |
+| Record a maintainer assessment | Use the exact media-approval or finding-override command printed on the review | Records the authorized person's assessment for the current commit; an engineering explanation alone is not that assessment |
+
+An explicit analysis command may optionally name the current head:
+`@reviewsensei rescan commit <sha>`, using its full SHA or a prefix of 7-40
+hexadecimal characters. The legacy lowercase `@sensei` alias and standalone
+`re-scan` / `re scan` spellings remain supported. The entire trimmed body must
+be that command; prefixes such as “please,” trailing prose, quotes, code fences
+and malformed commit selectors do not request fresh analysis. Separators within
+the command cannot contain CR or LF.
+
+Commands must be newly created, unedited comments of at most 4,096 UTF-8 bytes,
+including surrounding whitespace. Editing a comment does not trigger another
+run. Oversized explicit analysis commands fail in trigger resolution with a size
+error, before hosted analysis; they are not reported as permission loss. Keep
+long reports in ordinary comments without a bot mention and send a short link
+separately. Mentioning an earlier rescan in prose remains discussion.
+
+Rollout requires the updated caller as well as the relevant package release.
+The setup service recognizes the exact previously released keyword-matching v5
+caller and proposes its replacement; operator edits remain operator-owned.
+Updating the reusable-workflow tag alone cannot replace another repository's
+installed caller. No package publication, tag promotion or Worker deployment is
+performed by this parser change itself.

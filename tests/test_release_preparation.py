@@ -195,11 +195,13 @@ class PreparationRenderingTests(unittest.TestCase):
         self,
     ):
         old_site = json.loads(
-            (self.root / "docs/site/data/site-manifest.json").read_text()
+            (self.root / "docs/site/data/site-manifest.json").read_text(
+                encoding="utf-8"
+            )
         )
         installation = self.root / "docs/installation.md"
-        historical = installation.read_text().split("```text", 1)[1]
-        changelog = (self.root / "CHANGELOG.md").read_text()
+        historical = installation.read_text(encoding="utf-8").split("```text", 1)[1]
+        changelog = (self.root / "CHANGELOG.md").read_text(encoding="utf-8")
         _, _, history = PREP.changelog_parts(changelog)
         before = {
             p.relative_to(self.root).as_posix(): p.read_bytes()
@@ -209,14 +211,20 @@ class PreparationRenderingTests(unittest.TestCase):
         receipt = self.generated()
         PREP.versions.validate_release_tag("v" + VERSION, self.root)
         new_site = json.loads(
-            (self.root / "docs/site/data/site-manifest.json").read_text()
+            (self.root / "docs/site/data/site-manifest.json").read_text(
+                encoding="utf-8"
+            )
         )
         self.assertEqual(new_site["providers"], old_site["providers"])
         self.assertEqual(new_site["release_facts"]["version"], VERSION)
         self.assertEqual(new_site["last_updated"], DATE)
-        self.assertIn(history, (self.root / "CHANGELOG.md").read_text())
-        self.assertEqual(installation.read_text().split("```text", 1)[1], historical)
-        self.assertIn("@reviewsensei/cli@" + VERSION, installation.read_text())
+        self.assertIn(history, (self.root / "CHANGELOG.md").read_text(encoding="utf-8"))
+        self.assertEqual(
+            installation.read_text(encoding="utf-8").split("```text", 1)[1], historical
+        )
+        self.assertIn(
+            "@reviewsensei/cli@" + VERSION, installation.read_text(encoding="utf-8")
+        )
         changed = {
             name
             for name, value in before.items()

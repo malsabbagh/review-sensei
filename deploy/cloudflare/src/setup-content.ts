@@ -8,6 +8,7 @@
  */
 
 import senseiOnlyV5CallerFixture from "../fixtures/sensei-only-v5-caller.yml";
+import keywordRescanV5CallerFixture from "../fixtures/released-v5-keyword-rescan-caller.yml";
 import {
   historicalV4UninstallBytes,
   mergeFocusedV4CallerBytes,
@@ -796,6 +797,11 @@ jobs:
     .replaceAll(GITHUB_EXPRESSION, "$");
 }
 
+/** Frozen released bytes are recognized exactly; operator edits stay owned. */
+export function keywordRescanV5WorkflowTemplate(publicWorkflowTag: string): string {
+  return retagFrozenCaller(keywordRescanV5CallerFixture, publicWorkflowTag);
+}
+
 export function senseiOnlyV5WorkflowTemplate(publicWorkflowTag: string): string {
   return retagFrozenCaller(senseiOnlyV5CallerFixture, publicWorkflowTag);
 }
@@ -967,8 +973,7 @@ jobs:
           sha_full = re.compile(r"^[a-f0-9]{40}$")
           sha_prefix = re.compile(r"^[a-f0-9]{7,39}$")
           ref = re.compile(r"^[A-Za-z0-9._/-]+$")
-          rescan = re.compile(r"\bre[\s-]?scan\b", re.IGNORECASE)
-          commit_sha = re.compile(r"\bcommit\s+([a-f0-9]{7,40})\b", re.IGNORECASE)
+          rescan = re.compile(r"(?:@sensei|(?ai:@reviewsensei))[^\S\r\n]+(?i:re(?:[^\S\r\n]|-)?scan)(?:[^\S\r\n]+(?ai:commit)[^\S\r\n]+(?P<commit>[a-fA-F0-9]{7,40}))?")
           pull = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
           event_name = sys.argv[2]
           comment_body = sys.argv[3] if len(sys.argv) > 3 else ""
@@ -1031,19 +1036,12 @@ jobs:
           elif event_name == "pull_request_review_comment":
               operation = "reply"
           elif event_name == "issue_comment":
-              wants_rescan = (
-                  isinstance(comment_body, str)
-                  and ("@sensei" in comment_body or re.search(r"(?:^|\s)(?ai:@reviewsensei)(?:$|\s|[.,!?])", comment_body))
-                  and rescan.search(comment_body) is not None
-              )
-              if wants_rescan:
-                  match = commit_sha.search(comment_body)
-                  token = match.group(1).casefold() if match is not None else None
-                  if token is not None and not (
-                      sha_full.fullmatch(token) or sha_prefix.fullmatch(token)
-                  ):
-                      token = None
-                  resolved_head = choose_head(token)
+              match = rescan.fullmatch(comment_body.strip())
+              if match is not None:
+                  if len(comment_body.encode("utf-8")) > 4096:
+                      print("::error::explicit rescan comment exceeds 4096 UTF-8 bytes", file=sys.stderr)
+                      raise SystemExit(1)
+                  resolved_head = choose_head(match.group("commit"))
               elif isinstance(comment_body, str) and len(comment_body.encode("utf-8")) <= 4096 and re.search(r"(?m)(?<!\S)@(?:(?ai:reviewsensei)|sensei)\s+(?:review\s+(?:status|pause|continue|reenroll)|verify|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}\s+--reason\s+\S.*|i\s+reviewed\s+the\s+media\s+files\s+and\s+i\s+approve|override\s+(?:(?:rs-)?[a-f0-9]{6,64})(?:(?:\s*,\s*|\s+)(?:rs-)?[a-f0-9]{6,64}){0,9}(?:\s+acceptable\s+risk)?|(?:(?:rs-)?[a-f0-9]{6,64})(?:(?:\s*,\s*|\s+)(?:rs-)?[a-f0-9]{6,64}){0,9}\s+(?:is|are)\s+acceptable\s+risk)\s*\Z", comment_body, re.IGNORECASE):
                   operation = "command"
               else:

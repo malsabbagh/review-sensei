@@ -36,17 +36,23 @@ ADVISORY_STATE = "advisory"
 # Fixed text on every published review and mention reply. Later agents copy
 # these commands; they do not invent a per-file media checklist.
 MAINTAINER_RESPONSE_INSTRUCTIONS = """\
+### Discussion and review actions
+
+- Discuss a finding: reply in its thread with `@reviewsensei` and your question or the exact fix commit. For a body-only finding, use a PR comment naming its RS-id. Discussion may generate an AI reply; it does not request a fresh review.
+- Recheck approval using existing evidence: post `@reviewsensei verify`. This does not run a new AI review or complete partial analysis.
+- Request fresh AI analysis of an incomplete review: post `@reviewsensei rescan` as a standalone PR comment. To bind the current head explicitly, use `@reviewsensei rescan commit <sha>` with its full SHA or a prefix of 7-40 hexadecimal characters. Fresh analysis uses the existing review budgets and does not resolve required human decisions.
+
+Post each command as a new comment of at most 4,096 UTF-8 bytes. Editing a comment does not trigger another run. Keep long reports in ordinary comments without a bot mention and send a short link separately. Mentioning a prior rescan in prose or quoting an example is discussion, not a new analysis request.
+
 ### Maintainer commands
 
-A maintainer or admin handles this review with one comment. Copy a command exactly.
+A maintainer or admin may record a real assessment with one standalone PR comment. Copy a command exactly; an engineering reply alone is not approval.
 
 - Approve the media files without listing each file: `@reviewsensei I reviewed the media files and I approve`
 - Override one finding by its id: `@reviewsensei override RS-ABCDEF acceptable risk` or `@reviewsensei RS-ABCDEF is acceptable risk`. Replace `RS-ABCDEF` with the finding id in this review.
 - Override many findings in the same comment, up to 10: `@reviewsensei override RS-ABCDEF RS-123456 acceptable risk`. Separate the IDs with spaces or commas.
 
-An override re-checks approval on this commit without a new AI review. Comment `@reviewsensei verify` to retry that check. An override applies to the current commit only. A new push needs a new override.
-
-The override is stored on this pull request as an acceptable-risk decision. The AI review stays partial. Write access alone cannot use these commands.\
+An override re-checks approval on this commit without a new AI review. Comment `@reviewsensei verify` to retry that check. An override applies to the current commit only. A new push needs a new override. The override is stored on this pull request as an acceptable-risk decision and does not complete partial AI analysis. Write access alone cannot use these assessment commands.\
 """
 
 _HIGHLIGHTED_OPTIONAL_LIMIT = 3
@@ -596,7 +602,13 @@ def _next_action(
         detail = reason or "the review did not complete"
         if "I reviewed the media files and I approve" in detail:
             return detail if detail.endswith(".") else f"{detail}."
-        return f"This review is incomplete because {detail}. Re-run ReviewSensei once resolved."
+        return (
+            f"This review is incomplete because {detail}. "
+            "If fresh AI analysis is needed, post a new standalone PR comment "
+            "`@reviewsensei rescan`; existing review budgets still apply. "
+            "Required human decisions need a maintainer assessment. "
+            "`@reviewsensei verify` only rechecks approval using existing evidence."
+        )
     if state == WITHHELD_STATE:
         detail = reason or "automatic approval is disabled for this repository"
         return f"Approval was withheld because {detail}."

@@ -1,2 +1,5 @@
 # Preserve the byte-pinned regression snapshot across Windows checkouts.
 tests/fixtures/regressions/pr308-session-ledger.json text eol=lf
+# Keep the exact released-caller snapshot stable when building wheels on Windows.
+packages/python/review-sensei-github/src/review_sensei_github/fixtures/released-v5-keyword-rescan-caller.yml text eol=lf
+deploy/cloudflare/fixtures/released-v5-keyword-rescan-caller.yml text eol=lf

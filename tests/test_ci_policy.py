@@ -424,7 +424,8 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(text.count("review-sensei-run.yml@" + "v5"), 1)
         self.assertIn("resolve-trigger:", text)
         self.assertIn("operation: ${{ needs.resolve-trigger.outputs.operation }}", text)
-        self.assertIn('rescan = re.compile(r"\\bre[\\s-]?scan\\b"', text)
+        self.assertIn("match = rescan.fullmatch(comment_body.strip())", text)
+        self.assertNotIn("rescan.search(comment_body)", text)
 
     def test_generated_review_workflow_routes_comments_read_only(self):
         workflow = (

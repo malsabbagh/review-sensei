@@ -26,6 +26,7 @@ import {
   historicalV5UninstallWorkflow,
   historicalV5WorkflowTemplate,
   senseiOnlyV5WorkflowTemplate,
+  keywordRescanV5WorkflowTemplate,
   mergeFocusedV4ConfigFile,
   mergeFocusedV4WorkflowTemplate,
   previousProviderParityWorkflowTemplate,
@@ -336,7 +337,7 @@ function looksLikeManagedV4Setup(path: string, content: string): boolean {
  * Recognize a released setup-v5 artifact that is not the current bytes.
  *
  * Only the caller and the uninstall workflow have released setups to
- * recognize. The caller may follow any valid tag and is accepted in both
+ * recognize. The caller may follow any valid tag and is accepted in known
  * released shapes: the invocation-only caller and the historical caller that
  * carried the workflow policy. The uninstall has the single released shape.
  * The configuration file has none: it was never generated at its current
@@ -356,7 +357,8 @@ function looksLikeManagedV5Setup(path: string, content: string): boolean {
       return (
         content === buildTaggedV4SetupFiles(publicWorkflowTag)[0].content ||
         content === historicalV5WorkflowTemplate(publicWorkflowTag) ||
-        content === senseiOnlyV5WorkflowTemplate(publicWorkflowTag)
+        content === senseiOnlyV5WorkflowTemplate(publicWorkflowTag) ||
+        content === keywordRescanV5WorkflowTemplate(publicWorkflowTag)
       );
     } catch {
       return false;

@@ -291,7 +291,7 @@ def _looks_like_managed_v5_setup(path: str, content: str) -> bool:
     """Recognize a released setup-v5 artifact that is not the current bytes.
 
     Only the caller and the uninstall workflow have released setups to
-    recognize. The caller may follow any valid tag and is accepted in both
+    recognize. The caller may follow any valid tag and is accepted in known
     released shapes: the invocation-only caller and the historical caller that
     carried the workflow policy. The uninstall has the single released shape.
     The configuration file recognizes the released backend-only document so a
@@ -311,6 +311,7 @@ def _looks_like_managed_v5_setup(path: str, content: str) -> bool:
                 _tagged_workflow(tag_matches[0]),
                 _historical_v5_workflow(tag_matches[0]),
                 _sensei_only_v5_workflow(tag_matches[0]),
+                _keyword_rescan_v5_workflow(tag_matches[0]),
             }
         except GitHubSetupError:
             return False
@@ -852,6 +853,28 @@ def _sensei_only_v5_caller_bytes() -> str:
     ):
         raise GitHubSetupError("sensei-only v5 caller fixture digest mismatch")
     return content
+
+
+@functools.lru_cache(maxsize=1)
+def _keyword_rescan_v5_caller_bytes() -> str:
+    """Read the released v5 caller before standalone rescan parsing."""
+    from importlib.resources import files
+
+    content = (
+        files("review_sensei_github.fixtures")
+        .joinpath("released-v5-keyword-rescan-caller.yml")
+        .read_text(encoding="utf-8")
+    )
+    if (
+        hashlib.sha256(content.encode("utf-8")).hexdigest()
+        != "cea8cc8e3905d30c973a76ec42afb1e999032f63c678e8f78e208ac110e7bbaf"
+    ):
+        raise GitHubSetupError("keyword-rescan v5 caller fixture digest mismatch")
+    return content
+
+
+def _keyword_rescan_v5_workflow(public_workflow_tag: str) -> str:
+    return _retag_frozen_caller(_keyword_rescan_v5_caller_bytes(), public_workflow_tag)
 
 
 def _sensei_only_v5_workflow(public_workflow_tag: str) -> str:
@@ -1397,8 +1420,7 @@ jobs:
           sha_full = re.compile(r"^[a-f0-9]{40}$")
           sha_prefix = re.compile(r"^[a-f0-9]{7,39}$")
           ref = re.compile(r"^[A-Za-z0-9._/-]+$")
-          rescan = re.compile(r"\bre[\s-]?scan\b", re.IGNORECASE)
-          commit_sha = re.compile(r"\bcommit\s+([a-f0-9]{7,40})\b", re.IGNORECASE)
+          rescan = re.compile(r"(?:@sensei|(?ai:@reviewsensei))[^\S\r\n]+(?i:re(?:[^\S\r\n]|-)?scan)(?:[^\S\r\n]+(?ai:commit)[^\S\r\n]+(?P<commit>[a-fA-F0-9]{7,40}))?")
           pull = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
           event_name = sys.argv[2]
           comment_body = sys.argv[3] if len(sys.argv) > 3 else ""
@@ -1461,19 +1483,12 @@ jobs:
           elif event_name == "pull_request_review_comment":
               operation = "reply"
           elif event_name == "issue_comment":
-              wants_rescan = (
-                  isinstance(comment_body, str)
-                  and ("@sensei" in comment_body or re.search(r"(?:^|\s)(?ai:@reviewsensei)(?:$|\s|[.,!?])", comment_body))
-                  and rescan.search(comment_body) is not None
-              )
-              if wants_rescan:
-                  match = commit_sha.search(comment_body)
-                  token = match.group(1).casefold() if match is not None else None
-                  if token is not None and not (
-                      sha_full.fullmatch(token) or sha_prefix.fullmatch(token)
-                  ):
-                      token = None
-                  resolved_head = choose_head(token)
+              match = rescan.fullmatch(comment_body.strip())
+              if match is not None:
+                  if len(comment_body.encode("utf-8")) > 4096:
+                      print("::error::explicit rescan comment exceeds 4096 UTF-8 bytes", file=sys.stderr)
+                      raise SystemExit(1)
+                  resolved_head = choose_head(match.group("commit"))
               elif isinstance(comment_body, str) and len(comment_body.encode("utf-8")) <= 4096 and re.search(r"(?m)(?<!\S)@(?:(?ai:reviewsensei)|sensei)\s+(?:review\s+(?:status|pause|continue|reenroll)|verify|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}\s+--reason\s+\S.*|i\s+reviewed\s+the\s+media\s+files\s+and\s+i\s+approve|override\s+(?:(?:rs-)?[a-f0-9]{6,64})(?:(?:\s*,\s*|\s+)(?:rs-)?[a-f0-9]{6,64}){0,9}(?:\s+acceptable\s+risk)?|(?:(?:rs-)?[a-f0-9]{6,64})(?:(?:\s*,\s*|\s+)(?:rs-)?[a-f0-9]{6,64}){0,9}\s+(?:is|are)\s+acceptable\s+risk)\s*\Z", comment_body, re.IGNORECASE):
                   operation = "command"
               else:

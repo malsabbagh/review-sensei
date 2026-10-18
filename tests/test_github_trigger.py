@@ -222,6 +222,41 @@ def command_corpus() -> list[str]:
 
 
 class GitHubTriggerTests(unittest.TestCase):
+    def test_narrative_and_quoted_rescan_mentions_remain_discussions(self):
+        summary = "@sensei Summary: the previous rescan completed.\n"
+        summary += "x" * (8702 - len(summary.encode("utf-8")))
+        for body in (
+            summary,
+            "@reviewsensei why did the rescan fail?",
+            "@sensei please re-scan commit bbbbbbb",
+            "@sensei re scan this PR",
+            "Earlier we used @reviewsensei rescan",
+            "> @reviewsensei rescan",
+            "`@reviewsensei rescan`",
+            "```\n@reviewsensei rescan\n```",
+            "@reviewsensei rescan\nThis is a historical example.",
+            "@reviewsensei\nrescan",
+            "@sensei rescan commit bbbbbb",
+            "@sensei rescan commit " + "b" * 41,
+            "@sensei rescan commit not-a-sha",
+        ):
+            with self.subTest(body=body[:100]):
+                self.assertFalse(issue_comment_requests_rescan(body))
+                self.assertEqual(
+                    resolve_issue_comment(body, _pull()).operation, "reply"
+                )
+
+    def test_explicit_rescan_comment_limit_is_utf8_bytes(self):
+        command = "@reviewsensei rescan"
+        at_limit = command + " " * (4096 - len(command.encode("utf-8")))
+        self.assertTrue(issue_comment_requests_rescan(at_limit))
+        self.assertEqual(resolve_issue_comment(at_limit, _pull()).operation, "review")
+        for body in (at_limit + " ", command + "\u3000" * 1400):
+            with self.subTest(size=len(body.encode("utf-8"))):
+                self.assertFalse(issue_comment_requests_rescan(body))
+                with self.assertRaisesRegex(ValueError, "exceeds 4096 UTF-8 bytes"):
+                    resolve_issue_comment(body, _pull())
+
     def test_canonical_handle_rescan_and_nonmatches(self):
         for alias in ("@reviewsensei", "@ReviewSensei", "@REVIEWSENSEI", "@sensei"):
             with self.subTest(alias=alias):
@@ -267,10 +302,8 @@ class GitHubTriggerTests(unittest.TestCase):
                     self.assertIsNone(parse_maintainer_command(command, actor="alice"))
 
     def test_issue_comment_requests_rescan(self):
-        self.assertTrue(
-            issue_comment_requests_rescan("@sensei please re-scan commit 016017b")
-        )
-        self.assertTrue(issue_comment_requests_rescan("@sensei re scan this PR"))
+        self.assertTrue(issue_comment_requests_rescan("@sensei re-scan commit 016017b"))
+        self.assertTrue(issue_comment_requests_rescan("@sensei re scan"))
         self.assertTrue(issue_comment_requests_rescan("@sensei Re-Scan"))
         self.assertFalse(issue_comment_requests_rescan("@sensei what changed?"))
         self.assertFalse(issue_comment_requests_rescan("please re-scan"))
@@ -390,7 +423,7 @@ class GitHubTriggerTests(unittest.TestCase):
 
     def test_resolve_issue_comment_rescan_routes_to_review(self):
         resolution = resolve_issue_comment(
-            "@sensei please re-scan commit 016017b",
+            "@sensei re-scan commit 016017b",
             _pull(head_sha="016017b" + ("0" * 33)),
         )
         self.assertEqual(resolution.operation, "review")
@@ -488,14 +521,55 @@ class InlineCallerResolverTests(unittest.TestCase):
             inline_resolver_script(repo), inline_resolver_script(generated)
         )
 
-    def test_inline_rescan_regex_matches_trigger_module(self):
-        trigger = (
-            ROOT / "src" / "review_sensei" / "hosting" / "github" / "trigger.py"
-        ).read_text(encoding="utf-8")
+    def test_inline_rescan_routing_requires_the_same_explicit_command(self):
         script = inline_resolver_script(REPO_CALLER.read_text(encoding="utf-8"))
-        pattern = 're.compile(r"\\bre[\\s-]?scan\\b", re.IGNORECASE)'
-        self.assertIn("_RESCAN = " + pattern, trigger)
-        self.assertIn("rescan = " + pattern, script)
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            pull = root / "pull.json"
+            pull.write_text(json.dumps(_pull()))
+            for body, operation in (
+                ("@reviewsensei rescan", "review"),
+                ("@ReviewSensei re-scan commit BBBBBBB", "review"),
+                ("@sensei why did the previous rescan fail?", "reply"),
+                ("> @reviewsensei rescan", "reply"),
+                ("```\n@reviewsensei rescan\n```", "reply"),
+                ("@sensei rescan commit not-a-sha", "reply"),
+                (
+                    "@sensei defer abcd1234abcd1234 --reason historical rescan evidence",
+                    "command",
+                ),
+                ("@sensei Summary: previous rescan. " + "x" * 8702, "reply"),
+            ):
+                with self.subTest(body=body[:100]):
+                    output = root / "output"
+                    output.unlink(missing_ok=True)
+                    result = subprocess.run(
+                        [sys.executable, "-", str(pull), "issue_comment", body],
+                        input=script,
+                        capture_output=True,
+                        text=True,
+                        env={**os.environ, "GITHUB_OUTPUT": str(output)},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(f"operation={operation}\n", output.read_text())
+                    self.assertEqual(
+                        resolve_issue_comment(body, _pull()).operation, operation
+                    )
+            for body in (
+                "@sensei rescan" + " " * 4096,
+                "@sensei rescan" + "\u3000" * 1400,
+            ):
+                output.unlink(missing_ok=True)
+                result = subprocess.run(
+                    [sys.executable, "-", str(pull), "issue_comment", body],
+                    input=script,
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "GITHUB_OUTPUT": str(output)},
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("exceeds 4096 UTF-8 bytes", result.stderr)
+                self.assertFalse(output.exists())
 
     def test_embedded_command_prefilter_covers_every_parser_accepted_command(self):
         prefilter = inline_command_prefilter(REPO_CALLER.read_text(encoding="utf-8"))
@@ -666,11 +740,13 @@ class InlineCallerResolverTests(unittest.TestCase):
             {
                 ".github/workflows/review-sensei-review.yml",
                 "deploy/cloudflare/fixtures/merge-focused-v4-caller.yml",
+                "deploy/cloudflare/fixtures/released-v5-keyword-rescan-caller.yml",
                 "deploy/cloudflare/fixtures/sensei-only-v5-caller.yml",
                 "deploy/cloudflare/src/setup-content.ts",
                 "deploy/cloudflare/test/setup-content.test.ts",
                 "examples/github-actions/review-sensei-review.yml",
                 "packages/python/review-sensei-github/src/review_sensei_github/fixtures/merge-focused-v4-caller.yml",
+                "packages/python/review-sensei-github/src/review_sensei_github/fixtures/released-v5-keyword-rescan-caller.yml",
                 "packages/python/review-sensei-github/src/review_sensei_github/fixtures/sensei-only-v5-caller.yml",
                 "packages/python/review-sensei-github/src/review_sensei_github/setup.py",
                 "tests/test_github_trigger.py",

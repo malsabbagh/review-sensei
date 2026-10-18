@@ -103,7 +103,8 @@ APPROVAL_ELIGIBILITY_MARKER_PREFIX = "<!-- reviewsensei:eligibility:v1"
 GIT_SHA_HEX = re.compile(r"^[a-f0-9]{40}$")
 PUBLISHED_REVIEW_STATES = frozenset({"COMMENTED", "APPROVED", "CHANGES_REQUESTED"})
 DISCUSSION_INSTRUCTION = (
-    "To discuss this finding, reply with @reviewsensei followed by your question."
+    "To discuss a finding, reply in its thread with @reviewsensei and your question. "
+    "For a body-only finding, use a PR comment naming its RS-id."
 )
 # GitHub's review body limit is independent of the provider-neutral summary
 # profile. The formatted summary is checked against ReviewLimits first, then
@@ -1551,7 +1552,7 @@ class ReviewApprovalFinalizer:
     ) -> PublicationResult:
         """Re-evaluate one published head after an override, without a provider call.
 
-        Adjusted eligibility is patched into the original review before approval.
+        Adjusted eligibility is updated in the original review before approval.
         A failed patch does not submit an approval.
         """
         owns_operation_budget = (
@@ -1743,7 +1744,7 @@ class ReviewApprovalFinalizer:
         if new_body != body:
             try:
                 status, _payload = self.http.request(
-                    "PATCH",
+                    "PUT",
                     self.http.repository_path(
                         repository, f"/pulls/{pull_request}/reviews/{chosen['id']}"
                     ),
