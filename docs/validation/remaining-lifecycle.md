@@ -89,3 +89,29 @@ The candidate receipt and PR validation section identify final code, commands,
 counts, wheel digests, origins and remaining platform/deployment gates. Large
 raw logs and generated review bodies stay in local/Actions artifacts. This
 document does not promise universal approval or exhaustive correctness.
+
+## Final local receipt
+
+[Candidate receipt](remaining-lifecycle-candidate.json) identifies code/harness
+`509a1c93a6b4a9f7398bc2f40aefa2415ca8b290`, all 848frozen tracked inputs,
+exact unpublished wheel/sdist hashes, installed origins and commands/results.
+All 3,577 checkout tests pass normally and under branch coverage (**82.52%**,
+unchanged 80% floor). Extracted package lanes pass 101 dist-safe and 11 downstream
+tests; installed canonical OpenAI configuration passes 18. All six post-package
+suites pass 1,148 rows, including 66 lifecycle methods. These are macOS arm64 /
+Python 3.14.6 observations, not final native/platform or deployed qualification.
+
+[Exact PyPI 0.8.1/hosted 0.3.1](published-0.8.1-expanded-lifecycle.json) passes
+its original five suites (1,082 rows) and fails 35 of 82 expanded lifecycle rows
+(including failing subcases; 66 parent methods executed). It retains 47 passing
+lifecycle rows. These are ordinary failures, not skips or expected failures. The
+old published artifact bytes do not contain the candidate's repairs. Historical
+1,109-row receipts used the earlier 27-method lifecycle inventory and remain
+valid observations of that different harness. No published version was replaced.
+
+Supplemental approved DeepSeek CLI review used public diffs only. Its valid
+transient-dispatch accounting finding was repaired and proved at the call
+ceiling. Other proposed changes would have marked a nonexistent pre-dispatch
+reservation uncertain, accepted malformed qualification states, or changed the
+intended deadline/redaction policy; code and closed-state tests showed those
+were not defects. This review is supporting evidence, not maintainer approval.

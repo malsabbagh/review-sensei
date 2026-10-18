@@ -5,6 +5,9 @@ wheel digests, not a rolling claim about the latest package. A newer release
 does not invalidate an older failure receipt. Do not replace historical hashes
 or reinterpret local candidate bytes as published wheels with the same version.
 
+- [Expanded current candidate receipt](remaining-lifecycle-candidate.json) and
+  [published 0.8.1 comparison](published-0.8.1-expanded-lifecycle.json): exact
+  artifact digests, current test inventory and preserved new acceptance failures.
 - [Remaining lifecycle acceptance and issue map](remaining-lifecycle.md): current
   supported paths, exact test seams, candidate/published identity separation
   and unresolved installation/production qualification.

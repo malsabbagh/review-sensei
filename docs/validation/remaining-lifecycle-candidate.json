@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "kind": "unpublished-candidate-qualification",
+  "source_commit": "509a1c93a6b4a9f7398bc2f40aefa2415ca8b290",
+  "harness_commit": "509a1c93a6b4a9f7398bc2f40aefa2415ca8b290",
+  "baseline_commit": "7a641b8b6402292f213159853400aff4f2e9a3d9",
+  "platform": {
+    "system": "Darwin",
+    "machine": "arm64",
+    "python": "3.14.6"
+  },
+  "build": {
+    "source_commit": "509a1c93a6b4a9f7398bc2f40aefa2415ca8b290",
+    "tracked_files_matched": 848,
+    "source_archive_sha256": "5a979c4606f81053ad7490621f77c883ae1477527c7490b1477364ac18589017",
+    "artifacts": {
+      "github/review_sensei_github-0.3.1-py3-none-any.whl": {
+        "sha256": "00babcecb5ecf7971757242336efcf0b46d09cd2b92f12ff8e74164873f33997",
+        "bytes": 294793
+      },
+      "review_sensei-0.8.1-py3-none-any.whl": {
+        "sha256": "e734b9edeefa3752a7d7efe463a445834e6b567cc4e2109106a53f5bf0d94087",
+        "bytes": 527879
+      },
+      "review_sensei-0.8.1.tar.gz": {
+        "sha256": "f0c1a7ac01dc195668bc167e9407af8dc15a39091b28e7230411e5f3882d0bc9",
+        "bytes": 1170503
+      }
+    }
+  },
+  "runtime_matches_harness": true,
+  "checkout": {
+    "discovered": 3577,
+    "inventory_sha256": "b04201a77b0ed1634993b8dd79371dec3252a39ea42a6105751e8df2fc02a97c",
+    "execution_complete": true,
+    "worker_exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "coverage_ok": true,
+    "coverage_percent": 82.52,
+    "coverage_floor_percent": 80,
+    "coverage_elapsed_seconds": 67.499,
+    "normal_tests": 3577,
+    "normal_elapsed_seconds": 278.349
+  },
+  "installed": {
+    "review_sensei": {
+      "origin": "<isolated-environment>/lib/python3.14/site-packages/review_sensei",
+      "verified_files": 118
+    },
+    "review_sensei_github": {
+      "origin": "<isolated-environment>/lib/python3.14/site-packages/review_sensei_github",
+      "verified_files": 48
+    }
+  },
+  "consumer_results": [
+    {
+      "name": "help",
+      "exit": 0
+    },
+    {
+      "name": "dist_safe",
+      "exit": 0,
+      "tests_run": 101
+    },
+    {
+      "name": "downstream",
+      "exit": 0,
+      "tests_run": 11
+    },
+    {
+      "name": "openai_configuration",
+      "exit": 0,
+      "tests_run": 18
+    },
+    {
+      "name": "qualify",
+      "exit": 0,
+      "total": 489,
+      "pass": 489,
+      "fail": 0
+    },
+    {
+      "name": "transports",
+      "exit": 0,
+      "total": 18,
+      "pass": 18,
+      "fail": 0
+    },
+    {
+      "name": "seam_boundaries",
+      "exit": 0,
+      "total": 519,
+      "pass": 519,
+      "fail": 0
+    },
+    {
+      "name": "operations",
+      "exit": 0,
+      "total": 39,
+      "pass": 39,
+      "fail": 0
+    },
+    {
+      "name": "operation_state",
+      "exit": 0,
+      "total": 17,
+      "pass": 17,
+      "fail": 0
+    },
+    {
+      "name": "lifecycle",
+      "exit": 0,
+      "tests_run": 66,
+      "total": 66,
+      "pass": 66,
+      "fail": 0
+    },
+    {
+      "name": "pip_check",
+      "exit": 0
+    }
+  ],
+  "additional_checks": {
+    "mypy_source_files": 110,
+    "ruff": "passed",
+    "compileall": "passed",
+    "action_pin_workflows": 18,
+    "json_public_schemas": "passed",
+    "sdist_required_entries": 42,
+    "sdist_excluded_checkout_modules": 10,
+    "worker_types": "passed",
+    "worker_tests": 507,
+    "production_broker_ipc_tests": 15,
+    "worker_node_version": "24.18.0; CI uses pinned Node22",
+    "immutable_reader_compatibility": "legacy and current passed; old oversized-authority limitation retained"
+  },
+  "limits": [
+    "100 independent SHA256 identities and250compact IDs: one requiredpath, shortUnicode prose,100/250ordinary historicalcomments; rich250independent IDs intentionally refuses inline24KiB reserve",
+    "Rich partition writer activation, public fair/targeted queues and joint retention/deployed-reader qualification remain open",
+    "Full original64dispatch/60s physical-service accounting and durable server-origin elapsed-time replay remain unqualified",
+    "OpenRouter positive report-bound runtime approval and legacy standalone-finalizer binding remain open; new accepting status claims withhold",
+    "Full provider/event/control installed cross-product, five native final artifacts, deployed upgrade/drain/rollback remain separate gates",
+    "No merge/release/channel/deployment/settings or secret changes performed"
+  ]
+}

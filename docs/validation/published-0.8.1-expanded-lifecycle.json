@@ -1,0 +1,121 @@
+{
+  "requested_version": "0.8.1",
+  "requested_github_version": "0.3.1",
+  "source": "exact PyPI wheels",
+  "credential_free": true,
+  "status": "FAIL",
+  "suites": [
+    {
+      "name": "qualify",
+      "exit": 0,
+      "total": 489,
+      "pass": 489,
+      "fail": 0
+    },
+    {
+      "name": "transports",
+      "exit": 0,
+      "total": 18,
+      "pass": 18,
+      "fail": 0
+    },
+    {
+      "name": "seam_boundaries",
+      "exit": 0,
+      "total": 519,
+      "pass": 519,
+      "fail": 0
+    },
+    {
+      "name": "operations",
+      "exit": 0,
+      "total": 39,
+      "pass": 39,
+      "fail": 0
+    },
+    {
+      "name": "operation_state",
+      "exit": 0,
+      "total": 17,
+      "pass": 17,
+      "fail": 0
+    },
+    {
+      "name": "lifecycle",
+      "exit": 1,
+      "total": 82,
+      "pass": 47,
+      "fail": 35
+    }
+  ],
+  "selected_suites": [
+    "qualify",
+    "transports",
+    "seam_boundaries",
+    "operations",
+    "operation_state",
+    "lifecycle"
+  ],
+  "excluded_suites": [],
+  "gaps": [
+    "No live providers or GitHub writes; loopback and fixture providers only",
+    "Native/npm packaging is outside this PyPI lane",
+    "Nine large total-work packing cases excluded from the default bounded lane",
+    "Supplemental release-source reply/regression suites are outside this portable lane",
+    "Windows cancellation and Linux/macOS architectures other than the runner are not proven"
+  ],
+  "propagation_attempts": [
+    {
+      "attempt": 1,
+      "exit": 0,
+      "elapsed_seconds": 1.407
+    }
+  ],
+  "github_propagation_attempts": [
+    {
+      "attempt": 1,
+      "exit": 0,
+      "elapsed_seconds": 1.131
+    }
+  ],
+  "wheel": {
+    "name": "review_sensei-0.8.1-py3-none-any.whl",
+    "sha256": "0663fe2d1ca0d9ef775ca9db71e8e68012a2f6efdb711dc8b8755db90d7b7113"
+  },
+  "github_wheel": {
+    "name": "review_sensei_github-0.3.1-py3-none-any.whl",
+    "sha256": "f5030b5986e1c9d24b71bb4fa317d63bc4cab7fb94b8b7fbef8b957b8b7d8145"
+  },
+  "expected_wheel_sha256": null,
+  "expected_github_wheel_sha256": null,
+  "installation_exit": 0,
+  "installed": {
+    "version": "0.8.1",
+    "origin": "<isolated-environment>/lib/python3.14/site-packages/review_sensei/__init__.py",
+    "dependencies": {
+      "jsonschema-specifications": "2025.9.1",
+      "jsonschema": "4.26.0",
+      "cryptography": "50.0.2",
+      "review-sensei-github": "0.3.1",
+      "certifi": "2026.10.18",
+      "cffi": "2.1.1",
+      "referencing": "0.37.0",
+      "pycparser": "3.11",
+      "rpds-py": "2026.9.1",
+      "attrs": "26.1.0",
+      "pip": "26.1.2",
+      "review-sensei": "0.8.1"
+    }
+  },
+  "installed_github": {
+    "version": "0.3.1",
+    "origin": "<isolated-environment>/lib/python3.14/site-packages/review_sensei_github/__init__.py",
+    "requires": [
+      "cryptography<51,>=44",
+      "review-sensei==0.8.1"
+    ]
+  },
+  "harness_commit": "509a1c93a6b4a9f7398bc2f40aefa2415ca8b290",
+  "harness_level": "expanded current lifecycle acceptance; counts include failed subcases",
+  "lifecycle_tests_run": 66
+}
