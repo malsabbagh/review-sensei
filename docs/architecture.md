@@ -803,14 +803,18 @@ resolve from trusted configuration, not this infrastructure input.
 Older setup-v4 callers remain recognized as managed content and migrate through
 the existing reviewable setup PR path.
 
-OpenRouter approval remains withheld until retained qualification evidence is
-bound to independently expected effective review identities. The GitHub
-publisher and result-facts builder do not accept profile/caller status strings
-or the historical `not-required` default as that evidence; replay preserves the
-withheld facts. Other providers and permitted review events keep their policy.
-The positive runtime evidence path and legacy standalone-finalizer binding
-remain open under #115; see [the runtime boundary](openrouter-qualification.md#runtime-approval-boundary-115)
-and [ADR 0045](adr/0045-openrouter-trusted-configuration.md).
+The reusable GitHub adapter can bind OpenRouter approval to independently
+configured retained evidence through `TrustedOpenRouterQualification`.
+Evaluation and runtime configuration digests remain separate, and neither
+profile/caller status nor the historical `not-required` default supplies proof.
+New facts v2 retain provider provenance and a bounded exact-head/result receipt;
+every public finalizer requires matching App-owned eligibility readback and
+revalidates configured OpenRouter authority. Legacy facts remain readable but
+cannot prove exemption. Other providers' new reviews retain their policy.
+Default CLI/hosted composition withholds until a trusted host explicitly wires
+the evidence authority. See [the runtime boundary](openrouter-qualification.md#runtime-approval-boundary-115)
+and [ADR 0083](adr/0083-trusted-runtime-openrouter-qualification.md) for scope,
+independent inputs and legacy recovery limits.
 
 The qualification harness separately requires every live report to bind its
 actual requested routing-policy digest and base URL to the selected target.

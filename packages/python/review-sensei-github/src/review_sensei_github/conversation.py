@@ -43,6 +43,7 @@ from .publication import (
     finding_instance_from_body,
     finding_publication_scope,
 )
+from .qualification import TrustedOpenRouterQualification
 from .reply_budget import bounded_reply_publication
 
 MAX_THREAD_MESSAGES = 20
@@ -266,9 +267,16 @@ class ProcessingReaction:
 class ConversationPublisher:
     """Publish an App reply to an authorized explicit @reviewsensei or @sensei mention."""
 
-    def __init__(self, *, http: GitHubHttp) -> None:
+    def __init__(
+        self,
+        *,
+        http: GitHubHttp,
+        qualification_authority: TrustedOpenRouterQualification | None = None,
+    ) -> None:
         self.http = http
-        self.finalizer = ReviewApprovalFinalizer(http=http)
+        self.finalizer = ReviewApprovalFinalizer(
+            http=http, qualification_authority=qualification_authority
+        )
 
     @staticmethod
     def _reaction_path(*, source_kind: str, source_comment_id: int) -> str:

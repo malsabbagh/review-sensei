@@ -54,9 +54,18 @@ from review_sensei.models import ReviewComment, ReviewResult
 from review_sensei.outcomes import PUBLIC_DIAGNOSTICS
 
 try:
-    from fake_github_http import json_response, make_http
+    from fake_github_http import json_response
+    from fake_github_http import make_http as _make_http
 except ModuleNotFoundError:
-    from tests.fake_github_http import json_response, make_http
+    from tests.fake_github_http import json_response
+    from tests.fake_github_http import make_http as _make_http
+
+
+def make_http(responses, routes=(), **kwargs):
+    """Model persisted provenance of successful first publication."""
+    kwargs.setdefault("review_readback", True)
+    return _make_http(responses, routes=routes, **kwargs)
+
 
 HEAD = "b" * 40
 BASE = "a" * 40

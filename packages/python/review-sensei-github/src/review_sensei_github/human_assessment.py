@@ -44,6 +44,7 @@ from .conversation import (
 from .errors import GitHubConversationError, GitHubPublicationError
 from .http import GitHubHttp
 from .publication import ReviewApprovalFinalizer, approval_eligibility_marker
+from .qualification import TrustedOpenRouterQualification
 from .reply_budget import bounded_reply_publication
 
 
@@ -226,7 +227,11 @@ class HumanAssessmentPublisher:
     """Keep reply authority, inference evidence and review authority distinct."""
 
     def __init__(
-        self, *, http: GitHubHttp, before_read: Callable[[], float] | None = None
+        self,
+        *,
+        http: GitHubHttp,
+        before_read: Callable[[], float] | None = None,
+        qualification_authority: TrustedOpenRouterQualification | None = None,
     ) -> None:
         if before_read is not None:
             http = FeedbackBudgetHttp(http=http, before_read=before_read)
@@ -234,8 +239,12 @@ class HumanAssessmentPublisher:
             http.before_read if isinstance(http, FeedbackBudgetHttp) else None
         )
         self.http = http
-        self.conversation = ConversationPublisher(http=http)
-        self.finalizer = ReviewApprovalFinalizer(http=http)
+        self.conversation = ConversationPublisher(
+            http=http, qualification_authority=qualification_authority
+        )
+        self.finalizer = ReviewApprovalFinalizer(
+            http=http, qualification_authority=qualification_authority
+        )
 
     @staticmethod
     def _source_metadata_digest(source: dict[str, Any]) -> str:

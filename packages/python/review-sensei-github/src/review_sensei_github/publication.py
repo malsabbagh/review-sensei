@@ -83,6 +83,7 @@ from .errors import (
     GitHubPublicationTransientError,
 )
 from .http import GitHubHttp
+from .qualification import TrustedOpenRouterQualification
 
 if TYPE_CHECKING:
     from .eligibility_parts import (
@@ -1262,10 +1263,20 @@ class ReviewApprovalFinalizer:
     """
 
     def __init__(
-        self, *, http: GitHubHttp, evidence_budget: EvidenceReadBudget | None = None
+        self,
+        *,
+        http: GitHubHttp,
+        evidence_budget: EvidenceReadBudget | None = None,
+        qualification_authority: TrustedOpenRouterQualification | None = None,
     ) -> None:
         self.http = http
         self.evidence_budget = evidence_budget
+        if (
+            qualification_authority is not None
+            and type(qualification_authority) is not TrustedOpenRouterQualification
+        ):
+            raise ReviewInputError("approval qualification authority is invalid")
+        self.qualification_authority = qualification_authority
         self._operation_budget: EvidenceReadBudget | None = None
 
     def _review_pages(
@@ -1293,13 +1304,17 @@ class ReviewApprovalFinalizer:
         head_sha: str,
         app_slug: str,
         eligibility: ReviewApprovalEligibility,
-        require_persisted: bool = False,
+        require_persisted: bool = True,
         honored_instances: frozenset[str] | None = None,
         assume_inline_unresolved: frozenset[str] | None = None,
         partition_reader: PartitionReader | None = None,
         visible_reader: VisibleReader | None = None,
     ) -> PublicationResult:
         """Emit at most one exact-head APPROVE from trusted eligibility.
+
+        ``require_persisted`` remains a compatibility argument; False cannot
+        relax App-owned exact-head readback. Provider exemption as well as
+        qualification requires that independent persisted provenance.
 
         The eligibility document is the only source of approval facts. A
         document for another head, or one whose static facts already withhold,
@@ -1344,6 +1359,17 @@ class ReviewApprovalFinalizer:
                 return PublicationResult(
                     status="approval_withheld",
                     diagnostic=approval_withheld_diagnostic(static),
+                )
+            if eligibility.facts.provider is None or (
+                eligibility.facts.provider == "openrouter"
+                and (
+                    eligibility.facts.qualification != "qualified"
+                    or eligibility.facts.qualification_binding is None
+                    or self.qualification_authority is None
+                )
+            ):
+                return PublicationResult(
+                    status="approval_withheld", diagnostic="qualification_unverified"
                 )
             if unresolved_inline:
                 return PublicationResult(
@@ -1403,6 +1429,15 @@ class ReviewApprovalFinalizer:
                 and eligibility.human_review.base_sha != preflight.base_sha
             ):
                 return PublicationResult(status="skipped_stale_base")
+            if not self._qualification_authorizes(
+                eligibility,
+                repository=repository,
+                pull_request=pull_request,
+                base_sha=preflight.base_sha,
+            ):
+                return PublicationResult(
+                    status="approval_withheld", diagnostic="qualification_unverified"
+                )
             open_blocking, resolved_instances = self._scan_blocking_threads(
                 token=token,
                 repository=repository,
@@ -1491,12 +1526,19 @@ class ReviewApprovalFinalizer:
                 persisted = self._eligibility_from_reviews(
                     reviews, head_sha=head_sha, app_slug=app_slug
                 )
-                if persisted != eligibility and (
-                    require_persisted or persisted is not None
-                ):
+                if persisted != eligibility:
                     return PublicationResult(
                         status="approval_withheld", diagnostic="approval_withheld"
                     )
+            if not self._qualification_authorizes(
+                eligibility,
+                repository=repository,
+                pull_request=pull_request,
+                base_sha=preflight.base_sha,
+            ):
+                return PublicationResult(
+                    status="approval_withheld", diagnostic="qualification_unverified"
+                )
             marker = approval_marker(
                 repository_id=preflight.repository_id,
                 pull_request=pull_request,
@@ -1535,6 +1577,30 @@ class ReviewApprovalFinalizer:
         finally:
             if owns_operation_budget:
                 self._operation_budget = None
+
+    def _qualification_authorizes(
+        self,
+        eligibility: ReviewApprovalEligibility,
+        *,
+        repository: str,
+        pull_request: int,
+        base_sha: str,
+    ) -> bool:
+        if eligibility.facts.provider is None:
+            return False
+        if eligibility.facts.provider != "openrouter":
+            return eligibility.facts.qualification in {"not-required", "qualified"}
+        authority = self.qualification_authority
+        if type(authority) is not TrustedOpenRouterQualification:
+            return False
+        return authority.authorizes(
+            eligibility.facts.qualification_binding,
+            repository=repository,
+            pull_request=pull_request,
+            base_sha=base_sha,
+            head_sha=eligibility.head_sha,
+            result_digest=eligibility.result_digest,
+        )
 
     def refinalize_with_dispositions(
         self,
@@ -2748,10 +2814,33 @@ def prepare_publication_review(
 class ReviewPublisher:
     """Publish one validated review as App-authored inline comments and summary."""
 
-    def __init__(self, *, http: GitHubHttp) -> None:
+    def __init__(
+        self,
+        *,
+        http: GitHubHttp,
+        qualification_authority: TrustedOpenRouterQualification | None = None,
+    ) -> None:
         self.http = http
-        self.finalizer = ReviewApprovalFinalizer(http=http)
+        self.finalizer = ReviewApprovalFinalizer(
+            http=http, qualification_authority=qualification_authority
+        )
         self.checks = ReviewCheckPublisher(http=http)
+
+    @staticmethod
+    def _bind_qualification(
+        eligibility: ReviewApprovalEligibility,
+        binding: str | None,
+    ) -> ReviewApprovalEligibility:
+        if binding is None:
+            return eligibility
+        return replace(
+            eligibility,
+            facts=replace(
+                eligibility.facts,
+                qualification="qualified",
+                qualification_binding=binding,
+            ),
+        )
 
     def prepare(
         self,
@@ -2902,6 +2991,7 @@ class ReviewPublisher:
         policy: str,
         approval_enabled: bool,
         qualification: str,
+        qualification_binding: str | None = None,
         retained_eligibility: ReviewApprovalEligibility | None = None,
         persisted_eligibility: ReviewApprovalEligibility | None = None,
     ) -> PublicationResult:
@@ -2931,6 +3021,10 @@ class ReviewPublisher:
             qualification=qualification,
             retained_eligibility=retained_eligibility,
         )
+        if persisted is None:
+            replay_eligibility = self._bind_qualification(
+                replay_eligibility, qualification_binding
+            )
         replay_eligibility = replace(
             replay_eligibility,
             facts=replace(
@@ -2963,7 +3057,7 @@ class ReviewPublisher:
             head_sha=head_sha,
             app_slug=app_slug,
             eligibility=replay_eligibility,
-            require_persisted=persisted is not None,
+            require_persisted=True,
         )
         diagnostic = check_diagnostic
         if diagnostic is None and finalized.status == "approval_withheld":
@@ -2987,6 +3081,7 @@ class ReviewPublisher:
         reviews_policy: str = "auto-approve",
         check_token: str | None = None,
         qualification: str = "not-required",
+        configuration_context: Mapping[str, object] | None = None,
         candidates: Sequence[CandidateFinding] | None = None,
         snapshot: Mapping[str, str] | None = None,
         snapshot_sha256: str | None = None,
@@ -3029,6 +3124,7 @@ class ReviewPublisher:
                 reviews_policy=reviews_policy,
                 check_token=check_token,
                 qualification=qualification,
+                configuration_context=configuration_context,
                 candidates=candidates,
                 snapshot=snapshot,
                 snapshot_sha256=snapshot_sha256,
@@ -3070,6 +3166,7 @@ class ReviewPublisher:
         reviews_policy: str = "auto-approve",
         check_token: str | None = None,
         qualification: str = "not-required",
+        configuration_context: Mapping[str, object] | None = None,
         candidates: Sequence[CandidateFinding] | None = None,
         snapshot: Mapping[str, str] | None = None,
         snapshot_sha256: str | None = None,
@@ -3211,6 +3308,22 @@ class ReviewPublisher:
                 authorized_dispositions=authorized_dispositions,
             )
         result = prepared.result
+        authority = self.finalizer.qualification_authority
+        qualification_binding = (
+            authority.issue_binding(
+                result=result,
+                configuration_context=configuration_context,
+                publication_mode=convergence_policy.mode,
+                repository=repository,
+                pull_request=pull_request,
+                base_sha=base_sha,
+                head_sha=head_sha,
+            )
+            if type(authority) is TrustedOpenRouterQualification
+            else None
+        )
+        if qualification_binding is not None:
+            qualification = "qualified"
         # Validate the complete inventory before checks or review mutations.
         # Failure must not publish an unreassessable human-review record.
         prospective_eligibility = approval_eligibility_from_result(
@@ -3226,6 +3339,9 @@ class ReviewPublisher:
         # contract, refuse inventories outside legacy capacity before any
         # remote check/review mutation. Domain admission alone is not durable
         # publication support.
+        prospective_eligibility = self._bind_qualification(
+            prospective_eligibility, qualification_binding
+        )
         prospective_eligibility.to_dict()
         # Automatic approval also requires an eligible review: a partial or
         # failed analysis, a pending human assessment, or incomplete coverage
@@ -3327,6 +3443,7 @@ class ReviewPublisher:
                         policy=effective_policy,
                         approval_enabled=approval_enabled,
                         qualification=qualification,
+                        qualification_binding=qualification_binding,
                         retained_eligibility=retained_eligibility,
                         persisted_eligibility=persisted_eligibility,
                     )
@@ -3345,6 +3462,7 @@ class ReviewPublisher:
                             policy=effective_policy,
                             approval_enabled=approval_enabled,
                             qualification=qualification,
+                            qualification_binding=qualification_binding,
                             persisted_eligibility=persisted_eligibility,
                         )
                     return PublicationResult(status="already_published")
@@ -3365,6 +3483,7 @@ class ReviewPublisher:
                             policy=effective_policy,
                             approval_enabled=approval_enabled,
                             qualification=qualification,
+                            qualification_binding=qualification_binding,
                             persisted_eligibility=persisted_eligibility,
                         )
                     return PublicationResult(status="already_published")
@@ -3496,6 +3615,7 @@ class ReviewPublisher:
             check_published=check_diagnostic is None,
             retained_eligibility=retained_eligibility,
         )
+        eligibility = self._bind_qualification(eligibility, qualification_binding)
         try:
             assembled = continuation_review or self._assemble_review_body(
                 result=result,
@@ -3676,7 +3796,7 @@ class ReviewPublisher:
                     head_sha=head_sha,
                     app_slug=app_slug,
                     eligibility=eligibility,
-                    require_persisted=retained_eligibility is not None,
+                    require_persisted=True,
                     check_diagnostic=check_diagnostic,
                     status="already_published",
                 )
@@ -3714,7 +3834,7 @@ class ReviewPublisher:
                     head_sha=head_sha,
                     app_slug=app_slug,
                     eligibility=eligibility,
-                    require_persisted=retained_eligibility is not None,
+                    require_persisted=True,
                     check_diagnostic=check_diagnostic,
                     status="published",
                     review_id=review_id,
@@ -3790,7 +3910,7 @@ class ReviewPublisher:
                 head_sha=head_sha,
                 app_slug=app_slug,
                 eligibility=eligibility,
-                require_persisted=retained_eligibility is not None,
+                require_persisted=True,
                 check_diagnostic=check_diagnostic,
                 status="already_published",
             )
@@ -3811,7 +3931,7 @@ class ReviewPublisher:
                     head_sha=head_sha,
                     app_slug=app_slug,
                     eligibility=eligibility,
-                    require_persisted=retained_eligibility is not None,
+                    require_persisted=True,
                     check_diagnostic=check_diagnostic,
                     status="already_published",
                 )
@@ -3848,7 +3968,7 @@ class ReviewPublisher:
         check_diagnostic: str | None,
         status: str,
         review_id: int | None = None,
-        require_persisted: bool = False,
+        require_persisted: bool = True,
         assume_inline_unresolved: frozenset[str] | None = None,
     ) -> PublicationResult:
         """Finalize approval for one published head and report its withholding.

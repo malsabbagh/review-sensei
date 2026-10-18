@@ -974,6 +974,7 @@ class GitHubApplication:
                         configuration_context
                     ),
                 ),
+                "configuration_context": configuration_context,
                 "candidates": candidates,
                 "snapshot": snapshot,
                 "snapshot_sha256": snapshot_sha256,
@@ -1901,6 +1902,7 @@ class GitHubApplication:
         app_slug: str,
         now=None,
         convergence_policy: ReviewConvergencePolicy | None = None,
+        configuration_context: Mapping[str, object] | None = None,
     ) -> PublicationResult:
         """Publish a retained result without invoking a model or writing learnings."""
 
@@ -1958,6 +1960,7 @@ class GitHubApplication:
                 model=result.model,
             ),
             convergence_policy=convergence_policy,
+            configuration_context=configuration_context,
         )
 
     def publish_learning(
@@ -2376,7 +2379,10 @@ class GitHubApplication:
             # Adapter test seams may implement only the original conversation
             # interface. The real GitHub adapter shares one bounded transport.
             if isinstance(self.replier, ConversationPublisher):
-                assessor = HumanAssessmentPublisher(http=self.replier.http)
+                assessor = HumanAssessmentPublisher(
+                    http=self.replier.http,
+                    qualification_authority=self.replier.finalizer.qualification_authority,
+                )
                 human = assessor.prepare(
                     token=read_token,
                     repository=repository,

@@ -49,7 +49,7 @@ def placement_responses(*, required=False):
     return [json_response([]), json_response({"message": "Not Found"}, 404)]
 
 
-def make_http(responses, routes=()):
+def make_http(responses, routes=(), *, review_readback=False, initial_reviews=()):
     """Build a fake transport from a positional queue and optional routes.
 
     ``routes`` holds ``(matches, respond)`` pairs consulted before the queue,
@@ -60,6 +60,8 @@ def make_http(responses, routes=()):
     """
 
     calls = []
+    initial_reviews = list(initial_reviews)
+    stored_reviews = list(initial_reviews)
     route_handlers = tuple(routes)
 
     def opener(request, timeout):
@@ -71,6 +73,36 @@ def make_http(responses, routes=()):
             response = responses.pop(0)
         else:
             response = responses
+        # Opt-in server-state fixture: successful review POSTs become visible
+        # to later empty review-list reads, as on GitHub. Explicit nonempty
+        # scripted pages and errors remain authoritative; default stays off
+        # for tests of missing, stale or conflicting readback.
+        is_reviews = request.full_url.split("?", 1)[0].endswith("/reviews")
+        if review_readback and is_reviews and isinstance(response, FakeHTTPResponse):
+            if request.method == "POST" and 200 <= response.status < 300:
+                payload = json.loads(request.data)
+                stored_reviews.append(
+                    {
+                        "body": payload.get("body", ""),
+                        "commit_id": payload.get("commit_id"),
+                        "state": {
+                            "COMMENT": "COMMENTED",
+                            "APPROVE": "APPROVED",
+                            "REQUEST_CHANGES": "CHANGES_REQUESTED",
+                        }.get(payload.get("event")),
+                        "user": {"login": "reviewsensei[bot]"},
+                    }
+                )
+            elif request.method == "GET" and response.status == 200 and initial_reviews:
+                payload = json.loads(response.body)
+                if isinstance(payload, list):
+                    response = json_response(initial_reviews + payload)
+            elif (
+                request.method == "GET"
+                and response.status == 200
+                and response.body == b"[]"
+            ):
+                response = json_response(stored_reviews)
         if isinstance(response, Exception):
             raise response
         if isinstance(response, tuple):

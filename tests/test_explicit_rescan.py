@@ -1364,7 +1364,8 @@ class RescanPublicationTests(unittest.TestCase):
                 gates.json_response(payload),
                 gates.json_response([]),
                 gates.json_response({"id": 7}),
-            ]
+            ],
+            review_readback=True,
         )
         outcome = ReviewPublisher(http=http).publish(
             token="synthetic-token",
