@@ -2393,7 +2393,9 @@ class GitHubApplication:
                             body=f"Human reassessment has insufficient current diff evidence (reason: `{human.evidence_diagnostic}`). No findings were cleared; approval requirements remain unchanged. After the required evidence is available within the context budget, rerun a full review for the current head and submit a new authorized mention.",
                             decisions=(),
                         )
-                    elif inventory.pending and human.evidence_bundle is not None:
+                    elif human.evidence_bundle is not None and (
+                        inventory.pending or operation_entry == "enabled"
+                    ):
                         evidence_bundle = human.evidence_bundle
                         produced = self._through_operation(
                             operation_entry=operation_entry,

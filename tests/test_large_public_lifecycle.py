@@ -196,6 +196,17 @@ class LargePublicLifecycleTests(unittest.TestCase):
         self.assertEqual(replay.calls, [])
         self.assertEqual(state.events(), ["COMMENT"])
 
+    def test_fully_resolved_enabled_delivery_replays_without_another_receipt(self):
+        state = PagedState(4, history_count=250)
+        self.assertEqual(state.reply(AssessingProvider()).approval_status, "approved")
+        before = (len(state.reviews), state.reply_count)
+        provider = AssessingProvider()
+        replay = state.reply(provider)
+        self.assertEqual(replay.status, "already_replied")
+        self.assertEqual(replay.approval_status, "already_approved")
+        self.assertEqual(provider.calls, [])
+        self.assertEqual((len(state.reviews), state.reply_count), before)
+
     def test_accepted_replay_rejects_changed_source_evidence_and_authority(self):
         for mutation in ("body", "actor", "patch", "result", "finding"):
             with self.subTest(mutation=mutation):
