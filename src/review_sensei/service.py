@@ -1122,10 +1122,12 @@ class ReviewService:
                             pull_request_number=request.pull_request_number,
                         )
                     except ProviderError as exc:
+                        # Every dispatched attempt consumes a call slot, including
+                        # transient failures. Retry attempts have their own
+                        # counter and cannot replace the provider-call charge.
+                        tracker.record_provider_call()
+                        self._provider_calls = tracker.provider_calls
                         if tracker.remaining_seconds() <= 0:
-                            if not exc.transient:
-                                tracker.record_provider_call()
-                                self._provider_calls = tracker.provider_calls
                             return self._finish_run(
                                 tracker=tracker,
                                 status="budget_exhausted",
@@ -1151,8 +1153,6 @@ class ReviewService:
                                 repository=request.repository,
                                 pull_request_number=request.pull_request_number,
                             )
-                        tracker.record_provider_call()
-                        self._provider_calls = tracker.provider_calls
                         return self._finish_run(
                             tracker=tracker,
                             status="provider_failed",

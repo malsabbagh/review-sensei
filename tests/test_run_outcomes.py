@@ -267,7 +267,7 @@ class RunOutcomeWiringTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             sleeper=clock.sleep,
         )
         self.assertEqual(run.outcome.status, "reviewed")
-        self.assertEqual(run.outcome.provider_calls, 1)
+        self.assertEqual(run.outcome.provider_calls, 2)
         self.assertEqual(run.outcome.retry_attempts, 1)
         self.assertEqual(run.outcome.structural_retries, 0)
         self.assertGreater(run.outcome.prompt_bytes, 0)
@@ -294,7 +294,7 @@ class RunOutcomeWiringTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
         ).run(ReviewRequest(diff=DIFF))
         self.assertEqual(run.outcome.status, "budget_exhausted")
         self.assertEqual(run.outcome.diagnostic, "transport_retry_exhausted")
-        self.assertEqual(run.outcome.provider_calls, 0)
+        self.assertEqual(run.outcome.provider_calls, 1)
         self.assertGreater(run.outcome.prompt_bytes, 0)
 
     def test_structural_retry_does_not_count_as_transport_retry(self):

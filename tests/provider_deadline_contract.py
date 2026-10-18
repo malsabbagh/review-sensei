@@ -81,11 +81,14 @@ class Provider:
 
 
 class ProviderDeadlineContractTests(unittest.TestCase):
-    def service_run(self, actions, *, mode="legacy", stages=None, retries=2):
+    def service_run(self, actions, *, mode="legacy", stages=None, retries=2, calls=8):
         clock = Clock()
         provider = Provider(clock, actions)
         resource = ResourceBudget.create(
-            timeout_ms=1000, max_retry_attempts=retries, max_output_bytes=16384
+            timeout_ms=1000,
+            max_retry_attempts=retries,
+            max_output_bytes=16384,
+            max_provider_calls=calls,
         )
         result = ReviewService(
             provider, stages=stages, work_budgets=ReviewWorkBudgets(mode=mode)
@@ -171,6 +174,38 @@ class ProviderDeadlineContractTests(unittest.TestCase):
                     )
                     self.assert_pending(run, mode, "deadline_exceeded")
                     self.assertEqual(len(requests), 1)
+                    self.assertEqual(run.outcome.provider_calls, len(requests))
+                    self.assertEqual(run.outcome.retry_attempts, 0)
+
+    def test_transient_dispatches_are_charged_separately_from_retry_attempts(self):
+        for mode in ("legacy", "unified"):
+            with self.subTest(mode=mode):
+                run, requests = self.service_run(
+                    [
+                        (0.125, ProviderError("synthetic failure", transient=True)),
+                        (0.125, CLEAN),
+                    ],
+                    mode=mode,
+                )
+                self.assertEqual(run.outcome.status, "reviewed")
+                self.assertEqual(len(requests), 2)
+                self.assertEqual(run.outcome.provider_calls, len(requests))
+                self.assertEqual(run.outcome.retry_attempts, 1)
+                self.assertEqual(run.outcome.structural_retries, 0)
+
+    def test_transient_retry_cannot_bypass_provider_call_ceiling(self):
+        for mode in ("legacy", "unified"):
+            with self.subTest(mode=mode):
+                run, requests = self.service_run(
+                    [(0.125, ProviderError("synthetic failure", transient=True))],
+                    mode=mode,
+                    calls=1,
+                )
+                self.assert_pending(run, mode, "provider_call_limit")
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(run.outcome.provider_calls, len(requests))
+                self.assertEqual(run.outcome.retry_attempts, 1)
+                self.assertEqual(run.outcome.structural_retries, 0)
 
     def test_shorter_transport_timeout_keeps_retry_diagnostic(self):
         for mode in ("legacy", "unified"):

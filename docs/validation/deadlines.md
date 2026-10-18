@@ -13,6 +13,7 @@ localhost HTTP transport. They send no credentials and perform no model inferenc
 | Positive finite dispatch timeout, intersected ceilings | `test_adapters_bound_current_timeout_before_transport`; `test_remaining_allowance_does_not_round_up_submillisecond_time` | Ollama, OpenAI-compatible and OpenRouter receive 0.125s for a 0.125s request within a 0.25s configured limit, and 0.25s for a 1s request. Invalid mutable timeouts refuse before transport. Fractional milliseconds are not rounded up. |
 | Original deadline across stages, batches, retries and corrections | `test_stages_share_original_deadline_in_both_work_modes`; `test_multiple_discovery_batches_share_original_deadline`; `test_transport_retry_and_correction_share_original_deadline` | Both work modes propagate 1s then 0.75s; transport failure plus 0.125s backoff and syntax correction receive 1s, 0.75s, 0.5s. Unified batches share the tracker. |
 | Expiry before dispatch, including durable callback latency | `test_expired_review_never_dispatches`; `test_durable_dispatch_callback_cannot_refresh_or_outlive_deadline` | No dispatch at expiry. A callback consuming 0.25s reduces actual dispatch to 0.75s; a 1s callback prevents dispatch while retaining the saved reservation and charge conservatively. |
+| Every dispatched attempt charged | `test_transient_dispatches_are_charged_separately_from_retry_attempts`; `test_transient_retry_cannot_bypass_provider_call_ceiling`; expired-error counter assertions | Both modes count a transient failure plus success as two provider calls and one retry; a one-call ceiling permits only the first dispatch, and an expired transient attempt still counts once. |
 | Distinct deadline / shorter transport failure | `test_timeout_after_original_deadline_has_deadline_diagnostic`; `test_shorter_transport_timeout_keeps_retry_diagnostic`; `test_human_timeout_distinguishes_original_deadline_from_transport_limit` | Expired original allowance reports `deadline_exceeded`, including zero retries and nontransient errors. Earlier retry exhaustion stays `transport_retry_exhausted`. Human assessment preserves transport failure before expiry and deadline diagnosis at expiry. |
 | Actual blocking transport | `test_real_ollama_socket_obeys_remaining_review_deadline` | A withheld localhost response with a 10s adapter setting returns within 1.5s under a 150ms total budget; no clean result is returned. |
 | Outside-checkout installed public CLI | `test_fresh_cli_uses_total_deadline_with_longer_transport_limit` | Isolated fresh CLI uses the tested installed package, clean environment and temporary working directory; 1s total versus 10s transport exits 2 within 2.5s, emitting partial coverage and a deadline reason. |
@@ -42,7 +43,7 @@ sdist tests, change outside the checkout, and run:
 REVIEWSENSEI_CHECKOUT_ROOT=/absolute/checkout /isolated/venv/bin/python -I -m unittest discover -s /unpacked/sdist/tests/dist_safe -p test_provider_deadline_contract.py -v
 ```
 
-The focused contract has 14 methods (with additional mode/provider/signal
+The focused contract has 16 methods (with additional mode/provider/signal
 subcases). A candidate wheel and extracted sdist passed the installed lane on
 macOS/Python 3.14; retain the final artifact SHA-256 values with the integration
 receipt. The integration owner runs the complete required gate sequence and
@@ -56,3 +57,10 @@ operating-system scheduling delays. urllib socket timeout semantics still apply
 to individual blocking operations. This repair enforces the existing provider
 request/resource contracts without a new schema, public persistence contract,
 resource ceiling or approval policy; no ADR is needed for that correction.
+
+A supplemental review reproduced a legacy call-counter defect: transient failures
+were not charged, including the newly classified expired-timeout path. Recording
+one call immediately on every `ProviderError` now preserves the dispatched-attempt
+count independently of retry accounting. The old run-outcome assertions (one call
+for failure plus success, zero for failure without retries) were corrected; the
+new acceptance also proves a transient retry cannot bypass a one-call ceiling.
