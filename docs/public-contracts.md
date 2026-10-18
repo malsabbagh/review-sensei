@@ -1398,3 +1398,28 @@ v1 documents still validate structurally, but unbound live reports cannot newly
 mint/load support. Retained evidence bytes must not be migrated by adding fields.
 The case-status enum also admits the live producer's existing `skipped` status;
 a skipped case is not converted to a passed deterministic check.
+
+## Live evaluation conformance and quality (#122)
+
+Optional v1 `evaluation_control` has a closed, bounded fixture-conformance
+protocol, a distinct fixture provider/model/configuration identity, matching
+engine/prompt/corpus identities, the complete fixture case inventory, and all
+original corpus thresholds. Each live quality case optionally records
+`execution_complete`. New live evaluations always supply these fields; old
+documents without them still parse but cannot newly authorize supported
+promotion. Strict readers require the updated schema. Never rewrite retained
+historical report bytes to add conformance evidence.
+
+The deterministic section comes from exact local fixture execution; actual live
+findings supply quality metrics through the existing one-to-one oracle. Recall
+counts every expected finding. Full fixture JSON identity is never a live-model
+quality assertion. The overall verdict requires all original numerical
+thresholds plus a nonempty complete live quality inventory with provider
+attempts. Live usage excludes fixture work. The protocol participates in new
+live configuration digests, leaving fixture output unchanged.
+
+Report readers and promotion gates cross-check inventories, expected counts,
+identity, metrics, rates and verdicts; a passing fixture control cannot rescue
+failed live quality. These checks establish consistency of retained reports,
+not cryptographic producer attestation. Three independent live invocations and
+OpenRouter target/retained-byte bindings remain required. See proposed ADR 0082.

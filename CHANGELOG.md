@@ -4,6 +4,10 @@
 
 - Bound ordinary AI discussion, correction and transport retries by the original
   caller deadline and shared call/output allowance before publishing a reply.
+- Separate exact local fixture conformance from live model quality without
+  lowering corpus thresholds. Retain bounded control provenance, reject
+  incomplete or contradictory promotion evidence, and count all expected
+  findings in recall. Historical unbound reports cannot newly authorize support.
 
 - Preserve prior concerns and history across every admitted full baseline
   refresh, including changed base/model recovery; omitted findings remain partial.

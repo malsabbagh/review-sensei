@@ -121,6 +121,26 @@
         }
       }
     },
+    "evaluation_control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "fixture",
+        "thresholds"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "fixture-conformance-and-live-quality-v1"
+        },
+        "fixture": {
+          "$ref": "#/$defs/fixtureConformance"
+        },
+        "thresholds": {
+          "$ref": "#/$defs/evaluationThresholds"
+        }
+      }
+    },
     "privacy": {
       "type": "object",
       "additionalProperties": false,
@@ -335,6 +355,139 @@
     }
   },
   "$defs": {
+    "fixtureConformance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "provider",
+        "model",
+        "engine_digest",
+        "prompt_digest",
+        "configuration_digest",
+        "corpus_digest",
+        "review_configuration_id",
+        "cases",
+        "deterministic",
+        "quality",
+        "threshold_failures",
+        "passed"
+      ],
+      "properties": {
+        "mode": {
+          "const": "fixture"
+        },
+        "provider": {
+          "const": "fixture"
+        },
+        "model": {
+          "const": "fixture-v1"
+        },
+        "engine_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "prompt_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "configuration_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "corpus_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "review_configuration_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "cases": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/caseResult"
+          }
+        },
+        "deterministic": {
+          "$ref": "#/properties/deterministic"
+        },
+        "quality": {"$ref": "#/properties/quality"},
+        "threshold_failures": {"$ref": "#/properties/threshold_failures"},
+        "passed": {"type": "boolean"}
+      }
+    },
+    "evaluationThresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deterministic",
+        "quality"
+      ],
+      "properties": {
+        "deterministic": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "exact_fixture_result_rate",
+            "expected_contract_rejection_rate"
+          ],
+          "properties": {
+            "exact_fixture_result_rate": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "expected_contract_rejection_rate": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        "quality": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "actionable_precision_minimum",
+            "false_positive_rate_maximum",
+            "expected_finding_recall_minimum",
+            "location_validity_minimum",
+            "category_coverage_minimum"
+          ],
+          "properties": {
+            "actionable_precision_minimum": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "false_positive_rate_maximum": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "expected_finding_recall_minimum": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "location_validity_minimum": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "category_coverage_minimum": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        }
+      }
+    },
     "caseResult": {
       "type": "object",
       "additionalProperties": false,
@@ -365,6 +518,7 @@
           "type": "string",
           "minLength": 1
         },
+        "execution_complete": {"type": "boolean"},
         "status": {
           "enum": ["passed", "failed", "skipped", "rejected-expected", "rejected-unexpected"]
         },

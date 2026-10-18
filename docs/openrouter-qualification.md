@@ -87,12 +87,14 @@ cannot establish qualification or approve a review.
 Repeat until three independent passing reports exist. Retain exact report files
 and provider terms/egress approval separately from the public support record.
 
-Current engineering prerequisite: the packaged live evaluator still compares
-exact fixture identity with live provider identity and skips contract-rejection
-cases while requiring their deterministic threshold. The command above can
-serialize an honest failing report, but repeated provider calls cannot currently
-complete those packaged-corpus gates. Resolve applicability/matching before
-attempting #122's passing live collection; this patch does not lower thresholds.
+Each live invocation now runs exact local fixture conformance separately from
+actual live finding quality. Both must satisfy every original corpus threshold;
+missing/incomplete live work or a failed control withholds passing evidence.
+The optional `evaluation_control` records both provenance and the complete local
+inventory (proposed ADR 0082). A passing fixture run cannot repair bad live
+quality. Historical reports without this control still parse, but cannot newly
+mint or validate supported promotion; preserve their original bytes and collect
+new evidence. No real provider has been qualified by the synthetic regressions.
 
 Live OpenRouter reports bind their actual requested policy and endpoint in
 `run.openrouter_routing_policy_digest` and `run.openrouter_base_url`. Every live

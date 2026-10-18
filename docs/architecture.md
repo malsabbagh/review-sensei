@@ -303,6 +303,13 @@ same validated result.
   policy binding. Routing prefixes participate in policy
   digests. Eligibility for DeepSeek/Morph evidence collection is distinct from
   passing qualification and approval (proposed ADR 0081).
+
+Live evaluation keeps exact deterministic fixture conformance distinct from
+actual model quality. The bounded report control retains complete fixture
+inventory and identity plus unchanged thresholds; promotion readers verify the
+conjunction and complete attempted live inventory. Fixture work never enters
+live usage, and expected recall includes missed findings. Historical unbound
+reports parse but cannot newly authorize support. See proposed ADR 0082.
 - `Stage` declares one provider invocation, its expected output sections,
   optional structured `ReviewCategory` values, and an optional canonical
   `provider_profile`. Per-stage profiles cannot expand a local/private run onto

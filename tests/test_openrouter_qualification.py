@@ -37,6 +37,7 @@ from review_sensei.providers.openrouter import (
     OpenRouterRoutingPolicy,
 )
 from review_sensei.schemas import validate_public_document
+from tests.test_promotion_release import _with_synthetic_control
 
 SHA = "a" * 64
 TARGET = INITIAL_OPENROUTER_QUALIFICATION_TARGET
@@ -69,7 +70,7 @@ def _make_openrouter_report(
 ) -> dict:
     prompt_value = prompt if prompt is not None else prompt_digest()
     failures = [] if passed else ["actionable_precision_minimum"]
-    return {
+    report = {
         "schema_version": "1.0",
         "corpus": {
             "id": "review-sensei-synthetic-v1",
@@ -137,6 +138,8 @@ def _make_openrouter_report(
         "threshold_failures": failures,
         "passed": passed,
     }
+
+    return _with_synthetic_control(report)
 
 
 def _retained_artifacts(reports: list[dict]) -> list[bytes]:

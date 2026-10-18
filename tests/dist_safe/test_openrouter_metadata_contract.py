@@ -23,8 +23,10 @@ assert_distribution_import()
 from review_sensei import ProviderRequest, ProviderTokenUsage  # noqa: E402
 from review_sensei.cli import main  # noqa: E402
 from review_sensei.errors import ReviewInputError  # noqa: E402
+from review_sensei.evaluation import load_corpus  # noqa: E402
 from review_sensei.openrouter_qualification import (  # noqa: E402
     CURRENT_HOSTED_OPENROUTER_QUALIFICATION_TARGET,
+    load_supported_openrouter_qualification,
     qualification_record_from_reports,
 )
 from review_sensei.provider_config import hosted_openrouter_upstream  # noqa: E402
@@ -51,6 +53,97 @@ class _Response:
 
 
 class InstalledOpenRouterMetadataContractTests(unittest.TestCase):
+    def test_installed_packaged_live_oracle_preserves_distinct_control_identity(self):
+        target = CURRENT_HOSTED_OPENROUTER_QUALIFICATION_TARGET
+        corpus_path = Path(__file__).resolve().parents[2] / "evaluation/v1/corpus.json"
+        corpus = load_corpus(corpus_path)
+        responses = [
+            corpus.read_asset(
+                case["response_path"], maximum=1048576, label="synthetic oracle"
+            )
+            for case in corpus.document["cases"]
+            if case["kind"] == "quality"
+        ]
+        requests = []
+
+        def opener(request, timeout):
+            content = responses[len(requests) % len(responses)]
+            requests.append(json.loads(request.data))
+            return _Response({"choices": [{"message": {"content": content}}]})
+
+        reports, artifacts = [], []
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "OPENROUTER_API_KEY": "synthetic",
+                        "OPENROUTER_UPSTREAM_PROVIDER": "morph",
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "review_sensei.providers.openrouter.build_opener",
+                    return_value=SimpleNamespace(open=opener),
+                ),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+            ):
+                for index in range(3):
+                    output = Path(tmp) / f"synthetic-{index}.json"
+                    status = main(
+                        [
+                            "evaluate",
+                            "--mode",
+                            "live",
+                            "--corpus",
+                            str(corpus_path),
+                            "--provider",
+                            "openrouter",
+                            "--base-url",
+                            target.base_url,
+                            "--model",
+                            target.model,
+                            "--provider-version",
+                            "synthetic-attestation",
+                            "--allow-live-model",
+                            "--allow-data-egress",
+                            "--output",
+                            str(output),
+                        ]
+                    )
+                    self.assertEqual(status, 0)
+                    artifacts.append(output.read_bytes())
+                    reports.append(json.loads(artifacts[-1]))
+        self.assertEqual(len(requests), 3 * len(responses))
+        self.assertEqual(len({report["run"]["invocation_id"] for report in reports}), 3)
+        for report in reports:
+            self.assertEqual(report["run"]["provider"], "openrouter")
+            self.assertEqual(
+                report["evaluation_control"]["fixture"]["provider"], "fixture"
+            )
+            self.assertEqual(report["metrics"]["provider_calls"], len(responses))
+        # Three independently invoked synthetic controls test the gate contract;
+        # this ephemeral positive is not evidence of real provider qualification.
+        record = qualification_record_from_reports(
+            reports,
+            target=target,
+            observed_revision="synthetic-attestation",
+            reproducibility={"synthetic": True},
+            evaluated_at="2026-10-01T00:00:00Z",
+            report_artifacts=artifacts,
+            status="supported",
+        )
+        checked = load_supported_openrouter_qualification(
+            record.to_dict(),
+            reports,
+            report_artifacts=artifacts,
+            expected_target=target,
+            expected_evaluated_at="2026-10-01T00:00:00Z",
+            expected_reproducibility={"synthetic": True},
+        )
+        self.assertEqual(checked.status, "supported")
+
     def test_installed_protocol_metadata_routing_and_eligibility(self):
         captured = []
 
@@ -151,7 +244,9 @@ class InstalledOpenRouterMetadataContractTests(unittest.TestCase):
             report = json.loads(output.read_text())
         self.assertFalse(report["passed"])
         self.assertTrue(any(case["status"] == "skipped" for case in report["cases"]))
-        self.assertEqual(report["deterministic"]["expected_contract_rejection_rate"], 0)
+        self.assertEqual(report["deterministic"]["expected_contract_rejection_rate"], 1)
+        self.assertEqual(report["quality"]["expected_finding_recall"], 0)
+        self.assertEqual(report["evaluation_control"]["fixture"]["provider"], "fixture")
         self.assertGreater(len(captured), 0)
         self.assertTrue(
             all(

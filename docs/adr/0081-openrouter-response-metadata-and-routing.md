@@ -133,9 +133,6 @@ runtime evidence loader remains separate; these metadata fields are not an
 alternative trust boundary. No release, deployment or support-label change is
 part of this patch.
 
-The packaged live evaluator's deterministic applicability still needs repair:
-contract-rejection cases are skipped while their threshold remains required,
-and exact fixture identity is compared with live provider identity. That is a
-separate engineering prerequisite to #122's passing packaged-corpus reports;
-this patch does not weaken thresholds or claim that repeated live calls can
-currently satisfy them.
+The separately proposed ADR 0082 repairs live evaluation applicability with
+explicit local fixture conformance and actual live quality. It preserves every
+threshold and does not supply #122's authorized live evidence.

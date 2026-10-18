@@ -22,11 +22,11 @@ The current candidate is `deepseek/deepseek-v4.1-flash` / `morph` at
 Other hosted combinations cannot inherit its eligibility or evidence. Historical
 Haiku/Anthropic eligibility is preserved, without claiming passing qualification.
 
-The fake CLI command intentionally returns an evaluation failure because the
-synthetic corpus pins fixture identity. It still captures one actual adapter
-request and validates its effective model, strict policy, configuration digest,
-operator-attested version and optional telemetry. A serialized request is not
-passing quality evidence.
+The fake CLI command uses a custom single clean case and now passes its stated
+oracle after exact fixture checks are separated from live quality. It captures
+one actual adapter request and validates model, strict policy, configuration
+digest, operator-attested version, optional telemetry and fixture control.
+This synthetic evaluator result is not live provider qualification.
 
 Red evidence against the baseline adapter: the updated fingerprint regression
 returned the model slug; endpoint tests rejected all three documented variants;
@@ -94,7 +94,21 @@ and repaired a schema mismatch: live contract-rejection cases already emit
 installed-contract methods passes; final wheel execution remains with the
 integration owner.
 
-The packaged live evaluator still has an engineering prerequisite to passing
-qualification: fixture identity matching and skipped deterministic-rejection
-applicability require resolution. Synthetic failing evaluation output and
-passing routing tests do not establish live model qualification or close #122.
+## Live evaluator applicability repair
+
+`LiveEvaluationTests` uses the actual packaged corpus. Before the repair, an
+oracle-perfect synthetic live provider achieved precision/recall/location 1 but
+failed exact fixture identity, deterministic rejection and category coverage.
+The new protocol runs the complete exact fixture inventory as a distinct local
+control and scores actual live findings with the unchanged one-to-one oracle.
+An adjacent denominator repair retains the full expected finding inventory;
+empty findings now have recall 0 instead of 1.
+
+Six acceptance methods prove three independently invoked synthetic perfect runs
+can pass/check promotion; bad live quality cannot be rescued by a passing or
+later fixture run; failed local conformance blocks perfect live quality; missing,
+partial and contradictory controls fail closed; non-fixture sidecar identity
+fails before live calls; and original thresholds/fixture output remain intact.
+The report-bound promotion gate checks the composite controls. Source/installed
+regressions do not qualify a provider or close #122's authorized live evidence.
+Proposed ADR 0082 records schema migration, digests, assurance limits and rollback.

@@ -116,6 +116,7 @@ class PromotionAndReleaseTests(unittest.TestCase):
         remote_report["run"]["model"] = "gpt-4o-mini"
         remote_report["run"]["endpoint_scope"] = "remote"
         remote_report["run"]["invocation_id"] = "a" * 32
+        _with_synthetic_control(remote_report)
         validate_profile_promotion("fast-triage", live, [remote_report])
         with self.assertRaisesRegex(
             ReviewInputError, "requires live evaluation reports"
@@ -129,6 +130,7 @@ class PromotionAndReleaseTests(unittest.TestCase):
         loopback_report["run"]["model"] = "gpt-4o-mini"
         loopback_report["run"]["endpoint_scope"] = "loopback"
         loopback_report["run"]["invocation_id"] = "b" * 32
+        _with_synthetic_control(loopback_report)
         with self.assertRaisesRegex(ReviewInputError, "endpoint scope does not match"):
             validate_profile_promotion("fast-triage", live, [loopback_report])
         mismatched_provider = json.loads(fixture_path.read_text(encoding="utf-8"))
@@ -137,6 +139,7 @@ class PromotionAndReleaseTests(unittest.TestCase):
         mismatched_provider["run"]["model"] = "qwen3.5:4b"
         mismatched_provider["run"]["endpoint_scope"] = "remote"
         mismatched_provider["run"]["invocation_id"] = "c" * 32
+        _with_synthetic_control(mismatched_provider)
         with self.assertRaisesRegex(
             ReviewInputError, "live report provider does not match profile"
         ):
@@ -188,6 +191,7 @@ class PromotionAndReleaseTests(unittest.TestCase):
         default_only["run"]["model"] = "gpt-4o-mini"
         default_only["run"]["endpoint_scope"] = "remote"
         default_only["run"]["invocation_id"] = "d" * 32
+        _with_synthetic_control(default_only)
         with patch(
             "review_sensei.evaluation.get_provider_profile",
             return_value=profile,
@@ -200,6 +204,7 @@ class PromotionAndReleaseTests(unittest.TestCase):
             stage_report["run"]["model"] = "gpt-4o"
             stage_report["run"]["endpoint_scope"] = "remote"
             stage_report["run"]["invocation_id"] = "e" * 32
+            _with_synthetic_control(stage_report)
             validate_profile_promotion(
                 "fast-triage", live, [default_only, stage_report]
             )
@@ -233,6 +238,7 @@ class PromotionAndReleaseTests(unittest.TestCase):
         invalid["run"]["model"] = "attacker-model"
         invalid["run"]["endpoint_scope"] = "remote"
         invalid["run"]["invocation_id"] = "h" * 32
+        _with_synthetic_control(invalid)
         with patch(
             "review_sensei.evaluation.get_provider_profile",
             return_value=profile,
@@ -271,12 +277,14 @@ class PromotionAndReleaseTests(unittest.TestCase):
         default_only["run"]["model"] = "gpt-4o-mini"
         default_only["run"]["endpoint_scope"] = "remote"
         default_only["run"]["invocation_id"] = "f" * 32
+        _with_synthetic_control(default_only)
         loopback_stage = json.loads(fixture_path.read_text(encoding="utf-8"))
         loopback_stage["run"]["mode"] = "live"
         loopback_stage["run"]["provider"] = "openai-compatible"
         loopback_stage["run"]["model"] = "gpt-4o"
         loopback_stage["run"]["endpoint_scope"] = "loopback"
         loopback_stage["run"]["invocation_id"] = "g" * 32
+        _with_synthetic_control(loopback_stage)
         with patch(
             "review_sensei.evaluation.get_provider_profile",
             return_value=profile,
@@ -504,6 +512,67 @@ class PromotionAndReleaseTests(unittest.TestCase):
             validate_compatibility_manifest(value)
 
 
+def _with_synthetic_control(report):
+    """Build internally consistent synthetic gate inputs, never live evidence."""
+    if report["run"]["mode"] != "live":
+        return report
+    import copy
+
+    from review_sensei.evaluation_control import (
+        fixture_control,
+        summarize_cases,
+        threshold_failures,
+    )
+
+    seed = report["cases"][0]
+    report["cases"] = []
+    for category in ("correctness", "security", "architecture", "tests"):
+        case = dict(
+            seed, id=f"synthetic-{category}", category=category, execution_complete=True
+        )
+        report["cases"].append(case)
+    deterministic, quality = summarize_cases(report["cases"])
+    report["deterministic"] = deterministic
+    report["quality"] = quality
+    report["metrics"]["provider_calls"] = sum(
+        case["provider_calls"] for case in report["cases"]
+    )
+    corpus = {
+        "deterministic_thresholds": {
+            "exact_fixture_result_rate": 1.0,
+            "expected_contract_rejection_rate": 1.0,
+        },
+        "quality_thresholds": {
+            "actionable_precision_minimum": 0.75,
+            "false_positive_rate_maximum": 0.25,
+            "expected_finding_recall_minimum": 0.75,
+            "location_validity_minimum": 1.0,
+            "category_coverage_minimum": 0.75,
+        },
+    }
+    thresholds = {
+        "deterministic": corpus["deterministic_thresholds"],
+        "quality": corpus["quality_thresholds"],
+    }
+    report["threshold_failures"] = threshold_failures(
+        deterministic, quality, thresholds
+    )
+    report["passed"] = not report["threshold_failures"]
+    fixture = copy.deepcopy(report)
+    fixture["run"].update(mode="fixture", provider="fixture", model="fixture-v1")
+    fixture["run"]["configuration_digest"] = (
+        "0" * 64 if report["run"]["configuration_digest"] != "0" * 64 else "1" * 64
+    )
+    report["evaluation_control"] = fixture_control(fixture, corpus)
+    report["threshold_failures"] = threshold_failures(
+        deterministic, quality, report["evaluation_control"]["thresholds"]
+    )
+    if not fixture["passed"]:
+        report["threshold_failures"].append("fixture_conformance")
+    report["passed"] = not report["threshold_failures"]
+    return report
+
+
 def _make_report(
     *,
     mode: str = "live",
@@ -521,7 +590,7 @@ def _make_report(
 ) -> dict:
     prompt_value = prompt if prompt is not None else prompt_digest()
     failures = [] if passed else ["actionable_precision_minimum"]
-    return {
+    report = {
         "schema_version": "1.0",
         "corpus": {
             "id": "review-sensei-synthetic-v1",
@@ -585,6 +654,8 @@ def _make_report(
         "threshold_failures": failures,
         "passed": passed,
     }
+
+    return _with_synthetic_control(report)
 
 
 class PromotionEvidenceBindingTests(unittest.TestCase):

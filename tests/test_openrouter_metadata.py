@@ -455,10 +455,9 @@ class HostedQualificationConfigurationTests(unittest.TestCase):
                         str(output),
                     ]
                 )
-            # The deterministic corpus pins fixture provider identity, so this
-            # synthetic live result correctly fails its quality gate. Transport
-            # correctness and eligibility do not manufacture passing evidence.
-            self.assertEqual(code, 1)
+            # This custom single clean case is satisfied by the synthetic
+            # response. Deterministic fixture identity is checked separately.
+            self.assertEqual(code, 0)
             report = json.loads(output.read_text())
             self.assertEqual(
                 report["run"]["configuration_digest"],
@@ -501,6 +500,9 @@ class HostedQualificationConfigurationTests(unittest.TestCase):
         validate_public_document(report, "evaluation-report")
         legacy = copy.deepcopy(report)
         del legacy["metrics"]["provider_reported_usage"]
+        del legacy["evaluation_control"]
+        for case in legacy["cases"]:
+            case.pop("execution_complete", None)
         for field in ("openrouter_routing_policy_digest", "openrouter_base_url"):
             del legacy["run"][field]
         validate_public_document(legacy, "evaluation-report")
@@ -509,6 +511,8 @@ class HostedQualificationConfigurationTests(unittest.TestCase):
         # still validate and must not be rewritten as qualification evidence.
         old_schema = copy.deepcopy(load_schema("evaluation-report"))
         del old_schema["properties"]["metrics"]["properties"]["provider_reported_usage"]
+        del old_schema["properties"]["evaluation_control"]
+        del old_schema["$defs"]["caseResult"]["properties"]["execution_complete"]
         for field in ("openrouter_routing_policy_digest", "openrouter_base_url"):
             del old_schema["properties"]["run"]["properties"][field]
         with self.assertRaises(ValidationError):

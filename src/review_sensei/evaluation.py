@@ -14,6 +14,16 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .errors import ReviewInputError, ReviewSenseiError
+from .evaluation_control import (
+    CONTROL_PROTOCOL,
+    fixture_control,
+    live_inventory_complete,
+    summarize_cases,
+    validate_live_control,
+)
+from .evaluation_control import (
+    threshold_failures as evaluation_threshold_failures,
+)
 from .learnings import LearningStore, learning_digest
 from .models import (
     MAX_PROVIDER_TOKEN_COUNT,
@@ -323,6 +333,8 @@ def load_evaluation_report(path: Path) -> dict[str, Any]:
 
     value = _load_json(path, maximum=MAX_JSON_FILE_BYTES, label="evaluation report")
     validate_public_document(value, "evaluation-report")
+    if value.get("evaluation_control") is not None:
+        validate_live_control(value)
     return value
 
 
@@ -371,6 +383,9 @@ def _report_promotion_fields(report: Mapping[str, Any]) -> dict[str, Any]:
             "threshold_failures": list(payload.get("threshold_failures") or []),
             "provider_version": run.get("provider_version"),
             "invocation_id": _required_invocation_id(run.get("invocation_id")),
+            "control_verified": (
+                validate_live_control(payload) if run.get("mode") == "live" else False
+            ),
         }
     except (KeyError, IndexError, AttributeError, TypeError) as exc:
         raise ReviewInputError("evaluation report is incomplete") from exc
@@ -403,7 +418,13 @@ def _classify_promotion_evidence(extracted: Sequence[Mapping[str, Any]]) -> str:
     passed = all(
         item["passed"] is True and not item["threshold_failures"] for item in extracted
     )
-    qualifies = len(extracted) >= 3 and live and not fixture and passed
+    qualifies = (
+        len(extracted) >= 3
+        and live
+        and not fixture
+        and passed
+        and all(item["control_verified"] for item in extracted)
+    )
     if qualifies:
         return "supported"
     live_non_fixture = [
@@ -448,7 +469,7 @@ def promotion_record_from_reports(
     elif status == "supported":
         raise ReviewInputError(
             "supported promotion requires at least three independent live "
-            "evaluation reports that passed quality thresholds"
+            "evaluation reports that passed quality thresholds and verified fixture conformance"
         )
     else:
         raise ReviewInputError(
@@ -529,6 +550,10 @@ def validate_promotion_against_report(
             )
         if _is_fixture_alias(record.provider) or _is_fixture_alias(fields["provider"]):
             raise ReviewInputError("fixture-only evidence cannot support promotion")
+        if not fields["control_verified"]:
+            raise ReviewInputError(
+                "supported promotion requires verified live evaluation control"
+            )
     elif not fields["passed"] or fields["threshold_failures"]:
         raise ReviewInputError("evaluation report did not pass quality thresholds")
 
@@ -613,6 +638,10 @@ def _validate_supplied_live_reports(
         if _report_endpoint_scope(report) not in expected:
             raise ReviewInputError(
                 "promotion record endpoint scope does not match profile"
+            )
+        if not fields["control_verified"]:
+            raise ReviewInputError(
+                "profile promotion requires verified live evaluation control"
             )
 
 
@@ -955,6 +984,8 @@ def configuration_digest(
     }
     if openrouter_policy is not None:
         payload["openrouter_policy"] = dict(openrouter_policy)
+    if mode == "live":
+        payload["evaluation_protocol"] = CONTROL_PROTOCOL
     return _json_digest(payload)
 
 
@@ -1176,6 +1207,7 @@ def run_case(
     measured: MeasuredProvider,
     *,
     learnings: Sequence[LearningEntry] = (),
+    fixture_exact: bool = True,
 ) -> dict[str, Any]:
     case_id = str(case["id"])
     kind = str(case["kind"])
@@ -1220,7 +1252,7 @@ def run_case(
             if error_category == expected_category
             else "rejected-unexpected"
         )
-        return {
+        failure = {
             "id": case_id,
             "kind": kind,
             "category": category,
@@ -1235,15 +1267,18 @@ def run_case(
             "prompt_bytes": case_prompt_bytes,
             "response_bytes": case_response_bytes,
         }
+        if not fixture_exact:
+            failure["execution_complete"] = False
+        return failure
 
     if result is None:
         status = "rejected-unexpected"
-        return {
+        failed_quality = {
             "id": case_id,
             "kind": kind,
             "category": category,
             "status": status,
-            "expected_matches": 0,
+            "expected_matches": len(case.get("expected_findings", [])),
             "actual_matches": 0,
             "false_positives": 0,
             "location_valid": False,
@@ -1253,16 +1288,26 @@ def run_case(
             "prompt_bytes": case_prompt_bytes,
             "response_bytes": case_response_bytes,
         }
+        if not fixture_exact:
+            failed_quality["execution_complete"] = False
+        return failed_quality
 
     expected = [
         ExpectedFinding.from_dict(item) for item in case.get("expected_findings", [])
     ]
-    actual_matches, expected_matches, false_positives = _one_to_one_matches(
+    actual_matches, _, false_positives = _one_to_one_matches(
         result.comments,
         expected,
     )
+    expected_matches = len(expected)
     if case.get("acceptable_no_finding", False) and result.comments:
         status = "failed"
+    elif not fixture_exact:
+        status = (
+            "passed"
+            if actual_matches == expected_matches and false_positives == 0
+            else "failed"
+        )
     elif not case.get("expected_result_path"):
         status = "passed"
     else:
@@ -1315,7 +1360,7 @@ def run_case(
         for comment in result.comments
         if comment.category is not None
     )
-    return {
+    outcome = {
         "id": case_id,
         "kind": kind,
         "category": category,
@@ -1330,6 +1375,9 @@ def run_case(
         "prompt_bytes": case_prompt_bytes,
         "response_bytes": case_response_bytes,
     }
+    if not fixture_exact:
+        outcome["execution_complete"] = result.review_status == "complete"
+    return outcome
 
 
 def evaluate_fixture(
@@ -1443,6 +1491,7 @@ def evaluate_live(
     model: str | None,
     endpoint_scope: str,
 ) -> dict[str, Any]:
+    control = fixture_control(evaluate_fixture(corpus), corpus.document)
     measured = MeasuredProvider(provider)
     cases: list[dict[str, Any]] = []
     for case in corpus.document["cases"]:
@@ -1466,7 +1515,7 @@ def evaluate_live(
             )
             continue
         service = ReviewService(measured)
-        cases.append(run_case(corpus, case, service, measured))
+        cases.append(run_case(corpus, case, service, measured, fixture_exact=False))
     openrouter_policy = None
     routing_policy = getattr(provider, "routing_policy", None)
     if routing_policy is not None and hasattr(routing_policy, "identity_fields"):
@@ -1482,6 +1531,7 @@ def evaluate_live(
         endpoint_scope=endpoint_scope,
         openrouter_policy=openrouter_policy,
         openrouter_base_url=getattr(provider, "base_url", None),
+        evaluation_control=control,
     )
 
 
@@ -1497,45 +1547,22 @@ def build_report(
     endpoint_scope: str,
     openrouter_policy: Mapping[str, object] | None = None,
     openrouter_base_url: str | None = None,
+    evaluation_control: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    quality_cases = [case for case in cases if case["kind"] == "quality"]
-    expected = sum(case["expected_matches"] for case in quality_cases)
-    actual = sum(case["actual_matches"] for case in quality_cases)
-    false_positives = sum(case["false_positives"] for case in quality_cases)
-    precision = _percent(actual, actual + false_positives)
-    recall = _percent(actual, expected)
-    fpr = false_positives / max(1, len(quality_cases))
-    location_valid = _percent(
-        sum(case["location_valid"] for case in quality_cases),
-        len(quality_cases),
-    )
-    categories = {
-        str(case["category"])
-        for case in quality_cases
-        if case["category"] and case["status"] == "passed"
+    deterministic, quality_metrics = summarize_cases(cases)
+    if evaluation_control is not None:
+        deterministic = dict(evaluation_control["fixture"]["deterministic"])
+    thresholds = {
+        "deterministic": corpus.document["deterministic_thresholds"],
+        "quality": corpus.document["quality_thresholds"],
     }
-    required_categories = {"correctness", "security", "architecture", "tests"}
-    category_coverage = _percent(
-        len(categories & required_categories), len(required_categories)
+    threshold_failures = evaluation_threshold_failures(
+        deterministic, quality_metrics, thresholds
     )
-
-    exact = sum(
-        1
-        for case in cases
-        if case["kind"] == "quality"
-        and case["status"] in {"passed", "rejected-expected"}
-    )
-    rejection = sum(
-        1
-        for case in cases
-        if case["kind"] == "contract-rejection"
-        and case["status"] == "rejected-expected"
-    )
-    contract_cases = [case for case in cases if case["kind"] == "contract-rejection"]
-    exact_rate = _percent(exact, len(quality_cases))
-    rejection_rate = _percent(rejection, len(contract_cases))
-
-    threshold_failures: list[str] = []
+    if evaluation_control is not None and not evaluation_control["fixture"]["passed"]:
+        threshold_failures.append("fixture_conformance")
+    if mode == "live" and not live_inventory_complete(cases):
+        threshold_failures.append("live_quality_inventory")
     report: dict[str, Any] = {
         "schema_version": "1.0",
         "corpus": {
@@ -1583,17 +1610,8 @@ def build_report(
             else 0.0,
             "elapsed_p95_ms": _p95(measured.elapsed_ms),
         },
-        "deterministic": {
-            "exact_fixture_result_rate": exact_rate,
-            "expected_contract_rejection_rate": rejection_rate,
-        },
-        "quality": {
-            "actionable_precision": precision,
-            "false_positive_rate": fpr,
-            "expected_finding_recall": recall,
-            "location_validity": location_valid,
-            "category_coverage": category_coverage,
-        },
+        "deterministic": deterministic,
+        "quality": quality_metrics,
         "threshold_failures": threshold_failures,
         "passed": True,
     }
@@ -1610,22 +1628,10 @@ def build_report(
                 )
             if openrouter_base_url is not None:
                 report["run"]["openrouter_base_url"] = openrouter_base_url
-    thresholds = corpus.document["deterministic_thresholds"]
-    if exact_rate < float(thresholds["exact_fixture_result_rate"]):
-        threshold_failures.append("exact_fixture_result_rate")
-    if rejection_rate < float(thresholds["expected_contract_rejection_rate"]):
-        threshold_failures.append("expected_contract_rejection_rate")
-    quality = corpus.document["quality_thresholds"]
-    if precision < float(quality["actionable_precision_minimum"]):
-        threshold_failures.append("actionable_precision_minimum")
-    if fpr > float(quality["false_positive_rate_maximum"]):
-        threshold_failures.append("false_positive_rate_maximum")
-    if recall < float(quality["expected_finding_recall_minimum"]):
-        threshold_failures.append("expected_finding_recall_minimum")
-    if location_valid < float(quality["location_validity_minimum"]):
-        threshold_failures.append("location_validity_minimum")
-    if category_coverage < float(quality["category_coverage_minimum"]):
-        threshold_failures.append("category_coverage_minimum")
+    if evaluation_control is not None:
+        report["evaluation_control"] = dict(evaluation_control)
     report["passed"] = not threshold_failures
     validate_public_document(report, "evaluation-report")
+    if evaluation_control is not None:
+        validate_live_control(report)
     return report
