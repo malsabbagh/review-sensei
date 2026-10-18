@@ -2503,6 +2503,9 @@ class GitHubApplication:
                             body="Retrying approval finalization for previously reassessed findings; all approval requirements still apply.",
                             decisions=(),
                         )
+                    # Stored results are bound to the original prepared bytes.
+                    # Fresh work is validated by publish's validate_work/evidence
+                    # checks and its live source/head/base/result fences instead.
                     if (
                         isinstance(assessment, _RecordedHumanAssessmentReply)
                         and assessment.replay_context != human.replay_context_digest

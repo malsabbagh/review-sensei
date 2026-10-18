@@ -61,6 +61,15 @@ class BaselineCLIContract:
     installed = False
 
     def setUp(self):
+        if self.installed:
+            # The ledger and baseline helpers must come from the same wheel as
+            # the CLI, even if a caller has preloaded one of these submodules.
+            prefix = Path(sys.prefix).resolve()
+            for name in ("review_sensei.baseline", "review_sensei.session"):
+                self.assertTrue(
+                    Path(sys.modules[name].__file__).resolve().is_relative_to(prefix),
+                    name,
+                )
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)

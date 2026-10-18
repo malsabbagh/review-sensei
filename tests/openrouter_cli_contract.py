@@ -151,7 +151,10 @@ class OpenRouterCLIContract(IsolatedWorkingDirectoryMixin):
     def test_malformed_response_remains_incomplete_and_redacts_all_sentinels(self):
         self.config()
         self.envelope = {"choices": [], "private": dict(SENTINELS)}
-        status, _, error = self.invoke()
+        status, output, error = self.invoke()
         self.assertEqual(status, 2)
         self.assertTrue(self.requests)
+        self.assertEqual(output, "")
+        self.assertIn("provider_failed", error)
+        self.assertIn("OpenRouter response did not contain review text", error)
         self.assertNotIn("Traceback", error)

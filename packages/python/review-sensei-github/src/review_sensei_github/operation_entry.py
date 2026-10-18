@@ -242,6 +242,8 @@ def _complete_retained_computation(
     OperationHost independently hashes those same bytes for payload_digest.
     A generic OperationHost producer may use a distinct decision digest, but
     its packet is not this adapter's computation-completion contract.
+    This adapter also sets TransitionPlan.request_digest to github_event_id;
+    both the accepted packet and transition must retain that exact event ID.
     """
 
     digest = hashlib.sha256(payload).hexdigest()

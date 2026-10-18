@@ -136,7 +136,13 @@ class PreparedHumanAssessment:
 
     @property
     def replay_context_digest(self) -> str:
-        """Bind accepted bytes while allowing monotonic resolution progress."""
+        """Bind authority/evidence, normalizing only resolution progress.
+
+        Every caller uses this projection: clearing resolved IDs and fixing the
+        derived pending flag makes an accepted result stable after its own
+        resolutions are published. It does not change live eligibility facts.
+        A changed source, inventory or evidence bundle still changes the digest.
+        """
         inventory = self.eligibility.human_review
         if inventory is None:
             raise GitHubConversationError(
