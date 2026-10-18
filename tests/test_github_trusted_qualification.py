@@ -88,6 +88,7 @@ class TrustedQualificationTests(unittest.TestCase):
         context=True,
         responses=None,
         readback=True,
+        checks=None,
         **overrides,
     ):
         http, calls = make_http(
@@ -105,6 +106,7 @@ class TrustedQualificationTests(unittest.TestCase):
                 json_response({"id": 6}, 200),
             ],
             review_readback=readback,
+            routes=() if checks is None else ((checks.matches, checks.respond),),
         )
         args = dict(
             token="token",
@@ -121,6 +123,8 @@ class TrustedQualificationTests(unittest.TestCase):
             allow_retired_legacy_policy=True,
             configuration_context=runtime_context() if context is True else context,
         )
+        if checks is not None:
+            args["check_token"] = "check-token"
         args.update(overrides)
         publisher = ReviewPublisher(
             http=http,
@@ -598,9 +602,13 @@ class TrustedQualificationTests(unittest.TestCase):
             self.assertEqual(posted_events(calls), [])
 
     def test_first_publication_requires_its_actual_app_owned_readback(self):
+        from tests.test_github_publication import FakeCheckRuns
+
         for provider in ("ollama", "openrouter"):
+            checks = FakeCheckRuns()
             outcome, calls = self.publish(
                 readback=False,
+                checks=checks,
                 result=replace(
                     clean_result(),
                     provider=provider,
@@ -609,6 +617,8 @@ class TrustedQualificationTests(unittest.TestCase):
             )
             self.assertEqual(outcome.status, "published")
             self.assertEqual(posted_events(calls), ["COMMENT"])
+            self.assertEqual(outcome.diagnostic, "approval_withheld")
+            self.assertEqual(checks.conclusions, [None, "success"])
 
     def test_repeated_bound_delivery_reconciles_existing_approval_without_post(self):
         from tests.test_github_publication import published_review
@@ -678,3 +688,109 @@ class TrustedQualificationTests(unittest.TestCase):
         self.assertEqual(outcome.status, "approval_withheld")
         self.assertEqual(outcome.diagnostic, "qualification_unverified")
         self.assertEqual(posted_events(calls), [])
+
+    def test_authority_constructor_rejects_missing_provider_before_indexing(self):
+        from review_sensei.errors import ReviewInputError
+
+        missing_provider = runtime_context()
+        del missing_provider["provider"]
+        missing_name = runtime_context()
+        del missing_name["provider"]["name"]
+        for context in (
+            {},
+            missing_provider,
+            missing_name,
+            {**runtime_context(), "provider": None},
+            {**runtime_context(), "provider": []},
+        ):
+            with self.subTest(context=context), self.assertRaises(ReviewInputError):
+                synthetic_authority(runtime_configuration=context)
+
+    def test_valid_input_binding_cannot_override_conflicting_persisted_binding(self):
+        from review_sensei_github.publication import approval_eligibility_marker
+
+        from tests.fake_github_http import make_http as raw_http
+        from tests.test_github_publication import published_review
+
+        _, calls = self.publish()
+        eligibility = approval_eligibility_from_body(review_payloads(calls)[0]["body"])
+        conflicting = replace(
+            eligibility,
+            facts=replace(eligibility.facts, qualification_binding="0" * 64),
+        )
+        http, calls = raw_http(
+            [
+                json_response(pr_payload(head_sha="b" * 40)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha="b" * 40)),
+                json_response(
+                    [
+                        published_review(
+                            marker=approval_eligibility_marker(conflicting),
+                            head_sha="b" * 40,
+                            state="COMMENTED",
+                        )
+                    ]
+                ),
+            ]
+        )
+        outcome = ReviewApprovalFinalizer(
+            http=http, qualification_authority=synthetic_authority()
+        ).finalize(
+            token="token",
+            repository="owner/repo",
+            pull_request=2,
+            head_sha="b" * 40,
+            app_slug="reviewsensei[bot]",
+            eligibility=eligibility,
+        )
+        self.assertEqual(outcome.status, "approval_withheld")
+        self.assertEqual(outcome.diagnostic, "approval_withheld")
+        self.assertEqual(posted_events(calls), [])
+
+    def test_public_replay_cannot_mint_authority_for_legacy_comment_without_eligibility(
+        self,
+    ):
+        from tests.test_github_publication import published_review
+
+        _, calls = self.publish()
+        body = review_payloads(calls)[0]["body"]
+        legacy = "\n".join(
+            line
+            for line in body.splitlines()
+            if not line.startswith("<!-- reviewsensei:eligibility:")
+        )
+        self.assertIsNone(approval_eligibility_from_body(legacy))
+        existing = [
+            published_review(marker=legacy, head_sha="b" * 40, state="COMMENTED")
+        ]
+        outcome, calls = self.publish(
+            responses=[
+                json_response(pr_payload(head_sha="b" * 40)),
+                json_response(existing),
+                json_response(pr_payload(head_sha="b" * 40)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha="b" * 40)),
+                json_response(existing),
+            ]
+        )
+        self.assertEqual(outcome.status, "already_published")
+        self.assertEqual(posted_events(calls), [])
+        self.assertIsNotNone(outcome.diagnostic)
+
+    def test_non_openrouter_qualified_claim_keeps_supported_approval_policy(self):
+        for provider in ("ollama", "compatible"):
+            outcome, calls = self.publish(
+                authority=None,
+                context=None,
+                result=replace(clean_result(), provider=provider),
+                qualification="qualified",
+            )
+            self.assertEqual(outcome.status, "published")
+            self.assertEqual(posted_events(calls), ["COMMENT", "APPROVE"])
+            eligibility = approval_eligibility_from_body(
+                review_payloads(calls)[0]["body"]
+            )
+            self.assertEqual(eligibility.facts.provider, provider)
+            self.assertEqual(eligibility.facts.qualification, "qualified")
+            self.assertIsNone(eligibility.facts.qualification_binding)

@@ -62,6 +62,65 @@ class ReaderCompatibilityTests(unittest.TestCase):
         with self.assertRaises(ReviewInputError):
             ReviewApprovalEligibility.from_dict(unsupported)
 
+    def test_legacy_v1_facts_roundtrip_in_plain_and_cross_file_envelopes(self):
+        original = prior()
+        finding = replace(
+            original.human_review.findings[0],
+            required_paths=("src/app.py", "src/caller.py"),
+        )
+        richer = replace(
+            original,
+            human_review=PendingHumanReview(original.human_review.base_sha, (finding,)),
+        )
+        for eligibility, envelope in ((original, "1"), (richer, "2.0")):
+            with self.subTest(envelope=envelope):
+                legacy = eligibility.to_dict()
+                legacy["facts"]["schema_version"] = "1"
+                del legacy["facts"]["provider"]
+                self.assertNotIn("qualification_binding", legacy["facts"])
+                parsed = ReviewApprovalEligibility.from_dict(legacy)
+                self.assertIsNone(parsed.facts.provider)
+                self.assertEqual(parsed.to_dict(), legacy)
+                marker = approval_eligibility_marker(parsed)
+                reread = approval_eligibility_from_body(marker)
+                self.assertEqual(reread, parsed)
+                self.assertEqual(reread.to_dict()["schema_version"], envelope)
+                self.assertEqual(reread.to_dict()["facts"]["schema_version"], "1")
+
+    def test_persisted_legacy_v1_facts_load_without_inferred_provider_exemption(self):
+        original = prior()
+        clean = replace(
+            original,
+            human_review=None,
+            facts=replace(original.facts, has_human_adjudication_findings=False),
+        )
+        document = clean.to_dict()
+        document["facts"]["schema_version"] = "1"
+        del document["facts"]["provider"]
+        legacy = ReviewApprovalEligibility.from_dict(document)
+        state = State()
+        state.reviews = [state.review(legacy, 20)]
+        finalizer = ReviewApprovalFinalizer(http=state.http)
+        arguments = dict(
+            token="synthetic",
+            repository="owner/repo",
+            pull_request=1,
+            head_sha=HEAD,
+            app_slug=APP,
+        )
+        loaded = finalizer.load_eligibility(**arguments, require_valid=True)
+        self.assertEqual(loaded.to_dict(), document)
+        self.assertTrue(state.calls)
+        outcome = finalizer.finalize(
+            **arguments, eligibility=loaded, require_persisted=True
+        )
+        self.assertEqual(outcome.status, "approval_withheld")
+        self.assertEqual(outcome.diagnostic, "qualification_unverified")
+        self.assertEqual(state.events(), [])
+        self.assertEqual(
+            approval_eligibility_from_body(state.reviews[0]["body"]).to_dict(), document
+        )
+
     def test_unknown_latest_payload_never_exposes_previous_clean_authority(self):
         state = State()
         clean = replace(
