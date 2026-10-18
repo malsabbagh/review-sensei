@@ -17,7 +17,7 @@ The workflows read the hosted version from the released commit's
 runtime workflow installs from. Releases before the hosted split (0.6.22 and
 earlier) cannot be qualified by this harness.
 
-The output directory must not already exist. Exit 0 requires all five suites to
+The output directory must not already exist. Exit 0 requires all six suites to
 complete and pass; failed installation, propagation, process timeouts, malformed
 receipts, or failed assertions exit nonzero. `summary.json` binds requested and
 installed versions, package origins, both wheel SHA-256s, dependency versions, retry
@@ -68,3 +68,12 @@ weaken assertions for current 0.6.20 or publish a replacement.
 `OLLAMA_API_KEY` and the approved DeepSeek 4.1 Flash / GLM 5.3 cloud identities, uses
 small synthetic input and a two-call limit, and saves hashes/counts instead of raw
 provider payloads. The Actions workflow never invokes it and adds no credentials.
+
+`lifecycle.py` reuses the packaged approval lifecycle and local CLI tests against
+the exact installed engine and adapter. It covers trusted classification through
+persisted eligibility, mixed media/generated confirmations, clean-process exits,
+and the preserved PR308 five-disposition ledger. Synthetic broker fixtures are
+not authentication evidence for the original grant. Known failures in an older
+PyPI release remain failures; candidate-wheel success does not qualify PyPI.
+The lifecycle receipt counts rows (including failing subcases) rather than claiming
+that those rows are an independent test-method count.

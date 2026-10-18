@@ -247,3 +247,76 @@ class LocalReviewContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstalledProcessExitTests(unittest.TestCase):
+    """Fresh process, isolated imports and clean host environment per journey."""
+
+    def test_process_exit_output_and_operational_contracts(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            diff = root / "input.patch"
+            response = root / "response.json"
+            diff.write_text(DIFF, encoding="utf-8")
+            env = {
+                key: os.environ[key]
+                for key in ("PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT")
+                if key in os.environ
+            }
+            env.update(
+                HOME=str(root),
+                USERPROFILE=str(root),
+                XDG_CONFIG_HOME=str(root / "config"),
+                XDG_STATE_HOME=str(root / "state"),
+            )
+            for label, payload, expected, reason, extra in (
+                ("clean", CLEAN_RESPONSE, 0, None, []),
+                ("fix", BLOCKING_RESPONSE, 1, "required-fixes-remain", []),
+                (
+                    "operational-fix",
+                    BLOCKING_RESPONSE,
+                    0,
+                    None,
+                    ["--exit-semantics", "operational"],
+                ),
+                ("malformed-provider", {"comments": "invalid"}, 2, None, []),
+            ):
+                with self.subTest(case=label):
+                    response.write_text(json.dumps(payload), encoding="utf-8")
+                    command = [
+                        sys.executable,
+                        "-I",
+                        "-m",
+                        "review_sensei",
+                        "--diff",
+                        str(diff),
+                        "--provider",
+                        "fixture",
+                        "--fixture-response",
+                        str(response),
+                        "--no-learning-proposals",
+                        "--format",
+                        "json",
+                        *extra,
+                    ]
+                    proc = subprocess.run(
+                        command,
+                        cwd=root,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    self.assertEqual(proc.returncode, expected, proc.stderr)
+                    self.assertNotIn("review-sensei:", proc.stdout)
+                    if expected != 2:
+                        document = json.loads(proc.stdout)
+                        validate_public_document(document, "review-result")
+                        self.assertEqual(document["review_status"], "complete")
+                    else:
+                        self.assertEqual(proc.stdout, "")
+                        self.assertIn("reason=", proc.stderr)
+                    if reason:
+                        self.assertIn("reason=" + reason, proc.stderr)

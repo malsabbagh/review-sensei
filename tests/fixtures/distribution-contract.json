@@ -36,17 +36,25 @@
   "lanes": {
     "dist_safe": {
       "packaged": true,
-      "discover": ["tests/dist_safe", "tests/downstream"],
+      "discover": [
+        "tests/dist_safe",
+        "tests/downstream"
+      ],
       "helpers": [
         "tests/packaging_guard.py",
         "tests/fake_github_http.py",
-        "tests/fixtures/distribution-contract.json"
+        "tests/fixtures/distribution-contract.json",
+        "tests/test_pr308_ledger_regression.py",
+        "tests/fixtures/regressions/pr308-session-ledger.json",
+        "tests/fixtures/regressions/pr308-session-ledger-evidence.json"
       ],
       "description": "Runs after pip install dist/*.whl from a directory that cannot import checkout src/. Tests load only packaged or generated assets."
     },
     "checkout_only": {
       "packaged": false,
-      "discover": ["tests"],
+      "discover": [
+        "tests"
+      ],
       "description": "Developer checkout lane. Requires scripts/, .github/, packages/, deploy/, and checkout-only fixtures. Compatibility and quality CI continue to run this broader suite.",
       "modules": [
         "tests/test_ci_policy.py",

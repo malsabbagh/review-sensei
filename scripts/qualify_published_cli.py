@@ -18,7 +18,7 @@ ENGINE = "review-sensei"
 HOSTED = "review-sensei-github"
 HOSTED_MANIFEST = "packages/python/review-sensei-github/pyproject.toml"
 # Suites that exercise the hosted runtime also verify its exact version.
-HOSTED_SUITES = frozenset({"qualify", "operations", "operation_state"})
+HOSTED_SUITES = frozenset({"qualify", "operations", "operation_state", "lifecycle"})
 
 
 def wheel_sha256(value):
@@ -293,6 +293,7 @@ def main():
             "seam_boundaries",
             "operations",
             "operation_state",
+            "lifecycle",
         ):
             destination = root / name
             command = [

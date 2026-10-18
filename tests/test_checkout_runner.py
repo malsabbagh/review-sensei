@@ -151,3 +151,82 @@ class Case(unittest.TestCase):
         result, _ = self.run_fixture(source)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Discovered 2 tests; running 1 disjoint workers", result.stdout)
+
+
+class MeasuredRunnerTests(unittest.TestCase):
+    def test_measured_costs_schedule_expensive_classes_without_changing_inventory(self):
+        identities = [f"module.Case{i}.test_it" for i in range(4)]
+        costs = {
+            "module.Case0": 10.0,
+            "module.Case1": 9.0,
+            "module.Case2": 1.0,
+            "module.Case3": 1.0,
+        }
+        groups = RUNNER.partition(identities, 2, costs)
+        self.assertNotEqual(
+            next(i for i, g in enumerate(groups) if identities[0] in g),
+            next(i for i, g in enumerate(groups) if identities[1] in g),
+        )
+        self.assertEqual(sorted(sum(groups, [])), identities)
+        self.assertEqual(groups, RUNNER.partition(identities[::-1], 2, costs))
+        for invalid in (0, -1, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                RUNNER.partition(identities, 2, {"module.Case0": invalid})
+
+    def test_worker_coverage_combines_both_branches_and_keeps_failure_evidence(self):
+        from coverage import CoverageData
+
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            package = root / "review_sensei"
+            package.mkdir()
+            (package / "__init__.py").write_text("")
+            probe = package / "probe.py"
+            probe.write_text(
+                "def choose(value):\n    if value:\n        return 1\n    return 0\n"
+            )
+            tests = root / "tests"
+            tests.mkdir()
+            (tests / "test_probe.py").write_text("""import unittest
+from review_sensei.probe import choose
+class Yes(unittest.TestCase):
+    def test_yes(self): self.assertEqual(choose(True), 1)
+class No(unittest.TestCase):
+    def test_no(self):
+        self.assertEqual(choose(False), 0)
+        self.fail("intentional worker failure")
+""")
+            report = root / "report.json"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--workers",
+                    "2",
+                    "--coverage",
+                    "--report",
+                    str(report),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertIn("intentional worker failure", proc.stderr)
+            data = json.loads(report.read_text())
+            self.assertTrue(data["complete"])
+            self.assertEqual(data["discovered"], 2)
+            self.assertEqual(
+                sorted(worker["exit"] for worker in data["workers"]), [0, 1]
+            )
+            self.assertEqual(sum(worker["executed"] for worker in data["workers"]), 2)
+            self.assertTrue(
+                all(worker["elapsed_seconds"] > 0 for worker in data["workers"])
+            )
+            coverage = CoverageData(basename=str(root / ".coverage"))
+            coverage.read()
+            self.assertTrue(coverage.has_arcs())
+            self.assertTrue(
+                {(2, 3), (2, 4)} <= set(coverage.arcs(str(probe.resolve())))
+            )
