@@ -2,8 +2,6 @@
 
 ## Unreleased
 
-## 0.8.0 - 2026-10-18
-
 - Report an incomplete media-command gate update when the check capability is
   unavailable, preserving the confirmation and providing explicit retry guidance.
 - Let an authorized explicit rescan reanalyze a published incomplete review on
@@ -34,10 +32,6 @@
   - Review summaries, body sections, and terminal output use a consistent
     three-way classification (`Required fix`, `Required decision`,
     `Optional improvement`).
-
-## review-sensei-github 0.3.0 - 2026-10-18
-
-- Pin `review-sensei==0.8.0`.
 
 ## 0.7.1 - 2026-10-16
 
