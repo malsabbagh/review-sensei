@@ -496,12 +496,21 @@ crashed with exit 1. Preserve that immutable tag and all already-published bytes
 Cryptography removed Intel macOS wheels in version 49. The native installer
 now builds its declared cryptography dependency with `OPENSSL_STATIC=1` and
 architecture-matched Homebrew static archives, bypassing cached/shared wheels.
-Linux's shared build helper pulls the digest-pinned Docker Official Images from
-`public.ecr.aws/docker/library`, avoiding Docker Hub's shared-runner pull quota.
-The pinned manifest contents and Debian 12 glibc baseline are unchanged; both
-amd64 and arm64 images are admitted before building, and the consumer remains
-offline. Registry failures get at most three pull attempts with jittered backoff
-on the same platform/digest, then fail the build with no mutable-tag fallback.
+Linux's shared build helper admits digest-pinned Docker Official Images from
+`public.ecr.aws/docker/library` first, then the official `docker.io/library`
+upstream if ECR fails. Each origin gets one attempt: a depleted anonymous data
+allowance cannot be repaired by immediate repeated pulls. The fallback preserves
+the entire image suffix, including the exact SHA-256 digest, and is logged before
+use. No third-party registry, mutable tag, credential or new cache is introduced.
+The pinned manifest contents and Debian 12 glibc baseline are unchanged. Both
+build and consumer images are admitted before any container starts; each smoke
+test uses its admitted reference with `--pull never`, and the consumer remains
+offline. If both origins fail for either image, the build stops before execution.
+Manifest-only verification against Docker Hub confirmed the existing Python
+`b99029c95d3d37fb1e4e76d287f7984373dca77c665885986e31b2c95260c13c` and Debian
+`3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251` index
+digests, including their amd64 and arm64 descriptors. Actual native CI still
+qualifies the pulled images and resulting executables before release.
 This is the [upstream macOS static-build procedure](https://cryptography.io/en/latest/installation/#building-cryptography-on-macos);
 it does not downgrade the dependency. Both `Release` and manual npm builds use
 `scripts/install_standalone_oracle.py` for the same installation contract.
