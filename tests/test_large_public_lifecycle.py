@@ -244,6 +244,70 @@ class LargePublicLifecycleTests(unittest.TestCase):
                 self.assertEqual(provider.calls, [])
                 self.assertEqual((state.reviews, state.reply_count), snapshot)
 
+    def test_fully_resolved_replay_rejects_changed_context_before_publication(self):
+        for mutation in ("body", "actor", "patch", "result", "finding"):
+            with self.subTest(mutation=mutation):
+                state = PagedState(4, history_count=250)
+                self.assertEqual(
+                    state.reply(AssessingProvider()).approval_status, "approved"
+                )
+                self.assertEqual(state.latest_inventory().pending, ())
+                if mutation == "body":
+                    state.source["body"] += " Edited without a trusted revision."
+                elif mutation == "actor":
+                    state.source["user"]["login"] = "bob"
+                elif mutation == "patch":
+                    state.files[0]["patch"] += "\n"
+                else:
+                    current = next(
+                        eligibility
+                        for review in reversed(state.reviews)
+                        if (
+                            eligibility := approval_eligibility_from_body(
+                                review["body"]
+                            )
+                        )
+                        is not None
+                    )
+                    if mutation == "result":
+                        current = replace(current, result_digest="f" * 64)
+                    else:
+                        inventory = current.human_review
+                        inventory = replace(
+                            inventory,
+                            findings=(
+                                replace(
+                                    inventory.findings[0], body="A changed concern."
+                                ),
+                                *inventory.findings[1:],
+                            ),
+                        )
+                        current = replace(current, human_review=inventory)
+                    # A clean authority COMMENT is the finalizer's input; the
+                    # previous APPROVE is not sufficient to authorize this root.
+                    state.reviews.append(state.review(current, 9000))
+                before = (
+                    deepcopy(state.reviews),
+                    deepcopy(state.replies),
+                    deepcopy(state.check_runs),
+                    deepcopy(state.operation_comments.comments),
+                )
+                provider = AssessingProvider()
+                with self.assertRaisesRegex(
+                    ReviewInputError, "replay authority changed"
+                ):
+                    state.reply(provider)
+                self.assertEqual(provider.calls, [])
+                self.assertEqual(
+                    (
+                        state.reviews,
+                        state.replies,
+                        state.check_runs,
+                        state.operation_comments.comments,
+                    ),
+                    before,
+                )
+
     def test_replay_after_durable_comment_interruption_keeps_one_authority(self):
         state = PagedState(100, history_count=250)
 

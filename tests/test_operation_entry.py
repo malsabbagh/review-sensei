@@ -324,12 +324,18 @@ class HostedComputationContinuationTests(unittest.TestCase):
         self.calls = []
 
     def run_event(
-        self, event, *, execute=None, parts=True, payload=b"validated-result"
+        self,
+        event,
+        *,
+        execute=None,
+        parts=True,
+        payload=b"validated-result",
+        trigger="reply",
     ):
         store = GitHubCommentOperationStore(self.comments, app_user_id=42)
         result = run_hosted_provider(
             store,
-            trigger="reply",
+            trigger=trigger,
             repository_id=7,
             pull_request=11,
             attestation_digest=_hex("attestation"),
@@ -346,6 +352,36 @@ class HostedComputationContinuationTests(unittest.TestCase):
             now=lambda: 1000,
         )
         return result, store
+
+    def test_adapter_completion_binds_both_digests_to_the_full_encoded_result(self):
+        normalized_decisions = b'[{"decision":"dismissed"}]'
+        payload = (
+            b'{"summary":"Complete validated result",'
+            b'"decisions":' + normalized_decisions + b',"coverage":"complete"}'
+        )
+        digest = hashlib.sha256(payload).hexdigest()
+        normalized_digest = hashlib.sha256(normalized_decisions).hexdigest()
+        self.assertNotEqual(digest, normalized_digest)
+        for trigger in ("full-review", "reply", "reassessment", "verify"):
+            with self.subTest(trigger=trigger):
+                self.setUp()
+                result, store = self.run_event(
+                    "digest-1", payload=payload, trigger=trigger
+                )
+                self.assertNotIsInstance(result, OperationRefusal)
+                events = tuple(store._live()["events"].values())
+                self.assertEqual(len(events), 1)
+                packet = events[0]["accepted"]
+                self.assertEqual(packet.payload_digest, digest)
+                self.assertEqual(packet.decisions_digest, digest)
+                self.assertNotEqual(packet.decisions_digest, normalized_digest)
+                replay, _ = self.run_event("digest-1", payload=payload, trigger=trigger)
+                self.assertEqual(replay.replay_payload, payload)
+                following, _ = self.run_event(
+                    "digest-2", payload=payload, trigger=trigger
+                )
+                self.assertNotIsInstance(following, OperationRefusal)
+                self.assertEqual(self.calls, ["digest-1", "digest-2"])
 
     def test_distinct_revision_continues_and_old_event_replay_keeps_current_cursor(
         self,

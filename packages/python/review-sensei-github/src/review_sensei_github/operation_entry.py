@@ -236,6 +236,12 @@ def _complete_retained_computation(
     The accepted packet and full owned result are the computation's durable
     target. There is no remote product root or source acknowledgement here.
     Generic OperationHost remote-effect reconciliation is deliberately unchanged.
+
+    This adapter's sole producer, run_hosted_provider.provider_call, assigns
+    SHA-256 of the complete encoded result to ProviderOutput.decisions_digest.
+    OperationHost independently hashes those same bytes for payload_digest.
+    A generic OperationHost producer may use a distinct decision digest, but
+    its packet is not this adapter's computation-completion contract.
     """
 
     digest = hashlib.sha256(payload).hexdigest()
