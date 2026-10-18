@@ -1552,7 +1552,7 @@ class ReviewApprovalFinalizer:
     ) -> PublicationResult:
         """Re-evaluate one published head after an override, without a provider call.
 
-        Adjusted eligibility is patched into the original review before approval.
+        Adjusted eligibility is updated in the original review before approval.
         A failed patch does not submit an approval.
         """
         owns_operation_budget = (
@@ -1744,7 +1744,7 @@ class ReviewApprovalFinalizer:
         if new_body != body:
             try:
                 status, _payload = self.http.request(
-                    "PATCH",
+                    "PUT",
                     self.http.repository_path(
                         repository, f"/pulls/{pull_request}/reviews/{chosen['id']}"
                     ),

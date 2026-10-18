@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Reconcile stored exact-head finding decisions using GitHub's required PUT
+  review-update endpoint. Preserve incomplete-review gates and durable decisions
+  when the update fails or its readback conflicts.
+
 - Require a standalone `@reviewsensei rescan` (or supported alias) PR comment
   before starting fresh analysis. Narrative summaries, quoted examples and
   malformed commit selectors stay discussions. Apply the 4,096-byte command

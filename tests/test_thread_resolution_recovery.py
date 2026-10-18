@@ -207,6 +207,8 @@ class ResolutionHost(GitHubHttp):
             return 201, comment
         if path.startswith("/repos/owner/repo/pulls/2/reviews"):
             if method == "PATCH":
+                return 405, None
+            if method == "PUT":
                 review = next(
                     item
                     for item in self.reviews

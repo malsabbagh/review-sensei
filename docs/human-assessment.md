@@ -92,6 +92,16 @@ Disposition reasons have a 512-byte limit.
 operation's resource allowance. These command IDs are distinct from the complete
 64-hex finding IDs required by the proposed targeted assessment API.
 
+Stored decisions and approval eligibility are separate writes. After recording
+an exact-head decision, the hosted adapter updates its owned review summary with
+GitHub's `PUT /repos/{owner}/{repo}/pulls/{pull_number}/reviews/{review_id}`
+endpoint and verifies the resulting eligibility through readback. A failed or
+conflicting update keeps the session decision but withholds approval; explicit
+verification can reconcile the same stored decision later. Resolving every
+finding does not turn partial analysis into a complete review. Corrected runtime
+behavior requires a new hosted package release; changing a reviewed PR's source
+does not replace the package installed by the reusable workflow.
+
 ## Authorized operator invocation
 
 The command is `review-sensei github reply`. Its current help supports:
