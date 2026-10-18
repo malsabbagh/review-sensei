@@ -26,6 +26,28 @@ with patch.object(sys, "path", [str(SCRIPTS), *sys.path]):
     _SPEC.loader.exec_module(CANDIDATE)
 
 
+def declare_fixture_posix_modes(tarball: Path) -> None:
+    """Declare portable modes for known synthetic fixture executables.
+
+    Windows cannot represent local POSIX execute bits. These fake payloads have
+    a declared tar mode independent of the host; production pack/validation is
+    unchanged, and explicit non-executable negative archives stay untouched.
+    """
+    rewritten = tarball.with_suffix(".fixture-modes.tgz")
+    executable_members = {"package/bin/review-sensei", "package/bin/review-sensei.js"}
+    with (
+        tarfile.open(tarball, "r:gz") as source,
+        tarfile.open(rewritten, "w:gz") as output,
+    ):
+        for member in source.getmembers():
+            if member.isfile() and member.name in executable_members:
+                member.mode = 0o755
+            output.addfile(
+                member, source.extractfile(member) if member.isfile() else None
+            )
+    rewritten.replace(tarball)
+
+
 class CandidateArtifactsTests(unittest.TestCase):
     def setUp(self):
         (ROOT / "dist").mkdir(exist_ok=True)
@@ -63,6 +85,21 @@ class CandidateArtifactsTests(unittest.TestCase):
         ).stdout.strip()
         self.stage = self.root / "dist"
         self.stage.mkdir()
+        run = subprocess.run
+
+        def run_fixture_pack(command, *args, **kwargs):
+            result = run(command, *args, **kwargs)
+            if len(command) > 1 and command[1] == "pack" and result.returncode == 0:
+                destination = Path(command[command.index("--pack-destination") + 1])
+                for item in json.loads(result.stdout):
+                    declare_fixture_posix_modes(destination / item["filename"])
+            return result
+
+        fixture_pack = patch.object(
+            CANDIDATE.subprocess, "run", side_effect=run_fixture_pack
+        )
+        fixture_pack.start()
+        self.addCleanup(fixture_pack.stop)
 
     def bundle(self, target):
         root = self.stage / "build" / target
@@ -87,6 +124,37 @@ class CandidateArtifactsTests(unittest.TestCase):
         return CANDIDATE.assemble_candidate(
             self.root, native, self.stage / "npm", self.source
         )
+
+    def test_windows_source_modes_construct_declared_posix_fixture_without_weakening_validation(
+        self,
+    ):
+        archive = self.stage / "windows-source-modes.tgz"
+        package = self.root / "packages/npm/platforms/linux-x64-gnu"
+        contents = {
+            "package/" + name: (package / name).read_bytes()
+            for name in ("package.json", "README.md", "LICENSE")
+        }
+        contents["package/bin/review-sensei"] = b"synthetic fixture payload"
+        contents["package/bin/_internal/runtime.dat"] = b"synthetic runtime"
+        with tarfile.open(archive, "w:gz") as stream:
+            for name, body in contents.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(body)
+                member.mode = 0o644
+                stream.addfile(member, io.BytesIO(body))
+        invalid = self.stage / "executable-negative.tgz"
+        shutil.copy2(archive, invalid)
+        with self.assertRaisesRegex(ValueError, "not executable"):
+            CANDIDATE.validate(archive)
+        declare_fixture_posix_modes(archive)
+        self.assertEqual(CANDIDATE.validate(archive)["role"], "platform")
+        with tarfile.open(archive, "r:gz") as stream:
+            self.assertEqual(stream.getmember("package/bin/review-sensei").mode, 0o755)
+            self.assertEqual(
+                stream.getmember("package/bin/_internal/runtime.dat").mode, 0o644
+            )
+        with self.assertRaisesRegex(ValueError, "not executable"):
+            CANDIDATE.validate(invalid)
 
     def test_archive_binds_source_and_all_file_bytes_and_preserves_execution(self):
         target = "darwin-arm64"
