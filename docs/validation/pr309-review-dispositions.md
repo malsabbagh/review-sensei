@@ -1,0 +1,30 @@
+# PR309 review dispositions
+
+Review source: [ReviewSensei review 5561919198](https://github.com/malsabbagh/review-sensei/pull/309#pullrequestreview-5561919198)
+at head `b04230946ce3b2f13707ed0cc74780701ac869c1`, based on current main
+`ead45bdaed3e0d1d0025b43ecac043a775e43b98`. Both inline threads and all eleven
+body-only optional findings were inspected. The issue discussion contained only
+the session ledger; it was read, not edited.
+
+| Finding | Disposition and evidence |
+| --- | --- |
+| **RS-DB07A7**, inline 4306155210 | **Fixed.** Timing files are actually read inside the temporary-directory lifetime, but truncated JSON, invalid UTF-8, invalid shapes or unexpected fields could escape and lose the parent report. The reader now validates only worker timing/count fields, records a sanitized `timing_error`, preserves actual subprocess exits, writes the parent report and exits 1. A subprocess regression overwrites worker timing at process exit; it fails on the old runner and passes with the repair. |
+| **RS-FCECA8**, inline 4306155214 | **Not reproduced; premise does not match the lanes.** The checkout runner collects editable-source coverage; the installed-wheel lane uses direct unittest commands and import guards, without this runner or `--coverage`. Coverage 7.16.2 resolves a non-directory `--source` value as an importable package, including a package outside cwd. The branch-union fixture now uses such an external package; a separate empty-data fixture proves the required `coverage report --fail-under=80` returns nonzero. An actual installed 0.8.0/0.3.0 probe records 201 engine and 102 adapter initializer lines beneath the isolated prefix, with branch data and cwd outside checkout. A prefix-only import guard in the checkout runner would incorrectly reject its intentional editable installs. No authority override or claim of owner assessment was made. |
+| RS-19ABB1 | **Already satisfied.** `test_pr308_ledger_regression.py` and both fixtures are explicit required helpers in `distribution-contract.json` and explicit `MANIFEST.in` entries. The installed lifecycle module adds the packaged tests directory before importing the helper. A missing required helper must fail discovery, not become a skip. Candidate sdist/wheel CI and published lifecycle qualification exercise the hook. |
+| RS-37DFE7 | **Strengthened.** The scheduling test now checks total assigned measured costs `[10, 11]`, in addition to disjoint/exact inventory and deterministic assignment. Separating heavy classes while putting both light classes on the wrong worker no longer passes. |
+| RS-3C152F | **Verified, no change needed.** The two named modules exist directly under `tests/dist_safe`; neither name collides with a module directly under `tests`. The explicit search paths are intentional for these non-package lane directories. Full installed qualification loads all 27 methods, and import guards reject checkout runtime imports. |
+| RS-5FD605 | **Not reproduced.** `published-cli.yml` invokes qualification without `--suite`, so all six suites, including lifecycle, run. The immutable historical validator explicitly selects five suites in a different workflow and does not upload a lifecycle result. Keep required artifact failure behavior. Published 0.8.0/0.3.0 qualified all six with no exclusions. |
+| RS-644AA6 | **Not reproduced under unittest's protocol.** `TestCase.run` calls `startTest` before entering the try/finally that calls `stopTest`; a failed `startTest` does not invoke `stopTest`. Class setup failures do not call a test's `stopTest` without `startTest`. Arbitrary custom tests can violate the protocol, but no such case is present. Damaged/missing worker evidence now fails closed through the timing reader rather than hiding the exit status. |
+| RS-9998F7 | **Addressed.** Reports now distinguish `execution_complete` and `coverage_ok` (null when not requested), retaining `complete` as their aggregate for compatibility. Coverage-failure tests assert execution remains complete while coverage is false and the lane fails. |
+| RS-332E71 | **Documented contract retained.** `.coverage` in runner cwd is the intended combined-data location used by the following CI `coverage report` command. CONTRIBUTING now states this explicitly. The fixture intentionally tests that public handoff, not a scratch filename. |
+| RS-493ACE | **Both keys are live.** Current discovery includes both `test_coalesced_admission.CoalescedAdmissionTests` and `tests.test_coalesced_admission.CoalescedAdmissionTests`. They are distinct unittest IDs in the existing inventory. Costs use their exact dotted class IDs; deleting either estimate does not normalize discovery and would discard a measured cost. |
+| RS-5391C2 | **Retain explicit configuration failure.** Omitting `--costs` already selects count-based scheduling. An explicitly requested tracked file that is missing should fail rather than silently switch scheduling. Normal CI checks out this required repository fixture. No required tests or checks are omitted. |
+| RS-7092B6 | **Already documented.** `tests/published_cli/README.md` explicitly distinguishes receipt rows (including failing subcases) from method counts. Historical 17/30 and 19/33 failure rows remain labelled as suite snapshots; published 0.8.0 has 27 passing lifecycle methods/rows. |
+| RS-77B72C | **Addressed.** The validation README indexes immutable historical snapshots, labels 0.7.1/0.2.1 failures as historical, and links a separate exact-PyPI 0.8.0/0.3.0 passing receipt. The original observations and hashes are preserved. |
+
+The full published 0.8.0/0.3.0 run passed 1,109 rows with no suite exclusions,
+verified installed origins and an exact adapter-to-engine pin. This is independent
+of candidate builds and checkout tests. Synthetic broker fixtures still cannot
+prove authenticity of the original unavailable grant. Current-head CI and actual
+hosted review receipts are recorded in the PR description and pickup comment;
+skipped review jobs do not constitute approval.

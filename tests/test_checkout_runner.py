@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -168,6 +169,13 @@ class MeasuredRunnerTests(unittest.TestCase):
             next(i for i, g in enumerate(groups) if identities[1] in g),
         )
         self.assertEqual(sorted(sum(groups, [])), identities)
+        self.assertEqual(
+            sorted(
+                sum(costs[name.rpartition(".")[0]] for name in group)
+                for group in groups
+            ),
+            [10.0, 11.0],
+        )
         self.assertEqual(groups, RUNNER.partition(identities[::-1], 2, costs))
         for invalid in (0, -1, float("nan"), float("inf")):
             with self.assertRaises(ValueError):
@@ -178,8 +186,11 @@ class MeasuredRunnerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
-            package = root / "review_sensei"
-            package.mkdir()
+            # --source accepts importable package names, including packages
+            # outside cwd, rather than interpreting every name as a cwd path.
+            installed = root / "installed"
+            package = installed / "review_sensei"
+            package.mkdir(parents=True)
             (package / "__init__.py").write_text("")
             probe = package / "probe.py"
             probe.write_text(
@@ -208,6 +219,7 @@ class No(unittest.TestCase):
                     str(report),
                 ],
                 cwd=root,
+                env={**os.environ, "PYTHONPATH": str(installed)},
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -216,6 +228,8 @@ class No(unittest.TestCase):
             self.assertIn("intentional worker failure", proc.stderr)
             data = json.loads(report.read_text())
             self.assertTrue(data["complete"])
+            self.assertTrue(data["execution_complete"])
+            self.assertTrue(data["coverage_ok"])
             self.assertEqual(data["discovered"], 2)
             self.assertEqual(
                 sorted(worker["exit"] for worker in data["workers"]), [0, 1]
@@ -283,6 +297,111 @@ class No(unittest.TestCase):
                 self.assertEqual(RUNNER.main(), 1)
             data = json.loads(report.read_text())
             self.assertFalse(data["complete"])
+            self.assertTrue(data["execution_complete"])
+            self.assertFalse(data["coverage_ok"])
             self.assertIn("coverage combination failed", data["coverage_error"])
             self.assertEqual(data["workers"][0]["executed"], 1)
             self.assertEqual(data["workers"][0]["exit"], 0)
+
+    def test_damaged_timing_reports_fail_closed_and_still_write_parent_evidence(self):
+        payloads = (
+            b"{",
+            b"\xff",
+            b"null",
+            b"[]",
+            b'{"executed":true,"class_seconds":{}}',
+            b'{"executed":1,"class_seconds":{"Case":NaN}}',
+            b'{"executed":1,"class_seconds":{},"exit":0}',
+        )
+        for payload in payloads:
+            with (
+                self.subTest(payload=payload),
+                tempfile.TemporaryDirectory() as scratch,
+            ):
+                root = Path(scratch)
+                (root / "test_damaged.py").write_text(
+                    f"""import atexit, pathlib, sys, unittest
+if "--worker-report" in sys.argv:
+    timing = pathlib.Path(sys.argv[sys.argv.index("--worker-report")+1])
+    atexit.register(lambda: timing.write_bytes({payload!r}))
+class First(unittest.TestCase):
+    def test_first(self): pass
+class Second(unittest.TestCase):
+    def test_second(self): pass
+""",
+                    encoding="utf-8",
+                )
+                report = root / "report.json"
+                proc = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "--workers",
+                        "2",
+                        "--start-directory",
+                        str(root),
+                        "--report",
+                        str(report),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                self.assertNotIn("Traceback", proc.stderr)
+                data = json.loads(report.read_text())
+                self.assertFalse(data["complete"])
+                self.assertFalse(data["execution_complete"])
+                self.assertIsNone(data["coverage_ok"])
+                self.assertEqual([worker["exit"] for worker in data["workers"]], [0, 0])
+                self.assertTrue(
+                    all(worker["timing_error"] for worker in data["workers"])
+                )
+                self.assertEqual(data["discovered"], 2)
+
+    def test_empty_coverage_cannot_pass_the_required_report_floor(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            installed = root / "installed" / "review_sensei"
+            installed.mkdir(parents=True)
+            (installed / "__init__.py").write_text("")
+            probe = root / "unrelated.py"
+            probe.write_text("pass\n")
+            data = root / ".coverage"
+            env = {**os.environ, "PYTHONPATH": str(installed.parent)}
+            run = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "coverage",
+                    "run",
+                    "--branch",
+                    "--source=review_sensei",
+                    "--data-file",
+                    str(data),
+                    str(probe),
+                ],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(run.returncode, 0, run.stderr)
+            report = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "coverage",
+                    "report",
+                    "--data-file",
+                    str(data),
+                    "--fail-under=80",
+                ],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertNotEqual(report.returncode, 0)

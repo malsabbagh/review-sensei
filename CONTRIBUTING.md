@@ -113,7 +113,13 @@ Measured class costs in `tests/fixtures/checkout-class-seconds.json` affect only
 scheduling; unknown classes receive a conservative per-method estimate. Refresh
 these estimates from archived per-worker timing receipts, never by excluding
 tests. Receipts include the discovered inventory hash, assigned/executed counts,
-worker exits and elapsed times.
+worker exits and elapsed times. `execution_complete` records exact inventory
+execution; `coverage_ok` is null when coverage was not requested and otherwise
+records whether it combined successfully. `complete` remains their aggregate
+compatibility field. A damaged worker timing report fails the lane and is
+recorded as a per-worker `timing_error`, without hiding subprocess exit codes.
+Combined checkout coverage is saved as `.coverage` in the runner working
+directory, the public handoff consumed by the next `coverage report` command.
 
 CI's Python jobs cache public pip downloads using all pinned requirements
 and both package manifests as cache inputs; they reinstall the current checkout and

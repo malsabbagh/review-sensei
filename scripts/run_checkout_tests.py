@@ -2,6 +2,8 @@
 
 Optional branch coverage is collected per worker and combined. Workers execute
 disjoint test IDs, preserve class/module fixtures, and all finish on failure.
+This is the checkout lane: coverage traces the editable source packages.
+Installed-wheel suites run directly with unittest and their own import guards.
 """
 
 from __future__ import annotations
@@ -59,6 +61,29 @@ def partition(
         groups[index].extend(members)
         loads[index] += cost(_name, members)
     return [sorted(group) for group in groups]
+
+
+def read_worker_report(path: Path) -> tuple[dict[str, object], str | None]:
+    """Read only the worker's timing fields; damaged evidence is not success."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as error:
+        return {}, "Worker timing report unreadable: " + type(error).__name__
+    if (
+        not isinstance(data, dict)
+        or set(data) != {"executed", "class_seconds"}
+        or type(data["executed"]) is not int
+        or data["executed"] < 0
+        or not isinstance(data["class_seconds"], dict)
+        or any(
+            not isinstance(name, str)
+            or type(seconds) not in (int, float)
+            or not 0 <= seconds <= sys.float_info.max
+            for name, seconds in data["class_seconds"].items()
+        )
+    ):
+        return {}, "Worker timing report has invalid fields"
+    return data, None
 
 
 def main() -> int:
@@ -197,22 +222,26 @@ def main() -> int:
                 ) as output:
                     shutil.copyfileobj(output, stream)
                 stream.flush()
-        complete = True
+        execution_complete = True
         workers = []
         for index, code in enumerate(results):
             timing = Path(scratch) / f"timing-{index}.json"
-            data = json.loads(timing.read_text()) if timing.exists() else {}
-            complete &= data.get("executed") == len(groups[index])
+            data, timing_error = read_worker_report(timing)
+            execution_complete &= data.get("executed") == len(groups[index])
+            if timing_error:
+                print(f"Worker {index + 1}: {timing_error}", file=sys.stderr)
             workers.append(
                 {
                     "worker": index,
                     "assigned": len(groups[index]),
                     "exit": code,
                     "elapsed_seconds": round(elapsed[index], 3),
+                    "timing_error": timing_error,
                     **data,
                 }
             )
         coverage_error = None
+        coverage_ok = None
         if args.coverage:
             from coverage import Coverage
             from coverage.exceptions import CoverageException
@@ -221,7 +250,7 @@ def main() -> int:
                 Path(scratch) / f".coverage.worker{index}"
                 for index in range(len(groups))
             ]
-            if not complete or not all(path.is_file() for path in paths):
+            if not execution_complete or not all(path.is_file() for path in paths):
                 coverage_error = "Missing worker coverage or incomplete execution"
             else:
                 try:
@@ -236,7 +265,8 @@ def main() -> int:
                     )
             if coverage_error:
                 print(coverage_error, file=sys.stderr)
-                complete = False
+            coverage_ok = coverage_error is None
+        complete = execution_complete and coverage_ok is not False
         if args.report:
             args.report.parent.mkdir(parents=True, exist_ok=True)
             args.report.write_text(
@@ -247,6 +277,8 @@ def main() -> int:
                         ).hexdigest(),
                         "discovered": suite.countTestCases(),
                         "complete": complete,
+                        "execution_complete": execution_complete,
+                        "coverage_ok": coverage_ok,
                         "coverage_error": coverage_error,
                         "elapsed_seconds": round(time.monotonic() - started, 3),
                         "workers": workers,

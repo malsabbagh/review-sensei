@@ -1,5 +1,10 @@
 # Approval lifecycle regression evidence
 
+This document records the original PR309 experiments. Its 0.7.1/0.2.1 receipts
+are historical, including local candidate builds that were never PyPI releases.
+See [the evidence index](README.md) for published 0.8.0/0.3.0 results and the
+current PR description for final-head candidate CI/review receipts.
+
 Baseline: fetched `origin/main` at `761b64a3112b0869a173a7a365255f6b07b5d0b8`
 (PR #308 merge). The branch uses its own clone. No tracked AGENTS.md or
 `.agents/skills` exists at this baseline; CONTRIBUTING.md supplies the gates.
