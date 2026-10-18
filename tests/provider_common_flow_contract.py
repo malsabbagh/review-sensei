@@ -78,9 +78,24 @@ class AdapterCase:
     name: str
     settings: ProviderSettings
     constructor: str
+    cli_backend: str
+    cli_inference_yaml: str = ""
+    credential_env: str | None = None
+    cli_advanced_yaml: str = ""
+    cli_negative_overrides: tuple[str, ...] = ()
     transport_argument: str = "opener"
     ollama_envelope: bool = False
     approval_without_qualification: bool = True
+
+    def configuration(self, *, advanced_yaml=None):
+        return (
+            "schema: 1\ninference:\n  backend: "
+            + self.cli_backend
+            + "\n"
+            + self.cli_inference_yaml
+            + "advanced:\n  egress:\n    allow_data_egress: true\n"
+            + (self.cli_advanced_yaml if advanced_yaml is None else advanced_yaml)
+        )
 
     def envelope(self, text):
         if self.ollama_envelope:
@@ -140,6 +155,37 @@ ADAPTER_CASES = (
             max_output_tokens=128,
         ),
         "OllamaProvider",
+        cli_backend="cloud-ollama",
+        credential_env="OLLAMA_API_KEY",
+        ollama_envelope=True,
+    ),
+    AdapterCase(
+        "OllamaLocalDefault",
+        ProviderSettings(
+            name="ollama",
+            model="qwen3.5:4b",
+            base_url="http://127.0.0.1:11434/api",
+            timeout_seconds=5,
+            max_output_tokens=128,
+        ),
+        "OllamaProvider",
+        cli_backend="local-ollama",
+        ollama_envelope=True,
+    ),
+    AdapterCase(
+        "OllamaCloudGLM",
+        ProviderSettings(
+            name="ollama",
+            model="glm-5.3:cloud",
+            base_url="https://ollama.com/api",
+            api_key="synthetic-only",
+            timeout_seconds=5,
+            max_output_tokens=128,
+        ),
+        "OllamaProvider",
+        cli_backend="cloud-ollama",
+        cli_inference_yaml="  model: glm-5.3:cloud\n",
+        credential_env="OLLAMA_API_KEY",
         ollama_envelope=True,
     ),
     AdapterCase(
@@ -153,6 +199,27 @@ ADAPTER_CASES = (
             max_output_tokens=128,
         ),
         "OpenAICompatibleProvider",
+        cli_backend="openai-compatible",
+        credential_env="OPENAI_API_KEY",
+    ),
+    AdapterCase(
+        "OpenAICustomHTTPS",
+        ProviderSettings(
+            name="openai-compatible",
+            model="gpt-4o-mini",
+            base_url="https://gateway.example.test/v1",
+            api_key="selected-custom-only",
+            timeout_seconds=5,
+            max_output_tokens=128,
+            allow_custom_endpoint=True,
+        ),
+        "OpenAICompatibleProvider",
+        cli_backend="openai-compatible",
+        credential_env="CUSTOM_OPENAI_KEY",
+        cli_advanced_yaml="  endpoint:\n    base_url: https://gateway.example.test/v1\n    allow_custom_endpoint: true\n    credential_env: CUSTOM_OPENAI_KEY\n",
+        cli_negative_overrides=(
+            "  endpoint:\n    base_url: https://gateway.example.test/v1\n    allow_custom_endpoint: false\n    credential_env: CUSTOM_OPENAI_KEY\n",
+        ),
     ),
     AdapterCase(
         "OpenRouterStrictRouting",
@@ -166,6 +233,8 @@ ADAPTER_CASES = (
             openrouter_policy=OpenRouterRoutingPolicy("morph"),
         ),
         "OpenRouterProvider",
+        cli_backend="openrouter",
+        credential_env="OPENROUTER_API_KEY",
         transport_argument="_test_opener",
         approval_without_qualification=False,
     ),
@@ -182,7 +251,12 @@ class Transport:
     def __call__(self, request, timeout, context):
         payload = json.loads(request.data)
         self.calls.append(
-            {"payload": payload, "timeout": timeout, "url": request.full_url}
+            {
+                "payload": payload,
+                "timeout": timeout,
+                "url": request.full_url,
+                "authorization": request.get_header("Authorization"),
+            }
         )
         elapsed, result = next(self.actions)
         self.clock.value += elapsed
@@ -213,18 +287,18 @@ class _CommonFlows:
 
     def test_public_cli_canonical_settings_reach_the_real_adapter(self):
         transport = Transport(self.case, [(0, CLEAN)])
-        backend = (
-            "cloud-ollama" if self.case.ollama_envelope else self.case.settings.name
-        )
+        environment = {
+            "OLLAMA_API_KEY": "ambient-ollama-sentinel",
+            "OPENAI_API_KEY": "ambient-openai-sentinel",
+            "OPENROUTER_API_KEY": "ambient-openrouter-sentinel",
+        }
+        if self.case.credential_env is not None:
+            environment[self.case.credential_env] = self.case.settings.api_key
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config, diff = root / "config.yml", root / "change.patch"
             config.write_text(
-                "schema: 1\ninference:\n  backend: "
-                + backend
-                + "\n  model: "
-                + self.case.settings.model
-                + "\nadvanced:\n  egress:\n    allow_data_egress: true\n",
+                self.case.configuration(),
                 encoding="utf-8",
             )
             diff.write_text(DIFF, encoding="utf-8")
@@ -233,11 +307,7 @@ class _CommonFlows:
                 self.case.transport_scope(transport),
                 patch.dict(
                     "os.environ",
-                    {
-                        "OLLAMA_API_KEY": "synthetic-only",
-                        "OPENAI_API_KEY": "synthetic-only",
-                        "OPENROUTER_API_KEY": "synthetic-only",
-                    },
+                    environment,
                     clear=True,
                 ),
                 redirect_stdout(stdout),
@@ -260,6 +330,14 @@ class _CommonFlows:
             self.assertEqual(json.loads(stdout.getvalue())["review_status"], "complete")
             self.assertEqual(len(transport.calls), 1)
             self.assertEqual(
+                transport.calls[0]["authorization"],
+                "Bearer " + self.case.settings.api_key
+                if self.case.settings.api_key is not None
+                else None,
+            )
+            for value in environment.values():
+                self.assertNotIn(value, stdout.getvalue() + stderr.getvalue())
+            self.assertEqual(
                 transport.calls[0]["payload"]["model"], self.case.settings.model
             )
             self.assertTrue(
@@ -270,6 +348,28 @@ class _CommonFlows:
                     transport.calls[0]["payload"]["provider"],
                     self.case.settings.openrouter_policy.to_request_provider(),
                 )
+            for rejected in self.case.cli_negative_overrides:
+                config.write_text(
+                    self.case.configuration(advanced_yaml=rejected),
+                    encoding="utf-8",
+                )
+                with (
+                    self.case.transport_scope(transport),
+                    patch.dict("os.environ", environment, clear=True),
+                    redirect_stdout(io.StringIO()),
+                    redirect_stderr(io.StringIO()),
+                ):
+                    code = main(
+                        [
+                            "--config",
+                            str(config),
+                            "--diff",
+                            str(diff),
+                            "--no-learning-proposals",
+                        ]
+                    )
+                self.assertEqual(code, 2)
+                self.assertEqual(len(transport.calls), 1)
 
     def run_review(
         self,

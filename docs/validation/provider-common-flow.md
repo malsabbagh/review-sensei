@@ -6,20 +6,29 @@ production provider abstraction, runtime refactor, permissions or support claim.
 An ADR is unnecessary because no runtime/public/persistence contract changes.
 
 `tests/provider_common_flow_contract.py` supplies one reusable contract.
-`OllamaCloudCommonFlowTests`, `OpenAIHTTPSCommonFlowTests` and
-`OpenRouterStrictRoutingCommonFlowTests` run the same fourteen methods, including
+Six generated configuration classes run the same fourteen methods, including
 legacy and unified work-mode subcases. Adding a factory supplies registry
-settings, a constructor transport seam and protocol envelope functions; the
+settings, explicit canonical backend/YAML/credential metadata, a constructor
+transport seam and protocol envelope functions; the
 scenario methods are shared. Generated classes are importable by exact test ID
 for the existing sharded checkout runner.
 
 All providers are the real production adapter classes created by the real default
 registry. Only captured synthetic HTTP transport is injected. Socket connections
-are denied for the shared scenarios. The settings are cloud Ollama
-`deepseek-v4.1-flash:cloud`, HTTPS OpenAI-compatible `gpt-4o-mini`, and OpenRouter
-`deepseek/deepseek-v4.1-flash` with the unchanged strict `morph` routing policy.
-DeepSeek and `glm-5.3:cloud` additionally pass the same registry/settings probe;
-they are model settings, not separate model-quality qualification claims.
+are denied for the shared scenarios. The supported finite configuration matrix is:
+
+| Class prefix | Canonical CLI selection | Endpoint and credential |
+| --- | --- | --- |
+| `OllamaLocalDefault` | `local-ollama`, packaged `qwen3.5:4b` default | Packaged loopback endpoint; no Authorization header even with ambient provider keys present |
+| `OllamaCloud` | `cloud-ollama`, packaged `deepseek-v4.1-flash:cloud` default | Packaged Ollama HTTPS endpoint; selected `OLLAMA_API_KEY` |
+| `OllamaCloudGLM` | `cloud-ollama`, explicit `glm-5.3:cloud` YAML | Same cloud endpoint and selected credential |
+| `OpenAIHTTPS` | `openai-compatible`, packaged `gpt-4o-mini` default | Packaged OpenAI HTTPS endpoint and selected `OPENAI_API_KEY` |
+| `OpenAICustomHTTPS` | `openai-compatible`, packaged model default | Explicit permitted custom HTTPS endpoint and selected `CUSTOM_OPENAI_KEY`, distinct from ambient `OPENAI_API_KEY`; removing endpoint permission refuses before transport |
+| `OpenRouterStrictRouting` | `openrouter`, packaged DeepSeek default | Packaged HTTPS endpoint, selected `OPENROUTER_API_KEY`, unchanged strict `morph` policy |
+
+Both approved cloud slugs run every common lifecycle method, not only a settings
+probe. The extra existing settings probe remains as a separate small control.
+These are configuration conformance observations, not model-quality claims.
 Shared engine journeys use explicit supported library settings (five-second
 adapter cap and 128 output tokens); the canonical public CLI probe uses its own
 actual resolved defaults, rather than inventing corresponding CLI flags.
@@ -27,7 +36,9 @@ actual resolved defaults, rather than inventing corresponding CLI flags.
 ## Acceptance matrix
 
 Method names below omit the `test_` prefix. Each row applies identically to all
-three generated adapter classes.
+six generated configuration classes. Backend selection is explicit case data,
+never inferred from an Ollama-shaped response envelope. The local/default-model
+and default HTTPS CLI probes omit model overrides to exercise packaged defaults.
 
 | Boundary | Shared method evidence | Limit |
 | --- | --- | --- |
@@ -57,7 +68,7 @@ engine and adapter imports under the installed prefix. The helper is declared in
 `MANIFEST.in` and `tests/fixtures/distribution-contract.json`; the installed wrapper
 is selected by `tests/published_cli/lifecycle.py` for post-package qualification.
 
-Focused source execution passed all 44 common-flow methods. Source-loader checks
+Focused source execution passed all 86 common-flow methods. Source-loader checks
 of the installed wrapper are not installed-artifact qualification. No wheel build,
 installation, live provider call or hosted mutation is part of this delegated
 change. Integration must run the clean sdist-extracted wheel lanes, post-package
@@ -65,9 +76,21 @@ inventory and complete required gates on the combined exact head. Live/deployed
 capabilities, provider quality, hosted 64/60 receipts and the full configuration
 cross product remain separate evidence requirements.
 
-Focused verification also passed 135 methods spanning common flows,
+The original three-configuration suite passed 44 common methods and 135 methods spanning common flows,
 distribution lanes, direct provider conformance/completion guards, operation
 entry and review work; the published qualification bootstrap passed 27 methods.
-The existing checkout sharder executed the exact 44-method inventory in two
+The original checkout sharder executed the exact 44-method inventory in two
 workers (28/16 assigned and executed, both exit zero), with
 `execution_complete: true`. Changed-file Ruff format/lint and diff checks passed.
+
+The expanded six-configuration suite reruns the same methods (86 total including
+the two existing Ollama controls). Its exact checkout sharder receipt discovers
+86 methods, assigns/executes 44 and 42 in two workers, and reports both exits zero
+with `execution_complete: true`. The common/configuration/registry/distribution
+focused command passes 193 methods in an environment without inherited provider
+settings. Earlier attempts inherited retired shell settings and failed existing
+configuration assertions; no product change was made to bypass those errors.
+Source-loader execution of the dist-safe wrapper also passes 86 methods; its
+deliberate checkout-import opt-out makes this a loader check, not installed-wheel
+evidence. Earlier three-configuration receipts are not reinterpreted as broader
+coverage. Installed and deployed execution remain integration gates.
