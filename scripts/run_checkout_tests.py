@@ -171,6 +171,8 @@ def main() -> int:
         costs = (
             json.loads(args.costs.read_text(encoding="utf-8")) if args.costs else None
         )
+        if args.costs and not isinstance(costs, dict):
+            raise ValueError("class costs must be a JSON object of positive seconds")
         groups = partition(test_ids(suite), args.workers, costs)
     except (ValueError, OSError) as exc:
         print(exc, file=sys.stderr)

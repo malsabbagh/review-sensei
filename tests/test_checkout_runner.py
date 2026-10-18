@@ -531,6 +531,7 @@ class BrokenProtocol(unittest.TestCase):
 
     def test_invalid_cost_files_fail_before_executing_any_workers(self):
         payloads = (
+            b"null",
             b"[]",
             b"[1]",
             b"false",
