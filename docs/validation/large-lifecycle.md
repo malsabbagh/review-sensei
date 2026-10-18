@@ -2,8 +2,9 @@
 
 This source qualification extends issues #240–245 and #269. It uses real engine,
 GitHub adapter, operation comment store and result-part implementations with
-synthetic HTTP and a deterministic provider. It does not establish installed
-wheel, published package, deployed Worker or live provider compatibility.
+synthetic HTTP and a deterministic provider. The focused source observations below do not establish published package,
+deployed Worker or live provider compatibility. The integration receipt separately
+records the sdist-extracted installed-wheel run of these shared cases.
 
 ## Acceptance matrix
 
@@ -53,5 +54,5 @@ route has no new durable replay guarantee from this change.
 
 No release, v5 movement, Worker deployment, permission or secret change is part
 of this qualification. Keep issues #240–245 and #269 open for the remaining
-rich-writer activation, joint capacity, compatible rollback and installed/live
+rich-writer activation, joint capacity, compatible rollback and remaining installed/live
 conditions; passing compact profiles does not discharge those obligations.

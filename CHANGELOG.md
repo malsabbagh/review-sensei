@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Preserve prior concerns and history across every admitted full baseline
+  refresh, including changed base/model recovery; omitted findings remain partial.
+- Bound provider transport to the original remaining review deadline, recheck
+  after durable dispatch callbacks, charge failed attempts, and reject durations
+  outside the platform transport range before dispatch.
+- Reconcile accepted human-assessment delivery without repeated inference,
+  decisions or publication; complete retained computation before the next event
+  while keeping unknown outcomes held. Read long histories with bounded adaptive
+  pagination without increasing caps.
+- Withhold new OpenRouter approval from unchecked profile/caller status claims.
+  Positive runtime report binding and legacy standalone finalizer qualification
+  remain pending. Extend installed/post-package lifecycle acceptance with explicit
+  finite capacity and deployment limitations.
+
 ## 0.8.1 - 2026-10-18
 
 - Reconcile stored exact-head finding decisions using GitHub's required PUT
