@@ -62,7 +62,7 @@ jobs:
         with:
           name: checkout-timings-${{ matrix.os }}-py${{ matrix.python-version }}
           path: ${{ runner.temp }}/checkout-timings.json
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
   quality:
     name: Quality gates
@@ -101,7 +101,7 @@ jobs:
         with:
           name: checkout-timings-quality
           path: ${{ runner.temp }}/checkout-timings.json
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
   schemas:
     name: Schemas and Action pins

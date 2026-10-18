@@ -104,3 +104,18 @@ serial attempt inherited retired provider settings and was invalid as a clean
 baseline; those failures were reproduced and cleared in the sanitized environment.
 A temporary nested adapter build directory also tripped the existing source-copy
 inventory assertion; deleting that generated build output restored the full gate.
+
+Supplemental authorized ReviewSensei CLI review used `deepseek-v4.1-flash:cloud`
+on the staged public diff with no secrets in review input. Its useful finding
+was loss of the timing receipt if coverage combination raises. The runner now
+catches coverage/I/O errors, fails closed and still writes the report; a focused
+fault test proves this. Speculative warnings about unittest reentrancy and the
+already-guarded packaged helper did not establish a defect. Both coalesced test
+class spellings are present in the actual discovery inventory, so both measured
+keys are intentional. Positional confirmation fields were clarified as keywords.
+
+The merged-baseline CI run [39088538249](https://github.com/malsabbagh/review-sensei/actions/runs/39088538249)
+finished with quality green (688s job duration), Windows green (374s job), and
+Linux x64 standalone failing because ECR Public rejected the pinned image pull
+with `toomanyrequests: Data limit exceeded`. The first draft run hit the same
+external failure before executing the build. No gate is disabled or bypassed.

@@ -214,7 +214,14 @@ class InstalledApprovalLifecycleTests(unittest.TestCase):
         )
         before = result.to_dict()
         confirmations = tuple(
-            BinaryConfirmation(item, "event", True, True, True) for item in inventory
+            BinaryConfirmation(
+                file=item,
+                event_id="event",
+                valid=True,
+                permission_current=True,
+                current=True,
+            )
+            for item in inventory
         )
         for label, receipts, expected in (
             ("current", confirmations, True),

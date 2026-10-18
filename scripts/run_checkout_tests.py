@@ -212,23 +212,31 @@ def main() -> int:
                     **data,
                 }
             )
+        coverage_error = None
         if args.coverage:
             from coverage import Coverage
+            from coverage.exceptions import CoverageException
 
             paths = [
                 Path(scratch) / f".coverage.worker{index}"
                 for index in range(len(groups))
             ]
-            if not all(path.is_file() for path in paths):
-                print(
-                    "Missing worker coverage; refusing incomplete combination",
-                    file=sys.stderr,
-                )
-                complete = False
+            if not complete or not all(path.is_file() for path in paths):
+                coverage_error = "Missing worker coverage or incomplete execution"
             else:
-                coverage = Coverage()
-                coverage.combine(data_paths=[str(path) for path in paths], strict=True)
-                coverage.save()
+                try:
+                    coverage = Coverage()
+                    coverage.combine(
+                        data_paths=[str(path) for path in paths], strict=True
+                    )
+                    coverage.save()
+                except (CoverageException, OSError) as error:
+                    coverage_error = (
+                        "Worker coverage combination failed: " + type(error).__name__
+                    )
+            if coverage_error:
+                print(coverage_error, file=sys.stderr)
+                complete = False
         if args.report:
             args.report.parent.mkdir(parents=True, exist_ok=True)
             args.report.write_text(
@@ -239,6 +247,7 @@ def main() -> int:
                         ).hexdigest(),
                         "discovered": suite.countTestCases(),
                         "complete": complete,
+                        "coverage_error": coverage_error,
                         "elapsed_seconds": round(time.monotonic() - started, 3),
                         "workers": workers,
                     },

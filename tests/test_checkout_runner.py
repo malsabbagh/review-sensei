@@ -230,3 +230,59 @@ class No(unittest.TestCase):
             self.assertTrue(
                 {(2, 3), (2, 4)} <= set(coverage.arcs(str(probe.resolve())))
             )
+
+    def test_corrupt_coverage_fails_closed_but_preserves_timing_report(self):
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        from unittest.mock import patch
+
+        from coverage.exceptions import CoverageException
+
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            (root / "test_example.py").write_text(
+                "import unittest\nclass Case(unittest.TestCase):\n    def test_ok(self): pass\n"
+            )
+            report = root / "report.json"
+
+            def corrupt_worker(command, **kwargs):
+                assigned = json.loads(
+                    Path(command[command.index("--worker-manifest") + 1]).read_text()
+                )
+                Path(command[command.index("--worker-report") + 1]).write_text(
+                    json.dumps({"executed": len(assigned), "class_seconds": {}})
+                )
+                Path(command[command.index("--data-file") + 1]).write_bytes(
+                    b"corrupt SQLite data"
+                )
+                return 0
+
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        str(SCRIPT),
+                        "--workers",
+                        "1",
+                        "--start-directory",
+                        str(root),
+                        "--coverage",
+                        "--report",
+                        str(report),
+                    ],
+                ),
+                patch.object(RUNNER.subprocess, "call", side_effect=corrupt_worker),
+                patch(
+                    "coverage.Coverage.combine",
+                    side_effect=CoverageException("synthetic corrupt coverage data"),
+                ),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(RUNNER.main(), 1)
+            data = json.loads(report.read_text())
+            self.assertFalse(data["complete"])
+            self.assertIn("coverage combination failed", data["coverage_error"])
+            self.assertEqual(data["workers"][0]["executed"], 1)
+            self.assertEqual(data["workers"][0]["exit"], 0)
