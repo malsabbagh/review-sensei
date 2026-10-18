@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.1 - 2026-10-18
+
 - Reconcile stored exact-head finding decisions using GitHub's required PUT
   review-update endpoint. Preserve incomplete-review gates and durable decisions
   when the update fails or its readback conflicts.
@@ -14,6 +16,10 @@
   genuine maintainer assessments in ReviewSensei's published instructions.
   Preserve exact recognition of the previously released setup-v5 caller so
   managed installations can upgrade without overwriting operator edits.
+
+## review-sensei-github 0.3.1 - 2026-10-18
+
+- Pin `review-sensei==0.8.1`.
 
 ## 0.8.0 - 2026-10-18
 
