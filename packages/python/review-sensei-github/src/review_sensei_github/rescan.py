@@ -169,10 +169,14 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
                 f"/repos/{args.repository}/issues/{args.pull_request}"
             )
             or not isinstance(live.get("body"), str)
-            or len(live["body"].encode("utf-8")) > 4096
-            or not issue_comment_requests_rescan(live["body"])
         ):
             raise ReviewInputError("explicit rescan comment is unauthorized or edited")
+        if len(live["body"].encode("utf-8")) > 4096:
+            raise ReviewInputError("explicit rescan comment exceeds 4096 UTF-8 bytes")
+        if not issue_comment_requests_rescan(live["body"]):
+            raise ReviewInputError(
+                "explicit rescan requires a standalone @reviewsensei rescan command"
+            )
         choose_head_sha(pull, extract_requested_commit(live["body"]))
         request_id = comment_id
         requested_at = live.get("created_at")

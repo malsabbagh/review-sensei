@@ -1045,5 +1045,9 @@ replay watermarks and bounded receipts distinguish this request from ordinary
 snapshot duplicates while retaining the existing per-head failure budget and
 current-head fences. Both reusable workflow provider lanes pass `--rescan` for
 manual dispatches and issue-comment review requests. Publication recognizes
-receipt-bound transactions and preserves all approval and coverage gates. See
+receipt-bound transactions and preserves all approval and coverage gates.
+The caller and package recognize a bounded standalone rescan command, rather
+than treating a mention plus a keyword anywhere in prose as authority. Current
+CLI/web setup generators share that grammar; exact frozen prior caller bytes
+permit managed upgrades while operator edits fail closed. See
 [ADR 0080](adr/0080-explicit-incomplete-review-rescans.md).

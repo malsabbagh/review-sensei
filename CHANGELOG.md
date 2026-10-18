@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Require a standalone `@reviewsensei rescan` (or supported alias) PR comment
+  before starting fresh analysis. Narrative summaries, quoted examples and
+  malformed commit selectors stay discussions. Apply the 4,096-byte command
+  bound before hosted execution and report oversized requests explicitly.
+- Explain discussion replies, `verify`, fresh analysis, comment edits and
+  genuine maintainer assessments in ReviewSensei's published instructions.
+  Preserve exact recognition of the previously released setup-v5 caller so
+  managed installations can upgrade without overwriting operator edits.
+
 ## 0.8.0 - 2026-10-18
 
 - Report an incomplete media-command gate update when the check capability is

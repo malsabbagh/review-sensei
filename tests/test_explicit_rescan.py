@@ -852,6 +852,31 @@ class RescanHostTests(unittest.TestCase):
             )
             self.assertEqual(authority.request_id, 10)
 
+    def test_comment_authority_explains_size_and_standalone_syntax_refusals(self):
+        from review_sensei_github.rescan import cli_event_requests_rescan
+
+        os.environ["GITHUB_EVENT_NAME"] = "issue_comment"
+        before = self.ledger.load(tx.IDENTITY).record.to_dict()
+        for body, reason in (
+            ("@reviewsensei rescan" + "\u3000" * 1400, "exceeds 4096 UTF-8 bytes"),
+            ("@reviewsensei Summary: the previous rescan completed.", "standalone"),
+            ("```\n@reviewsensei rescan\n```", "standalone"),
+        ):
+            with self.subTest(reason=reason):
+                self.http.comment["body"] = body
+                self.event.update(
+                    action="created",
+                    issue={"number": 146},
+                    comment=dict(self.http.comment),
+                )
+                self.write_event()
+                self.assertFalse(cli_event_requests_rescan())
+                with self.assertRaisesRegex(ReviewInputError, reason):
+                    resolve_rescan(
+                        self.args, self.ledger, actions_token="synthetic-actions-token"
+                    )
+                self.assertEqual(self.ledger.load(tx.IDENTITY).record.to_dict(), before)
+
     def test_comment_gate_requires_the_rescan_grammar(self):
         from review_sensei_github.rescan import cli_event_requests_rescan
 

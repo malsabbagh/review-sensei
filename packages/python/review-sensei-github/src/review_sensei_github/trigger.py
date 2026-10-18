@@ -13,7 +13,9 @@ from typing import Any, Mapping, TextIO
 _GIT_SHA_FULL = re.compile(r"^[a-f0-9]{40}$")
 _GIT_SHA_PREFIX = re.compile(r"^[a-f0-9]{7,39}$")
 _GIT_REF = re.compile(r"^[A-Za-z0-9._/-]+$")
-_RESCAN = re.compile(r"\bre[\s-]?scan\b", re.IGNORECASE)
+_RESCAN_COMMAND = re.compile(
+    r"(?:@sensei|(?ai:@reviewsensei))[^\S\r\n]+(?i:re(?:[^\S\r\n]|-)?scan)(?:[^\S\r\n]+(?ai:commit)[^\S\r\n]+(?P<commit>[a-fA-F0-9]{7,40}))?"
+)
 _COMMIT_SHA = re.compile(r"\bcommit\s+([a-f0-9]{7,40})\b", re.IGNORECASE)
 _REVIEWSENSEI_MENTION = re.compile(r"(?:^|\s)(?ai:@reviewsensei)(?:$|\s|[.,!?])")
 _SENSEI_COMMAND = re.compile(r"(?m)(?<!\S)(?:@sensei|(?ai:@reviewsensei))(?=\s+)")
@@ -72,11 +74,13 @@ def comment_mentions_sensei(body: str) -> bool:
 
 
 def issue_comment_requests_rescan(body: str) -> bool:
-    """Return whether a PR issue comment asks ReviewSensei to re-scan."""
+    """Accept only a bounded, standalone rescan command, never quoted prose."""
 
-    if not comment_mentions_sensei(body):
-        return False
-    return _RESCAN.search(body) is not None
+    return (
+        isinstance(body, str)
+        and len(body.encode("utf-8")) <= 4096
+        and _RESCAN_COMMAND.fullmatch(body.strip()) is not None
+    )
 
 
 def extract_requested_commit(body: str) -> str | None:
@@ -198,8 +202,11 @@ def resolve_issue_comment(
 ) -> TriggerResolution:
     """Resolve a PR issue comment into review or mention-reply operation inputs."""
 
-    if issue_comment_requests_rescan(body):
-        requested = extract_requested_commit(body)
+    rescan = _RESCAN_COMMAND.fullmatch(body.strip())
+    if rescan is not None:
+        if len(body.encode("utf-8")) > 4096:
+            raise ValueError("explicit rescan comment exceeds 4096 UTF-8 bytes")
+        requested = rescan.group("commit")
         return _resolution_from_pull(
             pull,
             operation="review",
