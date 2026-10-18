@@ -362,8 +362,16 @@ class Second(unittest.TestCase):
                 self.assertFalse(data["execution_complete"])
                 self.assertIsNone(data["coverage_ok"])
                 self.assertEqual([worker["exit"] for worker in data["workers"]], [0, 0])
-                self.assertTrue(
-                    all(worker["timing_error"] for worker in data["workers"])
+                expected_error = (
+                    "Worker timing report unreadable: JSONDecodeError"
+                    if payload == b"{"
+                    else "Worker timing report unreadable: UnicodeDecodeError"
+                    if payload == b"\xff"
+                    else "Worker timing report has invalid fields"
+                )
+                self.assertEqual(
+                    [worker["timing_error"] for worker in data["workers"]],
+                    [expected_error, expected_error],
                 )
                 self.assertEqual(data["discovered"], 2)
                 self.assertTrue(

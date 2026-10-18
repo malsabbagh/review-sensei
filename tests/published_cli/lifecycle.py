@@ -19,8 +19,18 @@ def load_contracts(tests):
     """
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
+    root = tests.resolve()
+    lane = (root / "dist_safe").resolve()
+    if lane.parent != root:
+        raise ImportError("contract directory escapes the qualification root")
+    paths = []
     for name in ("test_approval_lifecycle_contract", "test_local_review_contract"):
-        path = tests / "dist_safe" / (name + ".py")
+        path = (lane / (name + ".py")).resolve()
+        if path.parent != lane or path.name != name + ".py":
+            raise ImportError("contract file escapes its declared path")
+        paths.append((name, path))
+    # Validate the entire declared inventory before executing either module.
+    for name, path in paths:
         spec = importlib.util.spec_from_file_location(name, path)
         if spec is None or spec.loader is None:
             raise ImportError("contract module has no file loader")

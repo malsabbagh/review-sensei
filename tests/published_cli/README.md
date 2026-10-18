@@ -89,3 +89,13 @@ so a same-named module elsewhere on the search path cannot shadow them. Receipts
 include `tests_run` separately from row counts, a sanitized `load_error` for file
 import failures, and an explicit failed `empty-suite` row if discovery is empty.
 Neither condition counts as passing qualification.
+
+Lifecycle qualification treats every skipped method or subtest as a failed row
+with `kind=skipped`, even though unittest itself permits skips. Any such row
+invalidates qualification and forces exit 1. `tests_run` counts parent methods;
+passing subtests produce their parent's passing row, while failing subtests
+produce individual failed rows. These counts intentionally differ.
+The loader validates both declared resolved paths before executing either file,
+rejecting a contract file or directory symlink that escapes its declared location.
+The qualification ref supplies trusted test code; these path checks do not
+attest the harness contents or make arbitrary test code safe to execute.

@@ -84,6 +84,11 @@ coverage 82.36% (34,513 statements; 15,502 branches), above the unchanged 80%
 floor. This is a local macOS arm64/Python 3.14.6 measurement, not an Actions
 speedup claim. The committed 53 class costs were measured locally with serial
 coverage; omitted classes estimate 0.02s/method. Costs never select the inventory.
+The scheduling fixture is unchanged from commit
+`f04da88d7d553a811881792b23f27362a6834707`; its exact SHA-256 is
+`9f299eecd056cb8d4f902212ef6249878744b926416bd4cdb9ac4adfa38a7d43`.
+This digest identifies scheduling weights, separately from the discovered test
+inventory digest above.
 A separate fixture proves both sides of a branch survive worker combination even
 when one worker intentionally fails; exact inventory and all-worker completion
 checks remain active. Hosted timings below establish the actual CI change.

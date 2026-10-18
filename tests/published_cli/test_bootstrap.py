@@ -542,7 +542,7 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         names = ("test_approval_lifecycle_contract", "test_local_review_contract")
-        previous = {name: sys.modules.get(name) for name in names}
+        previous = dict(sys.modules)
         try:
             with tempfile.TemporaryDirectory() as scratch:
                 root = Path(scratch)
@@ -569,11 +569,39 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                         (lane / (name + ".py")).resolve(),
                     )
         finally:
-            for name, old in previous.items():
-                if old is None:
-                    sys.modules.pop(name, None)
-                else:
-                    sys.modules[name] = old
+            sys.modules.clear()
+            sys.modules.update(previous)
+
+    @unittest.skipIf(os.name == "nt", "symlink creation requires Windows privileges")
+    def test_contract_symlink_escape_is_rejected_before_any_module_executes(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "published_lifecycle_loader", Path(__file__).with_name("lifecycle.py")
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            tests = root / "tests"
+            lane = tests / "dist_safe"
+            lane.mkdir(parents=True)
+            marker = root / "executed"
+            code = f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
+            (lane / "test_approval_lifecycle_contract.py").write_text(code)
+            outside = root / "test_local_review_contract.py"
+            outside.write_text(code)
+            (lane / outside.name).symlink_to(outside)
+            with self.assertRaisesRegex(ImportError, "escapes its declared path"):
+                module.load_contracts(tests)
+            self.assertFalse(marker.exists())
+            (lane / outside.name).unlink()
+            (lane / "test_approval_lifecycle_contract.py").unlink()
+            lane.rmdir()
+            lane.symlink_to(root, target_is_directory=True)
+            with self.assertRaisesRegex(ImportError, "directory escapes"):
+                module.load_contracts(tests)
+            self.assertFalse(marker.exists())
 
 
 if __name__ == "__main__":

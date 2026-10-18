@@ -153,3 +153,32 @@ approved review.
 | RS-F58AD6, optional body | Both requirements files are part of the whole PR diff. Include-contract tests and actual CI installs verify their use. |
 | RS-714000, optional body | test.txt intentionally includes the shared pinned YAML requirements file. Its only dependency is PyYAML; no unnecessary historical validation tool is pulled in. |
 | RS-5BBC8A, optional body | The bootstrap test already accepts the exact historical five-suite selection, checks default all-six membership and rejects empty/unknown/duplicate names. |
+
+## Maintainer follow-up to the pending receipt
+
+The pending receipt on parent head `6ac71fecee3709128bb4bed56278267e5409bfcd`
+was checked against the full candidate code and focused regressions. These
+engineering dispositions do not clear the hosted review's partial-analysis
+status. Any maintainer risk decision must be newly recorded for the exact head.
+
+| Finding | Follow-up disposition |
+| --- | --- |
+| RS-1BC712 | Hardened: resolve both fixed contract paths and their directory before either module executes; reject symlink escapes. A filesystem regression fails on the parent and passes with the guard. Test-harness contents remain trusted qualification-ref code, not authenticated wheel contents. |
+| RS-1F1771 | Clarified why the checkout JWT tests preserve the former CI cryptography pin. Published-wheel qualification creates a separate environment and resolves wheel-declared runtime dependencies. |
+| RS-38C8CD | False positive: missing worker coverage means that worker's data file is absent. Valid timing, assigned execution and exit zero isolate this fault; combine must not run. Existing fault and real-process branch-union tests cover distinct cases. |
+| RS-4B3351 | Retain the documented distinction: complete/execution_complete describe evidence/inventory completeness; each actual worker exit is recorded, and every exit must be zero for lane success. A real assertion-failing worker produces exit 1 despite complete diagnostic evidence. |
+| RS-4EFE15 | False positive: the runner verifies every worker's timing/count and data-file presence before combining; missing or incomplete evidence forces exit 1 before the percentage report. |
+| RS-50CE88 | Strengthened bootstrap isolation: restore the complete module mapping; the existing path patch restores the original path object. Synthetic modules import only the already loaded unittest module. |
+| RS-73F040 | Documented explicitly: any skipped method/subtest is kind=skipped and a failed qualification row, forcing exit 1 even when unittest permits skips. |
+| RS-8ED9CC | Retain diagnostic coverage from completed failing workers. Combining their trace never overrides their nonzero exits; both the runner and CI lane fail. This is intentional diagnostics, not successful qualification. |
+| RS-987788 | False positive: every coverage worker explicitly receives --branch and --source=review_sensei,review_sensei_github. The CI floor remains 80%. |
+| RS-C3443B | Strengthened: each damaged payload now requires its exact sanitized error. Deliberate NaN input tests semantic rejection by the permissive Python JSON decoder's downstream finite-number validation. |
+| RS-C4F1C3 | Retain unittest parent-method semantics: passing subtests produce one parent pass row, failed subtests produce individual failure rows, and final success requires wasSuccessful plus zero failed rows. The separate counts are documented. |
+| RS-E5FD12 | False positive: both local wheels are explicit pip requirements in one transaction. A conflicting exact engine dependency cannot replace the explicit local requirement; resolution must fail. The clean consumer still resolves other declared runtime dependencies normally. |
+| RS-F3589F | Retain subset assertions for the tiny stable if/return probe, not equality against the entire arc graph. Exact executed counts intentionally protect exhaustive inventory; cross-platform CI tests the same contract. |
+| RS-F77278 | Added the exact scheduling-fixture SHA-256 and origin commit to the measurement document, distinct from test inventory hashes. |
+
+No ADR is needed: the follow-up changes qualification harness bounds, regression
+assertions and documentation; runtime schemas, authentication, persistence and
+approval policy are unchanged. A code-path review by this follow-up is separate
+from hosted AI evidence and does not turn a partial hosted result into complete.
