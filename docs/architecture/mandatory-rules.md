@@ -641,3 +641,11 @@ application boundary or grant another provider allowance. Unbound older accepted
 payloads require a new authorized mention. See the replay amendment in
 [ADR 0061](adr/0061-human-reply-reassessment.md) and the finite source matrix in
 [large lifecycle qualification](validation/large-lifecycle.md).
+  OpenRouter preserves requested model, observed model/upstream and reported
+  fingerprint independently; optional `ProviderTokenUsage` contains only three
+  bounded provider-reported counters. Invalid optional protocol metadata stays
+  unknown. Live evaluation aggregates a counter only when every attempt reported
+  it; failures and cancellation remain attempted work. Routing identifiers retain
+  their full bounded family/variant/region/tier prefix and participate in policy
+  digests. Eligibility for DeepSeek/Morph evidence collection is distinct from
+  passing qualification and approval (proposed ADR 0081).
