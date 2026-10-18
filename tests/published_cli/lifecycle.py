@@ -15,6 +15,7 @@ CONTRACTS = (
     "test_baseline_recovery_contract",
     "test_provider_deadline_contract",
     "test_openrouter_cli_contract",
+    "test_large_public_lifecycle_contract",
 )
 
 

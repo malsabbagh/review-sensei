@@ -84,7 +84,7 @@ digests. It does not claim those old bytes implement newer lifecycle behavior.
 Default post-publication qualification runs all six suites; receipts always list
 selected and excluded suites so a subset cannot be mistaken for full coverage.
 
-Lifecycle contracts load from the five declared files under `tests/dist_safe`,
+Lifecycle contracts load from the six declared files under `tests/dist_safe`,
 so a same-named module elsewhere on the search path cannot shadow them. Receipts
 include `tests_run` separately from row counts, a sanitized `load_error` for file
 import failures, and an explicit failed `empty-suite` row if discovery is empty.
@@ -108,3 +108,10 @@ The OpenRouter sentinel matrix captures the actual strict Morph request and
 proves selected-key isolation/missing-key refusal without live provider I/O.
 These bounded additions do not qualify all hosted operation/control combinations
 or promote any model. See [the remaining acceptance matrix](../../docs/validation/remaining-lifecycle.md).
+
+The declared large public lifecycle composition also runs from sdist-extracted
+fixtures against both installed wheels. Its 100 SHA-256 and 250 compact-ID
+profiles use one required path and 100/250 ordinary historical comments; they
+do not qualify 250 rich independent identities or 100/250 distinct paths. Four
+fixture modules are explicitly retained by the distribution contract. Product
+imports stay under the wheel environment; socket connections are forbidden.

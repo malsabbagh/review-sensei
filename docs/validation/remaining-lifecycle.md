@@ -59,6 +59,7 @@ load-error cases as qualification failures:
 - `tests/dist_safe/test_baseline_recovery_contract.py`
 - `tests/dist_safe/test_provider_deadline_contract.py`
 - `tests/dist_safe/test_openrouter_cli_contract.py`
+- `tests/dist_safe/test_large_public_lifecycle_contract.py`
 
 The sdist distribution contract declares every shared helper and preserves
 checkout-only exclusions. Package CI uses only the two built wheels and the
