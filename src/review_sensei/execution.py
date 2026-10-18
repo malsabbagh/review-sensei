@@ -275,6 +275,8 @@ def execute_call(
         timeout = tracker.remaining_seconds()
         if request.timeout_seconds is not None:
             timeout = min(timeout, request.timeout_seconds)
+        if timeout <= 0:
+            return CallResult(diagnostic="deadline_exceeded")
         bounded = replace(
             request, max_response_bytes=output_limit, timeout_seconds=timeout
         )
@@ -308,12 +310,24 @@ def execute_call(
             if after_accounting is not None:
                 after_accounting()
             return CallResult(diagnostic="provider_identity_changed")
+        # Saving a durable dispatch witness can itself consume the remaining
+        # time. Recheck immediately before transport without resetting charge
+        # or reservation; a saved dispatch remains conservative on recovery.
+        remaining = tracker.remaining_seconds()
+        if remaining <= 0:
+            output_accounting.uncertain()
+            if after_accounting is not None:
+                after_accounting()
+            return CallResult(diagnostic="deadline_exceeded")
+        bounded = replace(bounded, timeout_seconds=min(timeout, remaining))
         try:
             response = provider.complete(bounded)
         except ProviderError as exc:
             output_accounting.uncertain()
             if after_accounting is not None:
                 after_accounting()
+            if tracker.remaining_seconds() <= 0:
+                return CallResult(diagnostic="deadline_exceeded")
             if not exc.transient:
                 return CallResult(diagnostic="provider_failed")
             reason = tracker.admit_transport_retry(exc.retry_after_seconds)

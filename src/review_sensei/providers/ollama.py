@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import ssl
 import unicodedata
@@ -22,6 +23,7 @@ from ..errors import ProviderError, ReviewInputError
 from ..models import ProviderRequest, ProviderResponse
 from ..validation import validate_bounded_text
 from .transport import (
+    bounded_transport_timeout,
     parse_retry_after_seconds,
     read_bounded_body,
     urllib_error_is_transient,
@@ -90,8 +92,13 @@ class OllamaProvider:
             raise ValueError("Ollama base_url must be non-empty")
         if not model.strip():
             raise ValueError("Ollama model must be non-empty")
-        if timeout_seconds <= 0:
-            raise ValueError("Ollama timeout_seconds must be positive")
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0
+        ):
+            raise ValueError("Ollama timeout_seconds must be a finite positive number")
         if type(require_completion_metadata) is not bool:
             raise ValueError("Ollama completion metadata policy must be a boolean")
         if require_completion_metadata and allow_model_override:
@@ -193,10 +200,8 @@ class OllamaProvider:
             or self.allow_model_override
         ):
             raise ProviderError("Ollama qualified transport binding changed")
-        timeout = (
-            min(self.timeout_seconds, request.timeout_seconds)
-            if request.timeout_seconds is not None
-            else self.timeout_seconds
+        timeout = bounded_transport_timeout(
+            self.timeout_seconds, request.timeout_seconds, label="Ollama"
         )
         model = (request.model if self.allow_model_override else None) or self.model
         try:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import math
 import re
 import socket
 from typing import Any
@@ -19,6 +20,20 @@ _TRANSIENT_NETWORK_ERRNOS = frozenset(
 )
 MAX_RETRY_AFTER_SECONDS = 60.0
 _DECIMAL_RETRY_AFTER = re.compile(r"^[0-9]+(\.[0-9]+)?$")
+
+
+def bounded_transport_timeout(
+    configured: float, requested: float | None, *, label: str
+) -> float:
+    """Validate mutable transport configuration before applying a request cap."""
+    if (
+        isinstance(configured, bool)
+        or not isinstance(configured, (int, float))
+        or not math.isfinite(configured)
+        or configured <= 0
+    ):
+        raise ProviderError(f"{label} timeout_seconds must be a finite positive number")
+    return min(configured, requested) if requested is not None else configured
 
 
 def urllib_error_is_transient(exc: URLError) -> bool:

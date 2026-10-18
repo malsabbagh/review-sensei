@@ -36,6 +36,7 @@ from ..errors import ProviderError, ReviewInputError
 from ..models import ProviderRequest, ProviderResponse
 from ..validation import validate_bounded_text
 from .transport import (
+    bounded_transport_timeout,
     parse_retry_after_seconds,
     read_bounded_body,
     urllib_error_is_transient,
@@ -427,10 +428,8 @@ class OpenRouterProvider:
             ) from exc
 
     def complete(self, request: ProviderRequest) -> ProviderResponse:
-        timeout = (
-            min(self.timeout_seconds, request.timeout_seconds)
-            if request.timeout_seconds is not None
-            else self.timeout_seconds
+        timeout = bounded_transport_timeout(
+            self.timeout_seconds, request.timeout_seconds, label="OpenRouter"
         )
         model = (request.model if self.allow_model_override else None) or self.model
         try:

@@ -864,10 +864,16 @@ class HumanAssessmentService:
                     f"human assessment budget exhausted (reason={diagnostic})",
                     diagnostic=diagnostic,
                 )
+            remaining = tracker.remaining_seconds()
+            if remaining <= 0:
+                raise ReviewInputError(
+                    "human assessment budget exhausted (reason=deadline_exceeded)",
+                    diagnostic="deadline_exceeded",
+                )
             bounded = replace(
                 request,
                 max_response_bytes=output_limit,
-                timeout_seconds=tracker.remaining_seconds(),
+                timeout_seconds=remaining,
             )
             tracker.record_prompt_attempt(request.prompt)
             tracker.record_provider_call()
@@ -875,6 +881,11 @@ class HumanAssessmentService:
             try:
                 response = self.provider.complete(bounded)
             except ProviderError as exc:
+                if tracker.remaining_seconds() <= 0:
+                    raise ReviewInputError(
+                        "human assessment budget exhausted (reason=deadline_exceeded)",
+                        diagnostic="deadline_exceeded",
+                    ) from None
                 # Incomplete envelopes and transport failures are not JSON syntax.
                 raise ProviderError(
                     "human assessment provider transport or completion failed",
