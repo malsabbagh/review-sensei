@@ -134,7 +134,7 @@ def _conversation_from_bytes(payload: bytes) -> ConversationReply:
     return ConversationReply.from_dict(loaded)
 
 
-def _assessment_bytes(value: object) -> bytes:
+def _assessment_bytes(value: object, *, replay_context: str | None = None) -> bytes:
     reply = value.reply if isinstance(value, HumanAssessmentWork) else value
     if not isinstance(reply, HumanAssessmentReply):
         return b""
@@ -142,8 +142,16 @@ def _assessment_bytes(value: object) -> bytes:
         "body": reply.body,
         "decisions": [item.to_dict() for item in reply.decisions],
         "context_requests": [item.to_dict() for item in reply.context_requests],
+        "replay_context": replay_context,
     }
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+@dataclass(frozen=True)
+class _RecordedHumanAssessmentReply(HumanAssessmentReply):
+    """Validated reply bytes restored from an accepted operation result."""
+
+    replay_context: str | None = None
 
 
 def _assessment_from_bytes(payload: bytes) -> HumanAssessmentReply:
@@ -154,7 +162,7 @@ def _assessment_from_bytes(payload: bytes) -> HumanAssessmentReply:
     requests = loaded.get("context_requests")
     if not isinstance(decisions, list) or not isinstance(requests, list):
         raise ReviewInputError("operation entry refused: result_missing")
-    return HumanAssessmentReply(
+    return _RecordedHumanAssessmentReply(
         str(loaded.get("body", "")),
         tuple(
             HumanAssessmentDecision(
@@ -181,6 +189,7 @@ def _assessment_from_bytes(payload: bytes) -> HumanAssessmentReply:
             for item in requests
             if isinstance(item, dict) and isinstance(item.get("required_paths"), list)
         ),
+        replay_context=loaded.get("replay_context"),
     )
 
 
@@ -2425,7 +2434,9 @@ class GitHubApplication:
                                 recovery=work_recovery,
                                 broader_service=broader_service,
                             ),
-                            encode=_assessment_bytes,
+                            encode=lambda value: _assessment_bytes(
+                                value, replay_context=human.replay_context_digest
+                            ),
                             decode=_assessment_from_bytes,
                         )
                         if isinstance(produced, HumanAssessmentWork):
@@ -2475,7 +2486,9 @@ class GitHubApplication:
                                 model=model,
                                 tracker=work_tracker,
                             ),
-                            encode=_assessment_bytes,
+                            encode=lambda value: _assessment_bytes(
+                                value, replay_context=human.replay_context_digest
+                            ),
                             decode=_assessment_from_bytes,
                         )
                         if not isinstance(produced_reply, HumanAssessmentReply):
@@ -2487,6 +2500,13 @@ class GitHubApplication:
                         assessment = HumanAssessmentReply(
                             body="Retrying approval finalization for previously reassessed findings; all approval requirements still apply.",
                             decisions=(),
+                        )
+                    if (
+                        isinstance(assessment, _RecordedHumanAssessmentReply)
+                        and assessment.replay_context != human.replay_context_digest
+                    ):
+                        raise ReviewInputError(
+                            "human assessment replay authority changed; submit a new authorized mention"
                         )
                     accepted = not inventory.pending or any(
                         item.decision != "unresolved" for item in assessment.decisions
@@ -2515,6 +2535,9 @@ class GitHubApplication:
                         if work_assessment is not None
                         else assessment,
                         app_slug=app_slug,
+                        recorded_replay=isinstance(
+                            assessment, _RecordedHumanAssessmentReply
+                        ),
                     )
                     if (
                         work_assessment is not None

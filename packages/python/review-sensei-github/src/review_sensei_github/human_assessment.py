@@ -12,7 +12,7 @@ from typing import Any
 
 from review_sensei.budgets import ReviewWorkBudgets
 from review_sensei.errors import ReviewInputError
-from review_sensei.evidence import EvidenceBundle, evidence_digest
+from review_sensei.evidence import EvidenceBundle, EvidenceGroup, evidence_digest
 from review_sensei.feedback import (
     MAX_FEEDBACK_BYTES,
     FeedbackAdmissionError,
@@ -133,6 +133,33 @@ class PreparedHumanAssessment:
         if self.feedback is not None:
             authority["feedback_digest"] = self.feedback.digest
         return evidence_digest(authority)
+
+    @property
+    def replay_context_digest(self) -> str:
+        """Bind accepted bytes while allowing monotonic resolution progress."""
+        inventory = self.eligibility.human_review
+        if inventory is None:
+            raise GitHubConversationError(
+                "human assessment replay inventory is missing"
+            )
+        normalized = replace(
+            self,
+            eligibility=replace(
+                self.eligibility,
+                human_review=replace(inventory, resolved=()),
+                facts=replace(
+                    self.eligibility.facts, has_human_adjudication_findings=True
+                ),
+            ),
+        )
+        return evidence_digest(
+            {
+                "authority": normalized.authority_digest,
+                "evidence": self.evidence_bundle.digest
+                if self.evidence_bundle is not None
+                else self.conversation.context.diff_context,
+            }
+        )
 
     def __post_init__(self) -> None:
         if self.feedback is not None:
@@ -731,6 +758,7 @@ class HumanAssessmentPublisher:
         app_slug: str,
         check_token: str | None = None,
         reviews_policy: str = "auto-approve",
+        recorded_replay: bool = False,
     ) -> ReplyResult:
         conversation = prepared.conversation
         if prepared.feedback is not None and self.before_read is None:
@@ -783,7 +811,14 @@ class HumanAssessmentPublisher:
         try:
             updated_inventory = (
                 work.inventory if work is not None else inventory
-            ).apply(reply.decisions)
+            ).apply(
+                tuple(
+                    decision
+                    for decision in reply.decisions
+                    if not recorded_replay
+                    or decision.fingerprint not in inventory.resolved
+                )
+            )
         except ReviewInputError as exc:
             raise GitHubConversationError(
                 "human assessment identities are invalid"
@@ -800,14 +835,27 @@ class HumanAssessmentPublisher:
             raise GitHubConversationError(
                 "human assessment reply contains a reserved marker"
             )
-        findings = {item.fingerprint: item for item in inventory.pending}
+        # Accepted operation replay can follow durable eligibility publication.
+        # Revalidate every original citation, but never apply its resolved IDs
+        # a second time or infer new decisions for the remaining inventory.
+        findings = {
+            item.fingerprint: item
+            for item in (inventory.findings if recorded_replay else inventory.pending)
+        }
         try:
             for decision in reply.decisions if work is None else ():
                 validate_assessment_evidence(
                     decision,
                     findings[decision.fingerprint],
                     source_body=prepared.source_body,
-                    diff_context=conversation.context.diff_context or "",
+                    diff_context=(
+                        EvidenceGroup(
+                            prepared.evidence_bundle,
+                            findings[decision.fingerprint].evidence_paths,
+                        ).diff_context
+                        if recorded_replay and prepared.evidence_bundle is not None
+                        else conversation.context.diff_context or ""
+                    ),
                     **(
                         {"feedback": prepared.feedback}
                         if prepared.feedback is not None
