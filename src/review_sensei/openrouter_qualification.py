@@ -426,6 +426,16 @@ def _validate_openrouter_live_report(
         raise ReviewInputError(
             "OpenRouter qualification requires remote endpoint_scope in live reports"
         )
+    if run.get("openrouter_routing_policy_digest") != target.routing_policy_digest():
+        raise ReviewInputError(
+            "OpenRouter qualification report routing policy does not match target; "
+            "retained live reports must bind the effective routing policy"
+        )
+    if run.get("openrouter_base_url") != target.base_url:
+        raise ReviewInputError(
+            "OpenRouter qualification report base URL does not match target; "
+            "retained live reports must bind the effective endpoint"
+        )
 
 
 def qualification_record_from_reports(

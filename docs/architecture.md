@@ -805,6 +805,13 @@ The positive runtime evidence path and legacy standalone-finalizer binding
 remain open under #115; see [the runtime boundary](openrouter-qualification.md#runtime-approval-boundary-115)
 and [ADR 0045](adr/0045-openrouter-trusted-configuration.md).
 
+The qualification harness separately requires every live report to bind its
+actual requested routing-policy digest and base URL to the selected target.
+Missing bindings or a changed suffix/endpoint fail before support can be minted
+or loaded. Old report bytes still parse but cannot newly authorize unbound live
+support; historical targets remain eligible. This report-target check does not
+supply the still-missing runtime approval binding. See ADR 0081.
+
 Before an enabled review reaches either provider, the reusable workflow runs a
 read-only authoritative pull-request preflight. It validates the repository
 numeric id, open/non-draft state, same-repository non-fork head, exact head

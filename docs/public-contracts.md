@@ -1388,3 +1388,13 @@ consult retired routing environment variables. Named-profile routing restriction
 remain exact. The legacy evaluation command still resolves its environment policy
 at the CLI boundary. Selecting a suffix does not inherit family qualification;
 unknown endpoint capabilities remain unverified.
+
+Live OpenRouter evaluation reports optionally expose
+`run.openrouter_routing_policy_digest` and `run.openrouter_base_url`, derived
+from the actual adapter's requested policy/endpoint. The qualification gate
+requires both fields to equal its independent target for every live report;
+absence, another upstream/suffix or another endpoint fails closed. Historical
+v1 documents still validate structurally, but unbound live reports cannot newly
+mint/load support. Retained evidence bytes must not be migrated by adding fields.
+The case-status enum also admits the live producer's existing `skipped` status;
+a skipped case is not converted to a passed deterministic check.

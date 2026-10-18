@@ -87,6 +87,21 @@ cannot establish qualification or approve a review.
 Repeat until three independent passing reports exist. Retain exact report files
 and provider terms/egress approval separately from the public support record.
 
+Current engineering prerequisite: the packaged live evaluator still compares
+exact fixture identity with live provider identity and skips contract-rejection
+cases while requiring their deterministic threshold. The command above can
+serialize an honest failing report, but repeated provider calls cannot currently
+complete those packaged-corpus gates. Resolve applicability/matching before
+attempting #122's passing live collection; this patch does not lower thresholds.
+
+Live OpenRouter reports bind their actual requested policy and endpoint in
+`run.openrouter_routing_policy_digest` and `run.openrouter_base_url`. Every live
+report must match the qualification target on both fields before a support
+record can be minted or checked. A `morph/variant` policy cannot inherit `morph`
+family evidence. Old reports without these optional schema fields still parse,
+but cannot newly authorize support; preserve their original bytes and collect
+new bound evidence. Historical Haiku/Anthropic remains an eligible target.
+
 ## Support record
 
 Publish a machine-readable `openrouter-qualification` document (schema id

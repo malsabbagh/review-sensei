@@ -1481,6 +1481,7 @@ def evaluate_live(
         model=model,
         endpoint_scope=endpoint_scope,
         openrouter_policy=openrouter_policy,
+        openrouter_base_url=getattr(provider, "base_url", None),
     )
 
 
@@ -1495,6 +1496,7 @@ def build_report(
     model: str | None,
     endpoint_scope: str,
     openrouter_policy: Mapping[str, object] | None = None,
+    openrouter_base_url: str | None = None,
 ) -> dict[str, Any]:
     quality_cases = [case for case in cases if case["kind"] == "quality"]
     expected = sum(case["expected_matches"] for case in quality_cases)
@@ -1599,6 +1601,15 @@ def build_report(
         report["metrics"]["provider_reported_usage"] = (
             measured.provider_reported_usage()
         )
+        if provider == "openrouter":
+            if openrouter_policy is not None:
+                # Same canonical JSON algorithm as routing_policy_digest; keep
+                # this lower layer independent of the qualification consumer.
+                report["run"]["openrouter_routing_policy_digest"] = _json_digest(
+                    dict(openrouter_policy)
+                )
+            if openrouter_base_url is not None:
+                report["run"]["openrouter_base_url"] = openrouter_base_url
     thresholds = corpus.document["deterministic_thresholds"]
     if exact_rate < float(thresholds["exact_fixture_result_rate"]):
         threshold_failures.append("exact_fixture_result_rate")

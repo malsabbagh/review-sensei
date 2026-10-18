@@ -373,6 +373,7 @@ class HostedQualificationConfigurationTests(unittest.TestCase):
                     mode=mode,
                     model=target.model,
                     invocation_id=f"synthetic-target-{index}",
+                    routing_policy=target.routing_policy(),
                 )
                 for index in range(count)
             ]
@@ -484,6 +485,11 @@ class HostedQualificationConfigurationTests(unittest.TestCase):
         self.assertEqual(
             payloads[0]["provider"], target.routing_policy().to_request_provider()
         )
+        self.assertEqual(
+            report["run"]["openrouter_routing_policy_digest"],
+            target.routing_policy_digest(),
+        )
+        self.assertEqual(report["run"]["openrouter_base_url"], target.base_url)
         # This CLI field remains explicitly operator-attested. A returned alias
         # or fingerprint cannot replace it or establish qualification authority.
         self.assertEqual(
@@ -495,12 +501,16 @@ class HostedQualificationConfigurationTests(unittest.TestCase):
         validate_public_document(report, "evaluation-report")
         legacy = copy.deepcopy(report)
         del legacy["metrics"]["provider_reported_usage"]
+        for field in ("openrouter_routing_policy_digest", "openrouter_base_url"):
+            del legacy["run"][field]
         validate_public_document(legacy, "evaluation-report")
         # The prior closed v1 reader rejects the additive object. Migrating the
         # reader to the current packaged schema is required; old report bytes
         # still validate and must not be rewritten as qualification evidence.
         old_schema = copy.deepcopy(load_schema("evaluation-report"))
         del old_schema["properties"]["metrics"]["properties"]["provider_reported_usage"]
+        for field in ("openrouter_routing_policy_digest", "openrouter_base_url"):
+            del old_schema["properties"]["run"]["properties"][field]
         with self.assertRaises(ValidationError):
             Draft202012Validator(old_schema).validate(report)
         Draft202012Validator(old_schema).validate(legacy)

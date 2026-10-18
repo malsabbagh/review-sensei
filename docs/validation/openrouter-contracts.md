@@ -74,3 +74,27 @@ The ingress repair's broader focused command passed 417 tests across
 configuration, hosted planning, provider settings/registry, canonical CLI,
 OpenRouter metadata, adapter/conformance, evaluation, qualification and schemas.
 Ruff, formatting, mypy and `git diff --check` also passed on that source diff.
+
+## Qualification routing evidence repair
+
+Spec review of `19db65dded84bf53bd965a711a5f8409e3667eb5` reproduced a
+family target accepting retained reports with a configuration digest computed
+for `morph/variant`. Eligibility-constructor rejection alone did not bind report
+routing. `QualificationRoutingEvidenceTests` now covers matching historical and
+current synthetic controls; missing/mutated/suffix/old-upstream policy binding;
+changed endpoint; and a loader supplied with altered artifacts whose retained
+byte references were also updated. The live report producer emits the actual
+policy digest/base URL; the mint and checked loader require their target match.
+Old unbound reports remain schema-valid but cannot newly authorize support.
+
+`InstalledOpenRouterMetadataContractTests.test_installed_live_report_binds_actual_routing_and_endpoint`
+uses the packaged corpus and real CLI/adapter with fake transport. This exposed
+and repaired a schema mismatch: live contract-rejection cases already emit
+`skipped`, which the case-status enum omitted. Source execution of the three
+installed-contract methods passes; final wheel execution remains with the
+integration owner.
+
+The packaged live evaluator still has an engineering prerequisite to passing
+qualification: fixture identity matching and skipped deterministic-rejection
+applicability require resolution. Synthetic failing evaluation output and
+passing routing tests do not establish live model qualification or close #122.

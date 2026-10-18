@@ -96,6 +96,17 @@
         "configuration_digest": {
           "type": "string",
           "pattern": "^[a-f0-9]{64}$"
+        },
+        "openrouter_routing_policy_digest": {
+          "description": "Optional effective requested policy binding, required by the OpenRouter live qualification gate. Independent of observed metadata.",
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "openrouter_base_url": {
+          "description": "Optional effective non-secret OpenRouter endpoint binding, required by the live qualification gate.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
         }
       }
     },
@@ -355,7 +366,7 @@
           "minLength": 1
         },
         "status": {
-          "enum": ["passed", "failed", "rejected-expected", "rejected-unexpected"]
+          "enum": ["passed", "failed", "skipped", "rejected-expected", "rejected-unexpected"]
         },
         "expected_matches": {
           "type": "integer",

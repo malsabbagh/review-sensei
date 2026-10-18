@@ -65,6 +65,7 @@ def _make_openrouter_report(
     prompt: str | None = None,
     configuration: str | None = None,
     corpus: str | None = None,
+    routing_policy: OpenRouterRoutingPolicy | None = None,
 ) -> dict:
     prompt_value = prompt if prompt is not None else prompt_digest()
     failures = [] if passed else ["actionable_precision_minimum"]
@@ -89,6 +90,10 @@ def _make_openrouter_report(
             "configuration_digest": (
                 configuration if configuration is not None else "c" * 64
             ),
+            "openrouter_routing_policy_digest": routing_policy_digest(
+                routing_policy or TARGET.routing_policy()
+            ),
+            "openrouter_base_url": TARGET.base_url,
         },
         "configuration": {"review_configuration_id": "packaged-defaults-v1"},
         "privacy": {"status": "clean", "scanned_inventory_count": 1},

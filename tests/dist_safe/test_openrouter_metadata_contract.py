@@ -22,8 +22,10 @@ assert_distribution_import()
 
 from review_sensei import ProviderRequest, ProviderTokenUsage  # noqa: E402
 from review_sensei.cli import main  # noqa: E402
+from review_sensei.errors import ReviewInputError  # noqa: E402
 from review_sensei.openrouter_qualification import (  # noqa: E402
     CURRENT_HOSTED_OPENROUTER_QUALIFICATION_TARGET,
+    qualification_record_from_reports,
 )
 from review_sensei.provider_config import hosted_openrouter_upstream  # noqa: E402
 from review_sensei.providers.openrouter import (  # noqa: E402
@@ -89,6 +91,88 @@ class InstalledOpenRouterMetadataContractTests(unittest.TestCase):
             "properties"
         ]
         self.assertIn("provider_reported_usage", metrics)
+
+    def test_installed_live_report_binds_actual_routing_and_endpoint(self):
+        target = CURRENT_HOSTED_OPENROUTER_QUALIFICATION_TARGET
+        captured = []
+
+        def opener(request, timeout):
+            captured.append(json.loads(request.data))
+            return _Response(
+                {
+                    "choices": [
+                        {"message": {"content": '{"summary":"ok","comments":[]}'}}
+                    ]
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "report.json"
+            corpus = Path(__file__).resolve().parents[2] / "evaluation/v1/corpus.json"
+            with (
+                patch.dict(
+                    "os.environ",
+                    {
+                        "OPENROUTER_API_KEY": "synthetic",
+                        "OPENROUTER_UPSTREAM_PROVIDER": "morph",
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "review_sensei.providers.openrouter.build_opener",
+                    return_value=SimpleNamespace(open=opener),
+                ),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+            ):
+                status = main(
+                    [
+                        "evaluate",
+                        "--mode",
+                        "live",
+                        "--corpus",
+                        str(corpus),
+                        "--provider",
+                        "openrouter",
+                        "--base-url",
+                        target.base_url,
+                        "--model",
+                        target.model,
+                        "--provider-version",
+                        "synthetic-attestation",
+                        "--allow-live-model",
+                        "--allow-data-egress",
+                        "--output",
+                        str(output),
+                    ]
+                )
+            # Synthetic clean responses are not passing quality evidence.
+            self.assertEqual(status, 1)
+            report = json.loads(output.read_text())
+        self.assertFalse(report["passed"])
+        self.assertTrue(any(case["status"] == "skipped" for case in report["cases"]))
+        self.assertEqual(report["deterministic"]["expected_contract_rejection_rate"], 0)
+        self.assertGreater(len(captured), 0)
+        self.assertTrue(
+            all(
+                request["provider"] == target.routing_policy().to_request_provider()
+                for request in captured
+            )
+        )
+        self.assertEqual(report["run"]["openrouter_base_url"], target.base_url)
+        self.assertEqual(
+            report["run"]["openrouter_routing_policy_digest"],
+            target.routing_policy_digest(),
+        )
+        del report["run"]["openrouter_routing_policy_digest"]
+        with self.assertRaisesRegex(ReviewInputError, "routing"):
+            qualification_record_from_reports(
+                [report],
+                target=target,
+                observed_revision="synthetic-attestation",
+                reproducibility={},
+                evaluated_at="2026-10-18T00:00:00Z",
+            )
 
     def test_installed_canonical_configuration_preserves_endpoint_in_real_adapter(self):
         requests = []

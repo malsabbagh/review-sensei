@@ -71,6 +71,20 @@ eligibility and a passing qualification record remain distinct. Morph is a famil
 constraint, not a pinned deployment/region. Current endpoint capability and live
 three-run qualification remain unverified under #122; no profile is promoted.
 
+Live OpenRouter reports additionally retain optional v1
+`run.openrouter_routing_policy_digest` and `run.openrouter_base_url` from the
+actual requested adapter configuration. The checked qualification gate requires
+both to match its independently supplied target for every live report. Missing
+fields, a suffix/other upstream's policy digest, or a different endpoint cannot
+mint or load support for the family target. The policy digest uses the same
+canonical JSON algorithm as the existing routing identity; observations and
+operator-attested revision/window/reproducibility retain their separate meanings.
+Old reports remain structurally valid and their bytes must be preserved, but
+unbound live evidence can no longer newly authorize support, including for the
+still-selectable historical Haiku target. The report schema also admits the
+producer's existing `skipped` case status, allowing live evaluation of packaged
+contract-rejection cases to serialize without turning skipped tests into passes.
+
 ## Alternatives considered
 
 A free-form metadata mapping was rejected because it could retain arbitrary
@@ -88,6 +102,12 @@ installed-wheel tests cover independent identities; malformed metadata and
 counters; partial, zero and unknown usage; attempted-call accounting; exact
 routing; strict-policy failure; distinct digests; and target eligibility.
 No live inference or API enrichment is authorized by this decision.
+
+`QualificationRoutingEvidenceTests` covers matching historical/current synthetic
+controls, missing/altered policy or endpoint fields, retained-byte rebinding and
+excluded suffixes. The installed metadata contract exercises the actual CLI
+against the packaged corpus through fake transport, checking serialized route
+binding and fail-closed unbound evidence. Packaging remains an integration gate.
 
 Official references checked 2026-10-18:
 
@@ -112,3 +132,10 @@ restore model-as-revision identity, fabricate usage or relax routing constraints
 runtime evidence loader remains separate; these metadata fields are not an
 alternative trust boundary. No release, deployment or support-label change is
 part of this patch.
+
+The packaged live evaluator's deterministic applicability still needs repair:
+contract-rejection cases are skipped while their threshold remains required,
+and exact fixture identity is compared with live provider identity. That is a
+separate engineering prerequisite to #122's passing packaged-corpus reports;
+this patch does not weaken thresholds or claim that repeated live calls can
+currently satisfy them.
