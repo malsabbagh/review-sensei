@@ -11,6 +11,7 @@ on:
       - "tests/published_cli/**"
       - "requirements/major-tag-validation.txt"
       - "requirements/ci.txt"
+      - "requirements/test.txt"
       - "scripts/release_docs.py"
   push:
     branches: [main]
@@ -23,6 +24,7 @@ on:
       - "tests/published_cli/**"
       - "requirements/major-tag-validation.txt"
       - "requirements/ci.txt"
+      - "requirements/test.txt"
       - "scripts/release_docs.py"
 
 permissions:
@@ -52,11 +54,16 @@ jobs:
       - name: Run the actual isolated installed-CLI harness against its immutable baseline
         # This is a fixed regression baseline, never a claim about the current
         # floating major tag or a future not-yet-published project version.
+        # Keep its five original contracts explicit: new lifecycle behavior is
+        # qualified separately against candidate/future published wheels and
+        # must not be required of immutable 0.6.23/0.1.1 artifacts.
         run: >-
           python scripts/qualify_published_cli.py --version 0.6.23
           --expected-wheel-sha256 e3966ccc999fad1cfdc0b278f22e43b570d8c3f809acd3a507ad075517f2bf37
           --github-version 0.1.1
           --expected-github-wheel-sha256 139f40dc5778af743e868616a1eb9a3cd2d8ab4eda564ab514f35720edaed0ba
+          --suite qualify --suite transports --suite seam_boundaries
+          --suite operations --suite operation_state
           --output "$RUNNER_TEMP/major-validator-regression"
       - name: Retain sanitized installed-process evidence even on failure
         if: always()

@@ -89,5 +89,6 @@ jobs:
             ${{ runner.temp }}/published-cli/seam_boundaries/results.json
             ${{ runner.temp }}/published-cli/operations/results.json
             ${{ runner.temp }}/published-cli/operation_state/results.json
+            ${{ runner.temp }}/published-cli/lifecycle/results.json
           if-no-files-found: error
           retention-days: 30

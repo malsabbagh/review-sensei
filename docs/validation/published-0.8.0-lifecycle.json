@@ -1,0 +1,78 @@
+{
+  "requested_version": "0.8.0",
+  "requested_github_version": "0.3.0",
+  "source": "exact PyPI wheels",
+  "credential_free": true,
+  "status": "PASS",
+  "wheel": {
+    "name": "review_sensei-0.8.0-py3-none-any.whl",
+    "sha256": "4ad7f65e2e97119725e6614dc826c8f69bea19cc5d0fd16c15477c966b4f28e4"
+  },
+  "github_wheel": {
+    "name": "review_sensei_github-0.3.0-py3-none-any.whl",
+    "sha256": "1704b4cc6182b30b649415dc17b95eff638be55efea24d1526743fa3038edfbc"
+  },
+  "selected_suites": [
+    "qualify",
+    "transports",
+    "seam_boundaries",
+    "operations",
+    "operation_state",
+    "lifecycle"
+  ],
+  "excluded_suites": [],
+  "suites": [
+    {
+      "name": "qualify",
+      "exit": 0,
+      "total": 489,
+      "pass": 489,
+      "fail": 0
+    },
+    {
+      "name": "transports",
+      "exit": 0,
+      "total": 18,
+      "pass": 18,
+      "fail": 0
+    },
+    {
+      "name": "seam_boundaries",
+      "exit": 0,
+      "total": 519,
+      "pass": 519,
+      "fail": 0
+    },
+    {
+      "name": "operations",
+      "exit": 0,
+      "total": 39,
+      "pass": 39,
+      "fail": 0
+    },
+    {
+      "name": "operation_state",
+      "exit": 0,
+      "total": 17,
+      "pass": 17,
+      "fail": 0
+    },
+    {
+      "name": "lifecycle",
+      "exit": 0,
+      "total": 27,
+      "pass": 27,
+      "fail": 0
+    }
+  ],
+  "harness_ref": "b04230946ce3b2f13707ed0cc74780701ac869c1",
+  "platform": "macOS arm64",
+  "python": "3.14.6",
+  "scope": "Published PyPI wheels only; separate from candidate/check-out validation",
+  "isolated_origins_verified": true,
+  "total_rows": 1109,
+  "limitations": [
+    "Synthetic GitHub/broker fixtures and loopback providers; not original-grant authenticity evidence",
+    "No Windows published-wheel qualification"
+  ]
+}

@@ -733,8 +733,9 @@ class SurfaceTests(unittest.TestCase):
             (ROOT / "requirements/major-tag-validation.txt").read_text().strip(),
             "PyYAML==6.0.3",
         )
+        self.assertIn("-r test.txt", (ROOT / "requirements/ci.txt").read_text())
         self.assertIn(
-            "-r major-tag-validation.txt", (ROOT / "requirements/ci.txt").read_text()
+            "-r major-tag-validation.txt", (ROOT / "requirements/test.txt").read_text()
         )
         for name in ["major-tag-validation.yml", "major-tag-validation-ci.yml"]:
             text = (ROOT / ".github/workflows" / name).read_text()

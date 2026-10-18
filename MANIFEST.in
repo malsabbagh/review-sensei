@@ -16,3 +16,6 @@ graft tests/downstream
 include tests/packaging_guard.py
 include tests/fake_github_http.py
 include tests/fixtures/distribution-contract.json
+include tests/test_pr308_ledger_regression.py
+include tests/fixtures/regressions/pr308-session-ledger.json
+include tests/fixtures/regressions/pr308-session-ledger-evidence.json

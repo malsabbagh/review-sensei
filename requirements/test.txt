@@ -1,0 +1,8 @@
+# Pinned tools/dependencies for deterministic checkout tests and schema validators.
+# The cryptography pin preserves the former CI checkout version for JWT tests.
+# Installed-wheel qualification resolves runtime dependencies from wheel metadata
+# in a separate clean environment; this file does not constrain that consumer.
+coverage==7.16.2
+cryptography==50.0.2
+jsonschema==4.26.0
+-r major-tag-validation.txt

@@ -1,0 +1,61 @@
+{
+  "requested_version": "0.7.1",
+  "requested_github_version": "0.2.1",
+  "source": "exact PyPI wheels",
+  "credential_free": true,
+  "status": "FAIL",
+  "wheel": {
+    "name": "review_sensei-0.7.1-py3-none-any.whl",
+    "sha256": "ecbbae81044d0a5ba06129f1677d5cb5ba4c3d7a8f104b8e4dc9201f3e0c6751"
+  },
+  "github_wheel": {
+    "name": "review_sensei_github-0.2.1-py3-none-any.whl",
+    "sha256": "a9909920245baeeddfd9888e22d0150b592d3459637c5996b84ff5ebf7622768"
+  },
+  "suites": [
+    {
+      "name": "qualify",
+      "exit": 0,
+      "total": 489,
+      "pass": 489,
+      "fail": 0
+    },
+    {
+      "name": "transports",
+      "exit": 0,
+      "total": 18,
+      "pass": 18,
+      "fail": 0
+    },
+    {
+      "name": "seam_boundaries",
+      "exit": 0,
+      "total": 519,
+      "pass": 519,
+      "fail": 0
+    },
+    {
+      "name": "operations",
+      "exit": 0,
+      "total": 39,
+      "pass": 39,
+      "fail": 0
+    },
+    {
+      "name": "operation_state",
+      "exit": 0,
+      "total": 17,
+      "pass": 17,
+      "fail": 0
+    },
+    {
+      "name": "lifecycle",
+      "exit": 1,
+      "total": 30,
+      "pass": 13,
+      "fail": 17
+    }
+  ],
+  "environment": "macOS arm64, Python 3.14.6; fresh venv; exact PyPI wheels; credential-free fixtures",
+  "interpretation": "Published 0.7.1/0.2.1 does not include merged PR308 fixes. Candidate results are separate. Synthetic brokers do not authenticate the unavailable original grant."
+}

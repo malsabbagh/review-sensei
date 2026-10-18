@@ -29,12 +29,27 @@ from qualify_published_cli import (
     require_hosted_pin,
     require_installed_distribution,
     require_wheel_digest,
+    selected_suites,
     validate_receipt,
     wheel_for,
 )
 
 
 class BootstrapContracts(unittest.TestCase):
+    def test_default_suite_set_includes_lifecycle_and_subsets_are_explicit(self):
+        self.assertIn("lifecycle", selected_suites(None))
+        original = [
+            "qualify",
+            "transports",
+            "seam_boundaries",
+            "operations",
+            "operation_state",
+        ]
+        self.assertEqual(selected_suites(original), tuple(original))
+        for invalid in ([], ["qualify", "qualify"], ["unknown"]):
+            with self.assertRaises(ValueError):
+                selected_suites(invalid)
+
     def test_real_symlink_escape_is_rejected_after_resolution(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -513,6 +528,174 @@ class BootstrapContracts(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(receipt["status"], "ERROR")
         self.assertEqual(output, "")
+
+
+class LifecycleModuleLoadingContracts(unittest.TestCase):
+    def test_contract_files_win_over_same_named_modules_on_the_search_path(self):
+        import importlib.util
+        from types import ModuleType
+
+        path = Path(__file__).with_name("lifecycle.py")
+        spec = importlib.util.spec_from_file_location(
+            "published_lifecycle_loader", path
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        names = ("test_approval_lifecycle_contract", "test_local_review_contract")
+        previous = dict(sys.modules)
+        try:
+            with tempfile.TemporaryDirectory() as scratch:
+                root = Path(scratch)
+                lane = root / "dist_safe"
+                lane.mkdir()
+                for name in names:
+                    (root / (name + ".py")).write_text(
+                        'raise RuntimeError("shadow module executed")\n'
+                    )
+                    (lane / (name + ".py")).write_text(
+                        "import unittest\nclass Contract(unittest.TestCase):\n    def test_contract(self): pass\n"
+                    )
+                    shadow = ModuleType(name)
+                    shadow.__file__ = str(root / (name + ".py"))
+                    sys.modules[name] = shadow
+                with patch.object(sys, "path", [str(root), *sys.path]):
+                    suite = module.load_contracts(root)
+                    result = unittest.TextTestRunner(stream=io.StringIO()).run(suite)
+                self.assertTrue(result.wasSuccessful())
+                self.assertEqual(result.testsRun, 2)
+                for name in names:
+                    self.assertEqual(
+                        Path(sys.modules[name].__file__).resolve(),
+                        (lane / (name + ".py")).resolve(),
+                    )
+        finally:
+            sys.modules.clear()
+            sys.modules.update(previous)
+
+    @unittest.skipIf(os.name == "nt", "symlink creation requires Windows privileges")
+    def test_contract_symlink_escape_is_rejected_before_any_module_executes(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "published_lifecycle_loader", Path(__file__).with_name("lifecycle.py")
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            tests = root / "tests"
+            lane = tests / "dist_safe"
+            lane.mkdir(parents=True)
+            marker = root / "executed"
+            code = f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
+            (lane / "test_approval_lifecycle_contract.py").write_text(code)
+            outside = root / "test_local_review_contract.py"
+            outside.write_text(code)
+            (lane / outside.name).symlink_to(outside)
+            with self.assertRaisesRegex(ImportError, "escapes its declared path"):
+                module.load_contracts(tests)
+            self.assertFalse(marker.exists())
+            (lane / outside.name).unlink()
+            (lane / "test_approval_lifecycle_contract.py").unlink()
+            lane.rmdir()
+            lane.symlink_to(root, target_is_directory=True)
+            with self.assertRaisesRegex(ImportError, "directory escapes"):
+                module.load_contracts(tests)
+            self.assertFalse(marker.exists())
+            lane.unlink()
+            alternate = tests / "alternate"
+            alternate.mkdir()
+            for name in (
+                "test_approval_lifecycle_contract.py",
+                "test_local_review_contract.py",
+            ):
+                (alternate / name).write_text(code)
+            lane.symlink_to(alternate, target_is_directory=True)
+            with self.assertRaisesRegex(ImportError, "directory escapes"):
+                module.load_contracts(tests)
+            self.assertFalse(marker.exists())
+
+    def test_main_load_error_and_empty_discovery_write_failed_receipts(self):
+        import importlib.util
+        from types import ModuleType
+
+        spec = importlib.util.spec_from_file_location(
+            "published_lifecycle_receipt", Path(__file__).with_name("lifecycle.py")
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        names = ("test_approval_lifecycle_contract", "test_local_review_contract")
+        guard = ModuleType("packaging_guard")
+        guard.assert_distribution_import = lambda: None
+        adapter = ModuleType("review_sensei_github")
+        adapter.__file__ = str(
+            Path(sys.prefix) / "review_sensei_github" / "__init__.py"
+        )
+        previous = dict(sys.modules)
+        try:
+            with tempfile.TemporaryDirectory() as scratch:
+                root = Path(scratch)
+                tests = root / "tests"
+                lane = tests / "dist_safe"
+                lane.mkdir(parents=True)
+                # Let the real file loader raise, then load two real empty files.
+                for fault in ("load-error", "empty-suite"):
+                    with self.subTest(fault=fault):
+                        for name in names:
+                            (lane / (name + ".py")).write_text(
+                                "raise RuntimeError('private module detail')\n"
+                                if fault == "load-error"
+                                else ""
+                            )
+                        report = root / fault
+                        argv = [
+                            "lifecycle.py",
+                            "--expected-version",
+                            "0.8.1",
+                            "--expected-github-version",
+                            "0.3.1",
+                            "--report",
+                            str(report),
+                        ]
+                        with (
+                            patch.object(
+                                module,
+                                "__file__",
+                                str(tests / "published_cli" / "lifecycle.py"),
+                            ),
+                            patch.dict(
+                                sys.modules,
+                                {
+                                    "packaging_guard": guard,
+                                    "review_sensei_github": adapter,
+                                },
+                            ),
+                            patch.object(
+                                module.importlib.metadata,
+                                "version",
+                                return_value="0.8.1",
+                            ) as version,
+                            patch.object(sys, "argv", argv),
+                            patch.object(sys, "path", list(sys.path)),
+                            patch.object(sys, "stderr", io.StringIO()),
+                        ):
+                            version.side_effect = lambda name: (
+                                "0.8.1" if name == "review-sensei" else "0.3.1"
+                            )
+                            self.assertEqual(module.main(), 1)
+                        receipt = json.loads((report / "results.json").read_text())
+                        self.assertEqual(receipt["tests_run"], 0)
+                        self.assertEqual(receipt["pass"], 0)
+                        self.assertEqual(receipt["fail"], 1)
+                        self.assertEqual(receipt["rows"][0]["kind"], fault)
+                        self.assertEqual(
+                            receipt["load_error"],
+                            "RuntimeError" if fault == "load-error" else None,
+                        )
+                        self.assertNotIn("private module detail", json.dumps(receipt))
+        finally:
+            sys.modules.clear()
+            sys.modules.update(previous)
 
 
 if __name__ == "__main__":

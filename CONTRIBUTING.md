@@ -106,12 +106,29 @@ and failed workers fail the lane. Module/class fixtures run inside each worker;
 cross-class mutable state must not be shared. Release-preparation fixtures clone
 one precommitted, normalized source seed into independent object stores instead
 of repeatedly copying, hashing and committing the same tree. No live repository
-or production release preparation is cached. The quality lane still runs the
-complete serial branch-coverage suite with the 80% floor.
+or production release preparation is cached. The quality lane runs the same complete inventory in four processes with
+isolated branch-coverage data, combines every worker file, and retains the 80%
+floor. Missing worker coverage or incomplete execution fails the lane.
+Measured class costs in `tests/fixtures/checkout-class-seconds.json` affect only
+scheduling; unknown classes receive a conservative per-method estimate. Refresh
+these estimates from archived per-worker timing receipts, never by excluding
+tests. Receipts include the discovered inventory hash, assigned/executed counts,
+worker exits and elapsed times. `execution_complete` records exact inventory
+execution; `coverage_ok` is null when coverage was not requested and otherwise
+records whether it combined successfully. `complete` remains their aggregate
+compatibility field. A damaged worker timing report fails the lane and is
+recorded as a per-worker `timing_error`, without hiding subprocess exit codes.
+Unreadable counts are explicit `executed: null` with empty `class_seconds`; a
+valid zero count remains distinguishable and cannot match a nonempty assignment.
+Combined checkout coverage is saved as `.coverage` in the runner working
+directory, the public handoff consumed by the next `coverage report` command.
 
-CI's Python jobs cache public pip downloads using the pinned tool requirements
-and project metadata as cache inputs; they reinstall the current checkout and
-run every gate. Superseded PR CI runs are cancelled, while main CI runs finish.
+CI's Python jobs cache public pip downloads using all pinned requirements
+and both package manifests as cache inputs; they reinstall the current checkout and
+run every gate. Compatibility, schemas, npm and Worker IPC lanes install
+`requirements/test.txt`; quality/build additionally install the lint/build tools
+in `requirements/ci.txt`. The package lane builds both engine and adapter wheels
+and installs those artifacts in the clean consumer. Superseded PR CI runs are cancelled, while main CI runs finish.
 Linux CI and release smoke builds use Docker's official ECR Public mirror with
 the same immutable Python/Debian multi-platform digests. Both images are pulled
 before building, with at most three attempts and jittered backoff for registry
