@@ -14,10 +14,26 @@ wheel, published package, deployed Worker or live provider compatibility.
 | Crash after durable authority COMMENT | `test_replay_after_durable_comment_interruption_keeps_one_authority` | With 250 history comments, a finalization interruption leaves 68 pending; replay retains exactly one authority COMMENT and makes zero provider calls. |
 | Changed authority cannot reuse accepted decisions | `test_accepted_replay_rejects_changed_source_evidence_and_authority` | Same-source body, actor, exact patch, result digest and finding-body mutations refuse without inference or publication. Original source/head/base fences still apply. |
 | History scans remain within publication bounds | Same enabled replay and interruption cases; `ConversationPublisher` and `GitHubHttp.paginate` | Adaptive 100/50/25/5/1 pages retain exact offsets and existing 512 KiB response, item, 128-request, 32-write and 60-second publication ceilings. Large individual items still refuse. These are history reads, not authorization to select 250 human feedback sources. |
-| 100/250 multi-invocation continuation | `test_100_250_findings_and_history_complete_over_bounded_new_mentions` | Integration criterion: expected pending counts are 68/36/4/0 and 218/186/154/122/90/58/26/0; exact-source replay must not alter them. Requires accepted computation transition release before the next distinct event. Keep unqualified until this test passes with that integration. |
+| 100/250 multi-invocation continuation | `test_100_250_findings_and_history_complete_over_bounded_new_mentions` | Composed source test passes with accepted computation transition release from ADR 0076. Pending counts are exactly 68/36/4/0 and 218/186/154/122/90/58/26/0; exact-source replay preserves counts, performs zero inference and adds no receipt or authority record. |
 | Rich 250-finding public capacity | `test_rich_250_inline_authority_refuses_without_claiming_supported_capacity`; existing `PartitionedEligibilityReaderTests.test_complete_100_250_result_bound_reader_all_resolution_and_no_approval` | Independently SHA-256 varied 250 IDs exceed the inline 24 KiB future-resolution reserve. Refusal is intentional and lossless. Existing partitioned readers reconstruct rich authority, but v4 finalization is explicitly withheld pending compatible writer/reader activation. Compact IDs are a finite compression profile, not universal 250-item support. |
 | Full baseline / complete rich inventory / indexed history primitives | `test_authenticated_partitions`, `test_partition_consumers`, `test_assessment_history_index`, `test_epic238_frozen_queue_faults` | Existing tests cover exact 100/250 reconstruction, fault/retention/counter primitives and source selection. They do not replace a joint public lifecycle qualification with root growth, tombstones, retained receipts, orphans and delayed readers. |
 | Evidence acquisition and complete feedback boundaries | `ExhaustiveAcquisitionTests`, `CompleteFeedbackTests`, `PublicFeedbackTests` | Existing tests retain >100 pagination, 999/1000/1001 evidence bounds, byte/read/deadline refusal, 32-source complete selection and source revalidation. Public default assessment source remains separately bounded at 32 KiB. |
+
+## Source measurements
+
+On the composed source, the seven tests in `test_large_public_lifecycle` pass
+in 1.508 seconds. The 100-item independently varied identity profile has 24,493
+immutable canonical bytes, 12,858 serialized all-resolved inventory bytes and an
+8,841-byte initial authority marker. The 250-item compact identity profile has
+61,243 immutable bytes, 18,960 serialized all-resolved inventory bytes and a
+3,577-byte initial marker. Both use one required path and distinct short Unicode
+finding bodies. They do not qualify 100/250 distinct paths or large prose.
+
+Nearby validation passes 120 operation/host/application/conversation tests after
+the computation release change. The earlier unchanged primitive matrix passed
+126 partition/reader/indexed-history/queue/OS-kill/recovery tests; complete-feedback
+admission/composition passed 30 tests. These counts describe source execution,
+not hosted or installed support.
 
 ## Replay compatibility and recovery
 

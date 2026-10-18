@@ -172,8 +172,9 @@ create another receipt or authority COMMENT. No provider allowance is renewed.
 `tests/test_large_public_lifecycle.py` exercises 100 varied / 250 compact finding
 profiles with 100/250 history comments, interruption before/after authority
 publication, changed source/evidence/authority and rich-250 capacity refusal.
-The multi-event continuation criterion additionally requires computation
-transition release; isolated replay success does not establish that release.
+The multi-event continuation criterion passes when composed with the accepted
+computation transition release in ADR 0076; isolated replay success alone does
+not establish that release.
 Installed and deployed verification remain separate. Rollback must retain readers
 that understand the additive replay binding or conservatively refuse accepted
 results; it must not re-infer or discard unresolved reservations to recover.
