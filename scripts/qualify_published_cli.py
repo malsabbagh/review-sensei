@@ -20,6 +20,29 @@ HOSTED_MANIFEST = "packages/python/review-sensei-github/pyproject.toml"
 # Suites that exercise the hosted runtime also verify its exact version.
 HOSTED_SUITES = frozenset({"qualify", "operations", "operation_state", "lifecycle"})
 
+SUITES = (
+    "qualify",
+    "transports",
+    "seam_boundaries",
+    "operations",
+    "operation_state",
+    "lifecycle",
+)
+
+
+def selected_suites(requested):
+    """Default to every contract; explicit subsets remain visible in receipts."""
+    if requested is None:
+        return SUITES
+    names = tuple(requested)
+    if (
+        not names
+        or len(set(names)) != len(names)
+        or any(name not in SUITES for name in names)
+    ):
+        raise ValueError("suite selection must be nonempty, known and distinct")
+    return names
+
 
 def wheel_sha256(value):
     if not re.fullmatch(r"[a-f0-9]{64}", value):
@@ -182,9 +205,19 @@ def main():
     parser.add_argument("--version", required=True, type=exact_version)
     parser.add_argument("--github-version", required=True, type=exact_version)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--suite",
+        action="append",
+        choices=SUITES,
+        help="Explicit contract subset; default runs all suites",
+    )
     parser.add_argument("--expected-wheel-sha256", type=wheel_sha256)
     parser.add_argument("--expected-github-wheel-sha256", type=wheel_sha256)
     args = parser.parse_args()
+    try:
+        suites = selected_suites(args.suite)
+    except ValueError as error:
+        parser.error(str(error))
     root = args.output.resolve()
     if root.exists():
         parser.error("output must be a new directory to prevent stale receipts")
@@ -199,6 +232,8 @@ def main():
         "credential_free": True,
         "status": "NOT_EXECUTED",
         "suites": [],
+        "selected_suites": list(suites),
+        "excluded_suites": [name for name in SUITES if name not in suites],
         "gaps": [
             "No live providers or GitHub writes; loopback and fixture providers only",
             "Native/npm packaging is outside this PyPI lane",
@@ -287,14 +322,7 @@ def main():
         )
         require_hosted_pin(report["installed_github"].get("requires"), args.version)
         scripts = Path(__file__).resolve().parents[1] / "tests/published_cli"
-        for name in (
-            "qualify",
-            "transports",
-            "seam_boundaries",
-            "operations",
-            "operation_state",
-            "lifecycle",
-        ):
+        for name in suites:
             destination = root / name
             command = [
                 str(python),

@@ -29,12 +29,27 @@ from qualify_published_cli import (
     require_hosted_pin,
     require_installed_distribution,
     require_wheel_digest,
+    selected_suites,
     validate_receipt,
     wheel_for,
 )
 
 
 class BootstrapContracts(unittest.TestCase):
+    def test_default_suite_set_includes_lifecycle_and_subsets_are_explicit(self):
+        self.assertIn("lifecycle", selected_suites(None))
+        original = [
+            "qualify",
+            "transports",
+            "seam_boundaries",
+            "operations",
+            "operation_state",
+        ]
+        self.assertEqual(selected_suites(original), tuple(original))
+        for invalid in ([], ["qualify", "qualify"], ["unknown"]):
+            with self.assertRaises(ValueError):
+                selected_suites(invalid)
+
     def test_real_symlink_escape_is_rejected_after_resolution(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

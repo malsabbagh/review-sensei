@@ -71,7 +71,7 @@ qualification runs the same assertions against its own exact versions.
 
 ## Candidate execution and local scheduling evidence
 
-Final credential-free checkout run: 3,512 distinct discovered IDs, every assigned
+Pre-review candidate credential-free checkout run: 3,512 distinct discovered IDs, every assigned
 ID executed once, all four workers exit 0. Inventory SHA-256:
 `65fcc32a68d2b46c112815c2efbdd2dc6f963c77fac8a760f46623c72d40365a`.
 Elapsed 60.931s; workers 58.508 / 56.550 / 60.779 / 60.703s. Combined branch
@@ -119,3 +119,12 @@ finished with quality green (688s job duration), Windows green (374s job), and
 Linux x64 standalone failing because ECR Public rejected the pinned image pull
 with `toomanyrequests: Data limit exceeded`. The first draft run hit the same
 external failure before executing the build. No gate is disabled or bypassed.
+
+The first hosted run also exposed an integration mistake: the immutable
+major-validator 0.6.23/0.1.1 lane inherited the newly added lifecycle suite. That
+old baseline cannot implement newer features. Its original five suites and
+exact digest pins are now explicitly selected. Default published qualification
+still runs all six suites, and every receipt records selected/excluded suites.
+This preserves the historical validator gate without weakening the new
+post-package lifecycle expectations. A bootstrap contract tests the default and
+rejects empty, duplicate or unknown subset selections.

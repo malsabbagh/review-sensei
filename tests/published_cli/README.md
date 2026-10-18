@@ -17,7 +17,7 @@ The workflows read the hosted version from the released commit's
 runtime workflow installs from. Releases before the hosted split (0.6.22 and
 earlier) cannot be qualified by this harness.
 
-The output directory must not already exist. Exit 0 requires all six suites to
+The output directory must not already exist. By default, exit 0 requires all six suites to
 complete and pass; failed installation, propagation, process timeouts, malformed
 receipts, or failed assertions exit nonzero. `summary.json` binds requested and
 installed versions, package origins, both wheel SHA-256s, dependency versions, retry
@@ -77,3 +77,9 @@ not authentication evidence for the original grant. Known failures in an older
 PyPI release remain failures; candidate-wheel success does not qualify PyPI.
 The lifecycle receipt counts rows (including failing subcases) rather than claiming
 that those rows are an independent test-method count.
+
+The immutable major-validator baseline deliberately selects its original five
+contracts with repeated `--suite` options, preserving the exact 0.6.23/0.1.1 wheel
+digests. It does not claim those old bytes implement newer lifecycle behavior.
+Default post-publication qualification runs all six suites; receipts always list
+selected and excluded suites so a subset cannot be mistaken for full coverage.
