@@ -84,7 +84,7 @@ digests. It does not claim those old bytes implement newer lifecycle behavior.
 Default post-publication qualification runs all six suites; receipts always list
 selected and excluded suites so a subset cannot be mistaken for full coverage.
 
-Lifecycle contracts load from the six declared files under `tests/dist_safe`,
+Lifecycle contracts load from the seven declared files under `tests/dist_safe`,
 so a same-named module elsewhere on the search path cannot shadow them. Receipts
 include `tests_run` separately from row counts, a sanitized `load_error` for file
 import failures, and an explicit failed `empty-suite` row if discovery is empty.
@@ -115,3 +115,7 @@ profiles use one required path and 100/250 ordinary historical comments; they
 do not qualify 250 rich independent identities or 100/250 distinct paths. Four
 fixture modules are explicitly retained by the distribution contract. Product
 imports stay under the wheel environment; socket connections are forbidden.
+
+The OpenRouter metadata/routing contract is part of the default lifecycle
+inventory after publication as well as the sdist package lane. Its captured
+transport is synthetic and does not qualify a live target or approval.
