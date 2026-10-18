@@ -16,9 +16,9 @@ execution evidence, not a claim that every lifecycle risk is exhausted.
 | Binary and generated confirmations retain partial AI status; permission revocation and stale confirmation block | `test_mixed_coverage`, `test_human_file_review`, `test_human_feedback` | Installed mixed text/media/generated journey; missing, stale and revoked confirmations; check agreement |
 | Exact-head freshness; old decisions do not approve a new head | `test_pr308_ledger_regression`, `test_github_publication`, `test_finalizer_adaptive_reviews` | Preserved PR308 reader/command tests now also run on installed candidate and published wheels |
 | Replay, continuation compatibility and schema integrity | `test_session_ledger`, `test_review_transaction`, `test_work_continuation` | Same unchanged five-disposition fixture, schema/digest tampering, reconstructed readers, reserve/commit replay |
-| Permission / grant / identity failures do not mutate | `test_github_http`, `test_session_ledger`, `test_pr308_ledger_regression` | Packaged synthetic broker rejection and wrong-identity tests; no claim about original grant authenticity |
+| Permission / grant / identity failures do not mutate | `test_github_http`, `test_session_ledger`, `test_pr308_ledger_regression` | Packaged synthetic broker rejection, wrong-identity tests and explicit HTTP GET/PATCH 403 failures; no claim about original grant authenticity |
 | Retry, idempotency and interruption before/after durable write | `test_pr308_ledger_regression`, `test_review_transaction`, `test_epic238_process_faults` | Packaged before-store / after-store interruption with fresh grant and readback |
-| Bounded budgets fail closed without minting approval | `test_session_ledger`, `test_work_continuation`, `test_provider_completion_guards` | Installed bound checks and complete checkout gates retained |
+| Bounded budgets fail closed without minting approval | `test_session_ledger`, `test_work_continuation`, `test_provider_completion_guards` | Installed restored shared-read budget rejects dispatch before I/O, round-budget checks, and complete checkout gates retained |
 | CLI default/operational exits; JSON/stdout and reason/stderr | `test_local_cli_contract`; installed `test_local_review_contract` called Python main directly | Installed fresh-process CLI journeys, including malformed provider output and operational exits |
 | Published behavior differs from source candidate | `scripts/qualify_published_cli.py`, exact PyPI wheels and isolated origins | Same lifecycle suite added to published qualification; reports exact versions and failures independently of candidate results |
 
@@ -128,3 +128,11 @@ still runs all six suites, and every receipt records selected/excluded suites.
 This preserves the historical validator gate without weakening the new
 post-package lifecycle expectations. A bootstrap contract tests the default and
 rejects empty, duplicate or unknown subset selections.
+
+The final installed lifecycle suite adds explicit HTTP 403 read/write refusal
+(single attempt, unchanged ledger) and restored shared-read-budget exhaustion
+before any HTTP dispatch. The candidate suite now passes 27 methods; the earlier
+25-method and PyPI 17/30-row receipts above identify the earlier suite snapshot.
+A clean serial checkout run independently passed all 3,512 then-present methods
+in 212.770s; the post-review runner's 3,513-method inventory also passed in
+62.818s with 82.36% combined coverage.

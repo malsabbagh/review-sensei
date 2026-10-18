@@ -275,3 +275,72 @@ class InstalledApprovalLifecycleTests(unittest.TestCase):
         continuing = evaluate_round_admission(replace(state, failed_attempts=0), policy)
         self.assertTrue(continuing.admit)
         self.assertFalse(continuing.may_emit_approve)
+
+    def test_http_permission_loss_never_mutates_or_retries_a_ledger_write(self):
+        from review_sensei_github.errors import GitHubPublicationError
+        from test_pr308_ledger_regression import (
+            IDENTITY,
+            NOW,
+            PreservedLedgerRegressionTests,
+            Response,
+        )
+
+        for denied_method in ("GET", "PATCH"):
+            with self.subTest(denied_method=denied_method):
+                harness = PreservedLedgerRegressionTests()
+                harness.setUp()
+                try:
+                    before = harness.storage.path.read_bytes()
+                    opener = harness.storage.opener
+                    denied = []
+
+                    def forbidden(request, timeout):
+                        if request.method == denied_method:
+                            denied.append(request.method)
+                            return Response({}, 403)
+                        return opener(request, timeout)
+
+                    harness.storage.opener = forbidden
+                    with self.assertRaises(GitHubPublicationError):
+                        harness.pause()
+                    self.assertEqual(denied, [denied_method])
+                    self.assertEqual(harness.storage.path.read_bytes(), before)
+                    harness.storage.opener = opener
+                    self.assertEqual(
+                        harness.reader().load(IDENTITY, now=NOW).record.to_dict(),
+                        harness.expected,
+                    )
+                finally:
+                    harness.doCleanups()
+
+    def test_restored_shared_read_budget_refuses_dispatch_before_network(self):
+        from test_pr308_ledger_regression import (
+            IDENTITY,
+            NOW,
+            PreservedLedgerRegressionTests,
+        )
+
+        from review_sensei.bounded_evidence import MAX_PART_READS, EvidenceReadBudget
+
+        harness = PreservedLedgerRegressionTests()
+        harness.setUp()
+        try:
+            before = harness.storage.path.read_bytes()
+            budget = EvidenceReadBudget(
+                clock=lambda: 0.0,
+                wall_clock=lambda: 1000.0,
+                snapshot={
+                    "schema_version": "1.0",
+                    "calls": MAX_PART_READS - 4,
+                    "deadline_unix_ms": 1060000,
+                },
+            )
+            ledger = harness.reader()
+            ledger.evidence_budget = budget
+            with self.assertRaisesRegex(ReviewInputError, "budget exhausted"):
+                ledger.load(IDENTITY, now=NOW)
+            self.assertEqual(budget.calls, MAX_PART_READS - 4)
+            self.assertEqual(harness.storage.calls, [])
+            self.assertEqual(harness.storage.path.read_bytes(), before)
+        finally:
+            harness.doCleanups()
