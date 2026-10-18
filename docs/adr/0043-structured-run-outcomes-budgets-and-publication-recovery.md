@@ -116,3 +116,32 @@ is required.
 
 - Related ADRs: 0001, 0007, 0022, 0028
 - Parent issue: #24
+
+
+## Amendment (2026-10-18) - ordinary discussion shares original budgets
+
+Related issue: #314. Related PR: pending integration. Status remains Proposed;
+no architecture-governance approval is inferred.
+
+`ConversationService.reply` accepts an optional existing `ResourceBudgetTracker`
+and otherwise creates the documented default budget. It projects its current
+64 KiB prompt/16 KiB response limits and the caller's remaining aggregate
+allowances into the existing `execute_call` mechanism, rather than creating a
+provider-specific deadline or retry path. The existing single correction remains
+limited to JSON/non-object failures. Semantic invalid replies do not retry.
+Transport retries use the shared retry/call limits and conservative unknown
+output accounting. Configured provider output tokens are forwarded without
+byte-to-token estimates or model qualification claims.
+
+The GitHub ordinary-discussion caller starts its tracker before bounded context
+preparation, retains it through operation entry and passes it into generation.
+Existing exact-head publication fences and operation replay remain authoritative.
+A failed or expired generation cannot publish a reply. Cancellation propagates
+and processing-reaction cleanup still runs. Budget failures carry existing
+closed diagnostic tokens; provider failures are sanitized.
+
+Synthetic public service, all-three-adapter captured transport, original caller
+latency, cancellation and installed-package contracts validate this change. It
+adds no live qualification, provider-name branch, new persistence authority or
+policy registry. Rollback must retain bounded fail-closed generation; restoring
+an independent full transport timeout per correction would reopen the defect.

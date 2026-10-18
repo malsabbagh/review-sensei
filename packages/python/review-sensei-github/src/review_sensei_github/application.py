@@ -2310,6 +2310,9 @@ class GitHubApplication:
             raise ReviewInputError(
                 "broader discovery requires trusted full-review policy"
             )
+        # Context preparation, authorization and operation-entry latency all
+        # consume this caller's original provider-work deadline.
+        work_tracker = ResourceBudgetTracker(budget or ResourceBudget.create())
         prepared = self.replier.prepare_context(
             token=read_token,
             repository=repository,
@@ -2373,7 +2376,6 @@ class GitHubApplication:
             # Adapter test seams may implement only the original conversation
             # interface. The real GitHub adapter shares one bounded transport.
             if isinstance(self.replier, ConversationPublisher):
-                work_tracker = ResourceBudgetTracker(budget or ResourceBudget.create())
                 assessor = HumanAssessmentPublisher(http=self.replier.http)
                 human = assessor.prepare(
                     token=read_token,
@@ -2662,6 +2664,7 @@ class GitHubApplication:
                 execute=lambda: ConversationService(reply_provider).reply(
                     prepared.context,
                     model=model,
+                    tracker=work_tracker,
                 ),
                 encode=_conversation_bytes,
                 decode=_conversation_from_bytes,

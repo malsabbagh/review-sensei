@@ -1092,3 +1092,14 @@ than treating a mention plus a keyword anywhere in prose as authority. Current
 CLI/web setup generators share that grammar; exact frozen prior caller bytes
 permit managed upgrades while operator edits fail closed. See
 [ADR 0080](adr/0080-explicit-incomplete-review-rescans.md).
+
+
+Ordinary `ConversationService.reply` uses the existing generic call executor and
+an optional `ResourceBudgetTracker`. Its default public budget remains bounded;
+callers pass their original tracker to retain elapsed time, attempted calls and
+aggregate prompt/output accounting across transport retries and one JSON or
+non-object correction. Semantic reply failures never request correction. The
+GitHub caller creates that tracker before context preparation and retains it
+through operation entry and generation; expiry, exhaustion or cancellation
+cannot publish a generated reply. Provider adapters receive the remaining
+request deadline and their configured output cap without backend-specific policy.

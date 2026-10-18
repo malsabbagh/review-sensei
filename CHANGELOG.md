@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Bound ordinary AI discussion, correction and transport retries by the original
+  caller deadline and shared call/output allowance before publishing a reply.
+
 - Preserve prior concerns and history across every admitted full baseline
   refresh, including changed base/model recovery; omitted findings remain partial.
 - Bound provider transport to the original remaining review deadline, recheck

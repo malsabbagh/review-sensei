@@ -660,3 +660,13 @@ Missing bindings or a changed suffix/endpoint fail before support can be minted
 or loaded. Old report bytes still parse but cannot newly authorize unbound live
 support; historical targets remain eligible. This report-target check does not
 supply the still-missing runtime approval binding. See ADR 0081.
+
+Ordinary `ConversationService.reply` uses the existing generic call executor and
+an optional `ResourceBudgetTracker`. Its default public budget remains bounded;
+callers pass their original tracker to retain elapsed time, attempted calls and
+aggregate prompt/output accounting across transport retries and one JSON or
+non-object correction. Semantic reply failures never request correction. The
+GitHub caller creates that tracker before context preparation and retains it
+through operation entry and generation; expiry, exhaustion or cancellation
+cannot publish a generated reply. Provider adapters receive the remaining
+request deadline and their configured output cap without backend-specific policy.

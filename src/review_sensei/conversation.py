@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Mapping
 
-from .errors import ReviewFormatError, ReviewInputError
-from .models import ConversationContext, ConversationReply, ProviderRequest
+from .budgets import EffectiveWorkBudget, provider_output_tokens
+from .errors import ProviderError, ReviewFormatError, ReviewInputError
+from .execution import OutputAccounting, execute_call
+from .models import (
+    ConversationContext,
+    ConversationReply,
+    ProviderRequest,
+    ProviderResponse,
+)
+from .outcomes import ResourceBudget, ResourceBudgetTracker
 from .providers.base import ReviewProvider
 from .validation import validate_bounded_text
 
@@ -32,11 +41,14 @@ class ConversationService:
         *,
         model: str | None = None,
         max_prompt_bytes: int = MAX_CONVERSATION_PROMPT_BYTES,
+        tracker: ResourceBudgetTracker | None = None,
     ) -> ConversationReply:
         """Build a bounded prompt and return a strict validated reply."""
 
         if not isinstance(context, ConversationContext):
             raise ReviewInputError("conversation context must be a ConversationContext")
+        tracker = tracker or ResourceBudgetTracker(ResourceBudget.create())
+        tracker.budget.validate_against_limits()
         prompt = self._render_prompt(context)
         try:
             validate_bounded_text(
@@ -45,14 +57,11 @@ class ConversationService:
                 label="conversation prompt",
                 allow_empty=False,
             )
-        except ReviewInputError as exc:
+        except ReviewInputError:
             raise ReviewInputError(
-                "conversation prompt exceeds the configured limit"
-            ) from exc
-        last_json_error: json.JSONDecodeError | None = None
-        last_failure = "json"
-        payload: Mapping[str, object] | None = None
-        request_prompt = prompt
+                "conversation prompt exceeds the configured limit",
+                diagnostic="prompt_budget",
+            ) from None
         correction_prompt = f"{prompt}\n\n{_CONVERSATION_OUTPUT_CORRECTION}"
         try:
             validate_bounded_text(
@@ -63,40 +72,88 @@ class ConversationService:
             )
         except ReviewInputError:
             correction_prompt = prompt
-        for _attempt in range(2):
-            response = self.provider.complete(
-                ProviderRequest(
-                    prompt=request_prompt,
-                    model=model,
-                    json_mode=True,
-                    max_prompt_bytes=max_prompt_bytes,
-                    max_response_bytes=16 * 1024,
-                )
-            )
-            if not hasattr(response, "text") or not isinstance(response.text, str):
-                raise ReviewFormatError("provider response did not contain reply text")
+        request = ProviderRequest(
+            prompt=prompt,
+            model=model,
+            json_mode=True,
+            max_prompt_bytes=max_prompt_bytes,
+            max_response_bytes=16 * 1024,
+            max_output_tokens=provider_output_tokens(self.provider),
+        )
+        # This is a projection of the same public conversation and caller
+        # ceilings into the shared executor, not new provider qualification or
+        # a second retry/deadline policy. Corrections retain their original
+        # JSON/non-object-only behavior below.
+        budgets = EffectiveWorkBudget(
+            batch_diff_bytes=0,
+            batch_prompt_bytes=min(max_prompt_bytes, tracker.budget.max_prompt_bytes),
+            batch_output_bytes=min(16 * 1024, tracker.budget.max_output_bytes),
+            max_total_prompt_bytes=tracker.budget.max_prompt_bytes,
+            max_total_output_bytes=tracker.budget.max_output_bytes,
+            max_findings_per_batch=0,
+            provider_qualified=False,
+            max_output_tokens=request.max_output_tokens,
+            resource_budget=tracker.budget,
+        )
+        failure = "response"
+
+        def validate(response: ProviderResponse) -> ConversationReply:
+            nonlocal failure
             try:
                 parsed = json.loads(response.text)
-            except json.JSONDecodeError as exc:
-                last_json_error = exc
-                last_failure = "json"
-                request_prompt = correction_prompt
-                continue
-            if isinstance(parsed, Mapping):
-                payload = parsed
-                break
-            last_failure = "shape"
-            request_prompt = correction_prompt
-        if payload is None:
-            if last_failure == "shape":
+            except json.JSONDecodeError:
+                failure = "json"
+                raise
+            except (RecursionError, ValueError):
+                # Parser safety limits are not repairable JSON syntax. Keep the
+                # failure bounded and never expose the provider's raw body.
+                raise ReviewFormatError(
+                    "conversation response could not be parsed"
+                ) from None
+            if not isinstance(parsed, Mapping):
+                failure = "shape"
                 raise ReviewFormatError("provider response must be a JSON object")
-            raise ReviewFormatError("provider response was not valid JSON") from (
-                last_json_error
+            failure = "semantic"
+            return ConversationReply.from_dict(dict(parsed))
+
+        accounting = OutputAccounting()
+        for attempt in range(2):
+            failure = "response"
+            result = execute_call(
+                request,
+                provider=self.provider,
+                validate=validate,
+                tracker=tracker,
+                budgets=budgets,
+                output_accounting=accounting,
             )
-        try:
-            return ConversationReply.from_dict(dict(payload))
-        except (ReviewInputError, TypeError) as exc:
-            raise ReviewFormatError("conversation reply failed validation") from exc
+            if result.value is not None:
+                return result.value
+            diagnostic = result.diagnostic or "invalid_provider_output"
+            if diagnostic == "invalid_provider_output":
+                if (
+                    attempt == 0
+                    and failure in {"json", "shape"}
+                    and tracker.structural_retries < tracker.budget.max_retry_attempts
+                ):
+                    tracker.structural_retries += 1
+                    request = replace(request, prompt=correction_prompt)
+                    continue
+                message = {
+                    "json": "provider response was not valid JSON",
+                    "shape": "provider response must be a JSON object",
+                    "semantic": "conversation reply failed validation",
+                }.get(failure, "provider response did not contain valid reply text")
+                raise ReviewFormatError(message) from None
+            if diagnostic == "provider_failed":
+                raise ProviderError(
+                    "conversation provider transport or completion failed"
+                ) from None
+            raise ReviewInputError(
+                f"conversation budget exhausted (reason={diagnostic})",
+                diagnostic=diagnostic,
+            ) from None
+        raise ReviewFormatError("conversation reply failed validation")
 
     @staticmethod
     def _render_prompt(context: ConversationContext) -> str:
