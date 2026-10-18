@@ -798,6 +798,8 @@ class HumanAssessmentPublisher:
             reply = work.reply
         if inventory is None or not isinstance(reply, HumanAssessmentReply):
             raise GitHubConversationError("human assessment evidence is missing")
+        if len({item.fingerprint for item in reply.decisions}) != len(reply.decisions):
+            raise GitHubConversationError("human assessment identities are invalid")
         if prepared.feedback is not None and prepared.feedback.target_ids:
             targets = set(prepared.feedback.target_ids)
             if not targets.issubset(

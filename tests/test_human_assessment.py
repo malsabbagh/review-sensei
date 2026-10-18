@@ -1602,6 +1602,78 @@ class HumanAssessmentTests(unittest.TestCase):
             )
         self.assertFalse(any(method == "POST" for method, _, _ in state.calls))
 
+    def test_recorded_replay_rejects_invalid_identities_before_any_publication(self):
+        from review_sensei_github.application import (
+            _assessment_bytes,
+            _assessment_from_bytes,
+        )
+
+        from review_sensei.budgets import ReviewWorkBudgets
+
+        original = State()
+        _, initial = original.bridge()
+        provider = Provider(response_for(original.eligibility))
+        reply = HumanAssessmentService(provider).reply(
+            context=initial.conversation.context,
+            pending=initial.eligibility.human_review,
+            source_body=initial.source_body,
+        )
+        resolved = replace(
+            original.eligibility,
+            human_review=original.eligibility.human_review.apply(reply.decisions),
+            facts=replace(
+                original.eligibility.facts, has_human_adjudication_findings=False
+            ),
+        )
+        for mutation in ("duplicate", "unknown"):
+            with self.subTest(mutation=mutation):
+                state = State(resolved)
+                publisher = HumanAssessmentPublisher(http=state.http)
+                prepared = publisher.prepare(
+                    token="read",
+                    repository="owner/repo",
+                    pull_request=1,
+                    prepared=state.prepared(),
+                    app_slug=APP,
+                    work_budgets=ReviewWorkBudgets(mode="unified"),
+                )
+                self.assertIsNotNone(prepared.evidence_bundle)
+                decisions = (
+                    reply.decisions * 2
+                    if mutation == "duplicate"
+                    else (replace(reply.decisions[0], fingerprint="f" * 64),)
+                )
+                recorded = _assessment_from_bytes(
+                    _assessment_bytes(
+                        replace(reply, decisions=decisions),
+                        replay_context=prepared.replay_context_digest,
+                    )
+                )
+                self.assertEqual(
+                    recorded.replay_context, prepared.replay_context_digest
+                )
+                before = deepcopy(
+                    (state.calls, state.reviews, state.replies, state.check_runs)
+                )
+                with self.assertRaisesRegex(
+                    GitHubConversationError, "identities are invalid"
+                ):
+                    publisher.publish(
+                        token="issue",
+                        review_token="review",
+                        repository="owner/repo",
+                        pull_request=1,
+                        prepared=prepared,
+                        reply=recorded,
+                        app_slug=APP,
+                        recorded_replay=True,
+                    )
+                self.assertEqual(
+                    (state.calls, state.reviews, state.replies, state.check_runs),
+                    before,
+                )
+                self.assertEqual(len(provider.calls), 1)
+
     def test_unauthorized_bot_unrelated_or_edited_source_blocks_before_reassessment(
         self,
     ):
