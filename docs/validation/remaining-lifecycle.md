@@ -60,6 +60,11 @@ load-error cases as qualification failures:
 - `tests/dist_safe/test_provider_deadline_contract.py`
 - `tests/dist_safe/test_openrouter_cli_contract.py`
 - `tests/dist_safe/test_large_public_lifecycle_contract.py`
+- `tests/dist_safe/test_openrouter_metadata_contract.py` (provider stack)
+
+The lifecycle-only receipt below uses the original six declared files. The
+provider stack adds the seventh metadata/configuration contract, retaining the
+union; its exact combined receipt is recorded separately.
 
 The sdist distribution contract declares every shared helper and preserves
 checkout-only exclusions. Package CI uses only the two built wheels and the
