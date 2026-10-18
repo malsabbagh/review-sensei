@@ -73,8 +73,13 @@ three-run qualification remain unverified under #122; no profile is promoted.
 
 Live OpenRouter reports additionally retain optional v1
 `run.openrouter_routing_policy_digest` and `run.openrouter_base_url` from the
-actual requested adapter configuration. The checked qualification gate requires
-both to match its independently supplied target for every live report. Missing
+actual requested adapter configuration. The evaluator checks optional endpoint
+metadata against the existing strict OpenRouter allowlist before live dispatch
+and report construction, even for
+custom provider implementations. Userinfo, query/fragment, other hosts and
+unsupported paths refuse with a bounded diagnostic; valid requested bindings
+remain unchanged. The checked qualification gate requires both to match its
+independently supplied target for every live report. Missing
 fields, a suffix/other upstream's policy digest, or a different endpoint cannot
 mint or load support for the family target. The policy digest uses the same
 canonical JSON algorithm as the existing routing identity; observations and

@@ -130,7 +130,8 @@ def validate_live_control(report: Mapping[str, Any]) -> bool:
         raise ReviewInputError("evaluation control requires a live report")
     fixture = control["fixture"]
     if any(
-        fixture[key] != report["run"][key] for key in ("engine_digest", "prompt_digest")
+        fixture[key] != report["run"].get(key)
+        for key in ("engine_digest", "prompt_digest")
     ) or (
         fixture["corpus_digest"] != report["corpus"]["sha256"]
         or fixture["review_configuration_id"]

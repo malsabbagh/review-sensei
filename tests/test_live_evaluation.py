@@ -15,6 +15,7 @@ from review_sensei.evaluation import (
     evaluate_fixture,
     evaluate_live,
     load_corpus,
+    load_evaluation_report,
     promotion_record_from_reports,
     require_supported_promotion,
 )
@@ -242,6 +243,86 @@ class LiveEvaluationTests(unittest.TestCase):
             report["evaluation_control"]["thresholds"]["quality"],
             self.corpus.document["quality_thresholds"],
         )
+
+    def test_report_loader_requires_control_identities_but_preserves_legacy_reports(
+        self,
+    ):
+        report, _ = self.live()
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "report.json"
+            for identity in ("engine_digest", "prompt_digest"):
+                with self.subTest(identity=identity):
+                    missing = copy.deepcopy(report)
+                    missing["run"].pop(identity)
+                    path.write_text(json.dumps(missing), encoding="utf-8")
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "evaluation control.*identity"
+                    ):
+                        load_evaluation_report(path)
+                    # Historical v1 reports predate these optional identities
+                    # and controls. They still parse without gaining support.
+                    missing.pop("evaluation_control")
+                    path.write_text(json.dumps(missing), encoding="utf-8")
+                    self.assertEqual(load_evaluation_report(path), missing)
+
+    def test_openrouter_endpoint_binding_refuses_unsafe_metadata_before_live_calls(
+        self,
+    ):
+        for endpoint in (
+            "https://synthetic-user:synthetic-password@openrouter.ai/api/v1",
+            "https://openrouter.ai/api/v1?token=synthetic-token",
+            "https://openrouter.ai/api/v1#synthetic-fragment",
+            "https://synthetic.invalid/api/v1",
+            "http://openrouter.ai/api/v1",
+            "https://openrouter.ai/api/v1/../private",
+            "https://[invalid",
+            42,
+        ):
+            with self.subTest(endpoint=endpoint):
+                provider = OracleProvider(self.corpus)
+                provider.name = "openrouter"
+                provider.base_url = endpoint
+                with self.assertRaisesRegex(
+                    ReviewInputError,
+                    "OpenRouter evaluation endpoint is not allowlisted",
+                ) as raised:
+                    evaluate_live(
+                        self.corpus,
+                        provider,
+                        provider_version="synthetic-attestation",
+                        model=provider.model,
+                        endpoint_scope="remote",
+                    )
+                self.assertNotIn("synthetic-", str(raised.exception))
+                self.assertEqual(provider.calls, 0)
+
+        for endpoint in (
+            "https://openrouter.ai/api/v1",
+            "https://openrouter.ai/api/v1/chat/completions",
+        ):
+            with self.subTest(endpoint=endpoint):
+                provider = OracleProvider(self.corpus)
+                provider.name = "openrouter"
+                provider.base_url = endpoint
+                complete = provider.complete
+
+                def mutate_endpoint(request):
+                    response = complete(request)
+                    provider.base_url = (
+                        "https://synthetic-user:synthetic-password@openrouter.ai/api/v1"
+                    )
+                    return response
+
+                provider.complete = mutate_endpoint
+                report = evaluate_live(
+                    self.corpus,
+                    provider,
+                    provider_version="synthetic-attestation",
+                    model=provider.model,
+                    endpoint_scope="remote",
+                )
+                self.assertEqual(report["run"]["openrouter_base_url"], endpoint)
+                self.assertEqual(provider.calls, 5)
 
 
 if __name__ == "__main__":
