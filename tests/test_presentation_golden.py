@@ -213,7 +213,11 @@ def publish_scenario(scenario, *, thread_nodes=()) -> PublishedScenario:
             json_response({"id": 6}, 200),
         ]
     )
-    http, calls = make_http(responses, routes=((checks.matches, checks.respond),))
+    # The golden positive approval includes actual App-owned post/readback
+    # provenance; a successful POST alone is not enough to authorize APPROVE.
+    http, calls = make_http(
+        responses, routes=((checks.matches, checks.respond),), review_readback=True
+    )
     outcome = ReviewPublisher(http=http).publish(
         token="token",
         repository="owner/repo",
