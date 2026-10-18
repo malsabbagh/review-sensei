@@ -111,7 +111,7 @@ valid observations of that different harness. No published version was replaced.
 
 Supplemental approved DeepSeek CLI review used public diffs only. Its valid
 transient-dispatch accounting finding was repaired and proved at the call
-ceiling. Other proposed changes would have marked a nonexistent pre-dispatch
-reservation uncertain, accepted malformed qualification states, or changed the
-intended deadline/redaction policy; code and closed-state tests showed those
-were not defects. This review is supporting evidence, not maintainer approval.
+ceiling. Inspection showed that the earlier deadline gate precedes every reservation,
+nonaccepting qualification labels already fail closed, and deadline priority
+and sanitized transport errors follow the intended contract. Those suggestions
+did not establish additional defects. This review is supporting evidence, not maintainer approval.

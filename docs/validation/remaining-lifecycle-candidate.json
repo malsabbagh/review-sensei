@@ -139,11 +139,24 @@
     "immutable_reader_compatibility": "legacy and current passed; old oversized-authority limitation retained"
   },
   "limits": [
-    "100 independent SHA256 identities and250compact IDs: one requiredpath, shortUnicode prose,100/250ordinary historicalcomments; rich250independent IDs intentionally refuses inline24KiB reserve",
+    "100 independent SHA256 identities and 250 compact IDs: one required path, short Unicode prose, 100/250 ordinary historical comments; rich 250 independent IDs intentionally refuse the inline 24 KiB reserve",
     "Rich partition writer activation, public fair/targeted queues and joint retention/deployed-reader qualification remain open",
-    "Full original64dispatch/60s physical-service accounting and durable server-origin elapsed-time replay remain unqualified",
+    "Full original 64-dispatch/60-second physical-service accounting and durable server-origin elapsed-time replay remain unqualified",
     "OpenRouter positive report-bound runtime approval and legacy standalone-finalizer binding remain open; new accepting status claims withhold",
     "Full provider/event/control installed cross-product, five native final artifacts, deployed upgrade/drain/rollback remain separate gates",
     "No merge/release/channel/deployment/settings or secret changes performed"
+  ],
+  "commands": [
+    "python scripts/run_checkout_tests.py --workers 4 --coverage --costs tests/fixtures/checkout-class-seconds.json --report <outside-checkout>/checkout-timings.json",
+    "python -m coverage report --precision=2 --show-missing --fail-under=80",
+    "python -m unittest discover -s tests -v",
+    "python -m build --no-isolation --outdir <candidate-artifacts> <verified-frozen-source>",
+    "python -m build --no-isolation --wheel --outdir <candidate-artifacts>/github <verified-frozen-source>/packages/python/review-sensei-github",
+    "python scripts/check_sdist_contract.py <candidate-artifacts>/review_sensei-0.8.1.tar.gz",
+    "<consumer-python> -I -m unittest discover -s <sdist>/tests/dist_safe -v",
+    "<consumer-python> -I -m unittest discover -s <sdist>/tests/downstream -v",
+    "<consumer-python> -I tests/published_cli/openai_configuration.py --wheel <engine-wheel> --expected-version 0.8.1 --report <receipt>",
+    "<consumer-python> tests/published_cli/{qualify,transports,seam_boundaries,operations,operation_state,lifecycle}.py --expected-version 0.8.1 --report <new-suite-directory> [--expected-github-version 0.3.1 for hosted suites]",
+    "python scripts/qualify_published_cli.py --version 0.8.1 --github-version 0.3.1 --output <new-published-directory>"
   ]
 }
