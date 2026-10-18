@@ -1,6 +1,6 @@
 # Runtime qualification binding acceptance (#115)
 
-This candidate extends base `ccc2e5eb510911891e7f78c64b4f07fd2651c82a`
+This candidate extends base `ce18fbb46ba0eae997bbab00e8bd66423f8d7e5d`
 (PR #316). It implements [ADR 0083](../adr/0083-trusted-runtime-openrouter-qualification.md).
 All reports and HTTP in the controls are synthetic. This is deterministic API
 acceptance, not live provider or deployed qualification.
@@ -56,8 +56,15 @@ source compatibility (201 tests), Ruff formatting/lint, mypy (112 source files),
 JSON contracts and `git diff --check`. The new runtime boundary class has 20
 public-seam methods. The package-safe test has also run against source with the
 explicit checkout-import opt-out; that is not an installed-wheel receipt.
-The integration owner runs full source and clean-wheel suites on final frozen
-bytes and retains their exact source/archive identities separately.
+The [exact-source receipt](runtime-qualification-candidate.json) binds frozen
+source `93fcb75653bb6c252e58ba05570f009809ab4dd5`: all 16 local gates,
+3,781 normal tests, four complete coverage workers and 82.83% coverage pass.
+The exact installed engine/adapter pass 237 distribution tests, 11 downstream
+tests, 18 OpenAI configuration tests and all 1,284 post-package cases, including
+202 lifecycle cases. The duplicate/unknown recorded-ID regression also passes
+against those installed bytes. All 880 tracked inputs and 119/49 runtime files
+were checked. This later receipt/documentation commit changes no tested runtime
+or harness bytes; CI and hosted review remain separate evidence.
 
 The fake GitHub fixture opts into server state: a successful review POST is
 returned by later review-list reads. Its default remains off, so missing or
