@@ -1077,6 +1077,21 @@ class ReviewService:
                         raise ReviewInputError(
                             "review prompt exceeds the configured limit"
                         ) from exc
+                    # Prompt construction and validation consume the same original
+                    # allowance as retries, stages and large-change chunks.
+                    remaining = tracker.remaining_seconds()
+                    if remaining <= 0:
+                        return self._finish_run(
+                            tracker=tracker,
+                            status="budget_exhausted",
+                            stage_summary=stage_summary,
+                            diagnostic="deadline_exceeded",
+                            repository=request.repository,
+                            pull_request_number=request.pull_request_number,
+                        )
+                    provider_request = replace(
+                        provider_request, timeout_seconds=remaining
+                    )
                     try:
                         tracker.record_prompt_attempt(current_prompt)
                         response = stage_provider.complete(provider_request)
@@ -1107,6 +1122,21 @@ class ReviewService:
                             pull_request_number=request.pull_request_number,
                         )
                     except ProviderError as exc:
+                        # Every dispatched attempt consumes a call slot, including
+                        # transient failures. Retry attempts have their own
+                        # counter and cannot replace the provider-call charge.
+                        tracker.record_provider_call()
+                        self._provider_calls = tracker.provider_calls
+                        if tracker.remaining_seconds() <= 0:
+                            return self._finish_run(
+                                tracker=tracker,
+                                status="budget_exhausted",
+                                stage_summary=stage_summary,
+                                diagnostic="deadline_exceeded",
+                                error=exc,
+                                repository=request.repository,
+                                pull_request_number=request.pull_request_number,
+                            )
                         if exc.transient:
                             retry_diagnostic = tracker.admit_transport_retry(
                                 exc.retry_after_seconds
@@ -1123,8 +1153,6 @@ class ReviewService:
                                 repository=request.repository,
                                 pull_request_number=request.pull_request_number,
                             )
-                        tracker.record_provider_call()
-                        self._provider_calls = tracker.provider_calls
                         return self._finish_run(
                             tracker=tracker,
                             status="provider_failed",

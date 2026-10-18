@@ -131,7 +131,9 @@ class P1PublicProfileTests(unittest.TestCase):
         self.assertIsNotNone(getattr(second, "replay_payload", None))
         self.assertEqual(executes["n"], 1)
         self.assertLessEqual(budget.calls, 60)
-        self.assertEqual(budget.calls, 30)
+        # Exact retained-result completion adds one owned operation read. The
+        # original 60 ordinary /64 total caps are unchanged.
+        self.assertEqual(budget.calls, 31)
 
     def _checkpoints(self, comments):
         from tests.test_activation_tail import HostedTailTests

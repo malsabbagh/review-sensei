@@ -2460,14 +2460,13 @@ def _reconcile_hosted_result(
     admission_baseline: object,
     verification_scope: object,
 ) -> object:
-    """Return the overflow reconciliation applied to one provider result."""
+    """Preserve prior concerns when fresh analysis cannot prove resolution."""
 
     from .models import ReviewResult
 
     def adjust(run: object) -> object:
         result = getattr(run, "result", None)
         coverage = getattr(verification_scope, "coverage_mode", None)
-        reason = getattr(verification_scope, "invalidation_reason", None)
         if (
             not isinstance(result, ReviewResult)
             or not isinstance(admission_baseline, ReviewBaseline)
@@ -2475,7 +2474,7 @@ def _reconcile_hosted_result(
             or verification_scope is None
         ):
             return run
-        if coverage != "incremental" and reason != "related-context-overflow":
+        if coverage not in {"incremental", "fallback-full"}:
             return run
         reconciled = reconcile_overflow_review(
             result,

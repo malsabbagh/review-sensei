@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import errno
+import math
 import re
 import socket
+from threading import TIMEOUT_MAX
 from typing import Any
 from urllib.error import URLError
 
@@ -17,8 +19,28 @@ _TRANSIENT_NETWORK_ERRNOS = frozenset(
         errno.ENETUNREACH,
     }
 )
+# Bound configured values before a request deadline can hide an unrepresentable
+# transport setting. This is the platform duration range, not a product ceiling.
+MAX_TRANSPORT_TIMEOUT_SECONDS = TIMEOUT_MAX
 MAX_RETRY_AFTER_SECONDS = 60.0
 _DECIMAL_RETRY_AFTER = re.compile(r"^[0-9]+(\.[0-9]+)?$")
+
+
+def bounded_transport_timeout(
+    configured: float, requested: float | None, *, label: str
+) -> float:
+    """Validate mutable transport configuration before applying a request cap."""
+    if (
+        isinstance(configured, bool)
+        or not isinstance(configured, (int, float))
+        or configured > MAX_TRANSPORT_TIMEOUT_SECONDS
+        or not math.isfinite(configured)
+        or configured <= 0
+    ):
+        raise ProviderError(
+            f"{label} timeout_seconds must be a finite positive number within the platform transport range"
+        )
+    return min(configured, requested) if requested is not None else configured
 
 
 def urllib_error_is_transient(exc: URLError) -> bool:

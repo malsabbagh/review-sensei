@@ -34,6 +34,8 @@ from ..errors import ProviderError, ReviewInputError
 from ..models import ProviderRequest, ProviderResponse
 from ..validation import validate_bounded_text
 from .transport import (
+    MAX_TRANSPORT_TIMEOUT_SECONDS,
+    bounded_transport_timeout,
     parse_retry_after_seconds,
     read_bounded_body,
     urllib_error_is_transient,
@@ -203,11 +205,12 @@ class OpenAICompatibleProvider:
         if (
             isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, (int, float))
+            or timeout_seconds > MAX_TRANSPORT_TIMEOUT_SECONDS
             or not math.isfinite(timeout_seconds)
             or timeout_seconds <= 0
         ):
             raise ValueError(
-                "OpenAI-compatible timeout_seconds must be a finite positive number"
+                "OpenAI-compatible timeout_seconds must be a finite positive number within the platform transport range"
             )
         if isinstance(max_output_tokens, bool) or not isinstance(
             max_output_tokens, int
@@ -334,10 +337,8 @@ class OpenAICompatibleProvider:
             ) from exc
 
     def complete(self, request: ProviderRequest) -> ProviderResponse:
-        timeout = (
-            min(self.timeout_seconds, request.timeout_seconds)
-            if request.timeout_seconds is not None
-            else self.timeout_seconds
+        timeout = bounded_transport_timeout(
+            self.timeout_seconds, request.timeout_seconds, label="OpenAI-compatible"
         )
         model = (request.model if self.allow_model_override else None) or self.model
         try:

@@ -541,7 +541,7 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        names = ("test_approval_lifecycle_contract", "test_local_review_contract")
+        names = module.CONTRACTS
         previous = dict(sys.modules)
         try:
             with tempfile.TemporaryDirectory() as scratch:
@@ -562,7 +562,7 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                     suite = module.load_contracts(root)
                     result = unittest.TextTestRunner(stream=io.StringIO()).run(suite)
                 self.assertTrue(result.wasSuccessful())
-                self.assertEqual(result.testsRun, 2)
+                self.assertEqual(result.testsRun, len(names))
                 for name in names:
                     self.assertEqual(
                         Path(sys.modules[name].__file__).resolve(),
@@ -624,7 +624,7 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
         )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        names = ("test_approval_lifecycle_contract", "test_local_review_contract")
+        names = module.CONTRACTS
         guard = ModuleType("packaging_guard")
         guard.assert_distribution_import = lambda: None
         adapter = ModuleType("review_sensei_github")
@@ -638,7 +638,7 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                 tests = root / "tests"
                 lane = tests / "dist_safe"
                 lane.mkdir(parents=True)
-                # Let the real file loader raise, then load two real empty files.
+                # Let the real file loader raise, then load the declared real empty files.
                 for fault in ("load-error", "empty-suite"):
                     with self.subTest(fault=fault):
                         for name in names:

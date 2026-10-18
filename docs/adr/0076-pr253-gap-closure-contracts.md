@@ -142,6 +142,43 @@ While the stores disagree, liability stays conservative and inference cannot
 redispatch. Staged orphan parts are not acceptance. A broker rollback after
 an observed external effect must not reopen dispatch.
 
+#### Hosted computation completion
+
+`run_hosted_provider` uses its operation root as a computation cursor. It does
+not represent a published review, activated decision ledger, passing check,
+approval or source acknowledgement. Its independently sufficient completion
+condition is the exact accepted packet plus the entire retained result from an
+App-owned matching write echo or owned part readback, with matching digest,
+measured length, request, original admission binding and current prior cursor.
+Only that adapter-owned computation transition becomes `confirmed` and advances
+the scope generation once. Generic `OperationHost` remote-effect reconciliation
+does not change. The adapter neither invokes nor synthesizes acknowledgement.
+
+The next distinct authorized source event uses the advanced cursor. An exact
+event retry reconstructs its original prior cursor and accepted bytes, without
+another grant consumption, provider call, debit or cursor update, even after a
+later event advances the scope. A new event is refused before original admission
+while another computation is held, so a refused contender cannot retain a stale
+cursor binding. An accepted packet without retained full output, an unknown
+transition, disagreement or quarantine never satisfies computation completion.
+Loss of the completion-write response is recovered from the original accepted
+event and owned stored result; it does not mint a new allowance.
+
+Fresh adapter work requires an owned `ResultPartStore` before original
+admission, grant consumption or provider dispatch. Without configured parts,
+only an existing accepted result with matching owned embedded bytes can replay.
+Inline embedding capacity alone cannot guarantee an unknown fresh result will
+fit. Missing retention returns `result_missing` without creating a reservation;
+configure owned result parts and retry the same event identity. Previously
+unknown or unretained effects keep their original guards and are never unlocked
+by this preflight. Actual GitHub application and Actions entry points already
+configure this store.
+
+Actual review/decision publication keeps its existing exact-head/base,
+transaction, authority and reconciliation gates. Completing computation does
+not prove any of those external effects occurred. This distinction does not
+qualify the fixed-clock hosted adapter against the 64/60 public profile (#267).
+
 ### Unknown remote effects
 
 Exact unique owned target, marker, head and operation observation can confirm
@@ -224,6 +261,15 @@ event. They must cover producer negatives, store disagreement, a delayed
 remote write after a newer read, the P1 crash replay, unchanged-source
 negatives, and mixed approval with unrelated blockers still withholding.
 A fixed structural clock is not elapsed-time proof.
+
+`HostedComputationContinuationTests` reproduces the formerly permanent
+`unknown_reservation` on the second source revision, for embedded and multipart
+results. It verifies monotonic cursor continuation, old-event zero-call replay,
+crashes immediately before and after the completion write, and held unknown,
+unretained and unowned-result negative controls. The real application
+100/250-finding and history matrix must additionally pass against the composed
+application and continuation changes; these synthetic tests do not establish
+live GitHub delivery or a 64/60 deadline/budget receipt.
 
 ## Rollout and rollback
 

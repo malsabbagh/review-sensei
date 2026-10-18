@@ -340,6 +340,9 @@ same validated result.
   re-reviews caller-supplied changed paths plus related dependency paths;
   incompatible base, learnings, model, or configuration, missing cache state,
   or incomplete related context falls back to a full bounded review.
+  Every admitted fallback preserves prior concern accounting: omitted,
+  downgraded or ambiguously rediscovered concerns remain uncertain, make the
+  review partial and retain the prior durable baseline until resolved.
 - `ReviewResult.finding_lifecycles` records stable fingerprints and states
   (`new`, `still-present`, `fixed`, `outdated`, `uncertain`). A later pass
   that omits a finding does not mark it fixed. Exact `(path, line, body)`
@@ -781,6 +784,15 @@ resolve from trusted configuration, not this infrastructure input.
 Older setup-v4 callers remain recognized as managed content and migrate through
 the existing reviewable setup PR path.
 
+OpenRouter approval remains withheld until retained qualification evidence is
+bound to independently expected effective review identities. The GitHub
+publisher and result-facts builder do not accept profile/caller status strings
+or the historical `not-required` default as that evidence; replay preserves the
+withheld facts. Other providers and permitted review events keep their policy.
+The positive runtime evidence path and legacy standalone-finalizer binding
+remain open under #115; see [the runtime boundary](openrouter-qualification.md#runtime-approval-boundary-115)
+and [ADR 0045](adr/0045-openrouter-trusted-configuration.md).
+
 Before an enabled review reaches either provider, the reusable workflow runs a
 read-only authoritative pull-request preflight. It validates the repository
 numeric id, open/non-draft state, same-repository non-fork head, exact head
@@ -909,6 +921,16 @@ inventory is durably reassessed, retries re-enter the existing exact-head
 finalizer without another inference or reassessment review. All other eligibility
 facts, current authorization, live thread checks and approval markers remain
 authoritative.
+
+Accepted operation results additionally bind their replay to complete immutable
+inventory, original result/facts, source identity and exact evidence. Replays
+may retain accumulated resolutions, but cannot reuse decisions after another
+source, evidence or authority change. The adapter revalidates complete evidence
+and skips only already-persisted resolved IDs; it does not weaken the inventory
+application boundary or grant another provider allowance. Unbound older accepted
+payloads require a new authorized mention. See the replay amendment in
+[ADR 0061](adr/0061-human-reply-reassessment.md) and the finite source matrix in
+[large lifecycle qualification](validation/large-lifecycle.md).
 
 The default reassessment path prioritizes the complete supplied current patches for validated
 pending paths within the existing 12 KiB budget. Missing, conflicting or

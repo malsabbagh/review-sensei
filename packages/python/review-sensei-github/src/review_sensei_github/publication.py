@@ -66,6 +66,7 @@ from .approval import (
     evaluate_approval_facts,
     has_blocking_findings,
     has_human_adjudication_findings,
+    restrict_result_qualification,
 )
 from .checks import (
     REVIEW_POLICY_MODES,
@@ -3108,6 +3109,7 @@ class ReviewPublisher:
             raise GitHubPublicationError("review base sha is invalid")
         if not isinstance(result, ReviewResult):
             raise GitHubPublicationError("review result is invalid")
+        qualification = restrict_result_qualification(result, qualification)
         _reject_conflicting_instances(result.comments)
         if retained_eligibility is not None:
             if (

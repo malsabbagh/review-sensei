@@ -57,6 +57,13 @@ checks without another provider call or charge. Dispositions and progress
 remain intact. ADR 0057 approval/check gates and ADR 0059 partial semantics
 remain applicable.
 
+All admitted fallback reasons use the same prior-concern reconciliation as
+related-context overflow. Base, model or other reuse invalidation cannot turn
+an omitted or downgraded prior concern into proof of resolution. Such concerns
+remain uncertain and the result stays partial with the old durable baseline.
+The result carries `fallback-full` even when the fresh service pass itself
+reviewed every supplied path.
+
 Emit the existing sanitized diagnostic token to stderr as well as Actions
 summary/output and optional outcome JSON. A refusal emits one consolidated
 stderr diagnostic including its specific reason; review exit semantics retain

@@ -49,6 +49,27 @@ model, and routing-policy identity fields are included in
 `configuration_digest` for evaluation and promotion evidence. Raw credentials are
 never hashed.
 
+### Approval status is not evidence (#115, 2026-10-18 amendment)
+
+The profile status remains diagnostic configuration. It does not authorize
+GitHub approval. The result-facts builder and reusable publisher withhold
+OpenRouter approval even when a caller supplies `qualified` or the historical
+`not-required` default. Publication/replay freeze the withholding into the
+existing exact-head eligibility document. No schema migration is introduced.
+Other providers and permitted comments/request-changes retain their policy.
+
+The alternative of trusting a preset's status is rejected because it cannot
+verify retained reports or independently expected effective identities. A new
+evidence/configuration API is deferred rather than guessing that evaluation
+and transaction configuration digests are equivalent. This leaves the positive
+runtime control and legacy standalone-finalizer evidence binding open in #115;
+the checked harness alone does not satisfy that acceptance. Tests in
+`tests/test_github_qualification_boundary.py` reproduce the accepting defaults
+on the prior source and assert withheld publication, recovery, replay and
+delayed finalization after this repair. Rollback restores the old accepting
+behavior; no stored document is rewritten. Maintainers review this amendment
+with the runtime fix; this ADR remains Proposed.
+
 ## Scope
 
 In scope: CLI `--provider openrouter`, OpenRouter profiles, registry wiring,

@@ -1339,7 +1339,7 @@ def reconcile_overflow_review(
     *,
     coverage_mode: str = "fallback-full",
 ) -> ReviewResult:
-    """Reconcile fresh overflow analysis without treating omission as a fix.
+    """Reconcile fresh recovery analysis without treating omission as a fix.
 
     Missing priors remain uncertain and make the result partial. Existing
     partial checkpoint and approval gates preserve exact prior history and

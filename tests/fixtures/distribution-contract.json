@@ -46,7 +46,15 @@
         "tests/fixtures/distribution-contract.json",
         "tests/test_pr308_ledger_regression.py",
         "tests/fixtures/regressions/pr308-session-ledger.json",
-        "tests/fixtures/regressions/pr308-session-ledger-evidence.json"
+        "tests/fixtures/regressions/pr308-session-ledger-evidence.json",
+        "tests/isolated_working_directory.py",
+        "tests/openrouter_cli_contract.py",
+        "tests/baseline_cli_contract.py",
+        "tests/provider_deadline_contract.py",
+        "tests/test_large_public_lifecycle.py",
+        "tests/test_human_assessment.py",
+        "tests/test_operation_entry.py",
+        "tests/test_review_work.py"
       ],
       "description": "Runs after pip install dist/*.whl from a directory that cannot import checkout src/. Tests load only packaged or generated assets."
     },

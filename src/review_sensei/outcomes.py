@@ -900,8 +900,10 @@ class ResourceBudgetTracker:
         return max(0, int((self.monotonic() - self.started) * 1000))
 
     def remaining_seconds(self) -> float:
-        remaining_ms = self.budget.timeout_ms - self.elapsed_ms()
-        return max(0.0, remaining_ms / 1000)
+        # Keep fractional milliseconds for transport admission. Rounding elapsed
+        # time down would grant a request more than the original allowance.
+        elapsed = max(0.0, self.monotonic() - self.started)
+        return max(0.0, self.budget.timeout_ms / 1000 - elapsed)
 
     def admit_call(self, prompt: str) -> str | None:
         """Return a diagnostic token when a provider call cannot start."""

@@ -9,6 +9,15 @@ import sys
 import unittest
 from pathlib import Path
 
+CONTRACTS = (
+    "test_approval_lifecycle_contract",
+    "test_local_review_contract",
+    "test_baseline_recovery_contract",
+    "test_provider_deadline_contract",
+    "test_openrouter_cli_contract",
+    "test_large_public_lifecycle_contract",
+)
+
 
 def load_contracts(tests):
     """Load exact files for this one-shot process, replacing cached names.
@@ -24,12 +33,12 @@ def load_contracts(tests):
     if lane != root / "dist_safe":
         raise ImportError("contract directory escapes the qualification root")
     paths = []
-    for name in ("test_approval_lifecycle_contract", "test_local_review_contract"):
+    for name in CONTRACTS:
         path = (lane / (name + ".py")).resolve()
         if path.parent != lane or path.name != name + ".py":
             raise ImportError("contract file escapes its declared path")
         paths.append((name, path))
-    # Validate the entire declared inventory before executing either module.
+    # Validate the entire declared inventory before executing any module.
     for name, path in paths:
         spec = importlib.util.spec_from_file_location(name, path)
         if spec is None or spec.loader is None:

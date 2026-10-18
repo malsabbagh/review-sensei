@@ -151,3 +151,30 @@ follow-up work.
 After separately approved publication, verify a fresh real needs_human review,
 a supported explanation and a partial/unrelated reply against the released
 workflow and package. Keep ADR status Proposed until maintainer review.
+
+### Proposed accepted-operation replay amendment (2026-10-18)
+
+Issues #242 and #245 require a partial accepted result to reconcile after its
+resolutions were already persisted. Accepted assessment bytes now carry a digest
+of the complete immutable inventory, original result and static facts, source
+identity/body/actor metadata and exact evidence. Only monotonic resolution state
+and its human-pending flag are normalized out. A changed digest refuses reuse;
+legacy unbound accepted bytes require a new authorized mention. This extends the
+existing operation payload, not the public human-assessment schema.
+
+The adapter distinguishes restored accepted bytes from fresh inference. It
+revalidates literal citations against complete current evidence groups and
+applies only decisions still pending. Previously resolved IDs remain durable;
+unknown identities and incomplete evidence still refuse. Replayed pending
+receipts retain their original assessment digest, so reconciliation does not
+create another receipt or authority COMMENT. No provider allowance is renewed.
+
+`tests/test_large_public_lifecycle.py` exercises 100 varied / 250 compact finding
+profiles with 100/250 history comments, interruption before/after authority
+publication, changed source/evidence/authority and rich-250 capacity refusal.
+The multi-event continuation criterion passes when composed with the accepted
+computation transition release in ADR 0076; isolated replay success alone does
+not establish that release.
+Installed and deployed verification remain separate. Rollback must retain readers
+that understand the additive replay binding or conservatively refuse accepted
+results; it must not re-infer or discard unresolved reservations to recover.
