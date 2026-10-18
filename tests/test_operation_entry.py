@@ -24,6 +24,7 @@ from review_sensei_github.operation_host import (
     AdmissionProof,
     ExecutionResult,
     GitHubCommentOperationStore,
+    InMemoryOperationStore,
     OperationHandle,
     OperationHost,
     OperationRefusal,
@@ -331,8 +332,9 @@ class HostedComputationContinuationTests(unittest.TestCase):
         parts=True,
         payload=b"validated-result",
         trigger="reply",
+        store=None,
     ):
-        store = GitHubCommentOperationStore(self.comments, app_user_id=42)
+        store = store or GitHubCommentOperationStore(self.comments, app_user_id=42)
         result = run_hosted_provider(
             store,
             trigger=trigger,
@@ -427,15 +429,47 @@ class HostedComputationContinuationTests(unittest.TestCase):
             )
         )
 
-    def test_accepted_packet_without_retained_result_does_not_release(self):
-        # Oversized-for-inline output cannot be treated as durable solely
-        # because the current process still has its bytes in memory.
-        first, _ = self.run_event("revision-1", parts=False, payload=b"x" * 90_000)
-        self.assertEqual(first.fresh, b"x" * 90_000)
-        second, _ = self.run_event("revision-2")
-        self.assertEqual(second.reason, "unknown_reservation")
-        replay, _ = self.run_event("revision-1", parts=False)
-        self.assertEqual(replay.reason, "result_missing")
+    def test_missing_result_parts_refuses_before_admission_and_can_retry_configured(
+        self,
+    ):
+        for payload in (b"short-result", b"x" * 90_000):
+            with self.subTest(bytes=len(payload)):
+                self.setUp()
+                first, store = self.run_event(
+                    "revision-1", parts=False, payload=payload
+                )
+                self.assertTrue(isinstance(first, OperationRefusal))
+                self.assertEqual(first.reason, "result_missing")
+                self.assertEqual(self.calls, [])
+                self.assertEqual(self.comments.comments, {})
+                self.assertTrue(all(not values for values in store._live().values()))
+                # Restore owned result storage and retry the original identity;
+                # no grant, original allowance or held cursor was poisoned.
+                retried, _ = self.run_event("revision-1", payload=payload)
+                self.assertEqual(retried.fresh, payload)
+                self.assertEqual(self.calls, ["revision-1"])
+                following, _ = self.run_event("revision-2")
+                self.assertNotIsInstance(following, OperationRefusal)
+
+    def test_owned_accepted_inline_replay_does_not_require_result_parts(self):
+        first, store = self.run_event("revision-1")
+        self.assertEqual(first.fresh, b"validated-result")
+        before = store._live()
+        replay, store = self.run_event("revision-1", parts=False)
+        self.assertEqual(replay.replay_payload, b"validated-result")
+        self.assertEqual(self.calls, ["revision-1"])
+        self.assertEqual(store._live(), before)
+
+    def test_memory_store_without_result_retention_refuses_without_effects(self):
+        backing = InMemoryOperationStore()
+        result, store = self.run_event("revision-1", parts=False, store=backing)
+        self.assertTrue(isinstance(result, OperationRefusal))
+        self.assertEqual(result.reason, "result_missing")
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.comments.comments, {})
+        self.assertTrue(all(not values for values in store._live().values()))
+        configured, _ = self.run_event("revision-1", store=backing)
+        self.assertEqual(configured.fresh, b"validated-result")
         self.assertEqual(self.calls, ["revision-1"])
 
     def test_owned_parts_complete_large_result_and_next_revision(self):

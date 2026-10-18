@@ -164,6 +164,16 @@ transition, disagreement or quarantine never satisfies computation completion.
 Loss of the completion-write response is recovered from the original accepted
 event and owned stored result; it does not mint a new allowance.
 
+Fresh adapter work requires an owned `ResultPartStore` before original
+admission, grant consumption or provider dispatch. Without configured parts,
+only an existing accepted result with matching owned embedded bytes can replay.
+Inline embedding capacity alone cannot guarantee an unknown fresh result will
+fit. Missing retention returns `result_missing` without creating a reservation;
+configure owned result parts and retry the same event identity. Previously
+unknown or unretained effects keep their original guards and are never unlocked
+by this preflight. Actual GitHub application and Actions entry points already
+configure this store.
+
 Actual review/decision publication keeps its existing exact-head/base,
 transaction, authority and reconciliation gates. Completing computation does
 not prove any of those external effects occurred. This distinction does not

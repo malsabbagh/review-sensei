@@ -346,6 +346,9 @@ def run_hosted_provider(
 
     A later call with the same delivery id reads the accepted packet and does
     not call ``execute``. A missing proof returns a refusal before ``execute``.
+    Fresh work requires owned ResultPartStore capacity; without it, only an
+    already accepted embedded result can replay. A result_missing refusal before
+    admission can be retried with that storage configured and the same identity.
     """
 
     proof = github_admission_proof(
@@ -364,6 +367,22 @@ def run_hosted_provider(
         event = github_event_id(delivery_id=delivery_id)
     except ValueError:
         return OperationRefusal("invalid")
+    if parts is None:
+        # A fresh encoded result's size is unknown before inference. Even a
+        # store that supports inline embedding cannot guarantee it will fit.
+        # Refuse before original admission/debit rather than leaving a held
+        # computation whose only complete output was lost with this process.
+        record = store._live()["events"].get((proof.scope_digest, event))
+        packet = record.get("accepted") if isinstance(record, dict) else None
+        embedded = getattr(store, "embedded_result", None)
+        retained = embedded((proof.scope_digest, event)) if callable(embedded) else None
+        if not (
+            isinstance(packet, AcceptedPacket)
+            and isinstance(retained, bytes)
+            and len(retained) == packet.known_output_bytes
+            and hashlib.sha256(retained).hexdigest() == packet.payload_digest
+        ):
+            return OperationRefusal("result_missing")
     cursor = _computation_cursor(store, proof.scope_digest, event)
     if isinstance(cursor, OperationRefusal):
         return cursor
@@ -432,10 +451,9 @@ def run_hosted_provider(
         if not isinstance(payload, bytes) or not payload:
             return OperationRefusal("result_missing")
         if parts is None:
-            # Fresh bytes may still be returned to the caller, but without a
-            # retained target this writer remains held and cannot admit a new
-            # event. A packet digest alone is not completion evidence.
-            return HostedProviderResult(captured["value"], None, payload_digest)
+            # The preflight admits only existing owned embedded replay without
+            # parts. A fresh or unexpectedly missing target cannot complete.
+            return OperationRefusal("result_missing")
         parts.write(event_key=event_key, result=payload)
         retained = parts.read(event_key=event_key, payload_digest=payload_digest)
     elif parts is not None:
