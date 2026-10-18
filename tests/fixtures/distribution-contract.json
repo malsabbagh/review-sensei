@@ -52,6 +52,7 @@
         "tests/baseline_cli_contract.py",
         "tests/provider_deadline_contract.py",
         "tests/conversation_deadline_contract.py",
+        "tests/provider_common_flow_contract.py",
         "tests/test_large_public_lifecycle.py",
         "tests/test_human_assessment.py",
         "tests/test_operation_entry.py",

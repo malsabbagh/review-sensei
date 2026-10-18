@@ -42,6 +42,13 @@ available with `qualify.py --large-total-work`; they are excluded from this boun
 default lane. Native/npm packages, injected GitHub reply regression suites, real
 provider quality and all combinatorial interactions need separate evidence.
 
+The lifecycle inventory also loads `test_provider_common_flow_contract`: one
+factory-parameterized contract runs actual Ollama, HTTPS OpenAI-compatible and
+strict-routing OpenRouter adapters through captured synthetic transports. It
+covers canonical CLI dispatch and shared engine/reassessment/replay seams; it
+does not qualify live endpoints or a full installed/deployed configuration cross
+product. See `docs/validation/provider-common-flow.md` for the exact boundary.
+
 The `Qualify published CLI` workflow runs after `Release` completes. Its gate reads
 the **same run attempt's** PyPI job from the GitHub API, requires its success, and
 reads the exact `workflow_run.head_sha` manifest as data to resolve the version.

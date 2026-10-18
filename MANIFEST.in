@@ -24,6 +24,7 @@ include tests/openrouter_cli_contract.py
 include tests/baseline_cli_contract.py
 include tests/provider_deadline_contract.py
 include tests/conversation_deadline_contract.py
+include tests/provider_common_flow_contract.py
 include tests/test_large_public_lifecycle.py
 include tests/test_human_assessment.py
 include tests/test_operation_entry.py
