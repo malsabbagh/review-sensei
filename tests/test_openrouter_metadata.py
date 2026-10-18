@@ -19,6 +19,7 @@ from review_sensei.models import ProviderRequest, ProviderResponse, ProviderToke
 from review_sensei.openrouter_qualification import (
     CURRENT_HOSTED_OPENROUTER_QUALIFICATION_TARGET,
     OpenRouterQualificationTarget,
+    qualification_record_from_reports,
     routing_policy_digest,
 )
 from review_sensei.provider_config import (
@@ -32,6 +33,12 @@ from review_sensei.providers.openrouter import (
 from review_sensei.schemas import load_schema, validate_public_document
 from tests.test_evaluation import _write_corpus
 from tests.test_openrouter import _Response
+from tests.test_openrouter_qualification import (
+    EVALUATED_AT,
+    REPRO,
+    _make_openrouter_report,
+    _retained_artifacts,
+)
 
 
 class OpenRouterMetadataTests(unittest.TestCase):
@@ -353,6 +360,35 @@ class HostedQualificationConfigurationTests(unittest.TestCase):
                 OpenRouterQualificationTarget(model, upstream)
         with self.assertRaisesRegex(ReviewInputError, "outside the published"):
             OpenRouterQualificationTarget(target.model, "morph/unknown")
+
+        # New target eligibility cannot inherit trusted support from the
+        # allowlist, copied artifacts or fixture-only quality evidence.
+        for mode, count, retain in (
+            ("fixture", 3, True),
+            ("live", 1, True),
+            ("live", 3, False),
+        ):
+            reports = [
+                _make_openrouter_report(
+                    mode=mode,
+                    model=target.model,
+                    invocation_id=f"synthetic-target-{index}",
+                )
+                for index in range(count)
+            ]
+            with (
+                self.subTest(mode=mode, reports=count, retained=retain),
+                self.assertRaises(ReviewInputError),
+            ):
+                qualification_record_from_reports(
+                    reports,
+                    target=target,
+                    observed_revision="synthetic-operator-attestation",
+                    reproducibility=REPRO,
+                    evaluated_at=EVALUATED_AT,
+                    report_artifacts=_retained_artifacts(reports) if retain else None,
+                    status="supported",
+                )
 
     def test_documented_evaluate_command_captures_the_effective_target_and_schema(self):
         target = CURRENT_HOSTED_OPENROUTER_QUALIFICATION_TARGET
