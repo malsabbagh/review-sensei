@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve the exact evaluation corpus bytes in Windows Git checkouts so its
+  pinned inventory and fixture/live controls retain the same hashes.
 - Bound ordinary AI discussion, correction and transport retries by the original
   caller deadline and shared call/output allowance before publishing a reply.
 - Separate exact local fixture conformance from live model quality without

@@ -100,6 +100,16 @@ OpenAI configuration suite 18. All six post-package suites passed 1,251 cases,
 including the nine-file lifecycle union's 169 methods. The same real-codec
 duplicate/unknown identity regression additionally passed against both exact
 installed packages, with live network disabled. It is recorded separately from
-the default lifecycle count. Later receipt/documentation commits do not change
-these tested runtime or test bytes. These observations retain every evidence
+the default lifecycle count. Receipt/documentation commit `6c60bde` changes none
+of those tested runtime or test bytes. These observations retain every evidence
 boundary above; they do not grant provider support or hosted approval.
+
+The subsequent Windows CI run exposed Git CRLF conversion in the real packaged
+corpus tests. The follow-up pins `evaluation/v1/**` to LF in `.gitattributes`,
+preserving the original corpus and every inventory hash rather than rewriting
+evidence or relaxing validation. A real temporary Git checkout with
+`core.autocrlf=true` and `core.eol=crlf` reproduced the failure before the rule
+and passes after it, with every restored corpus file compared byte for byte.
+All 111 focused evaluator/promotion/qualification tests pass. Runtime, prompt,
+corpus bytes and thresholds are unchanged; final Windows CI remains an
+independent required check for that follow-up.

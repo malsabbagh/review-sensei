@@ -2,6 +2,10 @@
 
 import copy
 import json
+import os
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -47,6 +51,66 @@ class LiveEvaluationTests(unittest.TestCase):
         self.corpus = load_corpus(
             Path(__file__).resolve().parents[1] / "evaluation/v1/corpus.json"
         )
+
+    def test_pinned_corpus_bytes_survive_windows_style_git_checkout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            shutil.copytree(self.corpus.root, checkout / "evaluation/v1")
+            (checkout / ".gitattributes").write_bytes(
+                (Path(__file__).resolve().parents[1] / ".gitattributes").read_bytes()
+            )
+            environment = {
+                key: os.environ[key]
+                for key in (
+                    "PATH",
+                    "SYSTEMROOT",
+                    "WINDIR",
+                    "COMSPEC",
+                    "PATHEXT",
+                    "TMP",
+                    "TEMP",
+                )
+                if key in os.environ
+            }
+            environment.update(
+                HOME=str(root), USERPROFILE=str(root), GIT_CONFIG_NOSYSTEM="1"
+            )
+
+            def git(*arguments):
+                return subprocess.run(
+                    ["git", "-C", str(checkout), *arguments],
+                    check=True,
+                    capture_output=True,
+                    env=environment,
+                )
+
+            git("init", "-q")
+            git("config", "core.autocrlf", "false")
+            git("add", "--", ".gitattributes", "evaluation/v1")
+            git(
+                "-c",
+                "user.name=Synthetic Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "Synthetic pinned corpus",
+            )
+            git("config", "core.autocrlf", "true")
+            git("config", "core.eol", "crlf")
+            shutil.rmtree(checkout / "evaluation")
+            git("checkout", "--", "evaluation/v1")
+            restored = load_corpus(checkout / "evaluation/v1/corpus.json")
+            self.assertEqual(restored.document, self.corpus.document)
+            for original in self.corpus.files:
+                relative = original.relative_to(self.corpus.root)
+                self.assertEqual(
+                    (restored.root / relative).read_bytes(), original.read_bytes()
+                )
 
     def live(self, *, bad=False):
         provider = OracleProvider(self.corpus, bad=bad)
