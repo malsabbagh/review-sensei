@@ -340,6 +340,9 @@ same validated result.
   re-reviews caller-supplied changed paths plus related dependency paths;
   incompatible base, learnings, model, or configuration, missing cache state,
   or incomplete related context falls back to a full bounded review.
+  Every admitted fallback preserves prior concern accounting: omitted,
+  downgraded or ambiguously rediscovered concerns remain uncertain, make the
+  review partial and retain the prior durable baseline until resolved.
 - `ReviewResult.finding_lifecycles` records stable fingerprints and states
   (`new`, `still-present`, `fixed`, `outdated`, `uncertain`). A later pass
   that omits a finding does not mark it fixed. Exact `(path, line, body)`

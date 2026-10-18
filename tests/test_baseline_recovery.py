@@ -593,7 +593,7 @@ class BaselineRecoveryTests(unittest.TestCase):
                     "rebase-or-base-change",
                 )
                 result = json.loads((self.root / "result.json").read_text())
-                self.assertEqual(result.get("coverage_mode", "full"), "full")
+                self.assertEqual(result["coverage_mode"], "fallback-full")
                 self.assertEqual(result["transaction"]["base_sha"], "c" * 40)
                 self.assertEqual(result["transaction"]["head_sha"], "d" * 40)
                 self.assertEqual(self.baseline().cache_key.base_sha, "c" * 40)
