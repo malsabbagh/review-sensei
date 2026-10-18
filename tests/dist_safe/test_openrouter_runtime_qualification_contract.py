@@ -5,6 +5,7 @@ No remote provider or real support record is used or claimed by this test.
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
 import unittest
@@ -23,11 +24,13 @@ from review_sensei_github import (  # noqa: E402
     ReviewPublisher,
     TrustedOpenRouterQualification,
 )
+from review_sensei_github.approval import approval_eligibility_from_result  # noqa: E402
 from review_sensei_github.publication import (  # noqa: E402
     ReviewApprovalFinalizer,
     approval_eligibility_from_body,
 )
 
+from review_sensei.errors import ReviewInputError  # noqa: E402
 from review_sensei.evaluation import (  # noqa: E402
     configuration_digest,
     engine_digest,
@@ -51,9 +54,7 @@ from review_sensei.service import DEFAULT_STAGES  # noqa: E402
 
 
 class InstalledRuntimeQualificationTests(unittest.TestCase):
-    def test_checked_packaged_corpus_evidence_binds_publisher_and_delayed_finalizer(
-        self,
-    ):
+    def authority_arguments(self):
         corpus = load_corpus(
             Path(__file__).resolve().parents[2] / "evaluation/v1/corpus.json"
         )
@@ -120,7 +121,7 @@ class InstalledRuntimeQualificationTests(unittest.TestCase):
         )
         # Expectations come from the selected installed engine/corpus/configuration,
         # independently of the record's claims or report run fields.
-        authority = TrustedOpenRouterQualification(
+        arguments = dict(
             qualification_document=json.dumps(record.to_dict()).encode(),
             report_artifacts=artifacts,
             expected_target=TARGET,
@@ -138,6 +139,101 @@ class InstalledRuntimeQualificationTests(unittest.TestCase):
             ),
             runtime_configuration=context,
         )
+        return arguments, context
+
+    def test_retained_evidence_and_expected_identity_refusals_are_installed(self):
+        arguments, _ = self.authority_arguments()
+        for mutation in ("duplicate", "changed_bytes", "fixture_only", "engine"):
+            with self.subTest(mutation=mutation):
+                changed = copy.deepcopy(arguments)
+                if mutation == "duplicate":
+                    changed["report_artifacts"] = [arguments["report_artifacts"][0]] * 3
+                elif mutation == "changed_bytes":
+                    changed["report_artifacts"][0] += b" "
+                elif mutation == "fixture_only":
+                    reports = [json.loads(raw) for raw in changed["report_artifacts"]]
+                    for report in reports:
+                        report["mode"] = "fixture"
+                    changed["report_artifacts"] = [
+                        json.dumps(report).encode() for report in reports
+                    ]
+                else:
+                    changed["expected_engine_digest"] = "0" * 64
+                with self.assertRaises(ReviewInputError):
+                    TrustedOpenRouterQualification(**changed)
+
+    def test_detached_provider_claim_without_app_owned_provenance_never_approves(self):
+        pr = {
+            "state": "open",
+            "draft": False,
+            "user": {"login": "alice", "type": "User"},
+            "head": {
+                "sha": "b" * 40,
+                "repo": {"full_name": "owner/repo", "fork": False},
+            },
+            "base": {
+                "sha": "a" * 40,
+                "ref": "main",
+                "repo": {"id": 1, "full_name": "owner/repo", "fork": False},
+            },
+        }
+        threads = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            }
+        }
+        for provider in ("ollama", "openai-compatible", "openrouter"):
+            with self.subTest(provider=provider):
+                result = ReviewResult(
+                    summary="Synthetic detached control.",
+                    comments=(),
+                    provider=provider,
+                    review_status="complete",
+                )
+                eligibility = approval_eligibility_from_result(
+                    result,
+                    head_sha="b" * 40,
+                    base_sha="a" * 40,
+                    enabled=True,
+                    app_authored=False,
+                )
+                http, calls = make_http(
+                    [
+                        json_response(pr),
+                        json_response(threads),
+                        json_response(pr),
+                        json_response([]),
+                    ]
+                )
+                final = ReviewApprovalFinalizer(http=http).finalize(
+                    token="synthetic",
+                    repository="owner/repo",
+                    pull_request=2,
+                    head_sha="b" * 40,
+                    app_slug="reviewsensei[bot]",
+                    eligibility=eligibility,
+                    require_persisted=False,
+                )
+                self.assertEqual(final.status, "approval_withheld")
+                self.assertFalse(
+                    any(
+                        method == "POST" and url.endswith("/reviews")
+                        for method, url, _ in calls
+                    )
+                )
+
+    def test_checked_packaged_corpus_evidence_binds_publisher_and_delayed_finalizer(
+        self,
+    ):
+        arguments, context = self.authority_arguments()
+        authority = TrustedOpenRouterQualification(**arguments)
         head, base = "b" * 40, "a" * 40
         pr = {
             "state": "open",
