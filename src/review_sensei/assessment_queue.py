@@ -359,6 +359,7 @@ class AssessmentCheckpoint:
         self._queue: AssessmentQueue | None = None
         self._restored_digests: dict[str, str | None] = {}
         self._prepared_read: tuple[object | None] | None = None
+        self._clock_high_water: datetime | None = None
 
     def prepare_queue(
         self,
@@ -406,7 +407,11 @@ class AssessmentCheckpoint:
             or value.utcoffset() is None
         ):
             raise ReviewInputError("assessment operation clock must be aware")
-        return value.astimezone(timezone.utc)
+        value = value.astimezone(timezone.utc)
+        if self._clock_high_water is not None and value < self._clock_high_water:
+            raise ReviewInputError("assessment operation clock regressed")
+        self._clock_high_water = value
+        return value
 
     def save(
         self,

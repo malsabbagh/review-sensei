@@ -47,14 +47,14 @@ retains the existing source, current PR/head/base, authority and approval checks
 Digest equality and compressed bytes cannot substitute for any of those checks.
 
 Admission reuses its bounded authenticated receipt once for full decoding;
-every actual activation retains the original generation fence. Replaying an
-accepted receipt with exactly identical execution/counters avoids another
-activation. Fresh request and semantic validation still run, as do current
-source/head/base/latest authority checks before reassessment/publication. The
-stored absolute origin/deadline/expiry and elapsed-time restoration keep their
-original authority without a no-op rewrite. Any changed execution or counter
-still requires the ordinary fenced mutation. Unknown dispatches do not become
-accepted or redispatchable through this optimization.
+every actual activation retains the original generation fence. Every accepted
+replay still persists original counters and the time high-water before returning.
+Suppressing an otherwise identical replay write is unsafe: current usage can be
+higher than the stored counters after max-merging, and a later process with a
+regressed wall clock must not forget a previously observed age. Receipt expiry
+and within-operation clock monotonicity are checked again at persistence. None
+of these checks renews original origin/deadline/expiry or permits unknown
+provider outcomes to dispatch again.
 
 ## Validation and limits
 
@@ -68,10 +68,14 @@ assessment and publication APIs with the actual local ledger, synthetic GitHub
 HTTP and deterministic provider. A full-ID target after the first 32 findings
 resolves only that target, retains the other 39 obligations, withholds approval,
 and completes within 56 charged original reads. Reconstructing the accepted
-checkpoint before publication performs zero new provider calls, preserves the
-original execution/counters/deadline and finishes publication within 60 reads. The accepted replay uses a fresh local
-ledger instance and restored original control budget, without another mutation.
-Source edits, current PR/head/base or latest inventory changes, and competing local generations refuse without unsupported effects.
+checkpoint with its original live ledger owner performs zero new provider calls
+and preserves original execution/counters/deadline, but its mandatory replay
+activation consumes the publication allowance. That full replay/publication path
+remains budget-blocked. A fresh local ledger without the genuine original
+attempt witness refuses activation; queue bytes or a reservation string cannot
+supply that proof.
+Source edits, current PR/head/base or latest inventory changes, and competing
+local generations refuse without unsupported effects.
 An early semantic rejection leaves its four obligations unresolved while a late
 second batch is durably accepted in the same operation.
 
@@ -91,5 +95,10 @@ as target authority, or resetting the budget would weaken the existing contract.
 Those alternatives are rejected. Follow-on work can qualify references to
 unchanged authenticated inventory/facts or a complete budgeted immutable reader
 projection; it must preserve original accounting and delayed-reader recovery.
+A referenced-inventory prototype fits the varied-100 manifest but does not fund
+the unchanged multi-page public report under the same allowance. It is not
+shipped as a second carrier contract without end-to-end benefit. Coalescing
+actual owned transaction reads and safe immutable page associations remain
+implementation options; external access is not their blocker.
 For rollback, disable this host opt-in and retain compatible packed readers for
 already referenced roots until their retained source receipts/tombstones expire.

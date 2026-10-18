@@ -343,7 +343,7 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
             self.assertEqual(len(state.latest_inventory().pending), 39)
             self.assertLessEqual(host.read_budget.calls, 60)
 
-    def test_accepted_interruption_reconstructs_receipt_without_provider_or_allowance(
+    def test_accepted_interruption_replays_without_inference_but_keeps_publication_budget_blocked(
         self,
     ):
         state, publisher, prepared = self.prepare()
@@ -356,16 +356,6 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
                 host.tracker.provider_calls,
                 host.tracker.prompt_bytes,
                 host.tracker.response_bytes,
-            )
-            restored_budget = EvidenceReadBudget(snapshot=host.read_budget.snapshot())
-            publisher = HumanAssessmentPublisher(
-                http=state.http, before_read=restored_budget.consume
-            )
-            host.publisher, host.read_budget = publisher, restored_budget
-            host.ledger = LocalSessionLedger(
-                Path(directory),
-                evidence_budget=restored_budget,
-                enable_partition_writes=True,
             )
             # Reconstruct the C checkpoint and A root/part reader, retaining the
             # SAME original control budget and durable reservation. No new grant.
@@ -393,18 +383,21 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
                 original_counters,
             )
             self.assertEqual(host.read_budget.wall_deadline_ms, original_deadline)
-            self.assertEqual(host.mutations, ["admission-dispatch", "accepted"])
-            outcome = publisher.publish(
-                token="synthetic",
-                review_token="synthetic",
-                repository="owner/repo",
-                pull_request=1,
-                prepared=prepared,
-                reply=replay,
-                app_slug=APP,
+            self.assertEqual(
+                host.mutations, ["admission-dispatch", "accepted", "replay"]
             )
-            self.assertEqual(outcome.approval_status, "approval_withheld")
-            self.assertEqual(len(state.latest_inventory().pending), 39)
+            with self.assertRaises((ReviewInputError, GitHubPublicationError)):
+                publisher.publish(
+                    token="synthetic",
+                    review_token="synthetic",
+                    repository="owner/repo",
+                    pull_request=1,
+                    prepared=prepared,
+                    reply=replay,
+                    app_slug=APP,
+                )
+            self.assertEqual(len(state.latest_inventory().pending), 40)
+            self.assertNotIn("APPROVE", state.events())
             self.assertLessEqual(host.read_budget.calls, 60)
 
     def test_unknown_or_foreign_target_has_no_provider_or_checkpoint_mutation(self):
@@ -600,6 +593,41 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
             self.assertEqual(host.read_budget.snapshot(), before)
             self.assertEqual(len(state.calls), before_calls)
             self.assertEqual(host.mutations, ["admission-dispatch", "accepted"])
+            self.assertEqual(state.reply_count, 0)
+
+    def test_fresh_owner_without_original_attempt_witness_cannot_activate_replay(self):
+        state, publisher, prepared = self.prepare()
+        with tempfile.TemporaryDirectory() as directory:
+            host = LocalFeedbackHost(directory, publisher, prepared)
+            host.run(AssessingProvider())
+            observer = LocalSessionLedger(Path(directory))
+            retained = observer.load(host.identity).record
+            original_deadline = host.read_budget.wall_deadline_ms
+            restored = EvidenceReadBudget(snapshot=host.read_budget.snapshot())
+            host.publisher = HumanAssessmentPublisher(
+                http=state.http, before_read=restored.consume
+            )
+            host.read_budget = restored
+            host.ledger = LocalSessionLedger(
+                Path(directory), evidence_budget=restored, enable_partition_writes=True
+            )
+            host.adapter = AssessmentQueueHostAdapter(
+                queue=host.queue,
+                binding=host.binding,
+                source_digest=host.source,
+                operation_id=host.operation_id,
+                attempt_reservation_id=host.reservation,
+                read=host.read,
+                activate=host.activate,
+            )
+            host.tracker = ResourceBudgetTracker(ResourceBudget.create())
+            provider = AssessingProvider()
+            with self.assertRaisesRegex(ReviewInputError, "witness"):
+                host.run(provider)
+            self.assertEqual(provider.calls, [])
+            self.assertEqual(host.mutations, ["admission-dispatch", "accepted"])
+            self.assertEqual(restored.wall_deadline_ms, original_deadline)
+            self.assertEqual(observer.load(host.identity).record, retained)
             self.assertEqual(state.reply_count, 0)
 
     def test_varied_100_falls_back_to_parts_and_does_not_claim_publication_capacity(
