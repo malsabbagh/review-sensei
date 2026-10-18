@@ -1517,6 +1517,7 @@ class ConversationPublisher:
         diagnostic: str | None = None,
         decision_reasons=None,
         assessment_digest: str = "",
+        layout: str = "legacy",
         **arguments,
     ) -> ReplyResult:
         """Confirm every bounded page before allowing caller authority updates.
@@ -1539,6 +1540,7 @@ class ConversationPublisher:
             diagnostic=diagnostic,
             decision_reasons=decision_reasons,
             assessment_digest=assessment_digest,
+            layout=layout,
         )
         failure = fence()
         if failure is not None:
@@ -1585,6 +1587,24 @@ class ConversationPublisher:
                     assessment_status="pending_delivery_incomplete",
                 )
             created = created or last.status == "replied"
+        if layout == "shared-guidance-v1":
+            # The compact opt-in report is accepted only as a complete owned
+            # report. A later page POST cannot hide edits/removal of an earlier
+            # page that already passed its individual readback.
+            complete = self._completed_pending_report(
+                token=arguments["token"],
+                repository=arguments["repository"],
+                pull_request=arguments["pull_request"],
+                source_kind=arguments.get("source_kind", "inline"),
+                source_comment_id=arguments["source_comment_id"],
+                source_updated_at=arguments["source_updated_at"],
+                head_sha=arguments["head_sha"],
+                report_digest=pages[0].report_digest,
+                pages=pages,
+                app_slug=arguments["app_slug"],
+            )
+            if complete is None:
+                raise GitHubConversationError("pending report readback is incomplete")
         failure = fence()
         if failure is not None:
             return ReplyResult(

@@ -774,6 +774,7 @@ class HumanAssessmentPublisher:
         check_token: str | None = None,
         reviews_policy: str = "auto-approve",
         recorded_replay: bool = False,
+        pending_report_layout: str = "legacy",
     ) -> ReplyResult:
         conversation = prepared.conversation
         if prepared.feedback is not None and self.before_read is None:
@@ -953,6 +954,7 @@ class HumanAssessmentPublisher:
             return None
 
         outcome = self.conversation.publish_pending(
+            layout=pending_report_layout,
             eligibility=refreshed,
             fence=pending_fence,
             authority_digest=hashlib.sha256(

@@ -47,17 +47,50 @@ MAX_FACTORED_DEPTH = 32
 MAX_RECONSTRUCTED_HISTORY_BYTES = 8 * 1024 * 1024
 
 
-def pack_queue_state(envelope: object) -> dict[str, object]:
+def pack_queue_state(
+    envelope: object, *, queue: AssessmentQueue | None = None
+) -> dict[str, object]:
     """Lossless optional carrier for an already authenticated complete queue.
 
     Hosts may place this document in the existing inline manifest if it fits,
     otherwise retain the partitioned carrier. Compression confers no authority,
     changes no byte/read limit and never replaces source or root fencing.
+    Passing ``queue`` explicitly selects v2: its immutable reference table must
+    come from retained authenticated inventory, and is required again to decode.
     """
     document = _queue_state_envelope(envelope)
+    original = canonical_bytes(document)
+    reference: dict[str, object] = {}
+    if queue is not None:
+        journal = document["journal"]
+        if (
+            not isinstance(journal, dict)
+            or journal.get("schema_version") != FACTORED_JOURNAL_INTERFACE_VERSION
+        ):
+            raise ReviewInputError("queue references require factored history")
+        retained = AssessmentQueue.from_document(journal["queue"])
+        if _queue_reference(retained) != _queue_reference(queue):
+            raise ReviewInputError("queue reference inventory changed")
+        reference = {
+            "queue_reference": _queue_reference(queue),
+            "original_bytes": len(original),
+            "original_sha256": hashlib.sha256(original).hexdigest(),
+        }
+        indexes = {
+            identity: index for index, identity in enumerate(queue.inventory_ids)
+        }
+        for name in ("inventory_ids", "pending_order", "resolved_ids"):
+            journal["queue"][name] = [indexes[item] for item in journal["queue"][name]]
+        journal["strings"] = [
+            {"inventory_id": indexes[item]} if item in indexes else item
+            for item in journal["strings"]
+        ]
     packed: dict[str, object] = {
         "schema_version": "1.0",
-        "kind": "assessment-queue-state-packed-v1",
+        "kind": "assessment-queue-state-packed-v2"
+        if queue is not None
+        else "assessment-queue-state-packed-v1",
+        **reference,
         "state": encode_evidence(
             document, max_decoded_bytes=MAX_OPERATION_RECEIPT_BYTES
         ),
@@ -67,25 +100,137 @@ def pack_queue_state(envelope: object) -> dict[str, object]:
     return packed
 
 
-def unpack_queue_state(document: object) -> dict[str, object]:
-    """Decode bounded owned storage, then validate complete queue semantics."""
+def unpack_queue_state(
+    document: object, *, queue: AssessmentQueue | None = None
+) -> dict[str, object]:
+    """Decode bounded owned storage, then validate complete queue semantics.
+
+    V2 requires the exact authenticated original inventory/snapshot; the queue
+    argument is neither authentication of this document nor an attempt witness.
+    """
+    referenced = False
     if (
         isinstance(document, dict)
-        and document.get("kind") == "assessment-queue-state-packed-v1"
+        and isinstance(document.get("kind"), str)
+        and document["kind"]
+        in {
+            "assessment-queue-state-packed-v1",
+            "assessment-queue-state-packed-v2",
+        }
     ):
-        if (
-            set(document) != {"schema_version", "kind", "state"}
-            or document["schema_version"] != "1.0"
-        ):
+        referenced = document["kind"] == "assessment-queue-state-packed-v2"
+        keys = {"schema_version", "kind", "state"}
+        if referenced:
+            keys |= {"queue_reference", "original_bytes", "original_sha256"}
+        if set(document) != keys or document["schema_version"] != "1.0":
             raise ReviewInputError("packed assessment queue shape is invalid")
         if len(canonical_bytes(document)) > MAX_OPERATION_RECEIPT_BYTES:
             raise ReviewInputError("packed assessment queue exceeds encoded bound")
-        document = decode_evidence(
+        if referenced and (
+            queue is None
+            or document["queue_reference"] != _queue_reference(queue)
+            or type(document["original_bytes"]) is not int
+            or not 0 < document["original_bytes"] <= MAX_OPERATION_RECEIPT_BYTES
+            or not _hash(document["original_sha256"])
+        ):
+            raise ReviewInputError(
+                "original authenticated queue reference is unavailable"
+            )
+        decoded = decode_evidence(
             document["state"],
             max_encoded_bytes=MAX_OPERATION_RECEIPT_BYTES,
             max_decoded_bytes=MAX_OPERATION_RECEIPT_BYTES,
         )
-    return _queue_state_envelope(document)
+        if referenced:
+            assert queue is not None
+            decoded = _expand_queue_reference(
+                decoded, queue, maximum=document["original_bytes"]
+            )
+            raw = canonical_bytes(decoded)
+            if (
+                len(raw) != document["original_bytes"]
+                or len(raw) > MAX_OPERATION_RECEIPT_BYTES
+                or hashlib.sha256(raw).hexdigest() != document["original_sha256"]
+            ):
+                raise ReviewInputError(
+                    "reconstructed queue reference differs from original"
+                )
+        document = decoded
+    validated = _queue_state_envelope(document)
+    if referenced:
+        assert queue is not None
+        journal = validated["journal"]
+        assert isinstance(journal, dict)
+        retained = AssessmentQueue.from_document(journal["queue"])
+        if _queue_reference(retained) != _queue_reference(queue):
+            raise ReviewInputError("reconstructed queue reference inventory changed")
+    return validated
+
+
+def _queue_reference(queue: AssessmentQueue) -> dict[str, object]:
+    if not isinstance(queue, AssessmentQueue):
+        raise ReviewInputError("original authenticated queue is invalid")
+    return {
+        "snapshot": queue.snapshot.to_dict(),
+        "inventory_digest": queue.inventory_digest,
+        "inventory_ids_sha256": evidence_digest(list(queue.inventory_ids)),
+    }
+
+
+def _expand_queue_reference(
+    document: object, queue: AssessmentQueue, *, maximum: int
+) -> dict[str, object]:
+    if not isinstance(document, dict) or set(document) != {
+        "schema_version",
+        "kind",
+        "journal",
+    }:
+        raise ReviewInputError("referenced queue envelope is invalid")
+    journal = document["journal"]
+    if (
+        not isinstance(journal, dict)
+        or journal.get("schema_version") != FACTORED_JOURNAL_INTERFACE_VERSION
+    ):
+        raise ReviewInputError("referenced queue journal is invalid")
+    state, strings = journal.get("queue"), journal.get("strings")
+    if (
+        not isinstance(state, dict)
+        or not isinstance(strings, list)
+        or len(strings) > MAX_FACTORED_STRINGS
+    ):
+        raise ReviewInputError("referenced queue fields are invalid")
+
+    reconstructed_size = len(canonical_bytes(document))
+    if reconstructed_size > min(maximum, MAX_OPERATION_RECEIPT_BYTES):
+        raise ReviewInputError("reconstructed queue reference exceeds bound")
+
+    def identity(index: object, encoded: object) -> str:
+        nonlocal reconstructed_size
+        if type(index) is not int or not 0 <= index < len(queue.inventory_ids):
+            raise ReviewInputError("queue reference index is invalid")
+        value = queue.inventory_ids[index]
+        reconstructed_size += len(canonical_bytes(value)) - len(
+            canonical_bytes(encoded)
+        )
+        if reconstructed_size > min(maximum, MAX_OPERATION_RECEIPT_BYTES):
+            raise ReviewInputError("reconstructed queue reference exceeds bound")
+        return value
+
+    for name in ("inventory_ids", "pending_order", "resolved_ids"):
+        indexes = state.get(name)
+        if not isinstance(indexes, list) or len(indexes) > MAX_QUEUE_FINDINGS:
+            raise ReviewInputError("queue reference index array is invalid")
+        state[name] = [identity(index, index) for index in indexes]
+    expanded = []
+    for item in strings:
+        if isinstance(item, str):
+            expanded.append(item)
+        elif isinstance(item, dict) and set(item) == {"inventory_id"}:
+            expanded.append(identity(item["inventory_id"], item))
+        else:
+            raise ReviewInputError("queue reference string is invalid")
+    journal["strings"] = expanded
+    return document
 
 
 def _queue_state_envelope(envelope: object) -> dict[str, object]:

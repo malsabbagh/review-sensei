@@ -15,8 +15,9 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from review_sensei_github.errors import GitHubPublicationError
+from review_sensei_github.errors import GitHubConversationError, GitHubPublicationError
 from review_sensei_github.human_assessment import HumanAssessmentPublisher
+from review_sensei_github.pending import pending_reply_pages
 
 from review_sensei.assessment_queue import (
     AssessmentQueue,
@@ -34,7 +35,7 @@ from review_sensei.bounded_evidence import (
 )
 from review_sensei.budgets import ReviewWorkBudgets
 from review_sensei.errors import ReviewInputError
-from review_sensei.evidence import evidence_digest
+from review_sensei.evidence import EvidenceSnapshot, evidence_digest
 from review_sensei.feedback import (
     FeedbackAdmissionError,
     FeedbackReference,
@@ -57,12 +58,15 @@ from tests.test_review_work import AssessingProvider
 class LocalFeedbackHost:
     """Caller-owned glue around the existing public host/ledger boundaries."""
 
-    def __init__(self, directory, publisher, prepared, *, tracker=None):
+    def __init__(
+        self, directory, publisher, prepared, *, tracker=None, referenced=False
+    ):
         # Fixture enrollment is separate from this assessment attempt.
         LocalSessionLedger(Path(directory)).initialize(
             SessionIdentity("owner/repo", 1, repository_id=1)
         )
         self.publisher, self.prepared = publisher, prepared
+        self.referenced = referenced
         self.tracker = tracker or ResourceBudgetTracker(ResourceBudget.create())
         self.read_budget = publisher.before_read.__self__
         self.ledger = LocalSessionLedger(
@@ -115,7 +119,10 @@ class LocalFeedbackHost:
         )
         self.mutations = []
         self.before_activation = None
-        self.adapter = AssessmentQueueHostAdapter(
+        self.adapter = self.new_adapter()
+
+    def new_adapter(self):
+        return AssessmentQueueHostAdapter(
             queue=self.queue,
             binding=self.binding,
             source_digest=self.source,
@@ -135,7 +142,10 @@ class LocalFeedbackHost:
         ):
             raise ReviewInputError("local queue binding changed")
         envelope = (
-            unpack_queue_state(read_session_assessment_queue(self.ledger, record))
+            unpack_queue_state(
+                read_session_assessment_queue(self.ledger, record),
+                queue=self.queue if self.referenced else None,
+            )
             if record.assessment_queue is not None
             else None
         )
@@ -177,7 +187,9 @@ class LocalFeedbackHost:
                     "deadline_at_ms": self.read_budget.wall_deadline_ms,
                 },
             }
-            carrier = pack_queue_state(request.envelope)
+            carrier = pack_queue_state(
+                request.envelope, queue=self.queue if self.referenced else None
+            )
             manifest = inline_manifest(
                 carrier, binding=self.binding, item_count=request.item_count
             )
@@ -222,7 +234,12 @@ class LocalFeedbackHost:
         self.last_envelope = copy.deepcopy(request.envelope)
         manifest = accepted.assessment_queue["state_manifest"]
         if (
-            manifest["sha256"] != evidence_digest(pack_queue_state(request.envelope))
+            manifest["sha256"]
+            != evidence_digest(
+                pack_queue_state(
+                    request.envelope, queue=self.queue if self.referenced else None
+                )
+            )
             or manifest["binding"] != self.binding
             or manifest["item_count"] != request.item_count
         ):
@@ -266,9 +283,23 @@ class LocalFeedbackHost:
         )
         if latest != self.prepared.eligibility:
             raise ReviewInputError("latest assessment authority changed")
+        if self.queue is None:
+            # The fresh reader obtains the required complete inventory from
+            # this actual authenticated retained authority read, not a cache.
+            self.queue = AssessmentQueue.create(
+                latest.human_review,
+                EvidenceSnapshot(
+                    "owner/repo",
+                    1,
+                    current_pr["base"]["sha"],
+                    current_pr["head"]["sha"],
+                ),
+            )
 
     def run(self, provider):
         self.fence_authority()
+        if self.adapter is None:
+            self.adapter = self.new_adapter()
         return reassess(
             provider=provider,
             pending=self.prepared.eligibility.human_review,
@@ -657,6 +688,298 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
                 )
             self.assertEqual(state.latest_inventory().resolved, ())
             self.assertEqual(state.reply_count, 0)
+
+    def test_referenced_varied_100_complete_publication_inside_original_budget(self):
+        state, publisher, prepared = self.prepare(100)
+        original = prepared.eligibility.human_review.inventory_document()
+        with tempfile.TemporaryDirectory() as directory:
+            host = LocalFeedbackHost(directory, publisher, prepared, referenced=True)
+            provider = AssessingProvider()
+            work = host.run(provider)
+            self.assertEqual(len(provider.calls), 1)
+            self.assertEqual(work.selected_ids, prepared.feedback.target_ids)
+            self.assertEqual(host.read_budget.calls, 32)
+            record = LocalSessionLedger(Path(directory)).load(host.identity).record
+            self.assertNotEqual(
+                record.assessment_queue["state_manifest"]["encoding"],
+                "partitioned-json-v1",
+            )
+            outcome = publisher.publish(
+                token="synthetic",
+                review_token="synthetic",
+                repository="owner/repo",
+                pull_request=1,
+                prepared=prepared,
+                reply=work,
+                app_slug=APP,
+                pending_report_layout="shared-guidance-v1",
+            )
+            self.assertEqual(outcome.approval_status, "approval_withheld")
+            self.assertEqual(
+                state.latest_inventory().resolved, prepared.feedback.target_ids
+            )
+            self.assertEqual(len(state.latest_inventory().pending), 99)
+            self.assertEqual(host.read_budget.calls, 57)
+            self.assertEqual(state.reply_count, 1)
+            self.assertNotIn("APPROVE", state.events())
+            self.assertEqual(state.latest_inventory().inventory_document(), original)
+            for item in state.latest_inventory().pending:
+                self.assertIn(item.fingerprint, state.replies[0]["body"])
+
+    def test_referenced_fresh_reader_reconstructs_inventory_but_not_attempt_witness(
+        self,
+    ):
+        state, publisher, prepared = self.prepare(100)
+        with tempfile.TemporaryDirectory() as directory:
+            host = LocalFeedbackHost(directory, publisher, prepared, referenced=True)
+            host.run(AssessingProvider())
+            observer = LocalSessionLedger(Path(directory))
+            retained = observer.load(host.identity).record
+            original_deadline = host.read_budget.wall_deadline_ms
+            restored = EvidenceReadBudget(snapshot=host.read_budget.snapshot())
+            host.publisher = HumanAssessmentPublisher(
+                http=state.http, before_read=restored.consume
+            )
+            host.read_budget = restored
+            host.ledger = LocalSessionLedger(
+                Path(directory), evidence_budget=restored, enable_partition_writes=True
+            )
+            host.queue, host.adapter = None, None
+            host.tracker = ResourceBudgetTracker(ResourceBudget.create())
+            before_reads = len(state.calls)
+            provider = AssessingProvider()
+            with self.assertRaisesRegex(ReviewInputError, "witness"):
+                host.run(provider)
+            self.assertEqual(provider.calls, [])
+            self.assertTrue(
+                any(
+                    path.endswith("/pulls/1/reviews")
+                    for _, path, _ in state.calls[before_reads:]
+                )
+            )
+            self.assertEqual(len(host.queue.inventory_ids), 100)
+            self.assertEqual(host.mutations, ["admission-dispatch", "accepted"])
+            self.assertEqual(observer.load(host.identity).record, retained)
+            self.assertEqual(restored.wall_deadline_ms, original_deadline)
+            self.assertEqual(state.reply_count, 0)
+
+    def test_referenced_fresh_reader_refuses_missing_original_retained_authority(self):
+        state, publisher, prepared = self.prepare(100)
+        with tempfile.TemporaryDirectory() as directory:
+            host = LocalFeedbackHost(directory, publisher, prepared, referenced=True)
+            host.run(AssessingProvider())
+            observer = LocalSessionLedger(Path(directory))
+            before = observer.load(host.identity).record
+            host.queue, host.adapter = None, None
+            state.reviews.clear()
+            provider = AssessingProvider()
+            with self.assertRaises(ReviewInputError):
+                host.run(provider)
+            self.assertIsNone(host.queue)
+            self.assertEqual(provider.calls, [])
+            self.assertEqual(host.mutations, ["admission-dispatch", "accepted"])
+            self.assertEqual(observer.load(host.identity).record, before)
+            self.assertEqual(state.reply_count, 0)
+
+    def test_referenced_shared_report_source_head_base_and_latest_races_between_pages(
+        self,
+    ):
+        class UnresolvedProvider(AssessingProvider):
+            def complete(self, request):
+                value = json.loads(super().complete(request).text)
+                # Keep one valid resolution: missing the later authority fence
+                # would otherwise allow a real inventory mutation.
+                for decision in value["assessments"][1:]:
+                    decision.update(
+                        decision="unresolved",
+                        rationale="Distinct unresolved basis 深🙂 " + "evidence " * 100,
+                        human_evidence="",
+                        diff_evidence="",
+                    )
+                return ProviderResponse(json.dumps(value), self.name, self.model)
+
+        for race in ("source", "head", "base", "latest"):
+            with self.subTest(race=race), tempfile.TemporaryDirectory() as directory:
+                state, publisher, prepared = self.prepare(
+                    104, targets=lambda ids: tuple(ids[-4:])
+                )
+                host = LocalFeedbackHost(
+                    directory, publisher, prepared, referenced=True
+                )
+                work = host.run(UnresolvedProvider())
+                pages = pending_reply_pages(
+                    body=work.reply.body,
+                    head_sha=state.head,
+                    eligibility=replace(
+                        prepared.eligibility,
+                        human_review=prepared.eligibility.human_review.apply(
+                            work.reply.decisions
+                        ),
+                    ),
+                    decision_reasons={
+                        item.fingerprint: item.rationale
+                        for item in work.reply.decisions
+                    },
+                    layout="shared-guidance-v1",
+                )
+                self.assertEqual(len(pages), 2)
+                original_request = state.http.request
+
+                def racing_request(method, path, **arguments):
+                    result = original_request(method, path, **arguments)
+                    if method == "POST" and path.endswith("/issues/1/comments"):
+                        if race == "source":
+                            state.source["updated_at"] = "edited"
+                        elif race == "head":
+                            state.head = "c" * 40
+                        elif race == "base":
+                            state.base = "c" * 40
+                        else:
+                            state.reviews.append(
+                                state.review(
+                                    replace(state.eligibility, result_digest="f" * 64),
+                                    100,
+                                )
+                            )
+                    return result
+
+                state.http.request = racing_request
+
+                def publish():
+                    return publisher.publish(
+                        token="synthetic",
+                        review_token="synthetic",
+                        repository="owner/repo",
+                        pull_request=1,
+                        prepared=prepared,
+                        reply=work,
+                        app_slug=APP,
+                        pending_report_layout="shared-guidance-v1",
+                    )
+
+                if race == "source":
+                    with self.assertRaises(FeedbackAdmissionError):
+                        publish()
+                else:
+                    self.assertTrue(publish().status.startswith("skipped_"))
+                self.assertEqual(state.reply_count, 1)
+                self.assertEqual(state.latest_inventory().resolved, ())
+                self.assertNotIn("APPROVE", state.events())
+                self.assertLessEqual(host.read_budget.calls, 60)
+
+    def test_referenced_delivery_conflict_concurrent_lost_and_unreadable_pages_keep_all_pending(
+        self,
+    ):
+        for fault in (
+            "same-id-content",
+            "concurrent",
+            "lost-post",
+            "partial-post",
+            "readback",
+            "whole-readback",
+        ):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                state, publisher, prepared = self.prepare(100)
+                host = LocalFeedbackHost(
+                    directory, publisher, prepared, referenced=True
+                )
+                work = host.run(AssessingProvider())
+                original_request = state.http.request
+                scans_after_post = 0
+
+                def failing_request(method, path, **arguments):
+                    nonlocal scans_after_post
+                    if (
+                        method == "POST"
+                        and path.endswith("/issues/1/comments")
+                        and fault == "concurrent"
+                    ):
+                        state.replies.append(
+                            {
+                                "id": 999,
+                                "body": arguments["body"]["body"],
+                                "created_at": "created",
+                                "updated_at": "replied",
+                                "user": {"login": APP, "type": "Bot"},
+                                "issue_url": state.source["issue_url"],
+                            }
+                        )
+                    if (
+                        method == "GET"
+                        and "/issues/1/comments" in path
+                        and state.reply_count
+                    ):
+                        scans_after_post += 1
+                        if fault == "readback" or (
+                            fault == "whole-readback" and scans_after_post == 2
+                        ):
+                            raise GitHubConversationError(
+                                "owned whole page readback unavailable"
+                            )
+                    result = original_request(method, path, **arguments)
+                    if method == "POST" and path.endswith("/issues/1/comments"):
+                        if fault == "lost-post":
+                            raise GitHubConversationError("post outcome unknown")
+                        if fault in {"same-id-content", "partial-post"}:
+                            state.replies[-1]["body"] = (
+                                "changed " + state.replies[-1]["body"]
+                                if fault == "same-id-content"
+                                else state.replies[-1]["body"][:100]
+                            )
+                    return result
+
+                state.http.request = failing_request
+                with self.assertRaises(
+                    (ReviewInputError, GitHubConversationError, GitHubPublicationError)
+                ):
+                    publisher.publish(
+                        token="synthetic",
+                        review_token="synthetic",
+                        repository="owner/repo",
+                        pull_request=1,
+                        prepared=prepared,
+                        reply=work,
+                        app_slug=APP,
+                        pending_report_layout="shared-guidance-v1",
+                    )
+                self.assertEqual(state.latest_inventory().resolved, ())
+                self.assertEqual(len(state.latest_inventory().pending), 100)
+                self.assertNotIn("APPROVE", state.events())
+                self.assertLessEqual(host.read_budget.calls, 60)
+
+    def test_referenced_original_owner_replay_persists_accounting_without_new_publication_allowance(
+        self,
+    ):
+        state, publisher, prepared = self.prepare(100)
+        with tempfile.TemporaryDirectory() as directory:
+            host = LocalFeedbackHost(directory, publisher, prepared, referenced=True)
+            first = host.run(AssessingProvider())
+            deadline = host.read_budget.wall_deadline_ms
+            host.adapter = host.new_adapter()
+            host.tracker = ResourceBudgetTracker(ResourceBudget.create())
+            provider = AssessingProvider()
+            replay = host.run(provider)
+            self.assertEqual(replay.reply, first.reply)
+            self.assertEqual(provider.calls, [])
+            self.assertEqual(
+                host.mutations, ["admission-dispatch", "accepted", "replay"]
+            )
+            self.assertEqual(host.read_budget.calls, 44)
+            self.assertEqual(host.read_budget.wall_deadline_ms, deadline)
+            with self.assertRaises((ReviewInputError, GitHubPublicationError)):
+                publisher.publish(
+                    token="synthetic",
+                    review_token="synthetic",
+                    repository="owner/repo",
+                    pull_request=1,
+                    prepared=prepared,
+                    reply=replay,
+                    app_slug=APP,
+                    pending_report_layout="shared-guidance-v1",
+                )
+            self.assertEqual(len(state.latest_inventory().pending), 100)
+            self.assertNotIn("APPROVE", state.events())
+            self.assertLessEqual(host.read_budget.calls, 60)
 
     def test_competing_local_generation_refuses_before_provider_dispatch(self):
         state, publisher, prepared = self.prepare()
