@@ -83,3 +83,9 @@ contracts with repeated `--suite` options, preserving the exact 0.6.23/0.1.1 whe
 digests. It does not claim those old bytes implement newer lifecycle behavior.
 Default post-publication qualification runs all six suites; receipts always list
 selected and excluded suites so a subset cannot be mistaken for full coverage.
+
+Lifecycle contracts load from the two declared files under `tests/dist_safe`,
+so a same-named module elsewhere on the search path cannot shadow them. Receipts
+include `tests_run` separately from row counts, a sanitized `load_error` for file
+import failures, and an explicit failed `empty-suite` row if discovery is empty.
+Neither condition counts as passing qualification.

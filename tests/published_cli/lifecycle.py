@@ -3,10 +3,27 @@
 
 import argparse
 import importlib.metadata
+import importlib.util
 import json
 import sys
 import unittest
 from pathlib import Path
+
+
+def load_contracts(tests):
+    """Load the two declared files, independent of module-name shadowing."""
+    loader = unittest.TestLoader()
+    suite = unittest.TestSuite()
+    for name in ("test_approval_lifecycle_contract", "test_local_review_contract"):
+        path = tests / "dist_safe" / (name + ".py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise ImportError("contract module has no file loader")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        suite.addTests(loader.loadTestsFromModule(module))
+    return suite
 
 
 def main():
@@ -57,11 +74,16 @@ def main():
             if err is not None:
                 rows.append({"id": str(subtest), "status": "FAIL", "kind": "subtest"})
 
-    loader = unittest.TestLoader()
-    suite = loader.loadTestsFromNames(
-        ["test_approval_lifecycle_contract", "test_local_review_contract"]
-    )
+    load_error = None
+    try:
+        suite = load_contracts(tests)
+    except Exception as error:
+        load_error = type(error).__name__
+        suite = unittest.TestSuite()
+        rows.append({"id": "suite-load", "status": "FAIL", "kind": "load-error"})
     result = unittest.TextTestRunner(verbosity=2, resultclass=Evidence).run(suite)
+    if not rows:
+        rows.append({"id": "suite-discovery", "status": "FAIL", "kind": "empty-suite"})
     failed = sum(row["status"] == "FAIL" for row in rows)
     report = {
         "version": args.expected_version,
@@ -70,6 +92,8 @@ def main():
         "pass": len(rows) - failed,
         "fail": failed,
         "rows": rows,
+        "tests_run": result.testsRun,
+        "load_error": load_error,
         "boundary": "installed wheels / synthetic broker and provider only",
     }
     (args.report / "results.json").write_text(

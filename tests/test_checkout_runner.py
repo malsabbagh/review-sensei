@@ -207,6 +207,11 @@ class No(unittest.TestCase):
         self.assertEqual(choose(False), 0)
         self.fail("intentional worker failure")
 """)
+            # The combined handoff overwrites previous-run data rather than
+            # quietly accumulating unrelated coverage from cwd.
+            old = CoverageData(basename=str(root / ".coverage"))
+            old.add_arcs({str(root / "stale.py"): [(1, 2)]})
+            old.write()
             report = root / "report.json"
             proc = subprocess.run(
                 [
@@ -240,6 +245,7 @@ class No(unittest.TestCase):
             )
             coverage = CoverageData(basename=str(root / ".coverage"))
             coverage.read()
+            self.assertNotIn(str(root / "stale.py"), coverage.measured_files())
             self.assertTrue(coverage.has_arcs())
             self.assertTrue(
                 {(2, 3), (2, 4)} <= set(coverage.arcs(str(probe.resolve())))
@@ -286,6 +292,8 @@ class No(unittest.TestCase):
                         str(report),
                     ],
                 ),
+                patch.dict(sys.modules),
+                patch.object(sys, "path", list(sys.path)),
                 patch.object(RUNNER.subprocess, "call", side_effect=corrupt_worker),
                 patch(
                     "coverage.Coverage.combine",
@@ -358,6 +366,12 @@ class Second(unittest.TestCase):
                     all(worker["timing_error"] for worker in data["workers"])
                 )
                 self.assertEqual(data["discovered"], 2)
+                self.assertTrue(
+                    all(worker["executed"] is None for worker in data["workers"])
+                )
+                self.assertTrue(
+                    all(worker["class_seconds"] == {} for worker in data["workers"])
+                )
 
     def test_empty_coverage_cannot_pass_the_required_report_floor(self):
         with tempfile.TemporaryDirectory() as scratch:
@@ -405,3 +419,68 @@ class Second(unittest.TestCase):
                 timeout=30,
             )
             self.assertNotEqual(report.returncode, 0)
+
+    def test_missing_worker_evidence_and_zero_execution_cannot_pass_coverage(self):
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        from unittest.mock import patch
+
+        for fault in ("missing-coverage", "missing-timing", "zero-execution"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as scratch:
+                root = Path(scratch)
+                (root / "test_example.py").write_text(
+                    "import unittest\nclass Case(unittest.TestCase):\n    def test_ok(self): pass\n"
+                )
+                report = root / "report.json"
+
+                def damaged_worker(command, **kwargs):
+                    if fault != "missing-timing":
+                        Path(command[command.index("--worker-report") + 1]).write_text(
+                            json.dumps(
+                                {
+                                    "executed": 0 if fault == "zero-execution" else 1,
+                                    "class_seconds": {},
+                                }
+                            )
+                        )
+                    if fault != "missing-coverage":
+                        Path(command[command.index("--data-file") + 1]).write_bytes(
+                            b"unused because execution is incomplete"
+                        )
+                    return 0
+
+                with (
+                    patch.object(
+                        sys,
+                        "argv",
+                        [
+                            str(SCRIPT),
+                            "--workers",
+                            "1",
+                            "--start-directory",
+                            str(root),
+                            "--coverage",
+                            "--report",
+                            str(report),
+                        ],
+                    ),
+                    patch.dict(sys.modules),
+                    patch.object(sys, "path", list(sys.path)),
+                    patch.object(RUNNER.subprocess, "call", side_effect=damaged_worker),
+                    patch("coverage.Coverage.combine") as combine,
+                    redirect_stdout(io.StringIO()),
+                    redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(RUNNER.main(), 1)
+                data = json.loads(report.read_text())
+                combine.assert_not_called()
+                self.assertFalse(data["complete"])
+                self.assertFalse(data["coverage_ok"])
+                self.assertEqual(
+                    data["execution_complete"], fault == "missing-coverage"
+                )
+                self.assertEqual(data["workers"][0]["exit"], 0)
+                if fault == "missing-timing":
+                    self.assertIsNone(data["workers"][0]["executed"])
+                if fault == "zero-execution":
+                    self.assertEqual(data["workers"][0]["executed"], 0)

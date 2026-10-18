@@ -530,5 +530,51 @@ class BootstrapContracts(unittest.TestCase):
         self.assertEqual(output, "")
 
 
+class LifecycleModuleLoadingContracts(unittest.TestCase):
+    def test_contract_files_win_over_same_named_modules_on_the_search_path(self):
+        import importlib.util
+        from types import ModuleType
+
+        path = Path(__file__).with_name("lifecycle.py")
+        spec = importlib.util.spec_from_file_location(
+            "published_lifecycle_loader", path
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        names = ("test_approval_lifecycle_contract", "test_local_review_contract")
+        previous = {name: sys.modules.get(name) for name in names}
+        try:
+            with tempfile.TemporaryDirectory() as scratch:
+                root = Path(scratch)
+                lane = root / "dist_safe"
+                lane.mkdir()
+                for name in names:
+                    (root / (name + ".py")).write_text(
+                        'raise RuntimeError("shadow module executed")\n'
+                    )
+                    (lane / (name + ".py")).write_text(
+                        "import unittest\nclass Contract(unittest.TestCase):\n    def test_contract(self): pass\n"
+                    )
+                    shadow = ModuleType(name)
+                    shadow.__file__ = str(root / (name + ".py"))
+                    sys.modules[name] = shadow
+                with patch.object(sys, "path", [str(root), *sys.path]):
+                    suite = module.load_contracts(root)
+                    result = unittest.TextTestRunner(stream=io.StringIO()).run(suite)
+                self.assertTrue(result.wasSuccessful())
+                self.assertEqual(result.testsRun, 2)
+                for name in names:
+                    self.assertEqual(
+                        Path(sys.modules[name].__file__).resolve(),
+                        (lane / (name + ".py")).resolve(),
+                    )
+        finally:
+            for name, old in previous.items():
+                if old is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = old
+
+
 if __name__ == "__main__":
     unittest.main()

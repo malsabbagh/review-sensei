@@ -118,6 +118,8 @@ execution; `coverage_ok` is null when coverage was not requested and otherwise
 records whether it combined successfully. `complete` remains their aggregate
 compatibility field. A damaged worker timing report fails the lane and is
 recorded as a per-worker `timing_error`, without hiding subprocess exit codes.
+Unreadable counts are explicit `executed: null` with empty `class_seconds`; a
+valid zero count remains distinguishable and cannot match a nonempty assignment.
 Combined checkout coverage is saved as `.coverage` in the runner working
 directory, the public handoff consumed by the next `coverage report` command.
 

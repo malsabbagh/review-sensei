@@ -35,6 +35,7 @@ def test_ids(suite: unittest.TestSuite) -> list[str]:
 def partition(
     identities: list[str], workers: int, costs: dict[str, float] | None = None
 ) -> list[list[str]]:
+    """Deterministic, order-independent class assignment to nonempty workers."""
     if workers < 1 or workers > 16:
         raise ValueError("workers must be between 1 and 16")
     if not identities or len(set(identities)) != len(identities):
@@ -68,7 +69,9 @@ def read_worker_report(path: Path) -> tuple[dict[str, object], str | None]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError) as error:
-        return {}, "Worker timing report unreadable: " + type(error).__name__
+        return {"executed": None, "class_seconds": {}}, (
+            "Worker timing report unreadable: " + type(error).__name__
+        )
     if (
         not isinstance(data, dict)
         or set(data) != {"executed", "class_seconds"}
@@ -82,7 +85,9 @@ def read_worker_report(path: Path) -> tuple[dict[str, object], str | None]:
             for name, seconds in data["class_seconds"].items()
         )
     ):
-        return {}, "Worker timing report has invalid fields"
+        return {"executed": None, "class_seconds": {}}, (
+            "Worker timing report has invalid fields"
+        )
     return data, None
 
 
