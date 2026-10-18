@@ -18,6 +18,7 @@ CONTRACTS = (
     "test_provider_common_flow_contract",
     "test_openrouter_cli_contract",
     "test_large_public_lifecycle_contract",
+    "test_public_feedback_continuation_contract",
     "test_openrouter_metadata_contract",
     "test_openrouter_runtime_qualification_contract",
 )
