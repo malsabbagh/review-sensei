@@ -20,30 +20,32 @@ root=$(git rev-parse --show-toplevel)
 build_image=public.ecr.aws/docker/library/python:3.11-bookworm@sha256:b99029c95d3d37fb1e4e76d287f7984373dca77c665885986e31b2c95260c13c
 consumer_image=public.ecr.aws/docker/library/debian:12-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 
-# Admit both images before spending time on a build; never switch to a mutable
-# tag or silently retry against a different registry during either smoke test.
+# Admit both images before spending time on a build. Each approved origin gets
+# one attempt; the fallback is the official upstream with the identical digest.
+# Smoke tests use only the admitted references and never pull implicitly.
 pull_pinned_image() {
-  # Docker diagnostics are not a stable machine-readable error contract.
-  # Retry all failures at most twice (up to 23 s of sleep); keep the original
-  # output visible and fail terminally rather than guessing permanent errors.
-  local image=$1 attempt
-  for attempt in 1 2 3; do
-    if docker pull --platform "$platform" "$image"; then
+  local image=$1 fallback candidate
+  if [[ ! "$image" =~ ^public\.ecr\.aws/docker/library/(python|debian)(:[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$ ]]; then
+    echo "Unapproved or unpinned image reference: $image" >&2
+    return 1
+  fi
+  fallback="docker.io/library/${image#public.ecr.aws/docker/library/}"
+  for candidate in "$image" "$fallback"; do
+    # Keep Docker diagnostics visible, but reserve stdout for the admitted ref.
+    if docker pull --platform "$platform" "$candidate" >&2; then
+      printf '%s\n' "$candidate"
       return 0
     fi
-    if [[ "$attempt" -lt 3 ]]; then
-      # Anonymous ECR pulls have a per-second quota. Back off with jitter when
-      # shared runners collide; preserve the same registry/platform/digest.
-      echo "Pinned image pull failed (attempt $attempt/3); retrying after backoff" >&2
-      sleep "$((attempt * 5 + RANDOM % 5))"
+    if [[ "$candidate" == "$image" ]]; then
+      echo "Trying approved upstream with the same digest: $fallback" >&2
     fi
   done
-  echo "Pinned image admission failed after 3 attempts: $image" >&2
+  echo "Pinned image admission failed after 2 approved origins: $image" >&2
   return 1
 }
 
-pull_pinned_image "$build_image"
-pull_pinned_image "$consumer_image"
+build_image=$(pull_pinned_image "$build_image")
+consumer_image=$(pull_pinned_image "$consumer_image")
 
 docker run --rm --pull never --platform "$platform" \
   --user "$(id -u):$(id -g)" \

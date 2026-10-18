@@ -400,72 +400,165 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
 
 class LinuxStandaloneReleaseBaselineTests(unittest.TestCase):
+    def _run_container_script(self, directory, *, fail_all=False, fail_consumer=False):
+        docker = directory / "docker"
+        docker.write_text(
+            "#!/bin/sh\n"
+            'printf "%s\\0" "$*" >> "$PULL_RECEIPT"\n'
+            'if [ "$1" = pull ]; then\n'
+            '  case "$*" in\n'
+            '    *public.ecr.aws*) echo "synthetic Data limit exceeded" >&2; exit 1 ;;\n'
+            '    *docker.io/library/debian*) [ "$FAIL_CONSUMER" = 1 ] && exit 1 ;;\n'
+            "  esac\n"
+            '  [ "$FAIL_ALL" = 1 ] && exit 1\n'
+            "fi\n"
+            "exit 0\n"
+        )
+        docker.chmod(0o755)
+        sleep = directory / "sleep"
+        sleep.write_text(
+            '#!/bin/sh\nprintf "%s\\0" "sleep $*" >> "$PULL_RECEIPT"\nexit 0\n'
+        )
+        sleep.chmod(0o755)
+        receipt = directory / "calls"
+        result = subprocess.run(
+            [
+                "bash",
+                str(ROOT / "scripts/build_linux_standalone_in_container.sh"),
+                "linux-arm64-gnu",
+            ],
+            cwd=ROOT,
+            env={
+                **os.environ,
+                "PATH": str(directory) + os.pathsep + os.environ["PATH"],
+                "PULL_RECEIPT": str(receipt),
+                "FAIL_ALL": "1" if fail_all else "0",
+                "FAIL_CONSUMER": "1" if fail_consumer else "0",
+            },
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result, receipt.read_text().rstrip("\0").split("\0")
+
     @unittest.skipIf(sys.platform == "win32", "Linux pull policy uses Bash")
     def test_exhausted_pull_stops_the_actual_script_before_any_container(self):
         with tempfile.TemporaryDirectory() as scratch:
-            directory = Path(scratch)
-            for name, body in (
-                (
-                    "docker",
-                    '#!/bin/sh\nprintf "%s\\n" "$*" >> "$PULL_RECEIPT"\necho "synthetic manifest unknown" >&2\nexit 1\n',
-                ),
-                ("sleep", "#!/bin/sh\nexit 0\n"),
-            ):
-                path = directory / name
-                path.write_text(body)
-                path.chmod(0o755)
-            receipt = directory / "calls"
-            result = subprocess.run(
-                [
-                    "bash",
-                    str(ROOT / "scripts/build_linux_standalone_in_container.sh"),
-                    "linux-arm64-gnu",
-                ],
-                cwd=ROOT,
-                env={
-                    **os.environ,
-                    "PATH": str(directory) + os.pathsep + os.environ["PATH"],
-                    "PULL_RECEIPT": str(receipt),
-                },
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            self.assertNotEqual(result.returncode, 0)
-            calls = receipt.read_text().splitlines()
-            self.assertEqual(len(calls), 3)
-            self.assertTrue(
-                all(call.startswith("pull --platform linux/arm64 ") for call in calls)
-            )
-            self.assertEqual(len(set(calls)), 1)
-            self.assertEqual(result.stderr.count("synthetic manifest unknown"), 3)
-            self.assertIn(
-                "Pinned image admission failed after 3 attempts", result.stderr
-            )
+            result, calls = self._run_container_script(Path(scratch), fail_all=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(
+            all(call.startswith("pull --platform linux/arm64 ") for call in calls)
+        )
+        self.assertIn("public.ecr.aws/docker/library/python:", calls[0])
+        self.assertIn("docker.io/library/python:", calls[1])
+        self.assertEqual(calls[0].split("@", 1)[1], calls[1].split("@", 1)[1])
+        self.assertEqual(result.stderr.count("synthetic Data limit exceeded"), 1)
+        self.assertIn(
+            "Pinned image admission failed after 2 approved origins", result.stderr
+        )
 
     @unittest.skipIf(sys.platform == "win32", "Linux pull policy uses Bash")
-    def test_pinned_pull_retries_are_bounded_and_keep_the_exact_identity(self):
+    def test_actual_script_runs_only_the_admitted_upstream_references(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            result, calls = self._run_container_script(Path(scratch))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 6)
+        pulls, runs = calls[:4], calls[4:]
+        self.assertTrue(all(call.startswith("pull ") for call in pulls))
+        self.assertTrue(all(call.startswith("run ") for call in runs))
+        self.assertIn("docker.io/library/python:", runs[0])
+        self.assertIn("docker.io/library/debian:", runs[1])
+        self.assertTrue(all("--pull never" in call for call in runs))
+        self.assertTrue(all("public.ecr.aws" not in call for call in runs))
+        self.assertIn("--network none", runs[1])
+        self.assertEqual(
+            result.stderr.count("Trying approved upstream with the same digest"), 2
+        )
+
+    @unittest.skipIf(sys.platform == "win32", "Linux pull policy uses Bash")
+    def test_consumer_admission_failure_stops_before_building(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            result, calls = self._run_container_script(
+                Path(scratch), fail_consumer=True
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all(call.startswith("pull ") for call in calls))
+
+    @unittest.skipIf(sys.platform == "win32", "Linux pull policy uses Bash")
+    def test_pinned_origin_attempts_preserve_digest_platform_and_selected_reference(
+        self,
+    ):
         script = (ROOT / "scripts/build_linux_standalone_in_container.sh").read_text()
-        # The helper's outer brace is unindented; nested shell blocks are not.
-        # Extract its actual body independently of blank lines at the call site.
         functions = re.findall(r"(?ms)^pull_pinned_image\(\) \{(.*?)^\}", script)
-        self.assertEqual(len(functions), 1, "expected exactly one pull helper")
+        self.assertEqual(len(functions), 1)
         function = functions[0]
-        image = "public.ecr.aws/docker/library/python@sha256:" + "a" * 64
-        for failures, count, status in ((0, 1, 0), (2, 3, 0), (3, 3, 1)):
-            with (
-                self.subTest(failures=failures),
-                tempfile.TemporaryDirectory() as scratch,
+        image = "public.ecr.aws/docker/library/python:3.11-bookworm@sha256:" + "a" * 64
+        fallback = image.replace("public.ecr.aws/docker/", "docker.io/", 1)
+        for platform in ("linux/arm64", "linux/amd64"):
+            for primary, secondary, expected in (
+                (0, 0, image),
+                (1, 0, fallback),
+                (1, 1, None),
             ):
-                shell = f'''set -euo pipefail
-platform=linux/arm64
-attempts=0
+                with (
+                    self.subTest(
+                        platform=platform, primary=primary, secondary=secondary
+                    ),
+                    tempfile.TemporaryDirectory() as scratch,
+                ):
+                    shell = f'''set -euo pipefail
+platform={platform}
 docker() {{
-  attempts=$((attempts + 1))
   printf '%s\\n' "$*" >>calls
-  [[ "$attempts" -gt {failures} ]]
+  echo "synthetic Docker stdout"
+  case "$*" in
+    *public.ecr.aws*) return {primary} ;;
+    *docker.io*) return {secondary} ;;
+  esac
 }}
-sleep() {{ printf '%s\\n' "$1" >>delays; }}
+sleep() {{ exit 99; }}
+pull_pinned_image() {{{function}
+}}
+selected=$(pull_pinned_image "{image}")
+printf '%s\\n' "$selected" >selected
+'''
+                    result = subprocess.run(
+                        ["bash", "-c", shell],
+                        cwd=scratch,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    self.assertEqual(
+                        result.returncode, 0 if expected else 1, result.stderr
+                    )
+                    calls = (Path(scratch) / "calls").read_text().splitlines()
+                    refs = [image] if primary == 0 else [image, fallback]
+                    self.assertEqual(
+                        calls, [f"pull --platform {platform} {ref}" for ref in refs]
+                    )
+                    if expected:
+                        self.assertEqual(
+                            (Path(scratch) / "selected").read_text().strip(), expected
+                        )
+                    else:
+                        self.assertIn("failed after 2 approved origins", result.stderr)
+
+    @unittest.skipIf(sys.platform == "win32", "Linux pull policy uses Bash")
+    def test_mutable_or_unapproved_image_is_rejected_before_any_pull(self):
+        script = (ROOT / "scripts/build_linux_standalone_in_container.sh").read_text()
+        function = re.findall(r"(?ms)^pull_pinned_image\(\) \{(.*?)^\}", script)[0]
+        for image in (
+            "public.ecr.aws/docker/library/python:latest",
+            "public.ecr.aws/docker/library/python@sha256:abc",
+            "unapproved.invalid/library/python@sha256:" + "a" * 64,
+        ):
+            with self.subTest(image=image), tempfile.TemporaryDirectory() as scratch:
+                shell = f'''set -euo pipefail
+platform=linux/amd64
+docker() {{ echo called >calls; return 0; }}
 pull_pinned_image() {{{function}
 }}
 pull_pinned_image "{image}"
@@ -477,22 +570,8 @@ pull_pinned_image "{image}"
                     text=True,
                     timeout=10,
                 )
-                self.assertEqual(result.returncode, status, result.stderr)
-                calls = (Path(scratch) / "calls").read_text().splitlines()
-                self.assertEqual(
-                    calls, [f"pull --platform linux/arm64 {image}"] * count
-                )
-                delays = Path(scratch) / "delays"
-                waits = (
-                    list(map(int, delays.read_text().splitlines()))
-                    if delays.exists()
-                    else []
-                )
-                self.assertEqual(len(waits), count - 1)
-                for attempt, delay in enumerate(waits, 1):
-                    self.assertTrue(attempt * 5 <= delay < attempt * 5 + 5)
-                if status:
-                    self.assertIn("failed after 3 attempts", result.stderr)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((Path(scratch) / "calls").exists())
 
     def test_both_publish_paths_build_linux_on_debian_12(self):
         for workflow_name in ("release.yml", "publish-npm.yml"):
@@ -532,10 +611,13 @@ pull_pinned_image "{image}"
         self.assertIn("public.ecr.aws/docker/library/python:", script)
         self.assertIn("public.ecr.aws/docker/library/debian:", script)
         self.assertEqual(script.count('docker pull --platform "$platform"'), 1)
-        self.assertIn("for attempt in 1 2 3", script)
+        self.assertIn('for candidate in "$image" "$fallback"', script)
         self.assertIn('pull_pinned_image "$build_image"', script)
         self.assertIn('pull_pinned_image "$consumer_image"', script)
-        self.assertLess(script.index('"$consumer_image"\n'), script.index("docker run"))
+        self.assertLess(
+            script.index('consumer_image=$(pull_pinned_image "$consumer_image")'),
+            script.index("docker run"),
+        )
         self.assertEqual(script.count("--pull never"), 2)
         self.assertEqual(script.count("getconf GNU_LIBC_VERSION"), 2)
         self.assertIn("--network none", script)
