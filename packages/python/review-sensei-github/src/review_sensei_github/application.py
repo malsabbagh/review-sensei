@@ -185,17 +185,34 @@ def _assessment_from_bytes(payload: bytes) -> HumanAssessmentReply:
 
 
 def _approval_bytes(value: object) -> bytes:
-    approved = bool(getattr(getattr(value, "approval", None), "approved", False))
-    return json.dumps({"approved": approved}, separators=(",", ":")).encode("utf-8")
+    approval = getattr(value, "approval", None)
+    approved = bool(getattr(approval, "approved", False))
+    raw_blockers = getattr(approval, "blockers", ())
+    blockers = (
+        [str(item) for item in raw_blockers if isinstance(item, str)]
+        if isinstance(raw_blockers, (tuple, list))
+        else []
+    )
+    payload: dict[str, object] = {"approved": approved}
+    if blockers:
+        payload["blockers"] = blockers
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def _approval_from_bytes(payload: bytes) -> object:
     loaded = json.loads(payload)
     approved = isinstance(loaded, dict) and loaded.get("approved") is True
+    raw_blockers = loaded.get("blockers", ()) if isinstance(loaded, dict) else ()
+    blockers = (
+        tuple(str(item) for item in raw_blockers if isinstance(item, str))
+        if isinstance(raw_blockers, list)
+        else ()
+    )
 
     class _Approval:
         def __init__(self) -> None:
             self.approved = approved
+            self.blockers = blockers
 
     class _Assessment:
         def __init__(self) -> None:
@@ -1192,6 +1209,7 @@ class GitHubApplication:
         run_attempt: str = "1",
         operation_store: object | None = None,
         operation_parts: object | None = None,
+        reviews_policy: str | None = None,
     ):
         """Apply a maintainer command through its applicable authority boundary.
 
@@ -1338,6 +1356,14 @@ class GitHubApplication:
             and operation_entry == "enabled"
             and operation_store is not None
         ):
+            effective_policy = (
+                reviews_policy
+                if reviews_policy is not None
+                else options.review_policy()
+            )
+            if effective_policy not in REVIEW_POLICY_MODES:
+                raise GitHubPublicationError("review policy mode is invalid")
+            auto_approve_enabled = effective_policy == "auto-approve"
             confirmer = getattr(media_publisher, "confirm", None)
             finalizer = getattr(media_publisher, "publish_mixed_approval", None)
             if (
@@ -1357,6 +1383,7 @@ class GitHubApplication:
             media_digest = sha256(
                 f"{repository_id}:{pull_request}:{head_sha}".encode()
             ).hexdigest()
+            extra_kwargs = {"enabled": False} if not auto_approve_enabled else {}
 
             def approve_media() -> object:
                 confirmer(
@@ -1367,6 +1394,7 @@ class GitHubApplication:
                 return finalizer(
                     request_comment_id=request_comment_id,
                     result=review_result,
+                    **extra_kwargs,
                 )
 
             assessment = self._through_operation(
@@ -1391,20 +1419,26 @@ class GitHubApplication:
                 encode=_approval_bytes,
                 decode=_approval_from_bytes,
             )
-            approved = bool(
-                getattr(getattr(assessment, "approval", None), "approved", False)
-            )
-            return MaintainerCommandResult(
-                action="approve-media",
-                applied=approved,
-                operator_paused=False,
-                summary=(
-                    "media files approved for this head"
-                    if approved
-                    else "media approval withheld"
-                ),
+            return self._finalize_media_command_result(
+                assessment=assessment,
+                review_result=review_result,
+                media_publisher=media_publisher,
+                options=options,
+                effective_policy=effective_policy,
+                oidc_token=oidc_token,
+                repository=repository,
+                head_sha=head_sha,
+                app_slug=app_slug,
             )
         if command.action == "approve-media":
+            effective_policy = (
+                reviews_policy
+                if reviews_policy is not None
+                else options.review_policy()
+            )
+            if effective_policy not in REVIEW_POLICY_MODES:
+                raise GitHubPublicationError("review policy mode is invalid")
+            auto_approve_enabled = effective_policy == "auto-approve"
             approver = getattr(media_publisher, "approve_reviewed_media", None)
             if (
                 not callable(approver)
@@ -1419,23 +1453,23 @@ class GitHubApplication:
                     operator_paused=False,
                     summary="media approval requires the current review result",
                 )
+            extra_kwargs = {"enabled": False} if not auto_approve_enabled else {}
             assessment = approver(
                 request_comment_id=request_comment_id,
                 source_comment_id=source_comment_id,
                 result=review_result,
+                **extra_kwargs,
             )
-            approved = bool(
-                getattr(getattr(assessment, "approval", None), "approved", False)
-            )
-            return MaintainerCommandResult(
-                action="approve-media",
-                applied=approved,
-                operator_paused=False,
-                summary=(
-                    "media files approved for this head"
-                    if approved
-                    else "media approval withheld"
-                ),
+            return self._finalize_media_command_result(
+                assessment=assessment,
+                review_result=review_result,
+                media_publisher=media_publisher,
+                options=options,
+                effective_policy=effective_policy,
+                oidc_token=oidc_token,
+                repository=repository,
+                head_sha=head_sha,
+                app_slug=app_slug,
             )
         identity = SessionIdentity(
             repository=repository,
@@ -1604,6 +1638,158 @@ class GitHubApplication:
             return self.broker.exchange(exchange_input, capability="check_publish")
         except (GitHubBrokerClientError, GitHubHTTPTransientError):
             return None
+
+    def _finalize_media_command_result(
+        self,
+        *,
+        assessment: object,
+        review_result: object,
+        media_publisher: object | None,
+        options: GitHubWriteOptions,
+        effective_policy: str,
+        oidc_token: str | None,
+        repository: str,
+        head_sha: str,
+        app_slug: str,
+    ) -> object:
+        """Reconcile the merge-gate check run after a human media confirmation."""
+
+        from review_sensei.disposition import MaintainerCommandResult
+
+        from .approval import (
+            has_blocking_findings,
+            has_human_adjudication_findings,
+        )
+        from .checks import ReviewCheckPublisher, check_outcome_for_result
+
+        approval = getattr(assessment, "approval", None)
+        approved = bool(getattr(approval, "approved", False))
+        raw_blockers = getattr(approval, "blockers", ())
+        blockers = (
+            tuple(str(item) for item in raw_blockers if isinstance(item, str))
+            if isinstance(raw_blockers, (list, tuple))
+            else ()
+        )
+        non_coverage_structural_blockers = set(blockers) - {
+            "auto-approval-disabled",
+            "blocking-findings-open",
+            "blocking-findings",
+            "human-adjudication-open",
+            "human-adjudication-findings",
+        }
+        mixed = getattr(assessment, "mixed", None)
+        mixed_satisfied = (
+            approved
+            or bool(getattr(mixed, "approved", False))
+            or (
+                bool(blockers)
+                and not non_coverage_structural_blockers
+                and not getattr(assessment, "pending_ids", ())
+            )
+        )
+        all_obligations_met = approved or (
+            bool(blockers) and set(blockers) <= {"auto-approval-disabled"}
+        )
+        applied = (
+            approved if effective_policy == "auto-approve" else all_obligations_met
+        )
+        base_summary = "media-approved" if applied else "media-approval-withheld"
+
+        if not isinstance(review_result, ReviewResult) or not options.github_writes:
+            return MaintainerCommandResult(
+                action="approve-media",
+                applied=applied,
+                operator_paused=False,
+                summary=base_summary,
+            )
+
+        http = (
+            self.http
+            if self.http is not None
+            else getattr(media_publisher, "http", None)
+        )
+        if http is None:
+            return MaintainerCommandResult(
+                action="approve-media",
+                applied=applied,
+                operator_paused=False,
+                summary=base_summary,
+            )
+
+        try:
+            exchange_input = oidc_token or self.broker.request_oidc_token()
+            check_token = self._check_capability_token(exchange_input)
+        except Exception:
+            check_token = None
+
+        if not check_token:
+            return MaintainerCommandResult(
+                action="approve-media",
+                applied=applied,
+                operator_paused=False,
+                summary=(
+                    f"{base_summary}; gate re-evaluation failed: "
+                    "check capability unavailable; retry media approval "
+                    "to complete check update"
+                ),
+                evaluation_failed=True,
+            )
+
+        req_fixes = (
+            "blocking-findings-open" in blockers
+            or "blocking-findings" in blockers
+            or has_blocking_findings(review_result)
+        )
+        req_decisions = (
+            "human-adjudication-open" in blockers
+            or "human-adjudication-findings" in blockers
+            or has_human_adjudication_findings(review_result)
+        )
+        outcome = check_outcome_for_result(
+            review_result,
+            policy=effective_policy,
+            required_fixes=req_fixes,
+            required_decisions=req_decisions,
+            mixed_coverage_satisfied=mixed_satisfied
+            and not non_coverage_structural_blockers,
+        )
+        try:
+            check_result = ReviewCheckPublisher(http=http).complete(
+                token=check_token,
+                repository=repository,
+                head_sha=head_sha,
+                outcome=outcome,
+                app_slug=app_slug,
+            )
+            if check_result.status not in {"created", "updated", "published"}:
+                return MaintainerCommandResult(
+                    action="approve-media",
+                    applied=applied,
+                    operator_paused=False,
+                    summary=(
+                        f"{base_summary}; gate re-evaluation failed, "
+                        "retry media approval to complete check update"
+                    ),
+                    evaluation_failed=True,
+                )
+        except Exception:
+            return MaintainerCommandResult(
+                action="approve-media",
+                applied=applied,
+                operator_paused=False,
+                summary=(
+                    f"{base_summary}; gate re-evaluation failed, "
+                    "retry media approval to complete check update"
+                ),
+                evaluation_failed=True,
+            )
+
+        return MaintainerCommandResult(
+            action="approve-media",
+            applied=applied,
+            operator_paused=False,
+            summary=base_summary,
+        )
 
     def _session_ledger_for_token(
         self,
@@ -2307,15 +2493,21 @@ class GitHubApplication:
                     )
                     if work_assessment is not None:
                         accepted = accepted or work_assessment.inventory != inventory
+                    review_policy = options.review_policy()
                     review_token = None
+                    check_token = None
                     if accepted:
+                        exchange_input = oidc_token or self.broker.request_oidc_token()
                         review_token = self.broker.exchange(
-                            oidc_token or self.broker.request_oidc_token(),
+                            exchange_input,
                             capability="review_publish",
                         )
+                        check_token = self._check_capability_token(exchange_input)
                     reply_outcome = assessor.publish(
                         token=capability_token,
                         review_token=review_token,
+                        check_token=check_token,
+                        reviews_policy=review_policy,
                         repository=repository,
                         pull_request=pull_request,
                         prepared=human,

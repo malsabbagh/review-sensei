@@ -355,7 +355,9 @@ class HumanJsonCorrectionTests(unittest.TestCase):
         self.assertEqual(retained[0].provider_calls, 2)
         self.assertEqual(retained[0].structural_retries, 1)
         self.assertEqual(self.state.reply_count, 1)
-        self.assertEqual(broker.capabilities, ["issue_reply", "review_publish"])
+        self.assertEqual(
+            broker.capabilities, ["issue_reply", "review_publish", "check_publish"]
+        )
 
     def test_public_application_exhausted_call_budget_never_writes(self):
         from review_sensei_github.application import GitHubApplication

@@ -193,6 +193,7 @@ class HumanFileReviewPublisher:
         self.app_login, self.app_user_id = app_login, app_user_id
         self.token, self.before_request, self.policy = token, before_request, policy
         self.prefix = f"/repos/{repository}"
+        self._last_reviews: list[Mapping[str, Any]] = []
 
     def _io(self, method: str, path: str, body: dict[str, object] | None = None) -> Any:
         remaining = self.before_request()
@@ -307,9 +308,11 @@ class HumanFileReviewPublisher:
             raise ReviewInputError(
                 "human file result lacks an authenticated review root"
             )
+        reviews = self._list(f"/pulls/{self.pull_request}/reviews")
+        self._last_reviews = reviews
         candidates = [
             x
-            for x in self._list(f"/pulls/{self.pull_request}/reviews")
+            for x in reviews
             if self._owned(x)
             and x.get("commit_id") == head
             and isinstance(x.get("body"), str)
@@ -736,7 +739,11 @@ class HumanFileReviewPublisher:
             qualification=original.qualification
             if original.qualification != "not-required"
             else current.qualification,
-            has_open_review_threads=has_open_review_threads,
+            has_open_review_threads=(
+                True
+                if original.has_open_review_threads is True
+                else has_open_review_threads
+            ),
         )
         # AI review_status stays partial. Mixed coverage may waive only the
         # binary coverage/status blockers. It must not rewrite those facts to
@@ -761,18 +768,20 @@ class HumanFileReviewPublisher:
             allow_confirmations=True,
             event_id=str(request_comment_id),
             source_context_incomplete=source_incomplete,
-            unresolved_threads=has_open_review_threads,
-            qualification=qualification,
+            unresolved_threads=facts.has_open_review_threads,
+            qualification=facts.qualification,
         )
         waivable = {"review-partial", "coverage-partial"}
         other = tuple(item for item in standard.blockers if item not in waivable)
         if (
             mixed.approved
-            and not other
             and facts.review_status == "partial"
             and mixed.ai_review_status == "partial"
         ):
-            decision = AutoApprovalDecision(approved=True, blockers=())
+            if not other:
+                decision = AutoApprovalDecision(approved=True, blockers=())
+            else:
+                decision = AutoApprovalDecision(approved=False, blockers=other)
         else:
             decision = AutoApprovalDecision(
                 approved=False,
@@ -799,7 +808,7 @@ class HumanFileReviewPublisher:
         result: ReviewResult,
         enabled: bool = True,
         app_authored: bool = False,
-        has_open_review_threads: bool | None = None,
+        has_open_review_threads: bool | None = False,
         qualification: str = "not-required",
     ) -> HumanFileReviewAssessment:
         """Post one exact-head APPROVE when mixed coverage is the only waiver.
@@ -827,14 +836,33 @@ class HumanFileReviewPublisher:
             + "\n\nAI-reviewed text; human-reviewed selected media; "
             "mixed coverage sufficient. AI result status remains partial."
         )
-        response = self._io(
-            "POST",
-            f"/pulls/{self.pull_request}/reviews",
-            {"commit_id": head, "event": "APPROVE", "body": body},
+        existing = next(
+            (
+                item
+                for item in reversed(self._last_reviews)
+                if self._owned(item)
+                and item.get("commit_id") == head
+                and item.get("state") == "APPROVED"
+                and item.get("body") == body
+                and positive(item.get("id"))
+            ),
+            None,
         )
-        if not isinstance(response, Mapping) or not positive(response.get("id")):
-            raise ReviewInputError("mixed approval outcome is unknown")
-        readback = self._object(f"/pulls/{self.pull_request}/reviews/{response['id']}")
+        if existing is not None:
+            readback = self._object(
+                f"/pulls/{self.pull_request}/reviews/{existing['id']}"
+            )
+        else:
+            response = self._io(
+                "POST",
+                f"/pulls/{self.pull_request}/reviews",
+                {"commit_id": head, "event": "APPROVE", "body": body},
+            )
+            if not isinstance(response, Mapping) or not positive(response.get("id")):
+                raise ReviewInputError("mixed approval outcome is unknown")
+            readback = self._object(
+                f"/pulls/{self.pull_request}/reviews/{response['id']}"
+            )
         if (
             readback.get("commit_id") != head
             or readback.get("body") != body
@@ -851,7 +879,8 @@ class HumanFileReviewPublisher:
         request_comment_id: int,
         source_comment_id: int,
         result: ReviewResult,
-        has_open_review_threads: bool | None = None,
+        enabled: bool = True,
+        has_open_review_threads: bool | None = False,
         qualification: str = "not-required",
     ) -> HumanFileReviewAssessment:
         """Confirm every file named by the source comment, then post one APPROVE.
@@ -871,6 +900,7 @@ class HumanFileReviewPublisher:
         return self.publish_mixed_approval(
             request_comment_id=request_comment_id,
             result=result,
+            enabled=enabled,
             has_open_review_threads=has_open_review_threads,
             qualification=qualification,
         )

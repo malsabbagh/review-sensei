@@ -5,11 +5,11 @@ authoritative check and reports its identity for administrator setup. The gate
 conclusion never encodes incomplete enforcement as ``neutral`` or ``skipped``:
 GitHub accepts those conclusions for required checks, so they would silently
 disable the gate. ``advisory`` is the one mode that publishes ``neutral``,
-because that mode promises no ReviewSensei-imposed merge gate. A completed
-``auto-approve`` review publishes ``success`` even when required fixes remain,
-because that mode uses Changes requested and Approve instead of a failing
-check. ``blocking`` publishes ``failure`` only when a completed review still
-has required fixes.
+because that mode promises no ReviewSensei-imposed merge gate. In
+``auto-approve`` and ``blocking`` modes, a completed review publishes
+``failure`` when required fixes remain, ``action_required`` when no required
+fixes remain and a required human decision is pending, and ``success`` when
+all obligations are satisfied.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewResult
 from review_sensei.validation import validate_bounded_text
 
-from .approval import has_blocking_findings
+from .approval import has_blocking_findings, has_human_adjudication_findings
 from .errors import (
     GitHubHTTPError,
     GitHubHTTPTransientError,
@@ -73,6 +73,8 @@ def review_check_outcome(
     policy: str,
     review_status: str,
     required_fixes: bool,
+    required_decisions: bool = False,
+    mixed_coverage_satisfied: bool = False,
 ) -> CheckOutcome:
     """Map one review outcome onto the documented gate conclusions."""
 
@@ -81,19 +83,29 @@ def review_check_outcome(
     if review_status not in {"complete", "partial", "incomplete", "summary-only"}:
         raise ReviewInputError("review status is invalid")
     bounded_required = required_fixes is True
+    bounded_decisions = required_decisions is True
+    bounded_mixed = mixed_coverage_satisfied is True
     if policy == "advisory":
         detail = (
             "Required fixes were reported but enforcement is disabled by "
             "github.reviews: advisory."
             if bounded_required
-            else "ReviewSensei does not impose a merge gate in advisory mode."
+            else (
+                "Findings requiring a human decision were reported, but "
+                "enforcement is disabled by github.reviews: advisory."
+                if bounded_decisions
+                else "ReviewSensei does not impose a merge gate in advisory mode."
+            )
         )
         return CheckOutcome(
             conclusion="neutral",
             title="Advisory review — not enforced",
             summary=detail,
         )
-    if review_status != "complete":
+    effective_complete = review_status == "complete" or (
+        review_status == "partial" and bounded_mixed
+    )
+    if not effective_complete:
         return CheckOutcome(
             conclusion="action_required",
             title="Review incomplete",
@@ -103,7 +115,17 @@ def review_check_outcome(
                 "eligible review completes."
             ),
         )
-    if bounded_required and policy == "blocking":
+    if bounded_required:
+        if bounded_decisions:
+            return CheckOutcome(
+                conclusion="failure",
+                title="Required fixes and human decisions remain",
+                summary=(
+                    "The completed review reported required fixes and findings "
+                    "that require a human decision for this head. "
+                    "They are listed in the ReviewSensei review comments."
+                ),
+            )
         return CheckOutcome(
             conclusion="failure",
             title="Required fixes remain",
@@ -112,14 +134,23 @@ def review_check_outcome(
                 "They are listed in the ReviewSensei review comments."
             ),
         )
-    if bounded_required:
+    if bounded_decisions:
+        return CheckOutcome(
+            conclusion="action_required",
+            title="Human decision required",
+            summary=(
+                "The completed review reported findings that require a human "
+                "decision before approval."
+            ),
+        )
+    if review_status == "partial" and bounded_mixed:
         return CheckOutcome(
             conclusion="success",
-            title="Changes requested",
+            title="No required fixes",
             summary=(
-                "The completed review requested changes for this head. "
-                "The ReviewSensei check stays successful; Changes requested "
-                "and Approve are the pull request decision."
+                "AI-reviewed text and human-confirmed non-text coverage "
+                "satisfied the review gate for this head (AI review status "
+                "remains partial)."
             ),
         )
     return CheckOutcome(
@@ -155,8 +186,41 @@ def review_check_outcome_for_publication_failure(
     )
 
 
+def _coverage_recovery_guidance(result: ReviewResult) -> str:
+    coverage = result.coverage
+    if coverage is None:
+        return ""
+    uncovered = [entry for entry in coverage.files if entry.outcome != "reviewed"]
+    if not uncovered and coverage.enumeration_complete:
+        return ""
+    if uncovered:
+        from review_sensei.human_file_review import is_human_confirmable_file
+
+        entries: list[str] = []
+        for entry in uncovered[:10]:
+            reason = entry.reason or entry.outcome
+            action = (
+                "confirm human file review"
+                if is_human_confirmable_file(entry)
+                else "rescan to complete coverage"
+            )
+            entries.append(f"{entry.path} ({reason}: {action})")
+        listed = "; ".join(entries)
+        if len(uncovered) > 10:
+            listed += f"; +{len(uncovered) - 10} more"
+        if not coverage.enumeration_complete:
+            listed += "; diff enumeration incomplete (rescan to complete coverage)"
+        return f" Uncovered files: {listed}."
+    return " Diff enumeration was incomplete. Recovery: rescan to complete coverage."
+
+
 def check_outcome_for_result(
-    result: ReviewResult, *, policy: str, required_fixes: bool | None = None
+    result: ReviewResult,
+    *,
+    policy: str,
+    required_fixes: bool | None = None,
+    required_decisions: bool | None = None,
+    mixed_coverage_satisfied: bool = False,
 ) -> CheckOutcome:
     """Map one validated review result onto the gate conclusions."""
 
@@ -168,6 +232,12 @@ def check_outcome_for_result(
         required_fixes=(
             has_blocking_findings(result) if required_fixes is None else required_fixes
         ),
+        required_decisions=(
+            has_human_adjudication_findings(result)
+            if required_decisions is None
+            else required_decisions
+        ),
+        mixed_coverage_satisfied=mixed_coverage_satisfied,
     )
     if result.persistence_status == "capacity-exceeded":
         detail = "Analysis completed, but complete evidence could not fit the durable baseline. Publication retains the full validated finding inventory."
@@ -183,6 +253,25 @@ def check_outcome_for_result(
             + (" (approval withheld)" if policy != "advisory" else ""),
             summary=detail,
         )
+    if (
+        result.review_status != "complete"
+        and not (result.review_status == "partial" and mixed_coverage_satisfied is True)
+        and result.coverage is not None
+    ):
+        guidance = _coverage_recovery_guidance(result)
+        if guidance:
+            if len(outcome.summary) + len(guidance) <= MAX_CHECK_SUMMARY_CHARS:
+                summary = outcome.summary + guidance
+            else:
+                head_limit = max(0, MAX_CHECK_SUMMARY_CHARS - len(guidance))
+                summary = (outcome.summary[:head_limit] + guidance)[
+                    :MAX_CHECK_SUMMARY_CHARS
+                ]
+            return CheckOutcome(
+                conclusion=outcome.conclusion,
+                title=outcome.title,
+                summary=summary,
+            )
     return outcome
 
 
@@ -342,6 +431,12 @@ class ReviewCheckPublisher:
             conclusion=conclusion,
         )
 
+    def _repository_path(self, repository: str, suffix: str) -> str:
+        repo_path = getattr(self.http, "repository_path", None)
+        if callable(repo_path):
+            return str(repo_path(repository, suffix))
+        return f"/repos/{repository}{suffix}"
+
     def _find_own_run(
         self,
         *,
@@ -353,7 +448,7 @@ class ReviewCheckPublisher:
         """Return the App-owned check-run id for this head, if one exists."""
 
         path = (
-            self.http.repository_path(repository, f"/commits/{head_sha}/check-runs")
+            self._repository_path(repository, f"/commits/{head_sha}/check-runs")
             + f"?check_name={REVIEW_CHECK_NAME}&per_page={MAX_CHECK_PAGE_SIZE}"
         )
         try:
@@ -407,7 +502,7 @@ class ReviewCheckPublisher:
         if conclusion is not None:
             body["conclusion"] = conclusion
         status_code, payload = self._request(
-            "POST", self.http.repository_path(repository, "/check-runs"), token, body
+            "POST", self._repository_path(repository, "/check-runs"), token, body
         )
         if status_code == 403:
             return CheckPublicationResult(
@@ -444,7 +539,7 @@ class ReviewCheckPublisher:
             body["conclusion"] = conclusion
         status_code, payload = self._request(
             "PATCH",
-            self.http.repository_path(repository, f"/check-runs/{check_run_id}"),
+            self._repository_path(repository, f"/check-runs/{check_run_id}"),
             token,
             body,
         )

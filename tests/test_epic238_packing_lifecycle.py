@@ -69,7 +69,10 @@ class PackingLifecycleTests(unittest.TestCase):
                     )
                 self.assertEqual(state.events(), ["COMMENT", "APPROVE"])
                 self.assertEqual(state.reply_count, 1)
-                self.assertEqual(broker.capabilities, ["issue_reply", "review_publish"])
+                self.assertEqual(
+                    broker.capabilities,
+                    ["issue_reply", "review_publish", "check_publish"],
+                )
                 refreshed = approval_eligibility_from_body(state.reviews[-2]["body"])
                 self.assertEqual(
                     refreshed.human_review.findings,

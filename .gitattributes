@@ -1,0 +1,2 @@
+# Preserve the byte-pinned regression snapshot across Windows checkouts.
+tests/fixtures/regressions/pr308-session-ledger.json text eol=lf

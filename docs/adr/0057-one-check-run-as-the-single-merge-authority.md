@@ -76,10 +76,12 @@ accepts those conclusions for required checks:
 
 | Mode | Condition | Conclusion |
 | --- | --- | --- |
-| `auto-approve` | complete, no required fixes | `success` |
-| `auto-approve` | complete, required fixes remain | `success` |
-| `blocking` | complete, no required fixes | `success` |
+| `auto-approve` | complete, no required fixes or required decisions | `success` |
+| `auto-approve` | complete, required fixes remain | `failure` |
+| `auto-approve` | complete, required decisions remain (no required fixes) | `action_required` |
+| `blocking` | complete, no required fixes or required decisions | `success` |
 | `blocking` | complete, required fixes remain | `failure` |
+| `blocking` | complete, required decisions remain (no required fixes) | `action_required` |
 | `auto-approve`, `blocking` | partial, incomplete, or summary-only | `action_required` |
 | `auto-approve`, `blocking` | publication failed | `action_required` |
 | `auto-approve`, `blocking` | run ended without a conclusion | `cancelled` |
@@ -89,24 +91,21 @@ accepts those conclusions for required checks:
 
 The review is one exact-head App review with the summary body and the valid
 inline findings. `github.reviews: auto-approve` publishes that review as
-`REQUEST_CHANGES` when required fixes remain, and as `COMMENT` otherwise, and
-keeps the check `success` for either completed review. The pull request review
-is the decision: Changes requested holds the pull request when the branch
-requires approving reviews, and a later eligible head is approved by the
-finalizer, which replaces the App's changes-requested state. A required
-ReviewSensei check does not stop that pull request, because the check is
-`success`. `blocking` stays `COMMENT` and is the mode whose check fails while
-required fixes remain. `advisory` stays `COMMENT` and `neutral`. GitHub's
+`REQUEST_CHANGES` when required fixes remain, and as `COMMENT` otherwise; both
+`auto-approve` and `blocking` report `failure` on the `ReviewSensei` check when
+required fixes remain, `action_required` when required human decisions remain
+without required fixes, and `success` only when a completed review has no
+unsatisfied required fixes or required decisions. `blocking` stays `COMMENT`
+and never approves. `advisory` stays `COMMENT` and `neutral`. GitHub's
 review decision is not bound to one commit. Incomplete reviews stay
 `action_required` in `auto-approve` and `blocking`, so a review that did not
 finish does not look clean.
 
 Approval is emitted only in the default `auto-approve` mode, and only for an
 eligible exact head: trusted complete review evidence for that head, no
-unresolved required finding or incomplete-review obligation, verified provider
+unresolved required finding, required human decision, or incomplete-review obligation, verified provider
 qualification, an eligible pull-request identity, and an authorized write. `blocking` enforces through the check and never
-approves, and `advisory` publishes `neutral` and never approves. `auto-approve`
-does not fail the check for a completed review. Eligibility is
+approves, and `advisory` publishes `neutral` and never approves. Eligibility is
 persisted as a bounded document in the published review body and re-read at
 finalization, so a delayed or recovery finalization decides from durable
 evidence rather than from a caller-supplied boolean. Missing or malformed state
@@ -303,6 +302,16 @@ request decision. `blocking` still publishes `failure` for that condition and
 posts comments. `advisory` still publishes `neutral` and posts comments.
 A partial, incomplete, summary-only, or unpublished review stays
 `action_required` for `auto-approve` and `blocking`.
+
+## Amendment 2026-10-17: auto-approve check aligns with required fixes and required decisions
+
+To prevent a required `ReviewSensei` check from turning green while approval is
+withheld for unresolved obligations on the same head, `auto-approve` and
+`blocking` both report `failure` when required fixes remain, `action_required`
+when required human decisions remain without required fixes, and `success` only
+when all review obligations are satisfied. When a human decision or thread
+resolution clears the remaining obligations on the same head, the check is
+reconciled to match the updated persisted eligibility state.
 
 ## Links
 

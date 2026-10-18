@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Report an incomplete media-command gate update when the check capability is
+  unavailable, preserving the confirmation and providing explicit retry guidance.
 - Let an authorized explicit rescan reanalyze a published incomplete review on
   the same head, with durable request replay protection and existing budgets.
   Ordinary duplicates and complete reviews remain suppressed; excluded content
@@ -16,6 +18,20 @@
   dispositions is not readable by the released 0.7.1 reader, so this
   schema alignment ships with the engine, the hosted package, and the
   workflow pin together.
+- Align the review-to-approval lifecycle across the verifier, presentation,
+  CLI exit codes, GitHub check run, and exact-head finalizer:
+  - `github.reviews: auto-approve` and `blocking` now both report `failure` on
+    the `ReviewSensei` check when required fixes remain, `action_required` when
+    required human decisions remain without required fixes, and `success` only
+    when all obligations are satisfied; human reassessment and validated
+    human-confirmed media/generated coverage reconcile the check run on the
+    same head while preserving the AI review's `partial` status.
+  - CLI review exit code `2` takes precedence whenever required human decisions
+    remain (including mixed required-fix and required-decision reviews), while
+    exit code `1` indicates completed reviews with only required fixes.
+  - Review summaries, body sections, and terminal output use a consistent
+    three-way classification (`Required fix`, `Required decision`,
+    `Optional improvement`).
 
 ## 0.7.1 - 2026-10-16
 
