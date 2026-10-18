@@ -241,6 +241,29 @@ class CandidateArtifactsTests(unittest.TestCase):
     @unittest.skipUnless(
         shutil.which("npm"), "npm is required for actual local tarball packing"
     )
+    def test_consumer_verifies_downloaded_bytes_before_installing(self):
+        packed = self.packed()
+        receipt = json.loads((packed / "candidate-packages.json").read_text())
+        (packed / receipt["packages"][0]["file"]).write_bytes(b"changed after download")
+        with (
+            patch.object(CANDIDATE, "validate_host_target"),
+            patch.object(CANDIDATE.subprocess, "run", wraps=subprocess.run) as runner,
+        ):
+            with self.assertRaisesRegex(CANDIDATE.CandidateError, "digest"):
+                CANDIDATE.consume_candidate(
+                    self.root,
+                    packed,
+                    "darwin-arm64",
+                    self.stage / "consumer",
+                    self.source,
+                )
+        self.assertFalse(
+            any("install" in call.args[0] for call in runner.call_args_list)
+        )
+
+    @unittest.skipUnless(
+        shutil.which("npm"), "npm is required for actual local tarball packing"
+    )
     def test_packed_receipt_cannot_substitute_a_different_source_or_duplicate_package(
         self,
     ):

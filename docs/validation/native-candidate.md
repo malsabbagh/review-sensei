@@ -64,3 +64,24 @@ It changes no public API, package format, release workflow, permissions, secrets
 deployment topology or ownership, so no ADR is required. Native GitHub-hosted
 operation compatibility, paid/live provider quality, external clean-host registry
 installation and release migration/rollback remain separately qualified scopes.
+
+## Local ARM macOS evidence (2026-10-18)
+
+The actual PyInstaller 6.16.0 ARM bundle passed all ten existing standalone parity
+cases. After materializing its four internal Python.framework links, its exact
+local npm platform tarball and launcher tarball were installed together offline
+with scripts and optional dependencies omitted. The installed native bytes
+matched the receipt, repeated all ten parity cases, and the installed Node
+launcher passed version/help/required-fix exit semantics.
+
+This scoped receipt identifies `a5899a53b58a9a4da4f4afca1330ece580b1f314`, Python
+3.14.6 and Node 24.18.0 on ARM macOS. CI intentionally tests its own fresh source
+artifacts with Python 3.11 and Node 22; the local results do not substitute for
+those runs or the other four platforms.
+
+| Local candidate artifact | SHA-256 |
+| --- | --- |
+| Native tarball | `f4400cf25026471f1d259c2fdcaa1105478f8afed54d126b560ec0d43e4849e3` |
+| Built and installed native executable | `12fda3f3e1d98d271d73e947ab6dfbd28cfc3e9ad7b51013ac233ba9517769b3` |
+| Launcher npm tarball | `510360146d7bbf814b24fe211622ae55e0d34d68779149c0b2a028b9812340b1` |
+| ARM macOS npm tarball | `1e1b31033e404cbb70d3bedeecc4cf0ed0f0c670ac55a39f3d419a46eb376792` |
