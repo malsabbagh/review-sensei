@@ -95,6 +95,9 @@ Process: `docs/process/adr-process.md`
 
 ## Policy
 
+New proposal: [0084 - Lossless packed assessment queue carrier](0084-packed-assessment-queue-carrier.md)
+qualifies bounded trusted-library continuation without enabling CLI/Worker writers.
+
 Publication-control ADRs 0017 and 0018 are internal-only and are excluded from
 the public publication tree together with the publication workflow and operator
 runbook.

@@ -16,7 +16,12 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import TypeVar
 
-from .bounded_evidence import _operation_attempt_binding, canonical_bytes
+from .bounded_evidence import (
+    _operation_attempt_binding,
+    canonical_bytes,
+    decode_evidence,
+    encode_evidence,
+)
 from .budgets import EffectiveWorkBudget
 from .errors import ReviewInputError
 from .evidence import EvidenceSnapshot, evidence_digest
@@ -40,6 +45,67 @@ MAX_RETAINED_FACTORED_OPERATIONS = 256
 MAX_FACTORED_STRINGS = 16384
 MAX_FACTORED_DEPTH = 32
 MAX_RECONSTRUCTED_HISTORY_BYTES = 8 * 1024 * 1024
+
+
+def pack_queue_state(envelope: object) -> dict[str, object]:
+    """Lossless optional carrier for an already authenticated complete queue.
+
+    Hosts may place this document in the existing inline manifest if it fits,
+    otherwise retain the partitioned carrier. Compression confers no authority,
+    changes no byte/read limit and never replaces source or root fencing.
+    """
+    document = _queue_state_envelope(envelope)
+    packed: dict[str, object] = {
+        "schema_version": "1.0",
+        "kind": "assessment-queue-state-packed-v1",
+        "state": encode_evidence(
+            document, max_decoded_bytes=MAX_OPERATION_RECEIPT_BYTES
+        ),
+    }
+    if len(canonical_bytes(packed)) > MAX_OPERATION_RECEIPT_BYTES:
+        raise ReviewInputError("packed assessment queue exceeds encoded bound")
+    return packed
+
+
+def unpack_queue_state(document: object) -> dict[str, object]:
+    """Decode bounded owned storage, then validate complete queue semantics."""
+    if (
+        isinstance(document, dict)
+        and document.get("kind") == "assessment-queue-state-packed-v1"
+    ):
+        if (
+            set(document) != {"schema_version", "kind", "state"}
+            or document["schema_version"] != "1.0"
+        ):
+            raise ReviewInputError("packed assessment queue shape is invalid")
+        if len(canonical_bytes(document)) > MAX_OPERATION_RECEIPT_BYTES:
+            raise ReviewInputError("packed assessment queue exceeds encoded bound")
+        document = decode_evidence(
+            document["state"],
+            max_encoded_bytes=MAX_OPERATION_RECEIPT_BYTES,
+            max_decoded_bytes=MAX_OPERATION_RECEIPT_BYTES,
+        )
+    return _queue_state_envelope(document)
+
+
+def _queue_state_envelope(envelope: object) -> dict[str, object]:
+    if (
+        not isinstance(envelope, dict)
+        or set(envelope) != {"schema_version", "kind", "journal"}
+        or envelope["schema_version"] != "1.0"
+        or envelope["kind"] != "assessment-queue-state"
+        or len(canonical_bytes(envelope)) > MAX_OPERATION_RECEIPT_BYTES
+    ):
+        raise ReviewInputError("assessment queue carrier is invalid")
+    journal = envelope["journal"]
+    if (
+        isinstance(journal, dict)
+        and journal.get("schema_version") == QUEUE_INTERFACE_VERSION
+    ):
+        AssessmentJournal.from_document(journal)
+    else:
+        FactoredAssessmentJournal.from_document(journal)
+    return json.loads(canonical_bytes(envelope))
 
 
 def _hash(value: object) -> bool:
