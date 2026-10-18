@@ -251,7 +251,7 @@ jobs:
           if "--github-session-ledger" in help_text or " resolve-hosted-openrouter" in help_text:
               raise SystemExit("engine help still exposes hosted commands")
           PY
-          "$wheel_venv/bin/python" -m pip install --disable-pip-version-check "$GITHUB_WORKSPACE"/dist/github/*.whl
+          "$wheel_venv/bin/python" -m pip install --disable-pip-version-check "$GITHUB_WORKSPACE"/dist/*.whl "$GITHUB_WORKSPACE"/dist/github/*.whl
           sdist_root="$RUNNER_TEMP/review-sensei-sdist"
           mkdir -p "$sdist_root"
           tar -xzf "$GITHUB_WORKSPACE"/dist/*.tar.gz -C "$sdist_root"

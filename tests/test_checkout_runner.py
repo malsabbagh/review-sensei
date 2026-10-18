@@ -425,7 +425,12 @@ class Second(unittest.TestCase):
         from contextlib import redirect_stderr, redirect_stdout
         from unittest.mock import patch
 
-        for fault in ("missing-coverage", "missing-timing", "zero-execution"):
+        for fault in (
+            "missing-coverage",
+            "missing-timing",
+            "zero-execution",
+            "failed-corrupt-timing",
+        ):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as scratch:
                 root = Path(scratch)
                 (root / "test_example.py").write_text(
@@ -434,7 +439,11 @@ class Second(unittest.TestCase):
                 report = root / "report.json"
 
                 def damaged_worker(command, **kwargs):
-                    if fault != "missing-timing":
+                    if fault == "failed-corrupt-timing":
+                        Path(command[command.index("--worker-report") + 1]).write_bytes(
+                            b"{"
+                        )
+                    elif fault != "missing-timing":
                         Path(command[command.index("--worker-report") + 1]).write_text(
                             json.dumps(
                                 {
@@ -447,7 +456,7 @@ class Second(unittest.TestCase):
                         Path(command[command.index("--data-file") + 1]).write_bytes(
                             b"unused because execution is incomplete"
                         )
-                    return 0
+                    return 7 if fault == "failed-corrupt-timing" else 0
 
                 with (
                     patch.object(
@@ -479,8 +488,43 @@ class Second(unittest.TestCase):
                 self.assertEqual(
                     data["execution_complete"], fault == "missing-coverage"
                 )
-                self.assertEqual(data["workers"][0]["exit"], 0)
+                self.assertEqual(
+                    data["workers"][0]["exit"],
+                    7 if fault == "failed-corrupt-timing" else 0,
+                )
                 if fault == "missing-timing":
                     self.assertIsNone(data["workers"][0]["executed"])
                 if fault == "zero-execution":
                     self.assertEqual(data["workers"][0]["executed"], 0)
+
+    def test_nonstandard_stop_without_start_retains_zero_execution_and_fails(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            (root / "test_protocol.py").write_text("""import unittest
+class BrokenProtocol(unittest.TestCase):
+    def run(self, result):
+        result.stopTest(self)
+        return result
+    def test_never_started(self): pass
+""")
+            report = root / "report.json"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--start-directory",
+                    str(root),
+                    "--report",
+                    str(report),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertNotIn("Traceback", proc.stderr)
+            data = json.loads(report.read_text())
+            self.assertFalse(data["execution_complete"])
+            self.assertEqual(data["workers"][0]["executed"], 0)
+            self.assertEqual(data["workers"][0]["exit"], 0)
+            self.assertIsNone(data["workers"][0]["timing_error"])

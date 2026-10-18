@@ -127,16 +127,21 @@ def main() -> int:
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
                 self.class_seconds: dict[str, float] = {}
+                self.started: float | None = None
 
             def startTest(self, test):
                 self.started = time.monotonic()
                 super().startTest(test)
 
             def stopTest(self, test):
-                name = test.id().rpartition(".")[0]
-                self.class_seconds[name] = (
-                    self.class_seconds.get(name, 0) + time.monotonic() - self.started
-                )
+                if self.started is not None:
+                    name = test.id().rpartition(".")[0]
+                    self.class_seconds[name] = (
+                        self.class_seconds.get(name, 0)
+                        + time.monotonic()
+                        - self.started
+                    )
+                self.started = None
                 super().stopTest(test)
 
         result = unittest.TextTestRunner(verbosity=2, resultclass=TimedResult).run(

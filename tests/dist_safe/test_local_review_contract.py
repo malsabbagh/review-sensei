@@ -245,10 +245,6 @@ class LocalReviewContractTests(unittest.TestCase):
         self.assertTrue(stdout)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class InstalledProcessExitTests(unittest.TestCase):
     """Fresh process, isolated imports and clean host environment per journey."""
 
@@ -320,3 +316,7 @@ class InstalledProcessExitTests(unittest.TestCase):
                         self.assertIn("reason=", proc.stderr)
                     if reason:
                         self.assertIn("reason=" + reason, proc.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

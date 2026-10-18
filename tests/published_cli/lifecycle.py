@@ -11,7 +11,12 @@ from pathlib import Path
 
 
 def load_contracts(tests):
-    """Load the two declared files, independent of module-name shadowing."""
+    """Load exact files for this one-shot process, replacing cached names.
+
+    Contract classes retain their module globals for the duration of the run.
+    Embedders must isolate/restore these module entries, as the bootstrap test
+    does; production qualification always invokes this script in a new process.
+    """
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     for name in ("test_approval_lifecycle_contract", "test_local_review_contract"):
@@ -81,9 +86,14 @@ def main():
         load_error = type(error).__name__
         suite = unittest.TestSuite()
         rows.append({"id": "suite-load", "status": "FAIL", "kind": "load-error"})
-    result = unittest.TextTestRunner(verbosity=2, resultclass=Evidence).run(suite)
+    result = None
+    if load_error:
+        print("Lifecycle suite load failed: " + load_error, file=sys.stderr)
+    else:
+        result = unittest.TextTestRunner(verbosity=2, resultclass=Evidence).run(suite)
     if not rows:
         rows.append({"id": "suite-discovery", "status": "FAIL", "kind": "empty-suite"})
+        print("Lifecycle suite is empty", file=sys.stderr)
     failed = sum(row["status"] == "FAIL" for row in rows)
     report = {
         "version": args.expected_version,
@@ -92,14 +102,18 @@ def main():
         "pass": len(rows) - failed,
         "fail": failed,
         "rows": rows,
-        "tests_run": result.testsRun,
+        "tests_run": 0 if result is None else result.testsRun,
         "load_error": load_error,
         "boundary": "installed wheels / synthetic broker and provider only",
     }
     (args.report / "results.json").write_text(
         json.dumps(report, indent=2) + "\n", encoding="utf-8"
     )
-    return 0 if result.wasSuccessful() and not failed and rows else 1
+    return (
+        0
+        if result is not None and result.wasSuccessful() and not failed and rows
+        else 1
+    )
 
 
 if __name__ == "__main__":
