@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -21,8 +22,8 @@ from prepare_npm_packages import (
     assemble_packages,
     project_version,
 )
-from standalone_smoke import clean_host_environment, run_smoke, smoke_fixture_root
-from validate_npm_package import validate
+from standalone_smoke import run_smoke, smoke_fixture_root
+from validate_npm_package import safe_archive_member_name, validate
 
 MAX_FILES = 20_000
 MAX_BYTES = 2 * 1024**3
@@ -63,6 +64,42 @@ def npm_isolation(directory: Path) -> list[str]:
     ]
 
 
+def npm_environment(directory: Path) -> dict[str, str]:
+    """Pass only tool/system lookup and locale settings to npm and its launcher."""
+    allowed = {
+        "PATH",
+        "SYSTEMROOT",
+        "WINDIR",
+        "SYSTEMDRIVE",
+        "COMSPEC",
+        "PATHEXT",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PROGRAMW6432",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+    }
+    environment = {
+        name: value for name, value in os.environ.items() if name.upper() in allowed
+    }
+    home = directory / "npm-home"
+    temporary = directory / "npm-tmp"
+    home.mkdir(parents=True, exist_ok=True)
+    temporary.mkdir(parents=True, exist_ok=True)
+    environment.update(
+        HOME=str(home),
+        USERPROFILE=str(home),
+        APPDATA=str(home / "AppData/Roaming"),
+        LOCALAPPDATA=str(home / "AppData/Local"),
+        TMPDIR=str(temporary),
+        TEMP=str(temporary),
+        TMP=str(temporary),
+    )
+    return environment
+
+
 def source_identity(root: Path, expected: str) -> dict[str, str]:
     if not re.fullmatch(r"[a-f0-9]{40}", expected):
         raise CandidateError("candidate source must be one exact commit SHA")
@@ -94,7 +131,9 @@ def inventory(root: Path) -> list[dict[str, object]]:
         raise CandidateError("native bundle must be a regular directory")
     files = []
     total = 0
-    for path in sorted(root.rglob("*")):
+    for path in sorted(
+        root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()
+    ):
         if path.is_symlink() or not (path.is_file() or path.is_dir()):
             raise CandidateError("native bundle contains a non-regular member")
         if path.is_file():
@@ -137,7 +176,7 @@ def materialize_bundle(source: Path, destination: Path) -> list[dict[str, str]]:
             )
         if path.is_dir():
             target.mkdir(parents=True)
-            for child in sorted(path.iterdir()):
+            for child in sorted(path.iterdir(), key=lambda item: item.name):
                 copy(child, target / child.name, ancestors | {resolved})
             shutil.copystat(path, target)
         elif path.is_file():
@@ -190,17 +229,32 @@ def archive_native(
     return archive
 
 
-def unpack_native(archive: Path, output: Path) -> Path:
+def unpack_native(archive: Path, output: Path, *, target: str | None = None) -> Path:
     """Restore modes without allowing archive links, traversal or unbounded expansion."""
     output.mkdir(parents=True, exist_ok=False)
     with tarfile.open(archive, "r:gz") as stream:
         members = stream.getmembers()
         seen = set()
+        case_paths: dict[str, str] = {}
+        # All targets cross Linux assembly. Apply target filesystem semantics
+        # before extraction rather than relying on the assembler's own OS.
+        insensitive = (
+            target is None
+            or not target.startswith("linux-")
+            or os.name == "nt"
+            or sys.platform == "darwin"
+        )
         total = 0
         if len(members) > MAX_FILES * 2:
             raise CandidateError("candidate archive contains too many members")
         for item in members:
-            path = PurePosixPath(item.name)
+            try:
+                name = safe_archive_member_name(item.name)
+            except ValueError:
+                raise CandidateError(
+                    "candidate archive contains an unsafe member"
+                ) from None
+            path = PurePosixPath(name)
             if (
                 not path.parts
                 or path.parts[0] != "review-sensei"
@@ -208,10 +262,19 @@ def unpack_native(archive: Path, output: Path) -> Path:
                 or ".." in path.parts
                 or "\\" in item.name
                 or not (item.isfile() or item.isdir())
-                or item.name in seen
+                or (item.name.endswith("/") and not item.isdir())
+                or name in seen
             ):
                 raise CandidateError("candidate archive contains an unsafe member")
-            seen.add(item.name)
+            if insensitive:
+                for length in range(1, len(path.parts) + 1):
+                    prefix = "/".join(path.parts[:length])
+                    prior = case_paths.setdefault(prefix.casefold(), prefix)
+                    if prior != prefix:
+                        raise CandidateError(
+                            "candidate archive contains an unsafe case collision"
+                        )
+            seen.add(name)
             total += item.size
             if total > MAX_BYTES:
                 raise CandidateError("candidate archive exceeds expanded byte bounds")
@@ -247,7 +310,9 @@ def assemble_candidate(root: Path, native: Path, output: Path, source: str) -> P
             "archive_sha256"
         ):
             raise CandidateError("candidate native archive digest does not match")
-        bundles[target] = unpack_native(archive, output / "native" / target)
+        bundles[target] = unpack_native(
+            archive, output / "native" / target, target=target
+        )
         if inventory(bundles[target]) != receipt.get("files"):
             raise CandidateError("candidate native file inventory does not match")
         receipts[target] = receipt
@@ -259,6 +324,7 @@ def assemble_candidate(root: Path, native: Path, output: Path, source: str) -> P
     packed.mkdir()
     packages = []
     isolation = npm_isolation(output.resolve())
+    environment = npm_environment(output.resolve())
     for target in ("cli", *TARGETS):
         result = subprocess.run(
             [
@@ -272,6 +338,7 @@ def assemble_candidate(root: Path, native: Path, output: Path, source: str) -> P
                 str((assembled / target).resolve()),
             ],
             cwd=root,
+            env=environment,
             check=True,
             capture_output=True,
             text=True,
@@ -387,8 +454,7 @@ def consume_candidate(
                 },
             },
         )
-        environment = clean_host_environment(scratch)
-        environment.pop("PYTHONPATH", None)
+        environment = npm_environment(scratch)
         subprocess.run(
             [
                 shutil.which("npm") or "npm",

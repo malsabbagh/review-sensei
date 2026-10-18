@@ -225,6 +225,145 @@ class CandidateArtifactsTests(unittest.TestCase):
                     CANDIDATE.unpack_native(archive, self.stage / kind)
         self.assertFalse((self.stage / "escape").exists())
 
+    def test_archive_noncanonical_and_case_collisions_refuse_before_extraction(self):
+        names = (
+            ("review-sensei/a", "review-sensei/./a"),
+            ("review-sensei/a", "review-sensei//a"),
+            ("review-sensei/A", "review-sensei/a"),
+            ("review-sensei/A/one", "review-sensei/a/two"),
+        )
+        for index, pair in enumerate(names):
+            with self.subTest(pair=pair):
+                archive = self.stage / f"collision-{index}.tar.gz"
+                with tarfile.open(archive, "w:gz") as stream:
+                    for name in pair:
+                        member = tarfile.TarInfo(name)
+                        member.size = 1
+                        stream.addfile(member, io.BytesIO(b"x"))
+                output = self.stage / f"collision-{index}"
+                with self.assertRaisesRegex(CANDIDATE.CandidateError, "unsafe"):
+                    CANDIDATE.unpack_native(archive, output)
+                self.assertEqual(list(output.rglob("*")), [])
+
+    def test_conventional_directory_markers_remain_valid(self):
+        archive = self.stage / "directory-markers.tar.gz"
+        with tarfile.open(archive, "w:gz") as stream:
+            directory = tarfile.TarInfo("review-sensei/")
+            directory.type = tarfile.DIRTYPE
+            stream.addfile(directory)
+            member = tarfile.TarInfo("review-sensei/payload")
+            member.size = 1
+            stream.addfile(member, io.BytesIO(b"x"))
+        restored = CANDIDATE.unpack_native(
+            archive, self.stage / "directory-markers", target="win32-x64"
+        )
+        self.assertEqual((restored / "payload").read_bytes(), b"x")
+
+    def test_native_file_inventory_order_is_identical_under_windows_path_ordering(self):
+        class WindowsOrderedPath(type(Path())):
+            def __lt__(self, other):
+                return str(self).casefold() < str(other).casefold()
+
+        bundle = self.bundle("win32-x64")
+        (bundle / "_internal/VCRUNTIME140.dll").write_bytes(b"uppercase runtime")
+        actual = CANDIDATE.inventory(WindowsOrderedPath(bundle))
+        expected = CANDIDATE.inventory(bundle)
+        self.assertEqual(actual, expected)
+        paths = [item["path"] for item in actual]
+        self.assertEqual(paths, sorted(paths))
+
+    def assert_isolated_npm_child(self, environment):
+        self.assertIsNotNone(
+            environment, "npm child inherited the entire ambient environment"
+        )
+        self.assertFalse(
+            any(name.lower().startswith("npm_config_") for name in environment)
+        )
+        for name in (
+            "NPM_TOKEN",
+            "NODE_AUTH_TOKEN",
+            "NODE_OPTIONS",
+            "PRIVATE_SENTINEL",
+        ):
+            self.assertNotIn(name, environment)
+        self.assertEqual(environment["PATH"], os.environ["PATH"])
+        self.assertEqual(
+            environment.get("SystemRoot", environment.get("SYSTEMROOT")),
+            self.hostile_npm_environment()["SystemRoot"],
+        )
+        self.assertEqual(environment["LANG"], "C.UTF-8")
+        self.assertNotEqual(environment["HOME"], os.environ.get("HOME"))
+
+    def hostile_npm_environment(self):
+        return {
+            "NPM_TOKEN": "synthetic-sentinel",
+            "NODE_AUTH_TOKEN": "synthetic-sentinel",
+            "npm_config_proxy": "http://127.0.0.1:9",
+            "NPM_CONFIG_GLOBAL": "true",
+            "NODE_OPTIONS": "synthetic-sentinel",
+            "PRIVATE_SENTINEL": "synthetic-sentinel",
+            "SystemRoot": os.environ.get(
+                "SystemRoot", os.environ.get("SYSTEMROOT", "synthetic-system-root")
+            ),
+            "LANG": "C.UTF-8",
+        }
+
+    @unittest.skipUnless(
+        shutil.which("npm"), "npm is required for actual local tarball packing"
+    )
+    def test_actual_pack_children_receive_only_allowlisted_environment(self):
+        native = self.archived()
+        run = subprocess.run
+        inspected = []
+
+        def inspect(command, *args, **kwargs):
+            if "pack" in command:
+                self.assert_isolated_npm_child(kwargs.get("env"))
+                inspected.append(command)
+            return run(command, *args, **kwargs)
+
+        with (
+            patch.dict(os.environ, self.hostile_npm_environment()),
+            patch.object(CANDIDATE.subprocess, "run", side_effect=inspect),
+        ):
+            CANDIDATE.assemble_candidate(
+                self.root, native, self.stage / "isolated-pack", self.source
+            )
+        self.assertEqual(len(inspected), 6)
+
+    @unittest.skipUnless(
+        shutil.which("npm"), "npm is required for actual local tarball packing"
+    )
+    def test_install_child_receives_only_allowlisted_environment(self):
+        packed = self.packed()
+        run = subprocess.run
+
+        class InspectedInstall(Exception):
+            pass
+
+        def inspect(command, *args, **kwargs):
+            if "install" in command:
+                self.assert_isolated_npm_child(kwargs.get("env"))
+                self.assertIn("--offline", command)
+                self.assertIn("--ignore-scripts", command)
+                self.assertIn("--omit=optional", command)
+                raise InspectedInstall
+            return run(command, *args, **kwargs)
+
+        with (
+            patch.dict(os.environ, self.hostile_npm_environment()),
+            patch.object(CANDIDATE, "validate_host_target"),
+            patch.object(CANDIDATE.subprocess, "run", side_effect=inspect),
+        ):
+            with self.assertRaises(InspectedInstall):
+                CANDIDATE.consume_candidate(
+                    self.root,
+                    packed,
+                    "win32-x64",
+                    self.stage / "isolated-install",
+                    self.source,
+                )
+
     @unittest.skipUnless(
         shutil.which("npm"), "npm is required for actual local tarball packing"
     )

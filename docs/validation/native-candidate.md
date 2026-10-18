@@ -85,3 +85,20 @@ those runs or the other four platforms.
 | Built and installed native executable | `12fda3f3e1d98d271d73e947ab6dfbd28cfc3e9ad7b51013ac233ba9517769b3` |
 | Launcher npm tarball | `510360146d7bbf814b24fe211622ae55e0d34d68779149c0b2a028b9812340b1` |
 | ARM macOS npm tarball | `1e1b31033e404cbb70d3bedeecc4cf0ed0f0c670ac55a39f3d419a46eb376792` |
+
+## Candidate transport and environment regressions
+
+Native tar paths are validated canonically before any member is extracted:
+`/./`, repeated separators, canonical duplicates and case collisions on target
+case-insensitive filesystems refuse. Conventional directory trailing slashes
+remain valid. File inventories use one relative POSIX-string ordering on every
+platform; Windows path comparison rules cannot reorder uppercase runtime DLL
+entries when Linux assembles or a consumer compares the receipt.
+
+Both real npm pack subprocesses and the offline installer receive an allowlisted
+environment containing only tool/system path and locale settings, plus isolated
+home/temp directories. Ambient npm tokens, `npm_config_*`, Node options and
+unrelated variables are excluded in addition to the existing explicit empty
+user/global configs, dead registry and offline installer flags. Synthetic
+sentinel regressions inspect both subprocess boundaries; no credentials or
+observed exfiltration are claimed.
