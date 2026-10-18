@@ -291,7 +291,7 @@ def _looks_like_managed_v5_setup(path: str, content: str) -> bool:
     """Recognize a released setup-v5 artifact that is not the current bytes.
 
     Only the caller and the uninstall workflow have released setups to
-    recognize. The caller may follow any valid tag and is accepted in both
+    recognize. The caller may follow any valid tag and is accepted in known
     released shapes: the invocation-only caller and the historical caller that
     carried the workflow policy. The uninstall has the single released shape.
     The configuration file recognizes the released backend-only document so a

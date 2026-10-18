@@ -4,7 +4,7 @@
 - Date: 2026-10-16
 - Decision owner / reviewers: ReviewSensei maintainers
 - Linked GitHub Issue: none; targeted maintainer-authorized bug fix
-- Linked PR: [#305](https://github.com/malsabbagh/review-sensei/pull/305)
+- Linked PR: [#305](https://github.com/malsabbagh/review-sensei/pull/305); parser/guidance amendment [#312](https://github.com/malsabbagh/review-sensei/pull/312)
 
 ## Context
 
