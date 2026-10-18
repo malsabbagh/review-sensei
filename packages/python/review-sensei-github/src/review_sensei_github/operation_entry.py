@@ -20,6 +20,7 @@ from review_sensei.operation_witness import operation_handle_witness  # noqa: F4
 from .operation_comments import ResultPartStore
 from .operation_host import (
     REVIEW_TRIGGERS,
+    AcceptedPacket,
     AdmissionProof,
     ExecutionResult,
     InMemoryOperationStore,
@@ -28,6 +29,7 @@ from .operation_host import (
     OperationRequest,
     ProviderOutput,
     TransitionPlan,
+    _binding,
     _event_key_text,
     run_review_trigger,
 )
@@ -169,6 +171,152 @@ class HostedProviderResult:
     payload_digest: str | None
 
 
+def _computation_cursor(
+    store: InMemoryOperationStore, scope: str, event: str
+) -> tuple[str, int, str] | OperationRefusal:
+    """Use the current cursor for a new event and original cursor for replay."""
+
+    live = store._live()
+    record = live["events"].get((scope, event))
+    if isinstance(record, dict):
+        transitions = [
+            item
+            for item in live["transitions"].values()
+            if isinstance(item, dict)
+            and item.get("scope_digest") == scope
+            and item.get("event_id") == event
+            and item.get("sequence") == 0
+        ]
+        if len(transitions) == 1:
+            prior = transitions[0]
+            return (
+                str(prior["prior_root_sha"]),
+                int(prior["prior_root_generation"]),
+                str(prior["target_root_sha"]),
+            )
+        if transitions or record.get("sequence") != 0:
+            return OperationRefusal("root_conflict")
+        root, generation = record["root_sha"], record["root_generation"]
+    else:
+        # Do not bind a new event to a cursor whose computation is still held.
+        # A refused contender must not become a stale admitted guard that can
+        # later spend against the old cursor after its owner completes.
+        if any(
+            isinstance(item, dict)
+            and item.get("scope_digest") == scope
+            and item.get("state") in {"inflight", "unknown", "pending"}
+            for item in live["transitions"].values()
+        ):
+            return OperationRefusal("unknown_reservation")
+        current = live["scopes"].get(scope)
+        if isinstance(current, dict):
+            root, generation = current["root_sha"], current["root_generation"]
+        else:
+            root, generation = _sha256("operation-root"), 0
+    if (
+        not isinstance(root, str)
+        or not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or not 0 <= generation < 2_147_483_647
+    ):
+        return OperationRefusal("root_conflict")
+    target = _sha256(f"computation\n{scope}\n{event}\n{root}\n{generation + 1}")
+    return root, generation, target
+
+
+def _complete_retained_computation(
+    store: InMemoryOperationStore,
+    proof: AdmissionProof,
+    request: OperationRequest,
+    packet: AcceptedPacket,
+    payload: bytes,
+) -> OperationRefusal | None:
+    """Release only this adapter's computation writer, never publication.
+
+    The accepted packet and full owned result are the computation's durable
+    target. There is no remote product root or source acknowledgement here.
+    Generic OperationHost remote-effect reconciliation is deliberately unchanged.
+    """
+
+    digest = hashlib.sha256(payload).hexdigest()
+    if (
+        packet.payload_digest != digest
+        or packet.decisions_digest != digest
+        or packet.known_output_bytes != len(payload)
+        or packet.request_digest != request.event_id
+    ):
+        return OperationRefusal("result_missing")
+    with store.transaction() as txn:
+        live = store._live()
+        event = live["events"].get((proof.scope_digest, request.event_id))
+        if (
+            not isinstance(event, dict)
+            or event.get("binding") != _binding(proof, request)
+            or event.get("operation_id") != request.operation_id
+            or event.get("accepted") != packet
+            or event.get("provider_charged") is not True
+            or event.get("provider_unknown") is not False
+            or event.get("inference_blocked") is not False
+            or event.get("quarantine") is not False
+            or event.get("ack_attempted") is not False
+        ):
+            txn.rollback()
+            return OperationRefusal("disagreement")
+        transitions = [
+            item
+            for item in live["transitions"].values()
+            if isinstance(item, dict)
+            and item.get("scope_digest") == proof.scope_digest
+            and item.get("event_id") == request.event_id
+        ]
+        if len(transitions) != 1:
+            txn.rollback()
+            return OperationRefusal("unknown_reservation")
+        transition = transitions[0]
+        if (
+            transition.get("state") not in {"inflight", "confirmed"}
+            or transition.get("request_digest") != request.event_id
+            or transition.get("prior_root_sha") != request.root_sha
+            or transition.get("prior_root_generation") != request.root_generation
+            or transition.get("target_root_generation") != request.root_generation + 1
+        ):
+            txn.rollback()
+            return OperationRefusal("unknown_reservation")
+        target = {
+            "root_sha": transition["target_root_sha"],
+            "root_generation": transition["target_root_generation"],
+        }
+        if transition["state"] == "confirmed":
+            # A later event may already have advanced the scope again. Replaying
+            # this event must not roll that cursor or its accounting backward.
+            matches = all(event.get(key) == value for key, value in target.items())
+            txn.rollback()
+            return None if matches else OperationRefusal("root_conflict")
+        prior = {
+            "root_sha": request.root_sha,
+            "root_generation": request.root_generation,
+        }
+        if live["scopes"].get(proof.scope_digest) != prior or any(
+            event.get(key) != value for key, value in prior.items()
+        ):
+            txn.rollback()
+            return OperationRefusal("root_conflict")
+        if any(
+            isinstance(item, dict)
+            and item is not transition
+            and item.get("scope_digest") == proof.scope_digest
+            and item.get("state") in {"inflight", "unknown", "pending"}
+            for item in live["transitions"].values()
+        ):
+            txn.rollback()
+            return OperationRefusal("unknown_reservation")
+        transition["state"] = "confirmed"
+        event.update(target)
+        live["scopes"][proof.scope_digest] = target
+        txn.commit()
+    return None
+
+
 def run_hosted_provider(
     store: InMemoryOperationStore,
     *,
@@ -210,13 +358,17 @@ def run_hosted_provider(
         event = github_event_id(delivery_id=delivery_id)
     except ValueError:
         return OperationRefusal("invalid")
+    cursor = _computation_cursor(store, proof.scope_digest, event)
+    if isinstance(cursor, OperationRefusal):
+        return cursor
+    root, generation, target = cursor
     request = OperationRequest(
         event_id=event,
         operation_id=_sha256(f"operation\n{reservation_id}"),
         inventory_digest=_sha256(f"inventory\n{repository_id}:{pull_request}"),
         source_digest=_sha256(f"source\n{delivery_id}"),
-        root_sha=_sha256("operation-root"),
-        root_generation=0,
+        root_sha=root,
+        root_generation=generation,
         producer_contract=trigger,
     )
     plan = TransitionPlan(
@@ -225,9 +377,9 @@ def run_hosted_provider(
         ordinary_dispatches=1,
         fence_dispatches=0,
         prior_root_sha=request.root_sha,
-        prior_root_generation=0,
-        target_root_sha=_sha256("operation-root-next"),
-        target_root_generation=1,
+        prior_root_generation=generation,
+        target_root_sha=target,
+        target_root_generation=generation + 1,
         request_digest=event,
         dispatch_digest=_sha256(f"dispatch\n{trigger}"),
     )
@@ -239,6 +391,7 @@ def run_hosted_provider(
         payload = encode(value)
         if not isinstance(payload, bytes) or not payload:
             raise ValueError("provider returned no result")
+        captured["payload"] = payload
         return ProviderOutput(payload, hashlib.sha256(payload).hexdigest())
 
     host = OperationHost(store, now=now)
@@ -267,21 +420,30 @@ def run_hosted_provider(
         isinstance(stored, bytes)
         and hashlib.sha256(stored).hexdigest() == payload_digest
     ):
-        return HostedProviderResult(
-            captured.get("value"),
-            None if "value" in captured else stored,
-            payload_digest,
-        )
-    if "value" in captured:
-        payload = encode(captured["value"])
-        if parts is not None and isinstance(payload, bytes) and payload:
-            parts.write(event_key=event_key, result=payload)
-        return HostedProviderResult(captured["value"], None, payload_digest)
-    if parts is None:
+        retained = stored
+    elif "value" in captured:
+        payload = captured.get("payload")
+        if not isinstance(payload, bytes) or not payload:
+            return OperationRefusal("result_missing")
+        if parts is None:
+            # Fresh bytes may still be returned to the caller, but without a
+            # retained target this writer remains held and cannot admit a new
+            # event. A packet digest alone is not completion evidence.
+            return HostedProviderResult(captured["value"], None, payload_digest)
+        parts.write(event_key=event_key, result=payload)
+        retained = parts.read(event_key=event_key, payload_digest=payload_digest)
+    elif parts is not None:
+        retained = parts.read(event_key=event_key, payload_digest=payload_digest)
+    else:
         return OperationRefusal("result_missing")
+    refused = _complete_retained_computation(
+        store, proof, request, admitted.packet, retained
+    )
+    if refused is not None:
+        return refused
     return HostedProviderResult(
-        None,
-        parts.read(event_key=event_key, payload_digest=payload_digest),
+        captured.get("value"),
+        None if "value" in captured else retained,
         payload_digest,
     )
 
