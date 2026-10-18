@@ -91,7 +91,7 @@ digests. It does not claim those old bytes implement newer lifecycle behavior.
 Default post-publication qualification runs all six suites; receipts always list
 selected and excluded suites so a subset cannot be mistaken for full coverage.
 
-Lifecycle contracts load from the seven declared files under `tests/dist_safe`,
+Lifecycle contracts load from the nine declared files under `tests/dist_safe`,
 so a same-named module elsewhere on the search path cannot shadow them. Receipts
 include `tests_run` separately from row counts, a sanitized `load_error` for file
 import failures, and an explicit failed `empty-suite` row if discovery is empty.
@@ -126,3 +126,11 @@ imports stay under the wheel environment; socket connections are forbidden.
 The OpenRouter metadata/routing contract is part of the default lifecycle
 inventory after publication as well as the sdist package lane. Its captured
 transport is synthetic and does not qualify a live target or approval.
+
+The same inventory includes the shared provider common-flow and discussion
+deadline contracts. Six configuration factories run identical engine journeys:
+local Ollama, approved DeepSeek and GLM cloud settings, default and explicitly
+permitted custom HTTPS OpenAI-compatible endpoints, and strict OpenRouter.
+Protocol envelopes vary in factory fixtures; lifecycle assertions are shared.
+See [the provider matrix](../../docs/validation/provider-flows.md). Captured
+transports establish deterministic composition, not live/deployed qualification.

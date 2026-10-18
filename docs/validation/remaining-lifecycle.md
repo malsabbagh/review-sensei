@@ -44,7 +44,7 @@ of those modules; focused notes describe the additional experiments.
 | #119 | Separate provider-contract candidate tests requested/observed model, upstream and fingerprint independently | Mutable alias and absent observed identity remain explicit unknowns; no enrichment request |
 | #120 | Separate provider-contract candidate tests bounded provider-reported counters and evaluation aggregation | Missing/partial usage is unknown, local call accounting is distinct and no price/cost is invented |
 | #121 | Separate provider-contract candidate tests bounded normalized provider/variant/region/tier routing and strict captured policy | Endpoint prefix syntax does not itself establish an available provider endpoint or capability; no fallback or privacy relaxation |
-| #122 | Checked report-byte loader and duplicate/identity/fixture negatives in `test_openrouter_qualification`; provider stack adds `test_openrouter_routing_evidence` and a real packaged-corpus installed CLI test | Packaged live evaluation still applies fixture-identity exact matching and a contract-rejection threshold to skipped cases; this evaluator-applicability engineering condition blocks qualification. Three independent authorized live invocations, matching retained reports and human adjudication also remain absent. Approved Ollama review is a different scope |
+| #122 | Checked report-byte loader and duplicate/identity/fixture negatives; `test_openrouter_routing_evidence`, `test_live_evaluation`, and installed real packaged-corpus CLI tests bind route identity and separate exact fixture controls from actual quality under unchanged thresholds | Three independent authorized live invocations, matching retained reports and human adjudication remain absent. Three synthetic invocations prove the harness/gates, not real model qualification. Approved Ollama review is a different scope |
 | #123 | Existing setup/plan/application control tests, candidate installed lanes, existing deployed release milestone credited only to its source | Qualified OpenRouter App→broker→Actions→installed-engine delivery, all controls and disposable-installation upgrade/rollback remain pending; no deployment performed |
 | #146 | Existing `test_review_transaction`, `test_session_ledger`, baseline subprocess journeys, exact candidate package origins and published qualification receipts | Full released F1–F6/control/failure sequence, managed upgrade/state preservation and compatible in-flight rollback require their named artifacts and authorized installation |
 
@@ -61,10 +61,15 @@ load-error cases as qualification failures:
 - `tests/dist_safe/test_openrouter_cli_contract.py`
 - `tests/dist_safe/test_large_public_lifecycle_contract.py`
 - `tests/dist_safe/test_openrouter_metadata_contract.py` (provider stack)
+- `tests/dist_safe/test_conversation_deadline_contract.py` (shared provider stack)
+- `tests/dist_safe/test_provider_common_flow_contract.py` (shared provider stack)
 
 The lifecycle-only receipt below uses the original six declared files. The
-provider stack adds the seventh metadata/configuration contract, retaining the
-union; its exact combined receipt is recorded separately.
+provider stack adds metadata/configuration, shared conversation deadlines and
+common-flow contracts, retaining the nine-file union. Its exact combined receipt
+is recorded separately. [The provider matrix](provider-flows.md) distinguishes
+the existing common interface and all six deterministic configuration factories
+from installed and live/deployed qualification.
 
 The sdist distribution contract declares every shared helper and preserves
 checkout-only exclusions. Package CI uses only the two built wheels and the

@@ -34,7 +34,7 @@
 - Bind retained live qualification reports to their actual requested routing
   policy and endpoint; absent or changed bindings cannot authorize support.
   Permit the evaluator's existing skipped-case status in its report schema.
-  Live corpus metric applicability remains an explicit qualification blocker.
+  Actual live quality remains independently required for qualification.
 
 ## 0.8.1 - 2026-10-18
 

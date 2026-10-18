@@ -671,9 +671,9 @@ through operation entry and generation; expiry, exhaustion or cancellation
 cannot publish a generated reply. Provider adapters receive the remaining
 request deadline and their configured output cap without backend-specific policy.
 
-Live evaluation must preserve the separation of local exact fixture conformance
-and actual live quality, with every original threshold enforced. Complete
-bounded control inventories and identities must be checked by report-bound
-promotion gates; fixture calls cannot count as live work or rescue bad live
-evidence. Historical reports without controls remain parseable but cannot newly
-authorize support. See proposed [ADR 0082](../adr/0082-separate-live-quality-from-deterministic-conformance.md).
+Live evaluation keeps exact deterministic fixture conformance distinct from
+actual model quality. The bounded report control retains complete fixture
+inventory and identity plus unchanged thresholds; promotion readers verify the
+conjunction and complete attempted live inventory. Fixture work never enters
+live usage, and expected recall includes missed findings. Historical unbound
+reports parse but cannot newly authorize support. See proposed ADR 0082.
