@@ -49,4 +49,4 @@ advanced:
     # Provider request timeout in seconds
     timeout_seconds: 900
     # Maximum provider calls for one review
-    max_provider_calls: 8
+    max_provider_calls: 16
