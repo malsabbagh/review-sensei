@@ -24,7 +24,7 @@ if (
     raise ImportError("large lifecycle requires the installed hosted adapter")
 
 sys.path.insert(0, str(_TESTS.parent))
-from tests import test_large_public_lifecycle as _contract  # noqa: E402
+import test_large_public_lifecycle as _contract  # noqa: E402
 
 
 class InstalledLargePublicLifecycleTests(_contract.LargePublicLifecycleTests):

@@ -621,3 +621,23 @@ be upgraded before richer writes; rollback readers fail closed on those records.
 Representative capacity and retained-state measurements are recorded in the
 ADR: fifty varied findings fit the baseline and resolution-growth contracts;
 larger or more verbose inventories can still exceed inline bounds. Full finding
+
+  Every admitted fallback preserves prior concern accounting: omitted,
+  downgraded or ambiguously rediscovered concerns remain uncertain, make the
+  review partial and retain the prior durable baseline until resolved.
+
+OpenRouter approval remains withheld until retained qualification evidence is
+bound to independently expected effective review identities. The GitHub
+publisher and result-facts builder do not accept profile/caller status strings
+or the historical `not-required` default as that evidence; replay preserves the
+withheld facts. Other providers and permitted review events keep their policy.
+
+Accepted operation results additionally bind their replay to complete immutable
+inventory, original result/facts, source identity and exact evidence. Replays
+may retain accumulated resolutions, but cannot reuse decisions after another
+source, evidence or authority change. The adapter revalidates complete evidence
+and skips only already-persisted resolved IDs; it does not weaken the inventory
+application boundary or grant another provider allowance. Unbound older accepted
+payloads require a new authorized mention. See the replay amendment in
+[ADR 0061](adr/0061-human-reply-reassessment.md) and the finite source matrix in
+[large lifecycle qualification](validation/large-lifecycle.md).
