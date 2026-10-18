@@ -83,3 +83,23 @@ original physical-service budget accounting, all final native artifacts and
 named deployed upgrade/drain/rollback remain the separate limits in
 [the lifecycle matrix](remaining-lifecycle.md). No threshold, coverage cap or
 approval requirement is weakened to qualify a provider.
+
+## Integrated candidate observation
+
+The [exact-source receipt](combined-lifecycle-provider-candidate.json) records
+unpublished source `b2bf03400788ad2a507cecded65b2b912c3cd2e3`, including the
+PR315 storage and duplicate replay fixes. All 3,710 checkout tests passed in
+normal discovery and four disjoint coverage workers, with 82.71% coverage and
+the unchanged 80% floor. All required static gates passed. The frozen archive
+matched 868 tracked inputs; both installed packages matched every wheel/Git
+runtime byte outside checkout. The sdist checker found 47 required entries and
+excluded all 10 declared checkout-only modules.
+
+Installed discovery passed 204 tests, downstream consumers 11, and the separate
+OpenAI configuration suite 18. All six post-package suites passed 1,251 cases,
+including the nine-file lifecycle union's 169 methods. The same real-codec
+duplicate/unknown identity regression additionally passed against both exact
+installed packages, with live network disabled. It is recorded separately from
+the default lifecycle count. Later receipt/documentation commits do not change
+these tested runtime or test bytes. These observations retain every evidence
+boundary above; they do not grant provider support or hosted approval.
