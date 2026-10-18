@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Extend reusable installed-provider acceptance through actual GitHub CLI issue
+  and inline delivery, durable replay, preflight/refusal, credential isolation,
+  learning controls and every hosted-policy projection combination.
 - Preserve the exact evaluation corpus bytes in Windows Git checkouts so its
   pinned inventory and fixture/live controls retain the same hashes.
 - Bound ordinary AI discussion, correction and transport retries by the original

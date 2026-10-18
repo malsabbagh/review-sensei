@@ -11,7 +11,7 @@ publisher own exact-head authorization, delivery and approval. Adapters own
 authentication, endpoint/TLS rules, protocol mapping, bounded reads and normalized
 transport errors.
 
-`tests/provider_common_flow_contract.py` runs the same 14 methods for each
+`tests/provider_common_flow_contract.py` runs the same 19 methods for each
 configuration below, with two additional Ollama settings/completion controls.
 Only factory settings, captured transport and protocol envelopes vary. The
 checkout wrapper, guarded dist-safe wrapper and default post-package inventory
@@ -35,6 +35,24 @@ discussion. They do not prove every hosted event/control combination.
 `conversation_deadline_contract.py` additionally exercises the original caller
 tracker through context preparation, operation latency and discussion generation;
 all three real adapters receive its remaining timeout and shared limits.
+
+The five added common methods exercise actual GitHub CLI issue/inline replies,
+default operation-comment persistence, exact replay with no second inference,
+unauthorized/stale/draft/closed/disabled preflight, selected-credential refusal,
+call exhaustion and cancellation, and learning-generation opt-out while approved
+learnings remain in the prompt. Only external broker authorization and HTTP are
+captured; application, publisher, registry and provider code run unchanged.
+Each of the six configurations also projects all 144 GitHub control combinations
+through the real host-plan CLI (864 combinations total). That is complete policy
+projection coverage, not delivery of all 864 event combinations. The common
+inventory now has 116 methods including the two additional Ollama controls.
+
+After an unaccepted dispatched reply, the real operation store retains
+`provider_unknown`. Cancellation returns CLI status130; exact retry refuses
+without another provider call. Invalid output reaching the original call ceiling
+also remains unknown. These cases prove safe durable refusal and reaction
+cleanup, not authenticated reconciliation or eventual recovery from unknown
+remote effects. No response, review or approval is published for those cases.
 
 The audit found ordinary discussion had no request deadline/tracker even though
 normal review and human reassessment used shared budgets. The correction uses
@@ -77,6 +95,10 @@ OpenAI/OpenRouter authorization/configuration or passing run evidence. Three
 independent synthetic evaluation invocations prove control/quality and retained
 report gates; they are not the three real provider reports required by #122.
 Positive runtime OpenRouter report binding remains separate under #115.
+
+The [remaining-work map](remaining-qualification-work.md) distinguishes changes
+that can be implemented offline from evidence requiring release/operator or
+external live access. Green CI does not convert the latter into passing rows.
 
 Rich inventories, public fair queues, joint retention/deployed readers, complete
 original physical-service budget accounting, all final native artifacts and

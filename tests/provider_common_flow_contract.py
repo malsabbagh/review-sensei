@@ -8,6 +8,7 @@ library seams, not live capabilities, hosted delivery or model quality.
 from __future__ import annotations
 
 import io
+import itertools
 import json
 import socket
 import tempfile
@@ -284,6 +285,329 @@ class _CommonFlows:
     def fixture(self, actions):
         transport = Transport(self.case, actions)
         return self.case.create(transport), transport
+
+    def _github_cli_fixture(self, directory, *, source_kind="issue"):
+        from github_ingress_contract import CapturedGitHub
+
+        config = Path(directory) / "config.yml"
+        config.write_text(
+            self.case.configuration()
+            + "github:\n  writes: true\n  operation_entry: enabled\n",
+            encoding="utf-8",
+        )
+        environment = {
+            "GITHUB_TOKEN": "synthetic-read-token",
+            "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "REVIEWSENSEI_APP_ID": "7",
+            "OLLAMA_API_KEY": "unselected-ollama-sentinel",
+            "OPENAI_API_KEY": "unselected-openai-sentinel",
+            "OPENROUTER_API_KEY": "unselected-openrouter-sentinel",
+        }
+        if self.case.credential_env:
+            environment[self.case.credential_env] = self.case.settings.api_key
+        return CapturedGitHub(source_kind), config, environment
+
+    def test_github_cli_issue_and_inline_delivery_use_real_host_and_replay(self):
+        from github_ingress_contract import ANSWER
+
+        for source_kind in ("issue", "inline"):
+            with (
+                self.subTest(source_kind=source_kind),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                host, config, environment = self._github_cli_fixture(
+                    tmp, source_kind=source_kind
+                )
+                transport = Transport(self.case, [(0, json.dumps({"body": ANSWER}))])
+                code, output, error = host.invoke(
+                    self.case, transport, config, environment
+                )
+                self.assertEqual(code, 0, error)
+                self.assertEqual(output.strip(), "replied")
+                self.assertEqual(len(transport.calls), 1)
+                self.assertEqual(
+                    transport.calls[0]["payload"]["model"], self.case.settings.model
+                )
+                if self.case.settings.openrouter_policy is not None:
+                    self.assertEqual(
+                        transport.calls[0]["payload"]["provider"],
+                        self.case.settings.openrouter_policy.to_request_provider(),
+                    )
+                replies = [
+                    value
+                    for table in (host.comments, host.inline)
+                    for value in table.values()
+                    if ANSWER in value["body"]
+                ]
+                self.assertEqual(len(replies), 1)
+                before = len(host.calls)
+                code, output, error = host.invoke(
+                    self.case, transport, config, environment
+                )
+                self.assertEqual(code, 0, error)
+                self.assertEqual(output.strip(), "already_replied")
+                self.assertEqual(len(transport.calls), 1)
+                self.assertFalse(
+                    any(
+                        method == "POST" and path.endswith(("/comments", "/replies"))
+                        for method, path, _ in host.calls[before:]
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        capability == "review_session"
+                        for _, capability in host.exchanges
+                    ),
+                    "default operation entry must run, not fall back",
+                )
+                captured = (
+                    json.dumps(host.calls) + json.dumps(host.exchanges) + output + error
+                )
+                for key in (
+                    "OLLAMA_API_KEY",
+                    "OPENAI_API_KEY",
+                    "OPENROUTER_API_KEY",
+                    self.case.credential_env,
+                ):
+                    if key:
+                        self.assertNotIn(environment[key], captured)
+
+    def test_github_cli_unauthorized_stale_and_disabled_replies_never_dispatch(self):
+        for refusal in ("unauthorized", "stale", "draft", "closed", "disabled"):
+            with self.subTest(refusal=refusal), tempfile.TemporaryDirectory() as tmp:
+                host, config, environment = self._github_cli_fixture(tmp)
+                if refusal == "unauthorized":
+                    host.source["author_association"] = "NONE"
+                elif refusal == "stale":
+                    host.head = "c" * 40
+                elif refusal == "draft":
+                    host.draft = True
+                elif refusal == "closed":
+                    host.closed = True
+                transport = Transport(self.case, [])
+                code, output, error = host.invoke(
+                    self.case,
+                    transport,
+                    config,
+                    environment,
+                    enabled=refusal != "disabled",
+                )
+                self.assertEqual(code, 0, error)
+                self.assertIn(
+                    "disabled" if refusal == "disabled" else "skipped_", output
+                )
+                self.assertEqual(transport.calls, [])
+                self.assertEqual(host.exchanges, [])
+                self.assertFalse(any(method != "GET" for method, _, _ in host.calls))
+
+    def test_installed_host_plan_preserves_all_github_control_combinations(self):
+        from review_sensei_github.cli import main as github_main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, config, environment = self._github_cli_fixture(tmp)
+            # This is the complete policy projection cross-product, not a claim
+            # that every corresponding external event has been delivered.
+            combinations = itertools.product(
+                (False, True),
+                (False, True),
+                (False, True),
+                ("auto-approve", "blocking", "advisory"),
+                ("disabled", "proposals", "pull-requests"),
+                ("none", "diagnostics"),
+            )
+            for (
+                automatic,
+                writes,
+                mentions,
+                reviews,
+                learning,
+                artifacts,
+            ) in combinations:
+                policy = dict(
+                    automatic_reviews=automatic,
+                    writes=writes,
+                    mentions=mentions,
+                    reviews=reviews,
+                    learning=learning,
+                    artifacts=artifacts,
+                )
+                with self.subTest(**policy):
+                    config.write_text(
+                        self.case.configuration()
+                        + "github:\n"
+                        + "".join(
+                            f"  {name}: {str(value).lower() if isinstance(value, bool) else value}\n"
+                            for name, value in policy.items()
+                        ),
+                        encoding="utf-8",
+                    )
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with (
+                        patch.dict("os.environ", environment, clear=True),
+                        redirect_stdout(stdout),
+                        redirect_stderr(stderr),
+                    ):
+                        code = github_main(
+                            ["host-plan", "--config", str(config), "--json"]
+                        )
+                    self.assertEqual(code, 0, stderr.getvalue())
+                    plan = json.loads(stdout.getvalue())
+                    self.assertEqual(plan["policy"], policy)
+                    self.assertEqual(plan["backend"], self.case.cli_backend)
+                    self.assertEqual(plan["model"], self.case.settings.model)
+                    self.assertEqual(plan["base_url"], self.case.settings.base_url)
+                    for name, value in environment.items():
+                        if name.endswith("_KEY"):
+                            self.assertNotIn(
+                                value, stdout.getvalue() + stderr.getvalue()
+                            )
+
+    def test_public_cli_learning_generation_optout_retains_approved_learning(self):
+        proposal = {
+            "title": "Keep the local boundary",
+            "rule": "Reject remote requests before transmission.",
+            "scope": ["app.py"],
+            "rationale": "The library is local-only.",
+            "category": "architecture",
+        }
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                _, config, environment = self._github_cli_fixture(tmp)
+                # Analysis is local CLI execution, not an attested Actions job.
+                environment = {
+                    k: v for k, v in environment.items() if not k.startswith("GITHUB_")
+                }
+                diff = root / "change.patch"
+                diff.write_text(DIFF, encoding="utf-8")
+                directory = root / ".github/review-sensei/learnings"
+                directory.mkdir(parents=True)
+                (directory / "local.json").write_text(
+                    json.dumps(
+                        {
+                            "id": "approved-local-boundary",
+                            "title": "Approved local boundary",
+                            "rule": "Retain the approved local-only guard.",
+                            "scope": ["*"],
+                            "category": "architecture",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                transport = Transport(
+                    self.case,
+                    [
+                        (
+                            0,
+                            json.dumps(
+                                {
+                                    "summary": "Synthetic complete review.",
+                                    "comments": [],
+                                    "learning_proposals": [proposal],
+                                }
+                            ),
+                        )
+                    ],
+                )
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with (
+                    self.case.transport_scope(transport),
+                    patch.dict("os.environ", environment, clear=True),
+                    redirect_stdout(stdout),
+                    redirect_stderr(stderr),
+                ):
+                    code = main(
+                        [
+                            "--config",
+                            str(config),
+                            "--diff",
+                            str(diff),
+                            "--format",
+                            "json",
+                            "--learning-root",
+                            str(root),
+                            *([] if enabled else ["--no-learning-proposals"]),
+                        ]
+                    )
+                self.assertEqual(code, 0, stderr.getvalue())
+                result = json.loads(stdout.getvalue())
+                self.assertEqual(len(result["learning_proposals"]), int(enabled))
+                self.assertEqual(len(transport.calls), 1)
+                prompt = self.case.prompt(transport.calls[0]["payload"])
+                self.assertIn("approved-local-boundary", prompt)
+                self.assertIn("Retain the approved local-only guard.", prompt)
+
+    def test_github_cli_selected_credential_and_resource_refusals_do_not_publish(self):
+        from github_ingress_contract import ANSWER
+
+        if self.case.credential_env:
+            with tempfile.TemporaryDirectory() as tmp:
+                host, config, environment = self._github_cli_fixture(tmp)
+                environment.pop(self.case.credential_env)
+                transport = Transport(self.case, [])
+                code, output, error = host.invoke(
+                    self.case, transport, config, environment
+                )
+                self.assertEqual(code, 1, error)
+                self.assertIn(self.case.credential_env, error)
+                self.assertEqual(transport.calls, [])
+                self.assertEqual(host.exchanges, [])
+                self.assertEqual(host.calls, [])
+        for action in ("call_limit", "cancel"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as tmp:
+                host, config, environment = self._github_cli_fixture(tmp)
+                config.write_text(
+                    self.case.configuration()
+                    + "  review_work:\n    mode: unified\n  resources:\n    max_provider_calls: 1\n"
+                    + "github:\n  writes: true\n  operation_entry: enabled\n",
+                    encoding="utf-8",
+                )
+                transport = Transport(
+                    self.case,
+                    [(0, KeyboardInterrupt() if action == "cancel" else "{}")],
+                )
+                code, output, error = host.invoke(
+                    self.case, transport, config, environment
+                )
+                self.assertEqual(code, 130 if action == "cancel" else 1, error)
+                self.assertNotIn("replied", output)
+                # Once dispatched, an unaccepted result remains durably
+                # unknown. This proves safe refusal, not recovery liveness.
+                self.assertIn(
+                    "cancelled"
+                    if action == "cancel"
+                    else "operation entry refused: provider_unknown",
+                    error,
+                )
+                self.assertEqual(len(transport.calls), 1)
+                self.assertTrue(
+                    any(
+                        method == "DELETE" and path.endswith("/reactions/99")
+                        for method, path, _ in host.calls
+                    )
+                )
+                self.assertFalse(
+                    any(ANSWER in value["body"] for value in host.comments.values())
+                )
+                self.assertFalse(
+                    any(
+                        "<!-- reviewsensei:reply:v1" in value["body"]
+                        for value in host.comments.values()
+                    )
+                )
+                self.assertFalse(
+                    any(
+                        method == "POST" and "/reviews" in path
+                        for method, path, _ in host.calls
+                    )
+                )
+                code, output, error = host.invoke(
+                    self.case, transport, config, environment
+                )
+                self.assertEqual(code, 1, error)
+                self.assertIn("operation entry refused: provider_unknown", error)
+                self.assertEqual(len(transport.calls), 1)
 
     def test_public_cli_canonical_settings_reach_the_real_adapter(self):
         transport = Transport(self.case, [(0, CLEAN)])
