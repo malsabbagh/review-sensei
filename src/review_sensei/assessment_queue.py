@@ -358,6 +358,7 @@ class AssessmentCheckpoint:
         self._saved: datetime | None = None
         self._queue: AssessmentQueue | None = None
         self._restored_digests: dict[str, str | None] = {}
+        self._prepared_read: tuple[object | None] | None = None
 
     def prepare_queue(
         self,
@@ -374,6 +375,7 @@ class AssessmentCheckpoint:
         if value is None:
             queue.require_current(pending, snapshot)
             self._queue = queue
+            self._prepared_read = (None,)
             return queue
         if (
             not isinstance(value, dict)
@@ -388,6 +390,12 @@ class AssessmentCheckpoint:
         ):
             raise ReviewInputError("assessment operation inventory authority is stale")
         self._queue = original
+        raw = canonical_bytes(value)
+        if len(raw) > MAX_OPERATION_RECEIPT_BYTES:
+            raise ReviewInputError("assessment operation receipt exceeds storage bound")
+        # Reuse this exact authenticated read once for full admission decoding.
+        # Every subsequent mutation still fences its original root generation.
+        self._prepared_read = (json.loads(raw),)
         return original
 
     def _clock(self) -> datetime:
@@ -517,7 +525,11 @@ class AssessmentCheckpoint:
         decode: Callable[[object, WorkBatch], T],
         request_digests: Mapping[str, str | None] | None,
     ) -> WorkExecution[T] | None:
-        value = self.read()
+        if self._prepared_read is None:
+            value = self.read()
+        else:
+            value = self._prepared_read[0]
+            self._prepared_read = None
         if value is None:
             return None
         try:

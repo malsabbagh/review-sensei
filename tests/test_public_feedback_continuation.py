@@ -15,6 +15,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+from review_sensei_github.errors import GitHubPublicationError
 from review_sensei_github.human_assessment import HumanAssessmentPublisher
 
 from review_sensei.assessment_queue import (
@@ -147,12 +148,7 @@ class LocalFeedbackHost:
         )
 
     def activate(self, request):
-        self.publisher.revalidate_feedback(
-            token="synthetic",
-            feedback=self.prepared.feedback,
-            app_slug=APP,
-            before_read=self.publisher.before_read,
-        )
+        self.fence_authority()
         if (
             request.source_digest != self.source
             or request.operation_id != self.operation_id
@@ -224,8 +220,6 @@ class LocalFeedbackHost:
         )
         self.mutations.append(request.mutation.reason)
         self.last_envelope = copy.deepcopy(request.envelope)
-        # replace_with_tail returns the owned full root after exact sealed
-        # part and root readback; avoid rereading the same parts yet again.
         manifest = accepted.assessment_queue["state_manifest"]
         if (
             manifest["sha256"] != evidence_digest(pack_queue_state(request.envelope))
@@ -241,7 +235,40 @@ class LocalFeedbackHost:
             self.reservation,
         )
 
+    def fence_authority(self):
+        self.publisher.revalidate_feedback(
+            token="synthetic",
+            feedback=self.prepared.feedback,
+            app_slug=APP,
+            before_read=self.publisher.before_read,
+        )
+        status, current_pr = self.publisher.http.request(
+            "GET",
+            self.publisher.http.repository_path("owner/repo", "/pulls/1"),
+            token="synthetic",
+        )
+        if (
+            status != 200
+            or not isinstance(current_pr, dict)
+            or current_pr.get("state") != "open"
+            or current_pr.get("draft") is not False
+            or current_pr.get("head", {}).get("sha") != self.prepared.feedback.head_sha
+            or current_pr.get("base", {}).get("sha") != self.prepared.feedback.base_sha
+        ):
+            raise ReviewInputError("current PR snapshot changed")
+        latest = self.publisher.finalizer.load_eligibility(
+            token="synthetic",
+            repository="owner/repo",
+            pull_request=1,
+            head_sha=self.prepared.feedback.head_sha,
+            app_slug=APP,
+            require_valid=True,
+        )
+        if latest != self.prepared.eligibility:
+            raise ReviewInputError("latest assessment authority changed")
+
     def run(self, provider):
+        self.fence_authority()
         return reassess(
             provider=provider,
             pending=self.prepared.eligibility.human_review,
@@ -330,6 +357,16 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
                 host.tracker.prompt_bytes,
                 host.tracker.response_bytes,
             )
+            restored_budget = EvidenceReadBudget(snapshot=host.read_budget.snapshot())
+            publisher = HumanAssessmentPublisher(
+                http=state.http, before_read=restored_budget.consume
+            )
+            host.publisher, host.read_budget = publisher, restored_budget
+            host.ledger = LocalSessionLedger(
+                Path(directory),
+                evidence_budget=restored_budget,
+                enable_partition_writes=True,
+            )
             # Reconstruct the C checkpoint and A root/part reader, retaining the
             # SAME original control budget and durable reservation. No new grant.
             host.adapter = AssessmentQueueHostAdapter(
@@ -356,9 +393,7 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
                 original_counters,
             )
             self.assertEqual(host.read_budget.wall_deadline_ms, original_deadline)
-            self.assertEqual(
-                host.mutations, ["admission-dispatch", "accepted", "replay"]
-            )
+            self.assertEqual(host.mutations, ["admission-dispatch", "accepted"])
             outcome = publisher.publish(
                 token="synthetic",
                 review_token="synthetic",
@@ -465,6 +500,108 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
             self.assertEqual(state.latest_inventory().resolved, ())
             self.assertEqual(state.reply_count, 0)
 
+    def test_head_base_or_latest_inventory_changes_cannot_accept_receipt(self):
+        for change in ("head", "base", "inventory"):
+            with (
+                self.subTest(change=change),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                state, publisher, prepared = self.prepare()
+                host = LocalFeedbackHost(directory, publisher, prepared)
+
+                class MovingAuthority(AssessingProvider):
+                    def complete(self, request):
+                        result = super().complete(request)
+                        if change in {"head", "base"}:
+                            setattr(state, change, "c" * 40)
+                        else:
+                            inventory = state.eligibility.human_review
+                            changed = replace(
+                                inventory,
+                                findings=(
+                                    replace(
+                                        inventory.findings[0],
+                                        body="Changed immutable concern",
+                                    ),
+                                    *inventory.findings[1:],
+                                ),
+                            )
+                            state.reviews.append(
+                                state.review(
+                                    replace(state.eligibility, human_review=changed),
+                                    100,
+                                )
+                            )
+                        return result
+
+                provider = MovingAuthority()
+                with self.assertRaises(ReviewInputError):
+                    host.run(provider)
+                self.assertEqual(len(provider.calls), 1)
+                self.assertEqual(host.mutations, ["admission-dispatch"])
+                observer = LocalSessionLedger(Path(directory))
+                root = observer.load(host.identity).record
+                packet = unpack_queue_state(
+                    read_session_assessment_queue(observer, root)
+                )
+                journal = FactoredAssessmentJournal.from_document(packet["journal"])
+                receipt = journal.receipt(
+                    source_digest=host.source, operation_id=host.operation_id
+                )
+                self.assertEqual(receipt["completed"], [])
+                self.assertEqual(packet["journal"]["queue"]["resolved_ids"], [])
+                self.assertEqual(state.reply_count, 0)
+
+    def test_read_only_accepted_replay_still_refuses_changed_source_or_head(self):
+        for change in ("source", "head"):
+            with (
+                self.subTest(change=change),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                state, publisher, prepared = self.prepare()
+                host = LocalFeedbackHost(directory, publisher, prepared)
+                host.run(AssessingProvider())
+                observer = LocalSessionLedger(Path(directory))
+                before = observer.load(host.identity).record
+                if change == "source":
+                    state.source["body"] += " changed after durable acceptance"
+                else:
+                    state.head = "c" * 40
+                provider = AssessingProvider()
+                with self.assertRaises(ReviewInputError):
+                    host.run(provider)
+                self.assertEqual(provider.calls, [])
+                self.assertEqual(observer.load(host.identity).record, before)
+                self.assertEqual(host.mutations, ["admission-dispatch", "accepted"])
+                self.assertEqual(state.reply_count, 0)
+
+    def test_expired_original_control_deadline_cannot_replay_or_publish(self):
+        state, publisher, prepared = self.prepare()
+        with tempfile.TemporaryDirectory() as directory:
+            host = LocalFeedbackHost(directory, publisher, prepared)
+            work = host.run(AssessingProvider())
+            before = host.read_budget.snapshot()
+            before_calls = len(state.calls)
+            host.read_budget.clock = lambda: host.read_budget.deadline + 1
+            provider = AssessingProvider()
+            with self.assertRaises(ReviewInputError):
+                host.run(provider)
+            with self.assertRaises(ReviewInputError):
+                publisher.publish(
+                    token="synthetic",
+                    review_token="synthetic",
+                    repository="owner/repo",
+                    pull_request=1,
+                    prepared=prepared,
+                    reply=work,
+                    app_slug=APP,
+                )
+            self.assertEqual(provider.calls, [])
+            self.assertEqual(host.read_budget.snapshot(), before)
+            self.assertEqual(len(state.calls), before_calls)
+            self.assertEqual(host.mutations, ["admission-dispatch", "accepted"])
+            self.assertEqual(state.reply_count, 0)
+
     def test_varied_100_falls_back_to_parts_and_does_not_claim_publication_capacity(
         self,
     ):
@@ -480,7 +617,7 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
                 record.assessment_queue["state_manifest"]["encoding"],
                 "partitioned-json-v1",
             )
-            with self.assertRaises(ReviewInputError):
+            with self.assertRaises((ReviewInputError, GitHubPublicationError)):
                 publisher.publish(
                     token="synthetic",
                     review_token="synthetic",

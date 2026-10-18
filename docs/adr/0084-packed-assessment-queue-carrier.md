@@ -15,7 +15,9 @@ The complete queue, original execution accounting and accepted decisions must
 survive before public publication. A 40-finding varied-identity targeted operation
 stored its approximately 11 KiB factored envelope in partition objects. Preparation,
 reservation and the two coalesced checkpoint activations consumed 50 original
-control reads. Publication then exhausted the ordinary 60 slots of the unchanged
+control reads in the initial prototype. Adding the required current PR/base/head
+and latest authority fences raises the fully fenced partition case to 56 reads
+after the single-read admission optimization below. Publication then exhausted the ordinary 60 slots of the unchanged
 64-call envelope, before any reply or authority record.
 
 ## Decision
@@ -44,6 +46,16 @@ sealed generation-fenced activation and owned full readback. Live publication
 retains the existing source, current PR/head/base, authority and approval checks.
 Digest equality and compressed bytes cannot substitute for any of those checks.
 
+Admission reuses its bounded authenticated receipt once for full decoding;
+every actual activation retains the original generation fence. Replaying an
+accepted receipt with exactly identical execution/counters avoids another
+activation. Fresh request and semantic validation still run, as do current
+source/head/base/latest authority checks before reassessment/publication. The
+stored absolute origin/deadline/expiry and elapsed-time restoration keep their
+original authority without a no-op rewrite. Any changed execution or counter
+still requires the ordinary fenced mutation. Unknown dispatches do not become
+accepted or redispatchable through this optimization.
+
 ## Validation and limits
 
 `QueueStateCarrierTests` covers complete 40/100/250 varied-ID queue round trips,
@@ -55,10 +67,11 @@ Queue storage round trips do not establish rich eligibility publication capacity
 assessment and publication APIs with the actual local ledger, synthetic GitHub
 HTTP and deterministic provider. A full-ID target after the first 32 findings
 resolves only that target, retains the other 39 obligations, withholds approval,
-and completes within 50 charged original reads. Reconstructing the accepted
+and completes within 56 charged original reads. Reconstructing the accepted
 checkpoint before publication performs zero new provider calls, preserves the
-original execution/counters/deadline and finishes publication within 58 reads.
-Source edits and competing local generations refuse without unsupported effects.
+original execution/counters/deadline and finishes publication within 60 reads. The accepted replay uses a fresh local
+ledger instance and restored original control budget, without another mutation.
+Source edits, current PR/head/base or latest inventory changes, and competing local generations refuse without unsupported effects.
 An early semantic rejection leaves its four obligations unresolved while a late
 second batch is durably accepted in the same operation.
 

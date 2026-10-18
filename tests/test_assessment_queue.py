@@ -124,6 +124,7 @@ class AssessmentQueueTests(QueueFixture, unittest.TestCase):
         self.assertEqual(
             set(work.execution.pending_ids), set(queue.pending_order) - {late}
         )
+
         self.assertEqual(work.queue.resolved_ids, (late,))
         self.assertIn("49 pending findings were not assessed", work.reply.body)
         validate_work(
@@ -133,6 +134,78 @@ class AssessmentQueueTests(QueueFixture, unittest.TestCase):
             source_body=HUMAN,
             authority_digest="f" * 64,
         )
+
+    def test_accepted_replay_nonzero_clock_preserves_exact_receipt_and_expiry(self):
+        pending, bundle, queue = fixture(4)
+        store = DocumentStore()
+        wall = [datetime(2026, 10, 18, tzinfo=timezone.utc)]
+        ticks = [0.0]
+        tracker = ResourceBudgetTracker(
+            ResourceBudget.create(), monotonic=lambda: ticks[0]
+        )
+        self.run_work(
+            pending,
+            bundle,
+            queue,
+            provider=AssessingProvider(),
+            tracker=tracker,
+            checkpoint=store.checkpoint(now=lambda: wall[0]),
+        )
+        receipt = copy.deepcopy(store.document)
+        writes = len(store.writes)
+        wall[0] += timedelta(seconds=5)
+        ticks[0] += 5
+        restored = ResourceBudgetTracker(
+            ResourceBudget.create(), monotonic=lambda: ticks[0]
+        )
+        provider = AssessingProvider()
+        self.run_work(
+            pending,
+            bundle,
+            queue,
+            provider=provider,
+            tracker=restored,
+            checkpoint=store.checkpoint(now=lambda: wall[0]),
+        )
+        self.assertEqual(provider.calls, [])
+        self.assertEqual(len(store.writes), writes)
+        self.assertEqual(store.document, receipt)
+        self.assertGreaterEqual(restored.elapsed_ms(), 5000)
+        self.assertEqual(restored.provider_calls, tracker.provider_calls)
+        wall[0] += timedelta(hours=6)
+        with self.assertRaises(ReviewInputError):
+            self.run_work(
+                pending,
+                bundle,
+                queue,
+                provider=provider,
+                checkpoint=store.checkpoint(now=lambda: wall[0]),
+            )
+        self.assertEqual(provider.calls, [])
+        self.assertEqual(store.document, receipt)
+
+    def test_single_prepared_read_cannot_refresh_a_competing_generation(self):
+        pending, bundle, queue = fixture(4)
+        store = DocumentStore()
+        checkpoint = store.checkpoint()
+        read = checkpoint.read
+        reads = []
+
+        def competing_read():
+            value = read()
+            reads.append(value)
+            store.generation += 1
+            return value
+
+        checkpoint.read = competing_read
+        provider = AssessingProvider()
+        with self.assertRaisesRegex(ReviewInputError, "stale writer"):
+            self.run_work(
+                pending, bundle, queue, provider=provider, checkpoint=checkpoint
+            )
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(provider.calls, [])
+        self.assertEqual(store.writes, [])
 
     def test_unknown_foreign_short_duplicate_and_resolved_targets_refuse(self):
         pending, bundle, queue = fixture(4)
@@ -478,10 +551,13 @@ class AssessmentCheckpointTests(QueueFixture, unittest.TestCase):
         resumed.on_mutation = activate
         resumed.root_generation = lambda: store.generation
         original_budget = copy.deepcopy(store.document["resource_budget"])
+        original_receipt = copy.deepcopy(store.document)
+        original_mutations = len(contexts)
         provider = CorrectingProvider()
         self.run_work(pending, bundle, queue, provider=provider, checkpoint=resumed)
         self.assertEqual(provider.calls, [])
-        self.assertTrue(any(item.reason == "replay" for item in contexts))
+        self.assertEqual(len(contexts), original_mutations)
+        self.assertEqual(store.document, original_receipt)
         self.assertEqual(store.document["resource_budget"], original_budget)
         self.assertEqual(store.document["counters"]["provider_calls"], 2)
 

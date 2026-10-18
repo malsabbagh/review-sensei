@@ -568,6 +568,20 @@ def execute_plan(
         else 0,
     )
     last_saved: tuple[WorkExecution[T], tuple[int, ...]] | None = None
+    if checkpoint_loaded and prior is not None:
+        last_saved = (
+            prior,
+            tuple(
+                getattr(tracker, name)
+                for name in (
+                    "provider_calls",
+                    "transport_retries",
+                    "structural_retries",
+                    "prompt_bytes",
+                    "response_bytes",
+                )
+            ),
+        )
     admission_pending = checkpoint is not None and not checkpoint_loaded
     coalesce_admission = getattr(checkpoint, "coalesce_admission_dispatch", False)
     if type(coalesce_admission) is not bool:
@@ -640,11 +654,12 @@ def execute_plan(
                 )
             )
             signature = (execution, counters)
-            # The last per-batch receipt already accounts for all obligations.
-            # Repeating its activation cannot add durability or replenish time.
+            # An authenticated loaded or just-saved receipt already accounts
+            # for identical obligations/counters. Its absolute original time
+            # bounds remain authoritative; replay cannot renew them by writing.
             if (
                 checkpoint is not None
-                and reason == "finalize"
+                and reason in {"replay", "finalize"}
                 and last_saved == signature
             ):
                 return
