@@ -113,30 +113,79 @@ def inventory(root: Path) -> list[dict[str, object]]:
     return files
 
 
+def materialize_bundle(source: Path, destination: Path) -> list[dict[str, str]]:
+    """Fit PyInstaller's internal framework links to npm's regular-file contract."""
+    if source.is_symlink() or not source.is_dir():
+        raise CandidateError("native bundle must be a regular directory")
+    root = source.resolve()
+    links = []
+    count = total = 0
+
+    def copy(path: Path, target: Path, ancestors: frozenset[Path]) -> None:
+        nonlocal count, total
+        resolved = path.resolve(strict=True)
+        if not resolved.is_relative_to(root) or resolved in ancestors:
+            raise CandidateError(
+                "native bundle link escapes its root or creates a cycle"
+            )
+        if path.is_symlink():
+            links.append(
+                {
+                    "path": path.relative_to(source).as_posix(),
+                    "target": str(path.readlink()),
+                }
+            )
+        if path.is_dir():
+            target.mkdir(parents=True)
+            for child in sorted(path.iterdir()):
+                copy(child, target / child.name, ancestors | {resolved})
+            shutil.copystat(path, target)
+        elif path.is_file():
+            count += 1
+            total += path.stat().st_size
+            if count > MAX_FILES or total > MAX_BYTES:
+                raise CandidateError(
+                    "materialized native bundle exceeds receipt bounds"
+                )
+            shutil.copy2(path, target)
+        else:
+            raise CandidateError("native bundle contains a non-regular member")
+
+    copy(source, destination, frozenset())
+    return links
+
+
 def archive_native(
     root: Path, target: str, bundle: Path, output: Path, source: str
 ) -> Path:
     identity = source_identity(root, source)
     if target not in TARGETS:
         raise CandidateError("unsupported candidate target")
-    files = inventory(bundle)
     executable = Path(str(TARGETS[target]["payload"])).name
     if not (bundle / executable).is_file():
         raise CandidateError("native bundle executable is missing")
     output.mkdir(parents=True, exist_ok=False)
     archive = output / (target + ".tar.gz")
-    with tarfile.open(archive, "w:gz", dereference=True) as stream:
-        stream.add(bundle, arcname="review-sensei")
-    receipt = {
-        **identity,
-        "schema_version": 1,
-        "kind": "native-candidate",
-        "target": target,
-        "archive": archive.name,
-        "archive_sha256": digest(archive),
-        "files": files,
-        "executable_sha256": digest(bundle / executable),
-    }
+    with tempfile.TemporaryDirectory(
+        prefix="reviewsensei-native-snapshot-"
+    ) as temporary:
+        snapshot = Path(temporary) / "review-sensei"
+        links = materialize_bundle(bundle, snapshot)
+        files = inventory(snapshot)
+        with tarfile.open(archive, "w:gz", dereference=True) as stream:
+            stream.add(snapshot, arcname="review-sensei")
+        receipt = {
+            **identity,
+            "schema_version": 1,
+            "kind": "native-candidate",
+            "target": target,
+            "normalization": "internal-symlinks-materialized-v1",
+            "materialized_symlinks": links,
+            "archive": archive.name,
+            "archive_sha256": digest(archive),
+            "files": files,
+            "executable_sha256": digest(snapshot / executable),
+        }
     write_json(output / "native-receipt.json", receipt)
     return archive
 

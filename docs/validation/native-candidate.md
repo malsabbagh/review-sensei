@@ -11,7 +11,11 @@ inspection and native parity. Only the missing ARM macOS and Windows x64 native
 builds are added. A separate release-style five-build workflow would repeat the
 three existing builds, so that placement was rejected.
 
-The five build outputs are archived in permission-preserving tarballs. Each
+The five build outputs are archived in permission-preserving tarballs. Safe
+internal PyInstaller framework symlinks are materialized into regular candidate
+files, as required by the existing npm package contract; escaping/cyclic links
+refuse. The receipt records every materialized link and the normalization version.
+Original executable bytes remain identical. Each
 native receipt identifies the exact source commit, engine version, target,
 archive SHA-256, executable SHA-256 and every bundled runtime file's length and
 SHA-256. The source worktree must be clean. The npm assembly job requires all

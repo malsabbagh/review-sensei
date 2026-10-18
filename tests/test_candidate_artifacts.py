@@ -128,10 +128,44 @@ class CandidateArtifactsTests(unittest.TestCase):
     def test_symlinked_bundle_cannot_enter_candidate_archive(self):
         bundle = self.bundle("darwin-arm64")
         try:
-            (bundle / "alias").symlink_to(bundle / "review-sensei")
+            outside = self.stage / "outside"
+            outside.write_bytes(b"outside data")
+            (bundle / "alias").symlink_to(outside)
         except OSError:
             self.skipTest("host does not permit test symlinks")
-        with self.assertRaisesRegex(CANDIDATE.CandidateError, "non-regular"):
+        with self.assertRaisesRegex(CANDIDATE.CandidateError, "escapes"):
+            CANDIDATE.archive_native(
+                self.root, "darwin-arm64", bundle, self.stage / "archive", self.source
+            )
+
+    def test_internal_framework_links_are_regularized_without_changing_bytes(self):
+        bundle = self.bundle("darwin-arm64")
+        try:
+            (bundle / "_internal" / "Current").symlink_to("runtime.dat")
+        except OSError:
+            self.skipTest("host does not permit test symlinks")
+        archive = CANDIDATE.archive_native(
+            self.root, "darwin-arm64", bundle, self.stage / "archive", self.source
+        )
+        restored = CANDIDATE.unpack_native(archive, self.stage / "restored")
+        self.assertFalse((restored / "_internal/Current").is_symlink())
+        self.assertEqual(
+            (restored / "_internal/Current").read_bytes(),
+            (bundle / "_internal/runtime.dat").read_bytes(),
+        )
+        receipt = json.loads((archive.parent / "native-receipt.json").read_text())
+        self.assertEqual(
+            receipt["materialized_symlinks"],
+            [{"path": "_internal/Current", "target": "runtime.dat"}],
+        )
+
+    def test_cyclic_framework_link_is_rejected_before_archive(self):
+        bundle = self.bundle("darwin-arm64")
+        try:
+            (bundle / "_internal" / "cycle").symlink_to("..", target_is_directory=True)
+        except OSError:
+            self.skipTest("host does not permit test symlinks")
+        with self.assertRaisesRegex(CANDIDATE.CandidateError, "cycle"):
             CANDIDATE.archive_native(
                 self.root, "darwin-arm64", bundle, self.stage / "archive", self.source
             )
