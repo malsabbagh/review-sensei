@@ -341,7 +341,7 @@ class ProviderDeadlineContractTests(unittest.TestCase):
                     )
                 self.assertEqual(calls[-1], expected)
                 self.assertTrue(math.isfinite(calls[-1]))
-            for invalid in (True, 0, -1, float("nan"), float("inf"), "1"):
+            for invalid in (True, 0, -1, float("nan"), float("inf"), 1e100, "1"):
                 provider.timeout_seconds = invalid
                 before = len(calls)
                 with (
@@ -352,6 +352,47 @@ class ProviderDeadlineContractTests(unittest.TestCase):
                         ProviderRequest(prompt="synthetic", timeout_seconds=1)
                     )
                 self.assertEqual(len(calls), before)
+
+    def test_adapter_timeout_range_is_validated_before_request_clamping(self):
+        def construct(name, timeout, opener):
+            if name == "ollama":
+                return OllamaProvider(timeout_seconds=timeout, opener=opener)
+            if name == "openai":
+                return OpenAICompatibleProvider(
+                    api_key="synthetic", timeout_seconds=timeout, opener=opener
+                )
+            return OpenRouterProvider(
+                api_key="synthetic",
+                model="synthetic",
+                timeout_seconds=timeout,
+                routing_policy=OpenRouterRoutingPolicy(upstream_provider="synthetic"),
+                _test_opener=opener,
+            )
+
+        for name in ("ollama", "openai", "openrouter"):
+            calls = []
+
+            def opener(request, timeout, context):
+                calls.append(timeout)
+                raise TimeoutError("synthetic timeout")
+
+            for timeout in (1e100, math.nextafter(threading.TIMEOUT_MAX, math.inf)):
+                with (
+                    self.subTest(adapter=name, invalid=timeout),
+                    self.assertRaises(ValueError),
+                ):
+                    construct(name, timeout, opener)
+                self.assertEqual(calls, [])
+            for timeout in (3601, threading.TIMEOUT_MAX):
+                provider = construct(name, timeout, opener)
+                with (
+                    self.subTest(adapter=name, valid=timeout),
+                    self.assertRaises(ProviderError),
+                ):
+                    provider.complete(
+                        ProviderRequest(prompt="synthetic", timeout_seconds=0.125)
+                    )
+                self.assertEqual(calls[-1], 0.125)
 
     @contextmanager
     def blocked_transport(self):
@@ -397,7 +438,7 @@ class ProviderDeadlineContractTests(unittest.TestCase):
             self.assertLess(time.monotonic() - started, 1.5)
             self.assert_pending(run, "legacy", "deadline_exceeded")
 
-    def cli_process(self, endpoint, root):
+    def cli_process(self, endpoint, root, *, timeout_seconds="10"):
         (root / "input.patch").write_text(DIFF, encoding="utf-8")
         (root / "config.yml").write_text(
             "schema: 1\nadvanced:\n  review_work:\n    mode: unified\n  resources:\n    review_deadline_seconds: 1\n",
@@ -432,7 +473,7 @@ class ProviderDeadlineContractTests(unittest.TestCase):
                 endpoint,
                 "--allow-custom-endpoint",
                 "--timeout-seconds",
-                "10",
+                timeout_seconds,
                 "--format",
                 "json",
                 "--outcome",
@@ -484,3 +525,21 @@ class ProviderDeadlineContractTests(unittest.TestCase):
                 self.assertEqual(stdout, b"")
                 self.assertIn(b"cancelled", stderr)
                 self.assertNotIn(b"Traceback", stderr)
+
+    def test_fresh_cli_rejects_unrepresentable_timeout_before_network(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            self.blocked_transport() as (endpoint, entered),
+        ):
+            process = self.cli_process(
+                endpoint, Path(directory), timeout_seconds="1e100"
+            )
+            self.addCleanup(lambda: process.kill() if process.poll() is None else None)
+            stdout, stderr = process.communicate(timeout=3)
+            self.assertEqual(process.returncode, 2)
+            self.assertFalse(
+                entered.is_set(), "invalid configured timeout reached transport"
+            )
+            self.assertEqual(stdout, b"")
+            self.assertIn(b"timeout_seconds", stderr)
+            self.assertNotIn(b"Traceback", stderr)

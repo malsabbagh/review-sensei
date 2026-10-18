@@ -43,7 +43,7 @@ sdist tests, change outside the checkout, and run:
 REVIEWSENSEI_CHECKOUT_ROOT=/absolute/checkout /isolated/venv/bin/python -I -m unittest discover -s /unpacked/sdist/tests/dist_safe -p test_provider_deadline_contract.py -v
 ```
 
-The focused contract has 16 methods (with additional mode/provider/signal
+The focused contract has 18 methods (with additional mode/provider/signal
 subcases). A candidate wheel and extracted sdist passed the installed lane on
 macOS/Python 3.14; retain the final artifact SHA-256 values with the integration
 receipt. The integration owner runs the complete required gate sequence and
@@ -64,3 +64,12 @@ one call immediately on every `ProviderError` now preserves the dispatched-attem
 count independently of retry accounting. The old run-outcome assertions (one call
 for failure plus success, zero for failure without retries) were corrected; the
 new acceptance also proves a transient retry cannot bypass a one-call ceiling.
+
+The transport-range regression is covered by
+`test_adapter_timeout_range_is_validated_before_request_clamping` and
+`test_fresh_cli_rejects_unrepresentable_timeout_before_network`. Constructors and
+mutable adapter configuration reject values above `threading.TIMEOUT_MAX` before
+clamping to the remaining deadline. This preserves rejection of `1e100` without
+introducing an arbitrary 3,600-second ceiling: 3,601 seconds and the exact
+platform duration limit remain valid configuration. The fresh CLI rejects the
+unrepresentable setting with exit 2 before any localhost request is received.

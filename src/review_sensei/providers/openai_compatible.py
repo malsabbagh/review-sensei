@@ -34,6 +34,7 @@ from ..errors import ProviderError, ReviewInputError
 from ..models import ProviderRequest, ProviderResponse
 from ..validation import validate_bounded_text
 from .transport import (
+    MAX_TRANSPORT_TIMEOUT_SECONDS,
     bounded_transport_timeout,
     parse_retry_after_seconds,
     read_bounded_body,
@@ -204,11 +205,12 @@ class OpenAICompatibleProvider:
         if (
             isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, (int, float))
+            or timeout_seconds > MAX_TRANSPORT_TIMEOUT_SECONDS
             or not math.isfinite(timeout_seconds)
             or timeout_seconds <= 0
         ):
             raise ValueError(
-                "OpenAI-compatible timeout_seconds must be a finite positive number"
+                "OpenAI-compatible timeout_seconds must be a finite positive number within the platform transport range"
             )
         if isinstance(max_output_tokens, bool) or not isinstance(
             max_output_tokens, int
