@@ -21,7 +21,7 @@ def load_contracts(tests):
     suite = unittest.TestSuite()
     root = tests.resolve()
     lane = (root / "dist_safe").resolve()
-    if lane.parent != root:
+    if lane != root / "dist_safe":
         raise ImportError("contract directory escapes the qualification root")
     paths = []
     for name in ("test_approval_lifecycle_contract", "test_local_review_contract"):

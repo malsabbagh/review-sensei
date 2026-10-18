@@ -602,6 +602,100 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
             with self.assertRaisesRegex(ImportError, "directory escapes"):
                 module.load_contracts(tests)
             self.assertFalse(marker.exists())
+            lane.unlink()
+            alternate = tests / "alternate"
+            alternate.mkdir()
+            for name in (
+                "test_approval_lifecycle_contract.py",
+                "test_local_review_contract.py",
+            ):
+                (alternate / name).write_text(code)
+            lane.symlink_to(alternate, target_is_directory=True)
+            with self.assertRaisesRegex(ImportError, "directory escapes"):
+                module.load_contracts(tests)
+            self.assertFalse(marker.exists())
+
+    def test_main_load_error_and_empty_discovery_write_failed_receipts(self):
+        import importlib.util
+        from types import ModuleType
+
+        spec = importlib.util.spec_from_file_location(
+            "published_lifecycle_receipt", Path(__file__).with_name("lifecycle.py")
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        names = ("test_approval_lifecycle_contract", "test_local_review_contract")
+        guard = ModuleType("packaging_guard")
+        guard.assert_distribution_import = lambda: None
+        adapter = ModuleType("review_sensei_github")
+        adapter.__file__ = str(
+            Path(sys.prefix) / "review_sensei_github" / "__init__.py"
+        )
+        previous = dict(sys.modules)
+        try:
+            with tempfile.TemporaryDirectory() as scratch:
+                root = Path(scratch)
+                tests = root / "tests"
+                lane = tests / "dist_safe"
+                lane.mkdir(parents=True)
+                # Let the real file loader raise, then load two real empty files.
+                for fault in ("load-error", "empty-suite"):
+                    with self.subTest(fault=fault):
+                        for name in names:
+                            (lane / (name + ".py")).write_text(
+                                "raise RuntimeError('private module detail')\n"
+                                if fault == "load-error"
+                                else ""
+                            )
+                        report = root / fault
+                        argv = [
+                            "lifecycle.py",
+                            "--expected-version",
+                            "0.8.1",
+                            "--expected-github-version",
+                            "0.3.1",
+                            "--report",
+                            str(report),
+                        ]
+                        with (
+                            patch.object(
+                                module,
+                                "__file__",
+                                str(tests / "published_cli" / "lifecycle.py"),
+                            ),
+                            patch.dict(
+                                sys.modules,
+                                {
+                                    "packaging_guard": guard,
+                                    "review_sensei_github": adapter,
+                                },
+                            ),
+                            patch.object(
+                                module.importlib.metadata,
+                                "version",
+                                return_value="0.8.1",
+                            ) as version,
+                            patch.object(sys, "argv", argv),
+                            patch.object(sys, "path", list(sys.path)),
+                            patch.object(sys, "stderr", io.StringIO()),
+                        ):
+                            version.side_effect = lambda name: (
+                                "0.8.1" if name == "review-sensei" else "0.3.1"
+                            )
+                            self.assertEqual(module.main(), 1)
+                        receipt = json.loads((report / "results.json").read_text())
+                        self.assertEqual(receipt["tests_run"], 0)
+                        self.assertEqual(receipt["pass"], 0)
+                        self.assertEqual(receipt["fail"], 1)
+                        self.assertEqual(receipt["rows"][0]["kind"], fault)
+                        self.assertEqual(
+                            receipt["load_error"],
+                            "RuntimeError" if fault == "load-error" else None,
+                        )
+                        self.assertNotIn("private module detail", json.dumps(receipt))
+        finally:
+            sys.modules.clear()
+            sys.modules.update(previous)
 
 
 if __name__ == "__main__":
