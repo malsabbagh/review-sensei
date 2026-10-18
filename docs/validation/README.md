@@ -5,6 +5,9 @@ wheel digests, not a rolling claim about the latest package. A newer release
 does not invalidate an older failure receipt. Do not replace historical hashes
 or reinterpret local candidate bytes as published wheels with the same version.
 
+- [Remaining lifecycle acceptance and issue map](remaining-lifecycle.md): current
+  supported paths, exact test seams, candidate/published identity separation
+  and unresolved installation/production qualification.
 - [Approval lifecycle matrix and original CI measurements](approval-lifecycle.md):
   initial PR309 work based on the PR308 merge. Its 0.7.1/0.2.1 local candidate
   builds and PyPI observations are historical.

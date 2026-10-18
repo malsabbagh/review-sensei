@@ -19,3 +19,7 @@ include tests/fixtures/distribution-contract.json
 include tests/test_pr308_ledger_regression.py
 include tests/fixtures/regressions/pr308-session-ledger.json
 include tests/fixtures/regressions/pr308-session-ledger-evidence.json
+include tests/isolated_working_directory.py
+include tests/openrouter_cli_contract.py
+include tests/baseline_cli_contract.py
+include tests/provider_deadline_contract.py

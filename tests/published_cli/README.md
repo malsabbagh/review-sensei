@@ -84,7 +84,7 @@ digests. It does not claim those old bytes implement newer lifecycle behavior.
 Default post-publication qualification runs all six suites; receipts always list
 selected and excluded suites so a subset cannot be mistaken for full coverage.
 
-Lifecycle contracts load from the two declared files under `tests/dist_safe`,
+Lifecycle contracts load from the five declared files under `tests/dist_safe`,
 so a same-named module elsewhere on the search path cannot shadow them. Receipts
 include `tests_run` separately from row counts, a sanitized `load_error` for file
 import failures, and an explicit failed `empty-suite` row if discovery is empty.
@@ -99,3 +99,12 @@ The loader validates both declared resolved paths before executing either file,
 rejecting a contract file or directory symlink that escapes its declared location.
 The qualification ref supplies trusted test code; these path checks do not
 attest the harness contents or make arbitrary test code safe to execute.
+
+The lifecycle inventory additionally runs the shared fresh-process baseline
+recovery, provider deadline and OpenRouter CLI configuration contracts. These
+exercise isolated synthetic state/transport against the exact installed wheels;
+the baseline and deadline children independently check their installed origins.
+The OpenRouter sentinel matrix captures the actual strict Morph request and
+proves selected-key isolation/missing-key refusal without live provider I/O.
+These bounded additions do not qualify all hosted operation/control combinations
+or promote any model. See [the remaining acceptance matrix](../../docs/validation/remaining-lifecycle.md).
