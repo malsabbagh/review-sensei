@@ -3,7 +3,8 @@
 Scope: reusable trusted local host at the public selector, assessment and
 publication APIs. Actual `LocalSessionLedger`, owned manifests and prepaid tails
 are exercised against synthetic GitHub HTTP and a deterministic provider. No
-deployed, installed CLI or live model qualification is implied.
+deployed, installed CLI or live model qualification is implied. Installed Python
+library composition is qualified separately below.
 
 | Issue / condition | Executable acceptance | Evidence / unresolved work |
 | --- | --- | --- |
@@ -65,3 +66,19 @@ actual owned-ledger transaction reads or safely reuse immutable report associati
 while preserving every current source/PR/head/latest-authority fence and complete
 report readback. This is implementable integration work, distinct from external
 provider authorization or deployed qualification gates.
+
+## Exact source and package evidence
+
+The [candidate receipt](public-feedback-continuation-candidate.json) binds frozen
+source `8be565aa8c27d39d54e7ce7863ecb09710fd9995`. All 16 local gates pass,
+including 3,766 normal tests, four complete coverage workers and 82.79% coverage
+at the unchanged 80% floor. Exact installed wheels pass 248 distribution tests,
+11 downstream tests, 18 OpenAI configuration cases and all 1,295 post-package
+cases (213 lifecycle methods). All 876 tracked inputs and 119/48 installed
+runtime files match frozen source and wheel bytes. The sdist contract and an
+additional installed duplicate/unknown recorded-ID regression pass.
+
+Independent final review reran the prior counter/time/expiry regressions and
+131 focused tests with no concrete Standards or Spec findings. This later
+receipt/documentation commit changes no tested runtime or harness bytes.
+Exact merge-head CI and hosted review are separate pending evidence.
