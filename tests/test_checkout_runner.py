@@ -528,3 +528,43 @@ class BrokenProtocol(unittest.TestCase):
             self.assertEqual(data["workers"][0]["executed"], 0)
             self.assertEqual(data["workers"][0]["exit"], 0)
             self.assertIsNone(data["workers"][0]["timing_error"])
+
+    def test_invalid_cost_files_fail_before_executing_any_workers(self):
+        payloads = (
+            b"[]",
+            b"[1]",
+            b"false",
+            b"{",
+            b'{"Case":"slow"}',
+            b'{"Case":true}',
+            b'{"Case":NaN}',
+        )
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            (root / "test_costs.py").write_text("""import pathlib, unittest
+class Case(unittest.TestCase):
+    def test_should_not_run(self): pathlib.Path(__file__).with_name("executed").touch()
+""")
+            costs = root / "costs.json"
+            for payload in (*payloads, None):
+                with self.subTest(payload=payload):
+                    if payload is None:
+                        costs.unlink(missing_ok=True)
+                    else:
+                        costs.write_bytes(payload)
+                    proc = subprocess.run(
+                        [
+                            sys.executable,
+                            str(SCRIPT),
+                            "--start-directory",
+                            str(root),
+                            "--costs",
+                            str(costs),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    self.assertEqual(proc.returncode, 1, proc.stderr)
+                    self.assertNotIn("Traceback", proc.stderr)
+                    self.assertFalse((root / "executed").exists())

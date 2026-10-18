@@ -88,3 +88,68 @@ Ordinary CI passed on that SHA; the actual ReviewSensei gate remained
 Current-head CI/review run links and any remaining required human assessments are
 reported on the PR. No maintainer override, manual session-ledger edit or silent
 draft-state change is used to bypass these assessments.
+
+
+## Review and explicit full rescan on 169a2b6
+
+The [incremental review 5562011726](https://github.com/malsabbagh/review-sensei/pull/309#pullrequestreview-5562011726)
+was partial (18 required human decisions, one optional suggestion). The explicit
+[rescan 39109501099](https://github.com/malsabbagh/review-sensei/actions/runs/39109501099)
+actually ran the released engine 0.8.0 and hosted adapter 0.3.0 against this PR's
+head, using the approved DeepSeek4.1Flash model. Its
+[review 5562027053](https://github.com/malsabbagh/review-sensei/pull/309#pullrequestreview-5562027053)
+reported complete analysis of 23 paths, no required fixes, 23 required human
+decisions and three optional suggestions. These are engineering responses,
+not maintainer assessments or approval overrides. A completed workflow is not an
+approved review.
+
+| Incremental finding | Engineering response |
+| --- | --- |
+| RS-0F0BEA, body | Both local wheel paths are explicit pip requirements. An unmatched shell glob remains an invalid literal and pip fails; it cannot silently select a registry replacement. Actual candidate artifact installs passed. |
+| RS-C7C31A, body | CONTRIBUTING documents the default `.coverage` in cwd; `--report` controls JSON only. The stale-data replacement and both-branch tests verify this handoff. Workers use absolute temporary paths. |
+| RS-2FA573, body | The root sdist glob is the engine archive. The adapter wheel lives under github/ and cannot match that root archive glob. Separate engine/adapter artifact contracts pass. |
+| RS-A3D570, body | The scheduling test checks actual fixture totals 10 and 11, reversed-input determinism and invalid costs. The 0.02-second unknown-class estimate is documented, not presented as a measurement. |
+| RS-0085D2, body | Worker JSON is an internal same-script-version protocol, deliberately strict. Unknown fields fail closed, preventing an unexpected field from overriding parent-owned exit evidence. |
+| RS-808AD4, 4306244038 | All three paths exist and are required helpers in distribution-contract.json. Manifest and actual-sdist verification passed; additional grafting is unnecessary. |
+| RS-C15AED, 4306244042 | The whole PR adds scripts/run_checkout_tests.py and its fault tests. An incremental view omitting the earlier addition does not mean implementation is absent. The documented behavior is exercised. |
+| RS-E7DF67, 4306244045 | The include edges are tested, pinned dependencies remain transitively reachable, and actual CI installs succeed. Historical validation uses its dedicated requirements file. A comment about indirection is optional style. |
+| RS-6788C5, 4306244050 | No current dependency between declaration order exists. Selection validates known suite names; proposed future membership changes need their own contract. |
+| RS-51034F, 4306244054 | Default qualification runs all six suites. Explicit historical subsets record selected and excluded names; assertions are intentionally not weakened based on version. Published 0.8.0/0.3.0 passes all six. |
+| RS-905EBE, 4306244056 | harness_ref is exactly the harness revision used, not wheel_source_ref. The evidence index explicitly labels immutable snapshots and wheel hashes; later reruns are separate evidence. |
+| RS-0E3645, 4306244058 | Worker write errors are not swallowed: stderr is captured and replayed and the worker exits nonzero. Parent read errors retain timing_error, null executed and the actual exit. Corrupt-report tests verify failure evidence. |
+| RS-2038D5, 4306244063 | Cold isolated processes insert the helper root before import; required-helper and actual-sdist checks prevent missing packaged assets. Runtime prefix guards prevent accidental source imports. Explicit lifecycle file loading also rejects cached/path-shadow contract modules. |
+| RS-D1716B, 4306244066 | Both module-root variants actually occur in discovery, through existing unittest hooks. They are distinct discovered IDs, not dead fixture entries. |
+| RS-7665AF, 4306244068 | Each thread owns one distinct index and the parent reads only after pool.map joins. No competing writer or process-pool implementation exists. |
+| RS-E1C672, 4306244071 | The allowlist omits PYTHONPATH/PYTHONHOME and -I ignores Python environment/site customization. No TMPDIR-under-scratch promise exists; all explicit test artifacts use scratch paths. |
+| RS-7101E3, 4306244075 | Real reporter probe: three passing subtests yield one passing parent row, tests_run=1. addSuccess already records it, so empty-suite is not triggered. |
+| RS-614C40, 4306244081 | Ordinary import exceptions produce sanitized failure receipts. Interrupt/SystemExit still propagate; the outer qualifier requires both process success and valid evidence, so absence cannot become green. Current contract modules do not exit during import. |
+| RS-FC19A1, optional body | The current published flow resolves exact release versions and defaults to all six suites. Historical pinned validation deliberately declares its narrower scope. |
+
+| Full-rescan finding | Engineering response |
+| --- | --- |
+| RS-35008C, body | **Fixed:** reject non-object cost JSON and invalid key/value types with a controlled error before any worker runs. New public CLI tests cover lists, booleans, malformed JSON, string/bool/NaN values and missing files, assert exit 1, no traceback and no execution marker. |
+| RS-6BB0F2, body | pip resolves declared dependencies, so installing normal declared runtime requirements does not hide missing dependency declarations. Both local distributions are explicit requirements; engine-only smoke still precedes adapter installation. |
+| RS-838165, body | The whole PR contains the runner implementation and public fault tests for its flags; the prior head passed 12 runner methods. The added cost-input method increases this to 13. |
+| RS-1F2240, body | Missing/invalid explicitly requested cost files must fail, rather than silently discard measured scheduling. The cost-input fix now also reports missing files as controlled exit 1 before execution. |
+| RS-5CF75D, 4306258099 | Discovery uses the same unittest TestLoader.discover default pattern and start directory as the serial command, including load_tests hooks. Actual inventory counts are verified; verbosity affects output only. |
+| RS-B3CE32, 4306258104 | Worker-file, exact-inventory and combine-error tests exist. Complete test execution may still fail assertions: combining such coverage preserves diagnostics while the final real exit remains nonzero. |
+| RS-EA7C1B, 4306258106 | The actual published workflow is the producer, defaults to all six suites and uploads its receipt. Fresh exact published-wheel qualification passed all 1,109 rows. |
+| RS-A17F9F, 4306258109 | The lean explicit helper allowlist and manifest/sdist verification cover current referenced fixtures. New future fixtures must be declared; unrelated test data need not be grafted. Missing required assets fail the installed journey. |
+| RS-2DE957, 4306258112 | HOSTED_SUITES is consulted inside the selected-suite loop, so excluded suites are not invoked. Both exact wheels are deliberately installed and their dependency pin checked for every qualification. |
+| RS-7821B2, 4306258116 | Cwd coverage handoff is documented and tested. Both package roots are installed by the coverage CI jobs; missing tools/packages correctly fail instead of silently reducing coverage. |
+| RS-81408E, 4306258120 | execution_complete means assigned inventory ran, not that assertions passed. Actual exit is separate and required for success. Coverage may intentionally be combined from completed failing tests for diagnosis; folding exit into inventory completeness would lose that distinction. |
+| RS-405590, 4306258124 | Raw elapsed timing permits zero for clock precision; scheduling weights require positive finite values. The worker report is not a directly consumable costs file (it contains nested metadata). Refreshing estimates requires aggregation/normalization; bad explicit weights fail visibly. |
+| RS-53957B, 4306258127 | requirements/test.txt includes pinned coverage and is included by ci.txt. Both actual coverage lanes installed it and passed; a missing required coverage tool should fail. |
+| RS-944155, 4306258133 | Each contract module inserts its helper root before load_tests is invoked, including cold isolated runs. Missing required packaged helpers must fail collection rather than skip qualification. Actual sdist and published journeys passed. |
+| RS-CC9839, 4306258138 | Qualification intentionally treats skipped checks as failed qualification; rows include kind=skipped, so they cannot masquerade as independent passes. The exit requires not failed as well as wasSuccessful. |
+| RS-C0B387, 4306258141 | The standard library addSubTest appends to failures/errors directly; it does not call this overridden addFailure. Actual probe: three failing subtests produce exactly three failed rows, zero passes, tests_run=1. |
+| RS-EF1683, 4306258144 | The whole PR includes production flags/implementation and tests. An incremental diff omitting earlier additions is not evidence that implementation is absent. |
+| RS-504389, 4306258146 | Deterministic order-independent partitioning is an intentional documented contract. Sorted class keys and tie-breaks implement it; measured totals 10/11 and reversed input are asserted. |
+| RS-81D3A7, 4306258149 | The test already asserts stale.py is absent and verifies both new probe.py arcs from distinct workers. Reusing the public default .coverage path is intentional and proves replacement. |
+| RS-655CF8, 4306258152 | Parent replays child stderr. The test also asserts structured timing_error, null executed, real zero worker exits and false completeness; traceback absence is supplementary. Bytes repr is valid generated Python and write_bytes deliberately creates invalid UTF-8 evidence. |
+| RS-2ADC2A, 4306258157 | Runner tests separately reject missing/incomplete coverage data. The explicit following CI coverage report enforces the 80% floor; the empty-data CLI test protects that command. The runner is not advertised as enforcing a percentage floor itself. |
+| RS-7CE03B, 4306258158 | The simulated worker deliberately exits zero with valid timing but missing coverage; parent exit 1, coverage_ok=false and combine-not-called prove rejection of that evidence fault. Requiring the simulated worker to fail would test a different condition. |
+| RS-3A22AE, 4306258163 | The public subprocess test already checks no traceback, real child exit 0, executed=0, timing_error=null and false inventory completeness. An unrelated parent exception could not satisfy its valid structured receipt checks. |
+| RS-F58AD6, optional body | Both requirements files are part of the whole PR diff. Include-contract tests and actual CI installs verify their use. |
+| RS-714000, optional body | test.txt intentionally includes the shared pinned YAML requirements file. Its only dependency is PyYAML; no unnecessary historical validation tool is pulled in. |
+| RS-5BBC8A, optional body | The bootstrap test already accepts the exact historical five-suite selection, checks default all-six membership and rejects empty/unknown/duplicate names. |

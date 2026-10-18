@@ -12,7 +12,6 @@ import argparse
 import concurrent.futures
 import hashlib
 import json
-import math
 import shutil
 import subprocess
 import sys
@@ -40,9 +39,17 @@ def partition(
         raise ValueError("workers must be between 1 and 16")
     if not identities or len(set(identities)) != len(identities):
         raise ValueError("discovery must produce distinct nonempty test IDs")
+    if costs is not None and not isinstance(costs, dict):
+        raise ValueError("class costs must be a JSON object of positive seconds")
     measured = costs is not None
     costs = costs or {}
-    if any(not math.isfinite(value) or value <= 0 for value in costs.values()):
+    if any(
+        not isinstance(name, str)
+        or not name
+        or type(value) not in (int, float)
+        or not 0 < value <= sys.float_info.max
+        for name, value in costs.items()
+    ):
         raise ValueError("class costs must be finite positive seconds")
     classes: dict[str, list[str]] = {}
     for identity in sorted(identities):
@@ -165,7 +172,7 @@ def main() -> int:
             json.loads(args.costs.read_text(encoding="utf-8")) if args.costs else None
         )
         groups = partition(test_ids(suite), args.workers, costs)
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
         print(exc, file=sys.stderr)
         return 1
     print(
