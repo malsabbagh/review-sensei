@@ -291,6 +291,14 @@ same validated result.
 - `ProviderRequest` is the provider-facing prompt contract.
 - `ProviderResponse` normalizes provider text without retaining raw request
   context.
+  OpenRouter preserves requested model, observed model/upstream and reported
+  fingerprint independently; optional `ProviderTokenUsage` contains only three
+  bounded provider-reported counters. Invalid optional protocol metadata stays
+  unknown. Live evaluation aggregates a counter only when every attempt reported
+  it; failures and cancellation remain attempted work. Routing identifiers retain
+  their full bounded family/variant/region/tier prefix and participate in policy
+  digests. Eligibility for DeepSeek/Morph evidence collection is distinct from
+  passing qualification and approval (proposed ADR 0081).
 - `Stage` declares one provider invocation, its expected output sections,
   optional structured `ReviewCategory` values, and an optional canonical
   `provider_profile`. Per-stage profiles cannot expand a local/private run onto

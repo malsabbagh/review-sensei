@@ -16,6 +16,7 @@ from typing import Any, Sequence
 from .errors import ReviewInputError, ReviewSenseiError
 from .learnings import LearningStore, learning_digest
 from .models import (
+    MAX_PROVIDER_TOKEN_COUNT,
     LearningEntry,
     ProviderRequest,
     ProviderResponse,
@@ -971,18 +972,56 @@ class MeasuredProvider:
         self.elapsed_ms: list[int] = []
         self.prompt_bytes = 0
         self.response_bytes = 0
+        self._usage_known = dict.fromkeys(
+            ("prompt_tokens", "completion_tokens", "total_tokens"), 0
+        )
+        self._usage_totals = dict(self._usage_known)
+        self._reported_attempts = 0
 
     def complete(self, request: ProviderRequest) -> ProviderResponse:
         if self._provider is None:
             raise RuntimeError("aggregate metrics provider cannot complete requests")
         started = time.perf_counter()
-        response = self._provider.complete(request)
-        elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
         self.calls += 1
-        self.elapsed_ms.append(elapsed_ms)
         self.prompt_bytes += len(request.prompt.encode("utf-8"))
-        self.response_bytes += len(response.text.encode("utf-8"))
-        return response
+        try:
+            response = self._provider.complete(request)
+            self.response_bytes += len(response.text.encode("utf-8"))
+            usage = response.token_usage
+            if usage is not None:
+                self._reported_attempts += 1
+                for key in self._usage_known:
+                    value = getattr(usage, key)
+                    if value is not None:
+                        self._usage_known[key] += 1
+                        self._usage_totals[key] = min(
+                            MAX_PROVIDER_TOKEN_COUNT + 1,
+                            self._usage_totals[key] + value,
+                        )
+            return response
+        finally:
+            # Failed/truncated/cancelled calls still consumed an attempt. Their
+            # unavailable usage is unknown, never zero or a fabricated refund.
+            self.elapsed_ms.append(max(0, int((time.perf_counter() - started) * 1000)))
+
+    def provider_reported_usage(self) -> dict[str, object]:
+        totals: dict[str, object] = {}
+        for key, known in self._usage_known.items():
+            totals[key] = (
+                self._usage_totals[key]
+                if self.calls
+                and known == self.calls
+                and self._usage_totals[key] <= MAX_PROVIDER_TOKEN_COUNT
+                else None
+            )
+        return {
+            "source": "provider-reported",
+            "attempts": self.calls,
+            "reported_attempts": self._reported_attempts,
+            "complete": bool(self.calls)
+            and all(value is not None for value in totals.values()),
+            **totals,
+        }
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -1495,7 +1534,7 @@ def build_report(
     rejection_rate = _percent(rejection, len(contract_cases))
 
     threshold_failures: list[str] = []
-    report = {
+    report: dict[str, Any] = {
         "schema_version": "1.0",
         "corpus": {
             "id": corpus.corpus_id,
@@ -1556,6 +1595,10 @@ def build_report(
         "threshold_failures": threshold_failures,
         "passed": True,
     }
+    if mode == "live":
+        report["metrics"]["provider_reported_usage"] = (
+            measured.provider_reported_usage()
+        )
     thresholds = corpus.document["deterministic_thresholds"]
     if exact_rate < float(thresholds["exact_fixture_result_rate"]):
         threshold_failures.append("exact_fixture_result_rate")

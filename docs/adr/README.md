@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0081](0081-openrouter-response-metadata-and-routing.md) | Proposed | Separate reported provider metadata and exact routing identifiers | #118–#121 | Optional bounded telemetry, hosted eligibility and unchanged qualification gates |
 | [0080](0080-explicit-incomplete-review-rescans.md) | Proposed | Explicit incomplete-review rescans | Maintainer-authorized bug fix | Durable request replay protection and unchanged approval gates |
 | [0072](0072-lossless-inline-review-evidence.md) | Proposed | Lossless inline review evidence with lifecycle capacity | User-authorized PR #231 recovery | Complete bounded inventories, reader-first rollout and distinct capacity status |
 | [0071](0071-generated-release-notes.md) | Proposed | Generate missing release notes from exact first-parent merged-source history | Maintainer-requested Release Marshal correction | Existing direct App commit, exact tag/source provenance and unchanged publication gates |

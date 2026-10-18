@@ -15,6 +15,12 @@
   Positive runtime report binding and legacy standalone finalizer qualification
   remain pending. Extend installed/post-package lifecycle acceptance with explicit
   finite capacity and deployment limitations.
+- Preserve requested and observed OpenRouter identities independently; never use
+  a returned model alias as the revision. Retain optional bounded token counters
+  and report unknown usage honestly across failed/interrupted attempts.
+- Accept bounded endpoint routing prefixes without relaxing privacy or fallback
+  policy. Make the existing hosted DeepSeek/Morph candidate eligible to collect
+  qualification evidence; it remains unqualified pending authorized live runs.
 
 ## 0.8.1 - 2026-10-18
 

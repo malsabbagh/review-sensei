@@ -38,6 +38,9 @@ _OPENROUTER_PROVIDER = "openrouter"
 _SCHEMA_VERSION = "1.0"
 _INITIAL_MODEL = "anthropic/claude-3.5-haiku"
 _INITIAL_UPSTREAM = "anthropic"
+# Explicit evidence eligibility, deliberately independent of mutable defaults.
+_CURRENT_HOSTED_MODEL = "deepseek/deepseek-v4.1-flash"
+_CURRENT_HOSTED_UPSTREAM = "morph"
 _ACCEPTED_REPORT_MODES = frozenset({"fixture", "live"})
 # A retained artifact is the same file ``load_evaluation_report`` reads, so it
 # carries the evaluation contract's own JSON ceiling rather than a second,
@@ -56,15 +59,19 @@ _DEFAULT_LIMITATIONS = (
     "honestly in observed_revision.",
 )
 
-# Published qualification slices, keyed by the full qualified combination of
-# model, upstream provider, and base URL. A new model, upstream provider, or
-# endpoint stays outside the qualified slice until its target and evidence set
-# are published, so the harness refuses to mint records for unlisted
-# combinations. Pinning the base URL here rather than leaning on the provider
-# module's endpoint allowlist keeps the slice from widening if that allowlist
-# is ever extended for an unrelated deployment.
+# Published slices eligible to collect qualification evidence, not supported
+# targets. Explicit model/upstream/base URL triples prevent defaults or broader
+# transport allowlists from silently expanding evidence eligibility. A passing
+# support record and its independent gates are still required for each target.
 PUBLISHED_QUALIFICATION_SLICES = frozenset(
-    {(_INITIAL_MODEL, _INITIAL_UPSTREAM, DEFAULT_OPENROUTER_BASE_URL)}
+    {
+        (_INITIAL_MODEL, _INITIAL_UPSTREAM, DEFAULT_OPENROUTER_BASE_URL),
+        (
+            _CURRENT_HOSTED_MODEL,
+            _CURRENT_HOSTED_UPSTREAM,
+            DEFAULT_OPENROUTER_BASE_URL,
+        ),
+    }
 )
 
 
@@ -118,6 +125,13 @@ class OpenRouterQualificationTarget:
 INITIAL_OPENROUTER_QUALIFICATION_TARGET = OpenRouterQualificationTarget(
     model=_INITIAL_MODEL,
     upstream_provider=_INITIAL_UPSTREAM,
+)
+
+
+# Eligibility to collect evidence only: this does not mint a support record.
+CURRENT_HOSTED_OPENROUTER_QUALIFICATION_TARGET = OpenRouterQualificationTarget(
+    model=_CURRENT_HOSTED_MODEL,
+    upstream_provider=_CURRENT_HOSTED_UPSTREAM,
 )
 
 
@@ -682,6 +696,7 @@ def load_supported_openrouter_qualification(
 
 __all__ = [
     "INITIAL_OPENROUTER_QUALIFICATION_TARGET",
+    "CURRENT_HOSTED_OPENROUTER_QUALIFICATION_TARGET",
     "MAX_EVIDENCE_ARTIFACT_BYTES",
     "PUBLISHED_QUALIFICATION_SLICES",
     "OpenRouterQualificationRecord",

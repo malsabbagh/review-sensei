@@ -42,6 +42,15 @@
     }
   ],
   "metrics": {
+    "provider_reported_usage": {
+      "source": "provider-reported",
+      "attempts": 1,
+      "reported_attempts": 1,
+      "complete": false,
+      "prompt_tokens": 2,
+      "completion_tokens": null,
+      "total_tokens": null
+    },
     "provider_calls": 1,
     "prompt_bytes": 0,
     "response_bytes": 0,

@@ -1340,3 +1340,41 @@ but cannot clear human findings without this inventory. The document is not a
 provider-controlled public result; only the App publisher records it. Literal
 evidence validation and authenticated source/base/head checks precede every
 update. See [ADR 0061](adr/0061-human-reply-reassessment.md).
+
+
+## OpenRouter response observations and usage (#119–#121)
+
+`ProviderResponse.model` keeps the effective requested OpenRouter model.
+Optional `observed_model` and `observed_upstream` retain independent reported
+identifiers. `revision` uses only the response fingerprint, with
+`revision_source="provider-system-fingerprint"`; neither a mutable model alias
+nor requested routing policy supplies missing observations. These values are
+provider claims, not immutable-build proof, operator attestations or approval.
+Other adapters retain their existing model/revision behavior.
+
+`ProviderTokenUsage` optionally reports `prompt_tokens`, `completion_tokens` and
+`total_tokens`. Each counter is an integer from 0 through 2^63-1, excluding
+booleans. Missing or malformed protocol counters remain unknown; constructors
+reject invalid typed caller data. Only bounded ASCII observation identifiers and
+these counters are retained. Nested usage, prices, reasoning and arbitrary
+provider structures are discarded; no extra API request is made.
+
+Live evaluation's optional v1 `metrics.provider_reported_usage` identifies its
+source and attempted/reported call counts. A counter total is null if any attempt
+lacks that counter or its aggregate exceeds the bound. `complete` requires all
+three totals and at least one attempt. Partial sums are never emitted as complete
+run totals. Failed, truncated and cancelled calls remain attempts. This telemetry
+is separate from local work budgets and `token_proxy_4_bytes`.
+Old reports without the optional object remain valid. Strict readers should load
+the updated packaged v1 schema; additive v1 fields follow the existing policy.
+An older closed reader rejects new live reports containing the object; this is
+not a claim of compatibility with an unchanged strict reader. Update the reader
+before consuming new reports. Retained qualification evidence bytes must not be
+rewritten to remove telemetry: their digests bind the original artifact.
+Fixture outputs are unchanged. No monetary fields or support claims are added.
+
+OpenRouter routing policies accept one to four lowercase ASCII slug segments,
+up to 64 characters per segment and 128 bytes total. The full prefix is serialized
+and hashed without dropping suffixes. A family prefix can select multiple
+eligible endpoints; syntax validation does not prove the endpoint exists or
+qualifies. Privacy, TLS, no-fallback and credential boundaries are unchanged.

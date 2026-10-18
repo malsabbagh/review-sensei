@@ -2230,6 +2230,46 @@ class ProviderRequest:
             )
 
 
+MAX_PROVIDER_TOKEN_COUNT = 2**63 - 1
+_PROVIDER_OBSERVED_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/ -]*$")
+
+
+def _validate_observed_identifier(value: str, maximum: int, *, label: str) -> None:
+    validate_bounded_text(value, maximum, label=label, allow_empty=False)
+    if not _PROVIDER_OBSERVED_IDENTIFIER.fullmatch(value) or value != value.strip():
+        raise ReviewInputError(f"{label} must be a bounded ASCII identifier")
+
+
+@dataclass(frozen=True)
+class ProviderTokenUsage:
+    """Optional provider-reported counters, independent of local work budgets.
+
+    Missing counters stay unknown. No counter is derived from another counter,
+    and no pricing, reasoning or arbitrary provider data is retained.
+    """
+
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        for value in (self.prompt_tokens, self.completion_tokens, self.total_tokens):
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 0 <= value <= MAX_PROVIDER_TOKEN_COUNT
+            ):
+                raise ReviewInputError("provider-reported token count is invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "source": "provider-reported",
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+
 @dataclass(frozen=True)
 class ProviderResponse:
     """Normalized provider response without retaining raw request context."""
@@ -2239,6 +2279,10 @@ class ProviderResponse:
     model: str | None = None
     limits: ReviewLimits = DEFAULT_REVIEW_LIMITS
     revision: str | None = None
+    observed_model: str | None = None
+    observed_upstream: str | None = None
+    revision_source: str | None = None
+    token_usage: ProviderTokenUsage | None = None
 
     @property
     def max_response_bytes(self) -> int:
@@ -2273,6 +2317,28 @@ class ProviderResponse:
                 label="provider response revision",
                 allow_empty=False,
             )
+
+        for label, value, maximum in (
+            ("observed model", self.observed_model, self.limits.max_model_bytes),
+            ("observed upstream", self.observed_upstream, 128),
+        ):
+            if value is not None:
+                _validate_observed_identifier(value, maximum, label=label)
+        if self.revision_source is not None:
+            if (
+                self.revision_source != "provider-system-fingerprint"
+                or self.revision is None
+            ):
+                raise ReviewInputError("provider response revision source is invalid")
+            _validate_observed_identifier(
+                self.revision,
+                self.limits.max_revision_bytes,
+                label="provider fingerprint",
+            )
+        if self.token_usage is not None and not isinstance(
+            self.token_usage, ProviderTokenUsage
+        ):
+            raise ReviewInputError("provider response token usage is invalid")
 
 
 def _json_compact(value: object) -> str:

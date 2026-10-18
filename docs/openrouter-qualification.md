@@ -13,16 +13,32 @@ credentials, or enable website support labels solely because the adapter merged.
 
 ## Qualification target
 
-The first supported slice is intentionally small:
+The current hosted candidate eligible for qualification is intentionally small:
 
-| Field | Initial value |
+| Field | Candidate value |
 | --- | --- |
 | Provider | `openrouter` |
-| Model | `anthropic/claude-3.5-haiku` |
-| Upstream provider | `anthropic` |
+| Model | `deepseek/deepseek-v4.1-flash` |
+| Upstream provider | `morph` (family constraint) |
 | Base URL | `https://openrouter.ai/api/v1` |
 | Endpoint scope | `remote` |
 | Routing policy | No fallbacks, `require_parameters`, `data_collection=deny`, `zdr=true` |
+
+Hosted selectability and target eligibility do not grant `supported` status.
+The historical Haiku/Anthropic eligibility is retained; other hosted models and
+unknown combinations cannot inherit this candidate's evidence. The `morph` slug
+selects eligible endpoints in a provider family, not one fixed region/deployment.
+Current strict-policy capability and three independent live passing runs remain
+pending #122. The [official routing contract](https://openrouter.ai/docs/guides/routing/provider-selection#targeting-specific-provider-endpoints)
+allows family and endpoint prefixes; full slugs are preserved in requests and
+policy/configuration digests. Endpoint variants shown in protocol tests are not
+qualified targets. Check the [candidate catalog](https://openrouter.ai/deepseek/deepseek-v4.1-flash/providers)
+and actual strict-policy behavior during authorized qualification; no live catalog
+lookup occurs in ordinary execution or CI.
+
+The candidate policy digest is
+`27fbcad31a801f636838de7fe087bdd9bb73b5318416cd473a92b72eb2efe400`.
+A changed upstream suffix produces a different digest and requires new evidence.
 
 Record the routing policy digest with
 `review_sensei.openrouter_qualification.routing_policy_digest`. Mutable model
@@ -52,15 +68,21 @@ explicitly authorized inputs, `--allow-live-model`, `--allow-data-egress`, and
 a non-empty `--provider-version`:
 
 ```bash
-review-sensei evaluate --mode live \
+OPENROUTER_UPSTREAM_PROVIDER=morph review-sensei evaluate --mode live \
   --corpus evaluation/v1/corpus.json \
   --provider openrouter \
   --base-url https://openrouter.ai/api/v1 \
-  --model anthropic/claude-3.5-haiku \
+  --model deepseek/deepseek-v4.1-flash \
   --provider-version <observed-openrouter-revision> \
   --allow-live-model --allow-data-egress \
   --output openrouter-live-1.json
 ```
+
+`--provider-version` remains an operator attestation, not a response probe.
+`ProviderResponse.revision` contains only a reported fingerprint when available;
+model aliases never substitute for it. Record unavailable identity honestly and
+retain provenance separately. Optional provider-reported usage is telemetry and
+cannot establish qualification or approve a review.
 
 Repeat until three independent passing reports exist. Retain exact report files
 and provider terms/egress approval separately from the public support record.
@@ -84,12 +106,12 @@ Emit from Python:
 import json
 
 from review_sensei.openrouter_qualification import (
-    INITIAL_OPENROUTER_QUALIFICATION_TARGET,
+    CURRENT_HOSTED_OPENROUTER_QUALIFICATION_TARGET,
     qualification_record_from_reports,
     require_supported_openrouter_qualification,
 )
 
-target = INITIAL_OPENROUTER_QUALIFICATION_TARGET
+target = CURRENT_HOSTED_OPENROUTER_QUALIFICATION_TARGET
 artifacts = [path.read_bytes() for path in retained_report_paths]
 reports = [json.loads(artifact) for artifact in artifacts]
 

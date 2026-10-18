@@ -157,6 +157,84 @@
           "type": "integer",
           "minimum": 0
         },
+        "provider_reported_usage": {
+          "description": "Optional live-run telemetry. Null totals are unknown or incomplete, never a partial sum. Independent of work budgets and the byte-based proxy.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source",
+            "attempts",
+            "reported_attempts",
+            "complete",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens"
+          ],
+          "properties": {
+            "source": {
+              "const": "provider-reported"
+            },
+            "attempts": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "reported_attempts": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "complete": {
+              "type": "boolean"
+            },
+            "prompt_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "completion_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "total_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "complete": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_tokens": {
+                    "type": "integer"
+                  },
+                  "completion_tokens": {
+                    "type": "integer"
+                  },
+                  "total_tokens": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          ]
+        },
         "token_proxy_4_bytes": {
           "type": "integer",
           "minimum": 0
