@@ -653,3 +653,10 @@ payloads require a new authorized mention. See the replay amendment in
   policy binding. Routing prefixes participate in policy
   digests. Eligibility for DeepSeek/Morph evidence collection is distinct from
   passing qualification and approval (proposed ADR 0081).
+
+The qualification harness separately requires every live report to bind its
+actual requested routing-policy digest and base URL to the selected target.
+Missing bindings or a changed suffix/endpoint fail before support can be minted
+or loaded. Old report bytes still parse but cannot newly authorize unbound live
+support; historical targets remain eligible. This report-target check does not
+supply the still-missing runtime approval binding. See ADR 0081.
