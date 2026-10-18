@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import io
 import json
 import sys
+import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 _TESTS_ROOT = Path(__file__).resolve().parents[1]
 if str(_TESTS_ROOT) not in sys.path:
@@ -16,6 +21,7 @@ from packaging_guard import assert_distribution_import  # noqa: E402
 assert_distribution_import()
 
 from review_sensei import ProviderRequest, ProviderTokenUsage  # noqa: E402
+from review_sensei.cli import main  # noqa: E402
 from review_sensei.openrouter_qualification import (  # noqa: E402
     CURRENT_HOSTED_OPENROUTER_QUALIFICATION_TARGET,
 )
@@ -83,3 +89,59 @@ class InstalledOpenRouterMetadataContractTests(unittest.TestCase):
             "properties"
         ]
         self.assertIn("provider_reported_usage", metrics)
+
+    def test_installed_canonical_configuration_preserves_endpoint_in_real_adapter(self):
+        requests = []
+
+        def opener(request, timeout):
+            requests.append(json.loads(request.data))
+            return _Response(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"summary":"Synthetic clean","comments":[]}'
+                            }
+                        }
+                    ]
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / ".reviewsensei.yml"
+            diff = root / "change.patch"
+            config.write_text(
+                "schema: 1\ninference:\n  backend: openrouter\nadvanced:\n  routing:\n    upstream_provider: morph/variant\n  egress:\n    allow_data_egress: true\n",
+                encoding="utf-8",
+            )
+            diff.write_text(
+                "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-x = 0\n+x = 1\n",
+                encoding="utf-8",
+            )
+            with (
+                patch.dict(
+                    "os.environ", {"OPENROUTER_API_KEY": "synthetic"}, clear=True
+                ),
+                patch(
+                    "review_sensei.providers.openrouter.build_opener",
+                    return_value=SimpleNamespace(open=opener),
+                ),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+            ):
+                status = main(
+                    [
+                        "--diff",
+                        str(diff),
+                        "--config",
+                        str(config),
+                        "--no-learning-proposals",
+                    ]
+                )
+        self.assertEqual(status, 0)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(
+            requests[0]["provider"],
+            OpenRouterRoutingPolicy("morph/variant").to_request_provider(),
+        )

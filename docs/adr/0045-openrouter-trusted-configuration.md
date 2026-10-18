@@ -159,3 +159,16 @@ Tradeoffs:
 Run `tests.test_openrouter`, `tests.test_cli`, `tests.test_diagnostics_and_patches`,
 and `tests.test_registry`. Roll back by removing OpenRouter profiles and CLI
 branches; the #96 adapter can remain registered without being selectable.
+
+
+## Amendment (2026-10-18) - canonical review routing authority
+
+Canonical review execution obtains routing from trusted
+`advanced.routing.upstream_provider`, including validated endpoint suffixes within
+the published model's upstream family. The resolved typed policy reaches
+`ProviderSettings` unchanged. Its registry boundary no longer reads or compares
+`OPENROUTER_UPSTREAM_PROVIDER`; named-profile policy equality remains mandatory.
+The earlier environment-equality description applies to the historical path.
+Legacy `evaluate` still resolves its environment policy at the CLI boundary.
+See proposed ADR 0081 and issue #121. This changes no privacy, fallback,
+credential, qualification or approval condition.

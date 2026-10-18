@@ -1378,3 +1378,13 @@ up to 64 characters per segment and 128 bytes total. The full prefix is serializ
 and hashed without dropping suffixes. A family prefix can select multiple
 eligible endpoints; syntax validation does not prove the endpoint exists or
 qualifies. Privacy, TLS, no-fallback and credential boundaries are unchanged.
+
+Canonical `advanced.routing.upstream_provider` accepts those same bounded
+prefixes. For a model with a published upstream mapping, only that family or a
+suffix within it is accepted; a different family fails before adapter construction.
+Offline/hosted plans and actual CLI requests preserve the selected prefix. Typed
+`ProviderSettings` is trusted explicit configuration, so the registry does not
+consult retired routing environment variables. Named-profile routing restrictions
+remain exact. The legacy evaluation command still resolves its environment policy
+at the CLI boundary. Selecting a suffix does not inherit family qualification;
+unknown endpoint capabilities remain unverified.

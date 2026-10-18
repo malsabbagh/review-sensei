@@ -296,7 +296,11 @@ same validated result.
   bounded provider-reported counters. Invalid optional protocol metadata stays
   unknown. Live evaluation aggregates a counter only when every attempt reported
   it; failures and cancellation remain attempted work. Routing identifiers retain
-  their full bounded family/variant/region/tier prefix and participate in policy
+  their full bounded family/variant/region/tier prefix through canonical YAML,
+  resolver, CLI and hosted plan. Published model mappings restrict prefixes to
+  the same upstream family; trusted typed `ProviderSettings` reaches the adapter
+  without ambient environment replacing its policy. Named profiles retain exact
+  policy binding. Routing prefixes participate in policy
   digests. Eligibility for DeepSeek/Morph evidence collection is distinct from
   passing qualification and approval (proposed ADR 0081).
 - `Stage` declares one provider invocation, its expected output sections,

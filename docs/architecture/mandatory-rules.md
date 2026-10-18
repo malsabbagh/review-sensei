@@ -649,3 +649,10 @@ payloads require a new authorized mention. See the replay amendment in
   their full bounded family/variant/region/tier prefix and participate in policy
   digests. Eligibility for DeepSeek/Morph evidence collection is distinct from
   passing qualification and approval (proposed ADR 0081).
+
+Canonical OpenRouter routing uses the adapter's bounded identifier validator.
+Published model mappings permit only their documented upstream family or a
+validated suffix within it. Preserve that exact prefix through YAML, resolver,
+plan, CLI and trusted typed `ProviderSettings`; ambient environment cannot replace
+or veto it. Named-profile policy binding remains exact. Suffix acceptance is not
+endpoint capability or qualification evidence (proposed ADR 0081, issue #121).

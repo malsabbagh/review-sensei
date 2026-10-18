@@ -51,6 +51,17 @@ Routing accepts one through four normalized lowercase ASCII segments of at most
 letters, digits, underscores or hyphens and start with a letter or digit. Exact
 input is serialized into `order` and identity digests. No suffix is stripped on
 failure, no fallback occurs and privacy/parameter settings remain fixed.
+Canonical `advanced.routing.upstream_provider` uses the same immutable policy
+validator as the adapter. For models with a published upstream mapping, the
+selected prefix must stay within that mapped family. Resolver, offline plan,
+hosted plan and CLI retain the full prefix; the review CLI passes its resolved
+policy explicitly into trusted `ProviderSettings`. The registry requires a typed
+policy and preserves named-profile binding; it does not compare trusted settings
+to ambient retired environment variables. Legacy `evaluate` continues resolving
+its explicit environment-based policy at the CLI boundary. Existing unlisted
+model configuration remains unqualified and keeps its prior explicit-routing
+behavior.
+
 A family or incomplete endpoint prefix can still match multiple eligible
 endpoints; syntax acceptance does not establish endpoint existence or capability.
 

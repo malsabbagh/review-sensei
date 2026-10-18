@@ -4,8 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from ..errors import ProviderError, ReviewInputError
-from ..provider_config import openrouter_policy_from_env
+from ..errors import ProviderError
 from .base import ReviewProvider, validate_provider_contract
 from .fixture import FixtureProvider
 from .ollama import OllamaProvider
@@ -169,17 +168,11 @@ class ProviderRegistry:
             )
         name = settings.name.strip().lower()
         if name == "openrouter" and settings.profile is None:
-            if settings.openrouter_policy is None:
+            if not isinstance(settings.openrouter_policy, OpenRouterRoutingPolicy):
                 raise ProviderError("openrouter provider requires a routing policy")
-            try:
-                env_policy = openrouter_policy_from_env()
-            except ReviewInputError as exc:
-                raise ProviderError(str(exc)) from exc
-            if settings.openrouter_policy != env_policy:
-                raise ProviderError(
-                    "openrouter routing policy does not match "
-                    "OPENROUTER_UPSTREAM_PROVIDER"
-                )
+            # ProviderSettings is trusted explicit configuration. Canonical YAML
+            # and legacy CLI callers resolve their policy before this boundary;
+            # ambient environment must not replace or veto that selected policy.
         try:
             factory = self._factories[name]
         except KeyError as exc:

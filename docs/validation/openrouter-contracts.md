@@ -42,9 +42,35 @@ python -m unittest tests.test_openrouter_metadata tests.test_openrouter \
   tests.test_registry tests.test_diagnostics_and_patches tests.test_provider_config -q
 ```
 
-The current deterministic matrix has 351 passing focused tests. Formatting,
+The initial response/routing run had 351 passing focused tests. Formatting,
 Ruff, mypy, public-schema validation, JSON configuration validation, action pins,
 compileall and sdist contract checks pass. The installed test runs with `-I`
 from `/tmp` against the built wheel and extracted sdist. These are local
 candidate artifacts, not a published release or proof that existing published
 packages contain the change.
+
+
+## Canonical routing ingress repair (#121)
+
+The acceptance matrix also covers the public configuration ingress, rather than
+only direct policy construction. `OpenRouterConfigurationTests` exercises the
+actual YAML parser, resolver, `config validate`, offline `plan`, hosted
+`host-plan` (including workflow output), registry and real OpenRouter adapter
+with socket-free captured transport. Four synthetic suffixes across the three
+published family mappings survive unchanged with the strict privacy/no-fallback
+policy. Malformed and wrong-family values fail before adapter construction.
+A retired environment value cannot replace canonical YAML routing. The original
+source failed all four valid suffix cases at YAML parsing; subsequent acceptance
+also exposed policy loss in the CLI and environment equality in the registry.
+
+`InstalledOpenRouterMetadataContractTests.test_installed_canonical_configuration_preserves_endpoint_in_real_adapter`
+adds the same canonical YAML → CLI → registry → real adapter path to the existing
+installed/post-package dist-safe inventory. This adds three checkout test methods
+and one installed contract method. Existing unlisted-model configuration remains
+unchanged; suffixes do not become qualification targets. These test identifiers
+are synthetic protocol cases, not claims about live endpoint availability.
+
+The ingress repair's broader focused command passed 417 tests across
+configuration, hosted planning, provider settings/registry, canonical CLI,
+OpenRouter metadata, adapter/conformance, evaluation, qualification and schemas.
+Ruff, formatting, mypy and `git diff --check` also passed on that source diff.

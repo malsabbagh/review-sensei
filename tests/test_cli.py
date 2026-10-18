@@ -3167,7 +3167,7 @@ class PromotionCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(created[0].base_url, "https://openrouter.ai/api/v1")
 
-    def test_openrouter_upstream_provider_selects_routing_policy(self):
+    def test_openrouter_review_ignores_retired_upstream_environment(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
             diff_path.write_text(DIFF, encoding="utf-8")
@@ -3199,7 +3199,7 @@ class PromotionCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                         ]
                     )
         self.assertEqual(status, 0)
-        self.assertEqual(created[0].openrouter_policy.upstream_provider, "openai")
+        self.assertEqual(created[0].openrouter_policy.upstream_provider, "morph")
 
     def test_review_timeout_ignores_the_retired_openrouter_environment(self):
         with tempfile.TemporaryDirectory() as temp_dir:

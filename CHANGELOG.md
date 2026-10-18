@@ -15,6 +15,9 @@
   Positive runtime report binding and legacy standalone finalizer qualification
   remain pending. Extend installed/post-package lifecycle acceptance with explicit
   finite capacity and deployment limitations.
+- Preserve canonical YAML and hosted-plan OpenRouter endpoint routing through
+  the adapter; retired environment settings cannot replace or veto that policy.
+
 - Preserve requested and observed OpenRouter identities independently; never use
   a returned model alias as the revision. Retain optional bounded token counters
   and report unknown usage honestly across failed/interrupted attempts.
