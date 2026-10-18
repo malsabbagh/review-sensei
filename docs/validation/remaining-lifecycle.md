@@ -93,7 +93,7 @@ document does not promise universal approval or exhaustive correctness.
 ## Final local receipt
 
 [Candidate receipt](remaining-lifecycle-candidate.json) identifies code/harness
-`509a1c93a6b4a9f7398bc2f40aefa2415ca8b290`, all 848frozen tracked inputs,
+`509a1c93a6b4a9f7398bc2f40aefa2415ca8b290`, all 848 frozen tracked inputs,
 exact unpublished wheel/sdist hashes, installed origins and commands/results.
 All 3,577 checkout tests pass normally and under branch coverage (**82.52%**,
 unchanged 80% floor). Extracted package lanes pass 101 dist-safe and 11 downstream
