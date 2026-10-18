@@ -292,6 +292,7 @@ def approval_facts_from_result(
 
     if not isinstance(result, ReviewResult):
         raise ReviewInputError("approval facts require a validated review result")
+    qualification = restrict_result_qualification(result, qualification)
     coverage_state = (
         coverage_approval_state(result.coverage)
         if result.coverage is not None
@@ -454,6 +455,23 @@ def evaluate_approval_facts(facts: ApprovalFacts) -> AutoApprovalDecision:
     return AutoApprovalDecision(approved=not blockers, blockers=tuple(blockers))
 
 
+def restrict_result_qualification(result: ReviewResult, qualification: str) -> str:
+    """A provider label or caller status cannot substitute for checked evidence.
+
+    There is currently no runtime binding from retained qualification reports to
+    independently expected effective review configuration. Until that boundary
+    exists, OpenRouter cannot mint eligible facts from either accepting string.
+    Preserve diagnostic withholding states and other providers' policy.
+    """
+
+    if result.provider.strip().lower() == "openrouter" and qualification in {
+        "not-required",
+        "qualified",
+    }:
+        return "unverified"
+    return qualification
+
+
 def qualification_state_for_configuration(
     *,
     provider: str,
@@ -469,8 +487,10 @@ def qualification_state_for_configuration(
     For an OpenRouter deployment the slice key is the full model, upstream
     provider, and base URL combination: a configuration the published slices do
     not cover is ``unverified`` because no published evidence could apply to
-    it, and a covered configuration is ``missing`` until the deployment itself
-    declares verified qualification.
+    it, and a covered configuration is ``missing`` without checked evidence.
+    ``qualification_status`` remains an accepted compatibility argument; a
+    profile/deployment status string is not retained report-byte evidence and
+    cannot authorize approval.
     """
 
     from review_sensei.openrouter_qualification import PUBLISHED_QUALIFICATION_SLICES
@@ -484,8 +504,6 @@ def qualification_state_for_configuration(
     )
     if slice_key not in PUBLISHED_QUALIFICATION_SLICES:
         return "unverified"
-    if qualification_status == "qualified":
-        return "qualified"
     return "missing"
 
 
@@ -505,8 +523,6 @@ def qualification_state_for_publication(
     and never enough to claim qualification for an OpenRouter deployment.
     """
 
-    from review_sensei.providers.profiles import get_provider_profile
-
     identity = provider_identity if isinstance(provider_identity, Mapping) else {}
     base_url = identity.get("base_url")
     if not isinstance(base_url, str):
@@ -515,21 +531,11 @@ def qualification_state_for_publication(
     upstream_provider = (
         policy.get("upstream_provider") if isinstance(policy, Mapping) else None
     )
-    profile_name = identity.get("profile")
-    qualification_status = "unknown"
-    if isinstance(profile_name, str) and profile_name.strip():
-        try:
-            qualification_status = get_provider_profile(
-                profile_name
-            ).qualification_status
-        except ReviewInputError:
-            qualification_status = "unknown"
     return qualification_state_for_configuration(
         provider=provider,
         model=model,
         upstream_provider=upstream_provider,
         base_url=base_url,
-        qualification_status=qualification_status,
     )
 
 

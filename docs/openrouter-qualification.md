@@ -204,6 +204,33 @@ The qualification harness proves these cases fail closed:
 Ordinary CI runs `tests/test_openrouter_qualification.py` and
 `tests/test_promotion_release.py` without live credentials.
 
+## Runtime approval boundary (#115)
+
+The GitHub adapter does not yet bind retained qualification reports to the
+independently expected effective configuration of a review run. Until that
+integration exists, OpenRouter reviews withhold automatic approval. A named
+profile's `qualification_status`, a caller's `qualification="qualified"`, and
+the publisher's historical `not-required` default cannot mint eligible
+OpenRouter facts. A published target identifies which configurations the
+harness can evaluate; it does not grant support or approval.
+
+`tests/test_github_qualification_boundary.py` captures the real publisher's
+GitHub requests with external HTTP replaced. It checks omitted/asserted status,
+application publication, recovery, replay, and separate finalization of the
+newly persisted withheld facts. Permitted comments and requests for changes,
+other providers, and approval/write opt-outs keep their existing policy.
+
+This repair does **not** complete #115. A supported positive runtime control
+still needs retained report-byte validation through
+`load_supported_openrouter_qualification`, independent effective engine,
+prompt, configuration and routing identities, and durable exact-head binding.
+The evaluation configuration digest and transaction configuration digest have
+different contracts and must not be treated as interchangeable. Existing
+standalone finalizer eligibility documents carry no provider/evidence identity;
+this test cannot prove that an older `qualified` document was backed by reports.
+Live qualification (#122) and installed/deployed acceptance (#123) remain
+separate operator evidence.
+
 ## Release compatibility and canary
 
 Before moving the public `v5` channel or enabling website support labels:
