@@ -94,3 +94,23 @@ Source-loader execution of the dist-safe wrapper also passes 86 methods; its
 deliberate checkout-import opt-out makes this a loader check, not installed-wheel
 evidence. Earlier three-configuration receipts are not reinterpreted as broader
 coverage. Installed and deployed execution remain integration gates.
+
+## Expanded installed ingress observation
+
+The preceding86-method observations identify the earlier helper. Frozen source
+`28ceeeae9203ca6942fb8fe733f96c0aac82f499` expands it to116 methods with
+the five additional ingress/control methods described in
+[the provider-flow matrix](provider-flows.md). The
+[exact expanded receipt](provider-ingress-candidate.json) records3,741 checkout
+tests, four complete coverage workers at82.77% (unchanged80% floor), and all16
+required local gates. All871 tracked build inputs matched the Git archive.
+
+The exact installed wheels passed234 dist-safe tests,11 downstream tests and18
+OpenAI configuration cases outside checkout. All six post-package suites passed
+1,281 cases, including199 lifecycle methods. The sdist contract checked48
+required entries and10 checkout-only exclusions; all119 engine and48 adapter
+runtime files matched the frozen wheels and Git bytes. These observations use
+synthetic external authorization/HTTP, not a live broker or provider. They do
+not qualify the remaining event cross-product, unknown-effect recovery or the
+live/deployed rows in the remaining-work map. This receipt/documentation update
+changes none of the tested runtime or harness bytes.
