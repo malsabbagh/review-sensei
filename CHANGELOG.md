@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep current-head finding IDs addressable after App inline discussion replies
+  create empty review containers; preserve newer review authority and refusals.
+
 - Preserve prior concerns and history across every admitted full baseline
   refresh, including changed base/model recovery; omitted findings remain partial.
 - Bound provider transport to the original remaining review deadline, recheck

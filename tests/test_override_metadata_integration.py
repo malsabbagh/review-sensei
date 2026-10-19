@@ -51,6 +51,62 @@ def _review(*, review_id=1, head=HEAD, actor="reviewsensei[bot]", body=None):
     }
 
 
+def _authority_body(
+    *,
+    fingerprint=FINGERPRINT,
+    review_status="complete",
+    blocking=False,
+    result_digest="d" * 64,
+):
+    from review_sensei_github.approval import ApprovalFacts, ReviewApprovalEligibility
+    from review_sensei_github.publication import (
+        IndexedFinding,
+        approval_eligibility_marker,
+        finding_index_marker,
+    )
+
+    from review_sensei.human_assessment import HumanReviewFinding, PendingHumanReview
+
+    eligibility = ReviewApprovalEligibility(
+        HEAD,
+        result_digest,
+        ApprovalFacts(
+            enabled=True,
+            app_authored=False,
+            review_status=review_status,
+            evidence_policy="legacy",
+            has_blocking_findings=blocking,
+            has_human_adjudication_findings=True,
+            coverage_blocker=None if review_status == "complete" else "partial",
+        ),
+        PendingHumanReview(
+            "c" * 40,
+            (HumanReviewFinding(fingerprint, "src/app.py", "Requires assessment."),),
+        ),
+    )
+    return "\n\n".join(
+        (
+            finding_index_marker(
+                repository_id=99,
+                pull_request=136,
+                head_sha=HEAD,
+                base_sha="c" * 40,
+                result_digest=eligibility.result_digest,
+                entries=(
+                    IndexedFinding(
+                        instance=fingerprint,
+                        lifecycle="e" * 64,
+                        blocking=blocking,
+                        needs_human=True,
+                        body_placed=True,
+                    ),
+                ),
+            ),
+            approval_eligibility_marker(eligibility),
+        )
+    )
+
+
 class HostedOverrideMetadataTests(unittest.TestCase):
     def _run(
         self,
@@ -66,6 +122,9 @@ class HostedOverrideMetadataTests(unittest.TestCase):
         request_changes=None,
         broker_changes=None,
         allow_write=True,
+        publication=False,
+        comment_body=BODY,
+        ledger=None,
     ):
         """Run the public CLI and real handler with synthetic external seams."""
         http = GitHubHttp()
@@ -74,6 +133,53 @@ class HostedOverrideMetadataTests(unittest.TestCase):
 
         def respond(method, url, token=None, **kwargs):
             calls.append(unittest.mock.call(method, url, token=token))
+            if publication:
+                if method == "GET" and url.endswith("/pulls/136"):
+                    return 200, {
+                        "state": "open",
+                        "draft": False,
+                        "user": {"login": "alice", "type": "User"},
+                        "head": {
+                            "sha": HEAD,
+                            "repo": {"full_name": "owner/repo", "fork": False},
+                        },
+                        "base": {
+                            "sha": "c" * 40,
+                            "repo": {
+                                "id": 99,
+                                "full_name": "owner/repo",
+                                "fork": False,
+                            },
+                        },
+                    }
+                if method == "PUT" and "/reviews/" in url:
+                    review = next(
+                        item
+                        for item in review_page
+                        if item["id"] == int(url.rsplit("/", 1)[1])
+                    )
+                    review["body"] = kwargs["body"]["body"]
+                    return 200, review
+                if method == "POST" and url.endswith("/reviews"):
+                    review = {
+                        **_review(review_id=100, body=kwargs["body"]["body"]),
+                        "state": "APPROVED",
+                    }
+                    review_page.append(review)
+                    return 200, review
+                if url == "/graphql":
+                    from tests.test_github_publication import (
+                        graphql_review_threads_response,
+                    )
+
+                    response = graphql_review_threads_response()
+                    return 200, json.loads(response.body)
+                if url.split("?", 1)[0].endswith("/check-runs"):
+                    return (
+                        (200, {"check_runs": []})
+                        if method == "GET"
+                        else (201, {"id": 101})
+                    )
             if "/collaborators/" in url:
                 return permission_status, permission
             if "/comments" in url:
@@ -105,16 +211,18 @@ class HostedOverrideMetadataTests(unittest.TestCase):
             "actor_type": actor_type,
             "association": association,
             "command_id": 501,
-            "command_digest": sha256(BODY.encode()).hexdigest(),
+            "command_digest": sha256(comment_body.encode()).hexdigest(),
             **(broker_changes or {}),
         }
         broker = Mock()
+        if publication:
+            broker.exchange.return_value = "synthetic-capability"
         broker.authorize_session_mutation.return_value = SimpleNamespace(
             token="synthetic-session-capability",
             grant="synthetic-one-use-grant",
             attestation=broker_attestation,
         )
-        ledger = InMemorySessionLedger()
+        ledger = InMemorySessionLedger() if ledger is None else ledger
         output = io.StringIO()
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -124,7 +232,7 @@ class HostedOverrideMetadataTests(unittest.TestCase):
                 "github",
                 "command",
                 "--comment-body",
-                BODY,
+                comment_body,
                 "--actor",
                 actor,
                 "--actor-type",
@@ -171,6 +279,7 @@ class HostedOverrideMetadataTests(unittest.TestCase):
             ledger=ledger,
             ledger_factory=ledger_factory,
             attestation=attestation,
+            reviews=review_page,
         )
 
     def test_admin_and_maintain_apply_through_oidc_not_the_read_token(self):
@@ -339,6 +448,93 @@ class HostedOverrideMetadataTests(unittest.TestCase):
             result.ledger.load(IDENTITY).record.dispositions[0]["fingerprint"],
             FINGERPRINT,
         )
+
+    def test_empty_app_discussion_reviews_do_not_erase_current_authority(self):
+        for body in ("", None):
+            with self.subTest(body=body):
+                discussion = {
+                    **_review(review_id=3),
+                    "body": body,
+                    "state": "COMMENTED",
+                }
+                result = self._run(
+                    permission={"permission": "admin"},
+                    environment={"GITHUB_TOKEN": "synthetic-read-token"},
+                    publication=True,
+                    reviews=[
+                        _review(body=_authority_body()),
+                        _review(review_id=2, actor="mallory", body=_marker()),
+                        discussion,
+                        {**discussion, "id": 4},
+                    ],
+                )
+                self.assertEqual(result.status, 0, result.output)
+                dispositions = result.ledger.load(IDENTITY).record.dispositions
+                self.assertEqual(len(dispositions), 1)
+                self.assertEqual(dispositions[0]["fingerprint"], FINGERPRINT)
+                self.assertEqual(dispositions[0]["head_sha"], HEAD)
+                self.assertIn("approval submitted", result.output)
+                verified = self._run(
+                    permission={"permission": "admin"},
+                    environment={"GITHUB_TOKEN": "synthetic-read-token"},
+                    publication=True,
+                    comment_body="@reviewsensei verify",
+                    ledger=result.ledger,
+                    reviews=result.reviews,
+                )
+                self.assertEqual(verified.status, 0, verified.output)
+                self.assertEqual(
+                    verified.ledger.load(IDENTITY).record.dispositions, dispositions
+                )
+                self.assertIn("approval submitted", verified.output)
+
+    def test_empty_discussion_cannot_reveal_superseded_or_invalid_authority(self):
+        for body in (
+            _authority_body(
+                fingerprint="f" * 64, blocking=True, result_digest="f" * 64
+            ),
+            _authority_body(
+                fingerprint="f" * 64, review_status="partial", result_digest="f" * 64
+            ),
+            "<!-- reviewsensei:eligibility:v1 invalid -->",
+            _marker(head="d" * 40),
+            "A newer review with no current finding.",
+        ):
+            with self.subTest(body=body):
+                result = self._run(
+                    permission={"permission": "admin"},
+                    environment={"GITHUB_TOKEN": "synthetic-read-token"},
+                    reviews=[
+                        _review(body=_authority_body()),
+                        _review(review_id=2, body=body),
+                        {**_review(review_id=3, body=""), "state": "COMMENTED"},
+                    ],
+                )
+                self.assertEqual(result.status, 1, result.output)
+                record = result.ledger.load(IDENTITY).record
+                self.assertTrue(record is None or not record.dispositions)
+
+    def test_empty_discussion_does_not_authenticate_foreign_stale_or_other_state(self):
+        for reviews in (
+            [_review(actor="mallory", body=_authority_body())],
+            [_review(head="d" * 40, body=_authority_body())],
+            [
+                _review(body=_authority_body()),
+                {**_review(review_id=2, body=""), "state": "CHANGES_REQUESTED"},
+            ],
+        ):
+            with self.subTest(reviews=reviews):
+                result = self._run(
+                    permission={"permission": "admin"},
+                    environment={"GITHUB_TOKEN": "synthetic-read-token"},
+                    reviews=[
+                        *reviews,
+                        {**_review(review_id=3, body=""), "state": "COMMENTED"},
+                    ],
+                )
+                self.assertEqual(result.status, 1, result.output)
+                record = result.ledger.load(IDENTITY).record
+                self.assertTrue(record is None or not record.dispositions)
 
     def test_stale_foreign_or_superseded_finding_markers_cannot_be_overridden(self):
         for reviews in (

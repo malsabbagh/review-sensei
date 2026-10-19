@@ -897,6 +897,12 @@ blocking root, the adapter invokes the shared finalizer on the same exact head;
 this avoids a second provider pass, synthetic commit, or Actions-dispatch
 capability while preserving the normal approval gates.
 
+Maintainer finding lookup ignores empty or null-bodied App `COMMENTED` review
+containers created by inline discussion replies. They carry no replacement
+inventory. Nonempty newer records, malformed authority, other review states and
+exact author/head scope retain their existing fail-closed behavior; see the
+amendment to [ADR 0050](adr/0050-maintainer-disposition-and-handoff-status.md).
+
 Pending `needs_human` findings follow the separate evidence-backed reassessment
 path in [ADR 0061](adr/0061-human-reply-reassessment.md). A new review records a
 complete bounded inventory in its App eligibility document. An authorized

@@ -552,6 +552,12 @@ def _override_facts(
             or not isinstance(commit_id, str)
         ):
             continue
+        # An inline reply can create an App review whose body is empty. That
+        # discussion container carries no replacement finding authority. Keep
+        # nonempty and other-state records authoritative, including malformed
+        # newer roots: they must never reveal an older clean inventory.
+        if review.get("state") == "COMMENTED" and review.get("body") in (None, ""):
+            continue
         if commit_id == head_sha:
             if latest is None or review_id >= int(latest["id"]):
                 latest = review
