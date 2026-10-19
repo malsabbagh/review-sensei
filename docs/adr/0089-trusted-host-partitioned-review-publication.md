@@ -54,6 +54,60 @@ and facts. Auto-approval opt-outs and existing provider provenance/qualification
 rules persist. A provider label or status does not become qualification. All
 pending findings remain blocked and this initial writer emits no APPROVE.
 
+
+The explicit `BoundPartitionedEligibilityReader` requires independent owned root
+body bytes and context from a retained authenticated publication receipt. It is
+opt-in on `HumanAssessmentPublisher` and `ReviewApprovalFinalizer`. It shares
+that source operation's actual budget/transport and never turns a budget snapshot
+into an original attempt. Authenticated content-addressed inventory/receipt
+payloads may be copied within this operation; mutable records are never cached.
+Each completed paginated review scan supplies its actual freshly fetched records
+to the same numeric-ID, Bot owner, head, PR placement, full body byte/hash checks
+used by individual prose GETs. Callers cannot provide claimed fresh records to
+`load_eligibility`. Duplicate/missing records and changed prose/root bytes refuse.
+This removes duplicate GETs while retaining full prose freshness at preparation,
+provider dispatch, acceptance, final activation and post-publication verification.
+The ordinary/default reader remains unchanged.
+
+For explicit target IDs, evidence acquisition requests the complete required
+path closure of those targets, while retaining the entire human inventory and
+complete changed-file evidence bundle. It does not raise the 64 required-path
+bound or treat unselected concerns as resolved. The same existing queue adapter,
+source/PR/latest checks, serialized local reads and provider evidence validator
+remain in the actual dispatch/acceptance path; no preparation fence is removed.
+
+Add `HumanAssessmentPublisher.publish_partitioned` for an accepted partial
+assessment with findings still pending. It validates the actual work against
+original inventory, complete evidence and selected source, then builds a bounded
+resolution root. Every resolved full ID is explicit; the remaining count and
+rule that every other ID remains pending are visible. Navigation links every
+retained full-prose part, clearly marked historical, preserving all concerns,
+reasons and required paths without duplicating their bodies. Immutable manifests,
+result/policy/configuration/producer identity and provider qualification facts
+remain unchanged. The ordinary publication API refuses v4 without this explicit
+conditional host. This profile never emits APPROVE; all-resolved finalization is
+an explicit unsupported capability here.
+
+`PartitionedAssessmentHost` owns the original accepted source/queue packet,
+serialized generation, exact accepted decision bytes, declared physical dispatch
+liabilities and terminal acknowledgement. Before dispatch, admission checks the
+actual complete-scan cost, a possible added-root page and all host/final-source
+liabilities against the original budget. This observation only plans capacity;
+verification still fetches every page fresh. Unexpected concurrent growth or
+transport ambiguity remains held/refused. There is no call-cap increase or
+ordinary-read relabeling as a fence.
+
+The local host holds before POST, authenticates the actual numeric owned root
+GET, and invokes the publisher's independent complete root/prose and final
+source/head verification before terminal local commit. Successful commit closes
+the original reservation after readback; a stored pre-publication counter cannot
+restart that completed source. Failure retains the original reservation and
+unknown hold. Exact in-process replay verifies the committed local record and
+fresh complete root/prose/source/head without another inference, root or round.
+Fresh-process root-delivery recovery needs an authenticated original attempt and
+owned terminal packet; a snapshot or newly loaded manifest is insufficient and
+is not qualified by this local fixture.
+
 ## Consequences
 
 Full finding prose is visible in retained COMMENT reviews, with navigation from
@@ -103,20 +157,52 @@ is activated. Older/default readers refuse v4; mixed-reader deployment is not
 qualified. Roll back by removing the explicit host opt-in while retaining every
 owned root, prose object and immutable evidence part for investigation/recovery.
 
-## Follow-up work
+## Late assessment validation and remaining boundaries
 
-The full late selected-source flow must authenticate the same retained complete
-inventory and exact source closure, preserve original attempt accounting and
-perform fresh full prose checks at dispatch, acceptance and final activation.
-Fresh root metadata fences may reuse immutable evidence only inside its actual
-original operation; they must never cache mutable source/PR/prose authority.
-An explicit conditional resolution-root report may link every retained full prose
-part only if pending/resolved IDs, status, counts and individual reasons remain
-unambiguous. Older prose must be clearly historical and every resolved full ID
-explicit. The ordinary pending report remains unchanged.
+`Rich250LateFeedbackTests` exercises the actual initial public writer, terminal
+initial ledger acknowledgement, a genuinely new authorized source revision,
+public selected-context preparation, complete 250-path evidence, real local queue
+persistence, one provider request, conditional root delivery and exact replay.
+The later source has one original budget throughout; the earlier initial review
+has its own completed operation (49 publication calls plus 5 acknowledgement
+calls). No same-event budget or counter is reset.
 
-Initial root publication is not proof of that later 249-pending authority update,
-accepted replay delivery, richer detail=3 capacity, complete retained feedback
-history, installed CLI/broker or live provider/deployed behavior. No issue is
-closed from initial publication alone. No DecisionProvider or governance policy
-decision is introduced.
+| Later source state | Accepted | Durable 249-pending root | Exact root replay |
+| --- | --- | --- | --- |
+| 0 unrelated issue comments | 40 (24 HTTP + 16 local) | 53 (32 HTTP + 21 local) | 57 (35 HTTP + 22 local) |
+| 100 unrelated issue comments | 40 | 53 | 57 |
+| 250 unrelated issue comments | 40 | 53 | 57 |
+| 100 additional non-App review records | 44 (28 HTTP + 16 local) | 59 (38 HTTP + 21 local) | Admission refuses at 59 before more I/O |
+| 250 additional non-App review records | 48 (32 HTTP + 16 local) | Admission refuses at 53 before root POST; all 250 remain pending in trusted authority | Unqualified |
+
+At 53 the original budget contains 41 ordinary and 12 existing fence charges;
+at 57 it contains 45 ordinary and 12 fence charges. These include the actual
+prepaid local activation steps, not just HTTP requests. The original total
+ceiling remains 64 and ordinary dispatch still leaves the four reserved final
+slots; no read is relabeled for capacity. The finite publication admission
+conservatively funds the complete remaining liability before root POST.
+
+Issue comments and review records are distinct. The explicitly selected source
+route does not load unrelated generic discussion; it still authenticates the
+entire selected source closure. Review records are fully paginated and freshly
+validated, including all required prose. The 250-review-record refusal retains
+the accepted decision in its original queue without claiming root delivery or
+approval. The 100-review-record first delivery does not qualify its replay.
+Known insufficient delivery capacity refuses before an authority mutation.
+
+Additional tests cover schema-valid/in-place root edits, exact root byte binding,
+prose missing/duplicate/owner/head/placement/body faults before dispatch (zero
+provider calls), changes after provider (no accepted receipt), pre-publication
+source/head/pause changes, actual concurrent local generation mutation, actual
+lost POST/GET responses, changed prose/source/head during root POST, malformed or
+unreadable pagination, remaining deadlines and expiry, copied-payload alias
+isolation, and two concurrent original writers producing exactly one root at 60
+charged calls. Every control uses captured HTTP and real local persistence.
+
+These finite initial/detail=1 and partial-resolution profiles do not qualify
+richer detail=3 capacity, initial publication on a busy review history, arbitrary
+feedback/reference history, every subsequent resolution through all-resolved
+approval, fresh-process terminal root recovery, installed CLI/broker, other
+provider/configuration cross-products or deployed behavior. No issue is closed
+from these profiles alone. No DecisionProvider or governance policy decision is
+introduced.

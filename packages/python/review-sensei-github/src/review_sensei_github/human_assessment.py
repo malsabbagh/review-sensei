@@ -8,7 +8,7 @@ import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from review_sensei.budgets import ReviewWorkBudgets
 from review_sensei.errors import ReviewInputError
@@ -41,11 +41,15 @@ from .conversation import (
     authorized_human_comment,
     has_standalone_sensei_mention,
 )
+from .eligibility_parts import BoundPartitionedEligibilityReader
 from .errors import GitHubConversationError, GitHubPublicationError
 from .http import GitHubHttp
 from .publication import ReviewApprovalFinalizer, approval_eligibility_marker
 from .qualification import TrustedOpenRouterQualification
 from .reply_budget import bounded_reply_publication
+
+if TYPE_CHECKING:
+    from .partitioned_assessment import PartitionedAssessmentHost
 
 
 class FeedbackBudgetHttp(GitHubHttp):
@@ -232,6 +236,7 @@ class HumanAssessmentPublisher:
         http: GitHubHttp,
         before_read: Callable[[], float] | None = None,
         qualification_authority: TrustedOpenRouterQualification | None = None,
+        partitioned_reader: BoundPartitionedEligibilityReader | None = None,
     ) -> None:
         if before_read is not None:
             http = FeedbackBudgetHttp(http=http, before_read=before_read)
@@ -242,8 +247,18 @@ class HumanAssessmentPublisher:
         self.conversation = ConversationPublisher(
             http=http, qualification_authority=qualification_authority
         )
+        if partitioned_reader is not None and (
+            type(partitioned_reader) is not BoundPartitionedEligibilityReader
+            or self.before_read != partitioned_reader.context.budget.consume
+        ):
+            raise ReviewInputError("partition assessment requires the original budget")
         self.finalizer = ReviewApprovalFinalizer(
-            http=http, qualification_authority=qualification_authority
+            http=http,
+            qualification_authority=qualification_authority,
+            evidence_budget=partitioned_reader.context.budget
+            if partitioned_reader
+            else None,
+            partitioned_reader=partitioned_reader,
         )
 
     @staticmethod
@@ -718,6 +733,9 @@ class HumanAssessmentPublisher:
                         {
                             path
                             for item in eligibility.human_review.pending
+                            if feedback is None
+                            or not feedback.target_ids
+                            or item.fingerprint in feedback.target_ids
                             for path in item.evidence_paths
                         }
                     )
@@ -760,6 +778,34 @@ class HumanAssessmentPublisher:
             feedback=feedback,
         )
 
+    def publish_partitioned(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        prepared: PreparedHumanAssessment,
+        work: HumanAssessmentWork,
+        host: PartitionedAssessmentHost,
+        app_slug: str,
+    ) -> ReplyResult:
+        """Explicit pending-only v4 resolution; requires a trusted conditional host.
+
+        Ordinary publication and approval never activate this finite profile.
+        """
+        from .partitioned_assessment import publish_partitioned_assessment
+
+        return publish_partitioned_assessment(
+            self,
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            prepared=prepared,
+            work=work,
+            host=host,
+            app_slug=app_slug,
+        )
+
     @bounded_reply_publication
     def publish(
         self,
@@ -780,6 +826,10 @@ class HumanAssessmentPublisher:
         if prepared.feedback is not None and self.before_read is None:
             raise FeedbackAdmissionError("feedback_read_budget_exhausted")
         original = prepared.eligibility
+        if original.partitioned_root is not None:
+            raise GitHubConversationError(
+                "partitioned eligibility requires an explicit conditional publication host"
+            )
         inventory = original.human_review
         work = reply if isinstance(reply, HumanAssessmentWork) else None
         if work is not None:

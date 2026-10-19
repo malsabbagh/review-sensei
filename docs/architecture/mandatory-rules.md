@@ -684,7 +684,8 @@ ADR 0086.
 Broker control funds isolated fetch/JWKS work under original bounds and v2 binding;
 redirects/bad receipts refuse, without refunds or new authority/durability (ADR 0088).
 
-Opt-in partitioned publication binds independent result/snapshot/policy/configuration/
-producer, original budget, conditional generation and owned numeric root readback.
-Full prose/capacity remain; defaults are unchanged. No late-flow or approval
-qualification (ADR 0089).
+Partitioned publication binds independent result/snapshot/policy/configuration/producer,
+original budget, conditional generation and owned numeric root readback. Fresh complete
+review scans validate all full prose; pending-only roots retain historical prose links,
+resolution allocation and full-ID status under a conditional trusted host. Finite local
+publication/replay differs from all-resolved approval; defaults are unchanged (ADR 0089).

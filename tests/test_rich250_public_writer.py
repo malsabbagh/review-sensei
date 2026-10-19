@@ -41,14 +41,40 @@ PRODUCER = 12345
 
 
 class RichState(State):
-    def __init__(self):
+    def __init__(self, *, history_count=0):
         super().__init__()
         self.reviews = []
         self.parts = {}
+        self.history = [
+            {
+                "id": 100000 + index,
+                "issue_url": self.source["issue_url"],
+                "body": f"Unrelated issue discussion {index} 深🙂.",
+                "updated_at": "historical",
+                "created_at": "2026-10-10T00:00:00Z",
+                "user": {"id": 500, "login": "bob", "type": "User"},
+                "author_association": "MEMBER",
+            }
+            for index in range(history_count)
+        ]
 
     def open(self, request, timeout):
         parsed = urlparse(request.full_url)
         path = parsed.path
+        if request.method == "GET" and path.endswith("/issues/1/comments"):
+            query = parse_qs(parsed.query)
+            size = int(query.get("per_page", [100])[0])
+            start = (int(query.get("page", [1])[0]) - 1) * size
+            self.calls.append(("GET", path, None))
+            return json_response(
+                [*self.history, self.source, *self.replies][start : start + size]
+            )
+        if request.method == "GET" and path.endswith("/pulls/1/files"):
+            query = parse_qs(parsed.query)
+            size = int(query.get("per_page", [100])[0])
+            start = (int(query.get("page", [1])[0]) - 1) * size
+            self.calls.append(("GET", path, None))
+            return json_response(self.files[start : start + size])
         if request.method == "GET" and path.endswith("/pulls/1/reviews"):
             query = parse_qs(parsed.query)
             size = int(query.get("per_page", [100])[0])

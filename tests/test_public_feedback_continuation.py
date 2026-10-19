@@ -59,12 +59,29 @@ class LocalFeedbackHost:
     """Caller-owned glue around the existing public host/ledger boundaries."""
 
     def __init__(
-        self, directory, publisher, prepared, *, tracker=None, referenced=False
+        self,
+        directory,
+        publisher,
+        prepared,
+        *,
+        tracker=None,
+        referenced=False,
+        existing_session=False,
+        existing_generation=None,
     ):
         # Fixture enrollment is separate from this assessment attempt.
-        LocalSessionLedger(Path(directory)).initialize(
-            SessionIdentity("owner/repo", 1, repository_id=1)
-        )
+        enrollment = LocalSessionLedger(Path(directory))
+        identity = SessionIdentity("owner/repo", 1, repository_id=1)
+        if existing_session:
+            # Prior completed-operation readback supplies only the expected
+            # CAS generation. This attempt's charged reservation reads the
+            # actual current record; no unbudgeted authority lookup is used.
+            if type(existing_generation) is not int or existing_generation < 0:
+                raise ReviewInputError("existing owned generation is unavailable")
+            expected_generation = existing_generation
+        else:
+            enrollment.initialize(identity)
+            expected_generation = 0
         self.publisher, self.prepared = publisher, prepared
         self.referenced = referenced
         self.tracker = tracker or ResourceBudgetTracker(ResourceBudget.create())
@@ -114,7 +131,7 @@ class LocalFeedbackHost:
             operation_binding=self.operation,
             slot="verification",
             reservation_id=self.reservation,
-            expected_generation=0,
+            expected_generation=expected_generation,
             now=self.now,
         )
         self.mutations = []
@@ -166,8 +183,11 @@ class LocalFeedbackHost:
             raise ReviewInputError("source operation changed")
 
         def prepare(record):
-            if record.generation != request.expected_generation:
-                raise ReviewInputError("stale local generation")
+            if (
+                record.operator_paused
+                or record.generation != request.expected_generation
+            ):
+                raise ReviewInputError("paused or stale local generation")
             receipt = FactoredAssessmentJournal.from_document(
                 request.envelope["journal"]
             ).receipt(source_digest=self.source, operation_id=self.operation_id)
