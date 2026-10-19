@@ -7,7 +7,6 @@ import os
 import unittest
 from contextlib import redirect_stderr
 from dataclasses import replace
-from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -71,6 +70,14 @@ from review_sensei.session import (
     SessionRecord,
 )
 
+try:
+    from session_fixture_clock import SESSION_FIXTURE_NOW, SessionFixtureClockMixin
+except ModuleNotFoundError:
+    from tests.session_fixture_clock import (
+        SESSION_FIXTURE_NOW,
+        SessionFixtureClockMixin,
+    )
+
 
 def main(argv: list[str]) -> int:
     """Observed evidence is a hosted command; other convergence flags stay local."""
@@ -89,7 +96,8 @@ DIFF = """diff --git a/src/app.py b/src/app.py
 +change
 """
 
-FIXED_NOW = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
+
+FIXED_NOW = SESSION_FIXTURE_NOW
 IDENTITY = SessionIdentity("owner/repo", 136, repository_id=99)
 HEAD = "a" * 40
 
@@ -989,7 +997,7 @@ def passing_cutover_inputs() -> dict[str, object]:
     }
 
 
-class ShadowObservationTests(unittest.TestCase):
+class ShadowObservationTests(SessionFixtureClockMixin, unittest.TestCase):
     def test_ambient_legacy_env_is_rejected_by_runtime_and_shadow_resolvers(self):
         with patch.dict(
             os.environ,

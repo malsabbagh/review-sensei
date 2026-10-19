@@ -33,6 +33,11 @@ from review_sensei.session import (
 )
 
 try:
+    from session_fixture_clock import SessionFixtureClockMixin
+except ModuleNotFoundError:
+    from tests.session_fixture_clock import SessionFixtureClockMixin
+
+try:
     import test_partial_review_transaction as partial
     import test_review_transaction as tx
 except ModuleNotFoundError:
@@ -594,8 +599,9 @@ class AuthorityHTTP(GitHubHttp):
         return [self.review]
 
 
-class RescanHostTests(unittest.TestCase):
+class RescanHostTests(SessionFixtureClockMixin, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         self.ledger, bound = seed()
         self.http = AuthorityHTTP(bound)
         self.ledger.http = self.http

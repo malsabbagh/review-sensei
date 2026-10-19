@@ -5,7 +5,7 @@ import os
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -66,12 +66,20 @@ from review_sensei.session import (
 )
 
 try:
+    from session_fixture_clock import SESSION_FIXTURE_NOW, SessionFixtureClockMixin
+except ModuleNotFoundError:
+    from tests.session_fixture_clock import (
+        SESSION_FIXTURE_NOW,
+        SessionFixtureClockMixin,
+    )
+
+try:
     from fake_github_http import FakeHTTPResponse, json_response, make_http
 except ImportError:
     from tests.fake_github_http import FakeHTTPResponse, json_response, make_http
 
 
-FIXED_NOW = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
+FIXED_NOW = SESSION_FIXTURE_NOW
 IDENTITY = SessionIdentity("owner/repo", 136, repository_id=99)
 
 
@@ -777,8 +785,9 @@ class SessionRecordTests(unittest.TestCase):
             SessionRecord.from_dict(record)
 
 
-class LocalSessionLedgerTests(unittest.TestCase):
+class LocalSessionLedgerTests(SessionFixtureClockMixin, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         self.temp = tempfile.TemporaryDirectory()
         self.ledger = LocalSessionLedger(Path(self.temp.name))
 
@@ -3037,7 +3046,7 @@ class GitHubApplicationSessionTests(unittest.TestCase):
         self.assertIsNone(loaded.record.reservation_id)
 
 
-class DiagnosticSessionTests(unittest.TestCase):
+class DiagnosticSessionTests(SessionFixtureClockMixin, unittest.TestCase):
     def test_diagnostic_does_not_print_counters_for_unavailable_session(self):
         from review_sensei.diagnostics import render_diagnostic
 
@@ -3175,7 +3184,7 @@ class AdmissionContextDocumentTests(unittest.TestCase):
             admission_context_from_document(broken)
 
 
-class HostedSessionLedgerResolutionTests(unittest.TestCase):
+class HostedSessionLedgerResolutionTests(SessionFixtureClockMixin, unittest.TestCase):
     """Analysis-side construction of the broker-attested hosted ledger."""
 
     class _Broker:
