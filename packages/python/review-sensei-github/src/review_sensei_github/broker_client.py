@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.broker_diagnostics import parse_broker_diagnostic
@@ -72,6 +72,12 @@ _SESSION_ATTESTATION_GRANT_KEYS = _SESSION_ATTESTATION_REQUEST_KEYS | frozenset(
 )
 
 
+class _RefuseRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        fp.close()
+        raise GitHubBrokerClientError("Controlled broker redirects are refused")
+
+
 class BrokerClient:
     """Exchange one Actions OIDC token for one capability token.
 
@@ -113,6 +119,10 @@ class BrokerClient:
                     "Broker accounting is not the original budget"
                 )
             before_request = control.budget.consume
+            if opener is urlopen:
+                # Each physical caller request has one prepaid dispatch. The
+                # ordinary urllib handler could silently follow several hops.
+                self.opener = build_opener(_RefuseRedirects()).open
         self.before_request = before_request
         self.control = control
 
@@ -162,6 +172,8 @@ class BrokerClient:
         value = parsed.get("value")
         if not isinstance(value, str) or not value.strip():
             raise GitHubBrokerClientError("OIDC token response was invalid")
+        if self.control is not None:
+            self.control.budget.check()
         return value
 
     def exchange(self, oidc_token: str, *, capability: str | None = None) -> str:

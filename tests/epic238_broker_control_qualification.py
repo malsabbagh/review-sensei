@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import copy
 import os
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -94,6 +96,51 @@ class BrokerControlQualification(unittest.TestCase):
         result = self.bridge.call("redirect_probe", site="rest", blocked=True)["result"]
         self.assertEqual(result["category"], "transport_refused")
         self.assertEqual(result["requests"], ["/redirect"])
+
+    def test_controlled_python_redirect_refusal_preserves_legacy_transport(self):
+        requests = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                requests.append(self.path)
+                if self.path.startswith("/redirect"):
+                    self.send_response(302)
+                    self.send_header("Location", "/destination")
+                    self.end_headers()
+                else:
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b'{"value":"synthetic"}')
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                with patch.dict(
+                    os.environ,
+                    {
+                        "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic",
+                        "ACTIONS_ID_TOKEN_REQUEST_URL": f"http://127.0.0.1:{server.server_port}/redirect?fixture=1",
+                    },
+                    clear=True,
+                ):
+                    self.assertEqual(BrokerClient().request_oidc_token(), "synthetic")
+                    self.assertEqual(len(requests), 2)
+                    requests.clear()
+                    client = BrokerClient(
+                        control=BrokerDispatchAccounting(self.budget, "a" * 64, 1, 1)
+                    )
+                    with self.assertRaises(GitHubBrokerClientError):
+                        client.request_oidc_token()
+            finally:
+                server.shutdown()
+                worker.join(timeout=2)
+        self.assertEqual(len(requests), 1)
+        self.assertNotIn("/destination", requests)
+        self.assertEqual(self.budget.calls, 1)
 
     def test_exhausted_server_subrequest_ceiling_refuses_before_an_unfunded_fetch(self):
         client = self.client(1)

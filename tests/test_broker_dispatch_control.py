@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
+from unittest.mock import patch
 
 from review_sensei_github.broker_client import BrokerClient
 from review_sensei_github.broker_control import BrokerDispatchAccounting
@@ -15,6 +17,26 @@ from tests.test_github_broker_client import FakeResponse
 
 
 class BrokerDispatchControlTests(unittest.TestCase):
+    def test_oidc_response_after_original_deadline_is_not_accepted(self):
+        clock = [0.0]
+        budget = EvidenceReadBudget(clock=lambda: clock[0])
+
+        def open_request(request, timeout):
+            clock[0] = 60.0
+            return FakeResponse(b'{"value":"synthetic"}')
+
+        with patch.dict(
+            os.environ,
+            {
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic",
+                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.github.test/token?fixture=1",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(ReviewInputError):
+                self.client(budget, open_request).request_oidc_token()
+        self.assertEqual(budget.calls, 1)
+
     def test_expiry_crossed_during_http_cannot_accept_receipt_or_renew_deadline(self):
         clock = [0.0]
         budget = EvidenceReadBudget(

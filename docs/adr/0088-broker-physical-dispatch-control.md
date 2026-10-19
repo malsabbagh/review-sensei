@@ -40,6 +40,9 @@ all 3xx responses with a closed `broker_control_redirect_refused` diagnostic.
 Automatic redirect hops would otherwise hide physical dispatches and potentially
 forward authentication headers. A refused Git advertisement never falls through
 to another resolver. Legacy uncontrolled fetch behavior remains unchanged.
+The controlled Python default transport also refuses redirects on caller/OIDC
+requests; injected trusted transports must preserve the same physical accounting.
+An OIDC response returned after the original deadline cannot be accepted.
 Cloudflare explicitly does not implement `redirect: "error"`; see its
 [Request redirect documentation](https://developers.cloudflare.com/workers/runtime-apis/request/#parameters).
 
@@ -82,6 +85,9 @@ loopback HTTP redirect handling: each 302 is refused after exactly one HTTP
 request, with no destination request or REST fallback. A real blocked HTTP fetch
 is canceled at the original deadline. These use Node's real transport with the
 Worker-supported manual redirect API; no deployed Cloudflare claim is made.
+The Python default-transport HTTP oracle observes two requests for the unchanged
+legacy redirect and exactly one refused request with control enabled, retaining
+its one original debit. Bounded final validation rejects a late OIDC response.
 `BrokerDispatchControlTests` covers prepaid caller liability, unchanged deadline,
 no unused/uncertain refund, missing/altered receipts, refusal before unfunded
 transport, and exact original callback ownership.
