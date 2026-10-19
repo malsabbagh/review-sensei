@@ -4,8 +4,10 @@ Complete publication may use closed eligibility schema 5 when the admitted human
 inventory exceeds legacy future-assessment capacity. Purpose-bound owned parts
 preserve every admitted instance, metadata and original index. Independent durable
 transaction and live repository/PR/base/head/numeric Bot authority are required;
-references alone grant none. Fresh readers verify the original visible prose and
-index. Ordinary approval facts, provider qualification and all other blockers
+references alone grant none. Inference, decisions and approval require fresh
+complete original prose and index verification. Nonauthoritative receipt pages
+may use fresh metadata fences; these never authorize a decision. Ordinary
+approval facts, provider qualification and all other blockers
 remain authoritative through partial and final resolution. Preflight the largest
 future resolution receipt and existing prose/frame limits before mutation.
 

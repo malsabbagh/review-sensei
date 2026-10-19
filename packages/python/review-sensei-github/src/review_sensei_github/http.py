@@ -454,7 +454,7 @@ class GitHubHttp:
         files = self.paginate(
             path=pr_path + "/files",
             token=token,
-            page_sizes=(100, 50, 25, 5, 1),
+            page_sizes=(100, 20, 10, 5, 1),
             max_requests=max_requests - 2,
             timeout_seconds=remaining(),
             monotonic=monotonic,

@@ -25,6 +25,7 @@ from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.context import ReviewContextCacheKey
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.coverage import CoverageManifest, FileCoverage
+from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewComment, ReviewResult, ReviewTransaction
 from review_sensei.session import (
     LocalSessionLedger,
@@ -48,6 +49,7 @@ class RetentionState(State):
         self.fail_part = None
         self.app_user = {"id": 99, "login": APP, "type": "Bot"}
         self.session_comment = None
+        self.retention_fault_event = None
 
     def open(self, request, timeout):
         parsed = urlparse(request.full_url)
@@ -74,16 +76,25 @@ class RetentionState(State):
                 "user": self.app_user,
                 "issue_url": "https://api.github.test/repos/owner/repo/issues/1",
             }
-            if self.fail_part == "crash-before":
+            # This fault targets raw result retention. Admission intent and
+            # evidence have a distinct public fault matrix.
+            fault = None
+            if RESULT_COMMENT_MARKER in body:
+                event = json.loads(comment_payload(body))["event_key"]
+                if self.retention_fault_event is None:
+                    self.retention_fault_event = event
+                if event == self.retention_fault_event:
+                    fault = self.fail_part
+            if fault == "crash-before":
                 raise KeyboardInterrupt()
-            if self.fail_part == "missing":
+            if fault == "missing":
                 return json_response({}, 500)
             self.parts.append(item)
-            if self.fail_part == "crash-after":
+            if fault == "crash-after":
                 raise KeyboardInterrupt()
-            if self.fail_part == "lost":
+            if fault == "lost":
                 return json_response({}, 500)
-            if self.fail_part == "echo-missing":
+            if fault == "echo-missing":
                 return json_response({"id": item["id"]}, 201)
             return json_response(item, 201)
         if request.method == "GET" and "/issues/comments/" in path:
@@ -234,7 +245,10 @@ class PublicationRecoveryTests(unittest.TestCase):
                     application(state, ledger), result, key, app_slug=configured
                 )
                 self.assertEqual(outcome.status, "published")
-                self.assertEqual(len(state.parts), 1)
+                self.assertEqual(
+                    len(state.parts), 3
+                )  # result, intent and admission evidence
+                self.assertTrue(all(item["user"]["id"] == 99 for item in state.parts))
                 self.assertEqual(state.parts[0]["user"]["id"], 99)
                 self.assertEqual(state.parts[0]["user"]["type"], "Bot")
                 self.assertEqual(
@@ -285,7 +299,12 @@ class PublicationRecoveryTests(unittest.TestCase):
                                 if m == "GET" and "/issues/comments/" in p
                             ]
                         ),
-                        len(state.parts),
+                        sum(
+                            RESULT_COMMENT_MARKER in item["body"]
+                            and json.loads(comment_payload(item["body"]))["event_key"]
+                            == state.retention_fault_event
+                            for item in state.parts
+                        ),
                     )
                     self.assertEqual(
                         recover(application(state, ledger), ledger).content_digest(),
@@ -338,10 +357,15 @@ class PublicationRecoveryTests(unittest.TestCase):
             )
             state = RetentionState()
             state.reviews = []
-            state.fail_part = "crash-after"
+
+            def interrupt_after_complete_admission(_state, method, path, body):
+                if method == "POST" and path.endswith("/reviews"):
+                    raise KeyboardInterrupt()
+
+            state.hook = interrupt_after_complete_admission
             with self.assertRaises(KeyboardInterrupt):
                 publish(application(state, ledger), result, None)
-            state.fail_part = None
+            state.hook = None
             fresh = LocalSessionLedger(Path(directory))
             app = application(state, fresh)
             budget = EvidenceReadBudget()
@@ -776,7 +800,9 @@ class PublicationRecoveryTests(unittest.TestCase):
             app = application(state, ledger)
             with self.assertRaisesRegex(GitHubPublicationError, "finding index"):
                 publish(app, result, key)
-            self.assertEqual(state.part_requests.count("POST"), 1)
+            # The raw lost POST reconciles once; independent admission adds
+            # one intent and one evidence part, each also created once.
+            self.assertEqual(state.part_requests.count("POST"), 3)
             self.assertEqual(
                 recover(app, ledger).content_digest(), result.content_digest()
             )
@@ -888,7 +914,7 @@ class PublicationRecoveryTests(unittest.TestCase):
                     restored = recover(app, fresh)
                     self.assertEqual(restored.content_digest(), result.content_digest())
                     with self.assertRaisesRegex(
-                        GitHubPublicationError, "finding index"
+                        ReviewInputError, "admission evidence is missing"
                     ):
                         publish(app, restored, key)
                 else:
@@ -938,6 +964,8 @@ class PublicationRecoveryTests(unittest.TestCase):
                     continue
                 ledger.replace(IDENTITY, mutate)
                 state.fail_part = None
-                with self.assertRaisesRegex(Exception, "progress"):
+                with self.assertRaisesRegex(
+                    Exception, "progress|admission evidence is missing"
+                ):
                     publish(application(state, ledger), result, key)
                 self.assertEqual(state.part_requests.count("POST"), 1)

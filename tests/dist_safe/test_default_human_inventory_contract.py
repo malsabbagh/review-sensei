@@ -22,11 +22,25 @@ if (
 sys.path.insert(0, str(_TESTS.parent))
 import test_default_human_consumers  # noqa: E402
 import test_default_human_inventory  # noqa: E402
+import test_default_human_inventory_cli  # noqa: E402
+import test_default_human_inventory_publisher  # noqa: E402
 import test_default_human_inventory_store  # noqa: E402
 
 
 class InstalledDefaultHumanInventoryTests(
     test_default_human_inventory.DefaultHumanInventoryTests
+):
+    pass
+
+
+class InstalledDefaultHumanCliTests(
+    test_default_human_inventory_cli.DefaultHumanInventoryCliTests
+):
+    pass
+
+
+class InstalledDefaultHumanPublisherTests(
+    test_default_human_inventory_publisher.DefaultHumanInventoryPublisherTests
 ):
     pass
 

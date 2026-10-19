@@ -21,10 +21,12 @@ resolution behavior on ordinary callers.
 Add a distinct closed eligibility schema 5 containing ordinary approval facts, a
 purpose-bound human inventory reference, and the compact full-ID resolution
 receipt. Preserve the existing standard approval algorithm, including canonical
-provider qualification and legitimately `not-required` providers. A supported
-complete publication whose human inventory exceeds legacy capacity stages the
-complete admitted inventory and exact finding index in existing owned PR result
-parts. Legacy publication remains unchanged for inventories within its capacity.
+provider qualification and legitimately `not-required` providers. A transaction
+bound publication retains the complete admitted inventory and exact finding index
+in existing owned PR result parts, even when the legacy root
+subsequently refuses its capacity. The complete profile may use schema 5 when
+its human inventory exceeds legacy capacity. Legacy publication remains unchanged
+for inventories within its capacity.
 
 References confer no authority. Each operation independently selects its durable
 transaction, repository/PR/base/head, configured numeric Bot, publication identity,
@@ -47,11 +49,22 @@ legacy human cap or truncate findings. The new immutable inventory is separate
 from raw-result retention and diagnostics. One original evidence allowance covers
 publication or feedback transport, broker dispatches, storage, readers and fences.
 
+For schema 5, initial inference, decision persistence and final approval require
+fresh complete visible-prose validation. Nonauthoritative pending-receipt pages
+may use fresh transaction/head/owned-root/index metadata fences between those
+full proofs. A metadata fence never permits a decision or approval. Pending
+reports retain every full ID and path; repeated common guidance is stated once.
+The original explanations remain in their verified body/inline placements.
+
 ## Scope and limits
 
 Wire the ordinary application/publisher, fresh readers, conversation assessment,
 maintainer decisions and finalization. Keep the separately proposed partitioned
-hosts opt-in. Reader-first rollout and configured complete emission remain
+hosts opt-in. POSIX local ledgers may reuse bounded immutable part bytes after
+fresh containment and inode/size/mtime/ctime checks; mutable roots remain fresh.
+Windows retains full rehashing and may hold this richer repeated-read profile
+within its existing budget. Native Windows capacity is not positively qualified.
+Reader-first rollout and configured complete emission remain
 required. Full prose must fit its existing inline/body placement bounds; this
 change does not make arbitrary body-only 250-finding reviews publishable.
 Long history or unavailable storage can exhaust the finite allowance and hold.

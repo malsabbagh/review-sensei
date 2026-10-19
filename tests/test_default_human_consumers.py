@@ -120,6 +120,29 @@ class DefaultHumanEligibilityTests(unittest.TestCase):
                 self.assertEqual(decision.approved, count == 250)
         self.assertEqual(seen, [reference_document()] * 4)
 
+    def test_all_resolved_reference_preserves_both_canonical_eligible_qualification_states(
+        self,
+    ):
+        inventory = rich_inventory()
+        current = replace(
+            inventory,
+            resolved=tuple(sorted(item.fingerprint for item in inventory.findings)),
+        )
+        for qualification in ("qualified", "not-required"):
+            with self.subTest(qualification=qualification):
+                wire = document(current)
+                wire["facts"]["qualification"] = qualification
+                restored = ReviewApprovalEligibility.from_dict(
+                    wire, human_inventory_reader=lambda _reference: inventory
+                )
+                self.assertEqual(restored.facts.qualification, qualification)
+                self.assertTrue(
+                    restored.evaluate(
+                        app_authored=False, has_open_review_threads=False
+                    ).approved
+                )
+                self.assertEqual(restored.to_dict(), wire)
+
     def test_reference_resolution_cannot_change_or_expand_inventory(self):
         inventory = rich_inventory()
         for change in (

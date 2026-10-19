@@ -70,8 +70,10 @@ class DefaultHumanInventoryTests(unittest.TestCase):
             current = self.load_current(state, path)
             pending = len(current.human_review.pending)
             expected_check = (
-                "action_required"
-                if pending or gate in {"partial", "blocker"}
+                "failure"
+                if gate == "blocker"
+                else "action_required"
+                if pending or gate == "partial"
                 else "success"
             )
             approvals = state.events().count("APPROVE")
@@ -92,7 +94,18 @@ class DefaultHumanInventoryTests(unittest.TestCase):
                 return outcome, current
             # A new read/delivery invocation may resume the same durable source,
             # but only a demonstrated exhausted original allowance explains it.
-            self.assertEqual(budget.calls, 60, (attempt, error, outcome))
+            self.assertEqual(
+                budget.calls,
+                60,
+                (
+                    attempt,
+                    error,
+                    outcome,
+                    pending,
+                    previous_pending,
+                    state.check_runs[-1],
+                ),
+            )
             if error is not None:
                 reasons = []
                 cause = error
@@ -104,6 +117,7 @@ class DefaultHumanInventoryTests(unittest.TestCase):
                 self.assertIn(
                     outcome.approval_diagnostic,
                     {"check_reconciliation_failed", "approval_withheld"},
+                    (attempt, pending, outcome, state.check_runs[-1]),
                 )
             self.assertLess(
                 attempt,

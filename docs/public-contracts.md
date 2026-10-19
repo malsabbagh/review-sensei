@@ -1400,3 +1400,10 @@ Fresh consumer operations share one budget and revalidate mutable authority and
 the original complete visible explanation before applying decisions. Standard
 approval gates, including legitimately `not-required` provider qualification,
 remain unchanged. See [ADR 0094](adr/0094-default-human-inventory-reference.md).
+
+For schema 5, initial inference, decision persistence and final approval require
+fresh complete visible-prose validation. Nonauthoritative pending-receipt pages
+may use fresh transaction/head/owned-root/index metadata fences between those
+full proofs. A metadata fence never permits a decision or approval. Pending
+reports retain every full ID and path; repeated common guidance is stated once.
+The original explanations remain in their verified body/inline placements.

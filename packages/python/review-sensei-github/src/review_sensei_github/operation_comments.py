@@ -116,7 +116,7 @@ class GitHubIssueCommentOperationPort:
             self._primed = None
             return tuple(self._view(item) for item in primed)
         collected: list[OperationComment] = []
-        page_sizes = (100, 25, 5, 1)
+        page_sizes = (100, 20, 10, 5, 1)
         hint = (
             self._http.pagination_page_size(self._list_path)
             if isinstance(self._http, GitHubHttp)
@@ -144,6 +144,8 @@ class GitHubIssueCommentOperationPort:
                 if size_index + 1 == len(page_sizes):
                     raise
                 size_index += 1
+                while len(collected) % page_sizes[size_index]:
+                    size_index += 1
                 continue
             if (
                 status != 200

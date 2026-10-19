@@ -39,3 +39,5 @@ include tests/test_default_human_inventory.py
 include tests/test_default_human_inventory_store.py
 include tests/test_default_human_consumers.py
 include tests/test_evidence_capacity.py
+include tests/test_default_human_inventory_cli.py
+include tests/test_default_human_inventory_publisher.py

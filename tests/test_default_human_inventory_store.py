@@ -517,6 +517,49 @@ class DefaultHumanInventoryStoreTests(unittest.TestCase):
             self.store.stage(changed, allow_start=True)
         self.assertEqual(self.posts(), 0)
 
+    def test_interleaved_authorized_writers_leave_duplicate_intent_held(self):
+        other_budget = EvidenceReadBudget()
+        other = HumanInventoryStore(
+            self.http,
+            "synthetic",
+            self.ledger,
+            replace(self.context, budget=other_budget),
+        )
+        original = self.http.request
+        competing = []
+        entered = False
+
+        def interleave(method, path, **arguments):
+            nonlocal entered
+            body = arguments.get("body")
+            if (
+                not entered
+                and method == "POST"
+                and isinstance(body, dict)
+                and INTENT_MARKER in body.get("body", "")
+            ):
+                entered = True
+                competing.append(other.stage(self.document, allow_start=True))
+            return original(method, path, **arguments)
+
+        with patch.object(self.http, "request", side_effect=interleave):
+            with self.assertRaises(ReviewInputError):
+                self.store.stage(self.document, allow_start=True)
+        self.assertEqual(len(competing), 1)
+        self.assertEqual(
+            sum(INTENT_MARKER in item["body"] for item in self.http.comments), 2
+        )
+        posts = self.posts()
+        # A reference returned before the competing intent is not durable
+        # authorization: every fresh reader must refuse the ambiguous set.
+        with self.assertRaises(ReviewInputError):
+            other.read(competing[0])
+        with self.assertRaises(ReviewInputError):
+            self.store.read_available()
+        self.assertEqual(self.posts(), posts)
+        self.assertLessEqual(self.budget.calls, 60)
+        self.assertLessEqual(other_budget.calls, 60)
+
     def test_changed_durable_transaction_refuses_reference_read(self):
         reference = self.store.stage(self.document, allow_start=True)
         self.ledger.replace(

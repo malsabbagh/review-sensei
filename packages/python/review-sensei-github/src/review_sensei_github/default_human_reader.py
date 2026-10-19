@@ -15,6 +15,11 @@ from review_sensei.human_assessment import (
 )
 from review_sensei.human_inventory import inventory_from_result_document
 from review_sensei.models import ReviewResult
+from review_sensei.presentation import (
+    assign_finding_identifiers,
+    build_finding_view,
+    render_finding,
+)
 from review_sensei.session import SessionIdentity, SessionLedger
 
 from .default_human_inventory import (
@@ -23,7 +28,7 @@ from .default_human_inventory import (
     build_human_inventory_context,
 )
 from .http import GitHubHttp
-from .publication import finding_instance_from_body, parse_finding_index
+from .publication import FindingIndex, finding_instance_from_body, parse_finding_index
 from .publication_recovery import publication_http, publication_session_ledger
 
 
@@ -215,8 +220,13 @@ class DefaultHumanInventoryReader:
             + self.http.repository_path(self.repository, f"/pulls/{self.pull_request}")
         )
 
-    def validate_root(self, review: object, reviews: list[Any]) -> None:
-        """A receipt cannot replace its original complete visible explanation."""
+    def validate_metadata(self, review: object, reviews: list[Any]) -> None:
+        """Fresh nonauthoritative receipt fence; this does not permit a decision."""
+        self._original_review(review, reviews)
+
+    def _original_review(
+        self, review: object, reviews: list[Any]
+    ) -> tuple[FindingIndex, dict[str, Any]]:
         if self.store is None or self.document is None or self.inventory is None:
             raise ReviewInputError("default human inventory was not authenticated")
         self.store.revalidate_snapshot()
@@ -249,10 +259,15 @@ class DefaultHumanInventoryReader:
                 originals.append(item)
         if not originals:
             raise ReviewInputError("default human inventory original root unavailable")
-        # Each independently admitted explanation must remain visible in the
-        # original owned root or its exact owned inline comment. Assessments
-        # and their compact receipts cannot substitute for this evidence.
-        original = originals[0]
+        return expected, originals[0]
+
+    def validate_root(self, review: object, reviews: list[Any]) -> None:
+        """A decision cannot replace its original complete visible explanation."""
+        expected, original = self._original_review(review, reviews)
+        assert self.store is not None and self.inventory is not None
+        context = self.store.context
+        # Initial inference, decision persistence and final approval all use
+        # this full fresh proof. Receipt-only pages may use metadata fences.
         inline = self.http.paginate(
             path=self.http.repository_path(
                 self.repository,
@@ -263,10 +278,23 @@ class DefaultHumanInventoryReader:
             timeout_seconds=60,
         )
         entries = {entry.instance: entry for entry in expected.entries}
+        identifiers = assign_finding_identifiers(entries)
         for finding in self.inventory.findings:
             entry = entries[finding.fingerprint]
+            if finding.comment is None or entry.lifecycle is None:
+                raise ReviewInputError(
+                    "default human inventory instance metadata missing"
+                )
+            explanation = render_finding(
+                build_finding_view(
+                    finding.comment,
+                    fingerprint=entry.lifecycle,
+                    identifier=identifiers[finding.fingerprint],
+                    placement="body" if entry.body_placed else "inline",
+                )
+            )
             if entry.body_placed:
-                if finding.body not in original["body"]:
+                if explanation not in original["body"]:
                     raise ReviewInputError(
                         "default human inventory visible prose missing"
                     )
@@ -288,7 +316,7 @@ class DefaultHumanInventoryReader:
                 and item.get("side") == finding.comment.side
                 and finding_instance_from_body(item.get("body")) == finding.fingerprint
                 and isinstance(item.get("body"), str)
-                and finding.body in item["body"]
+                and explanation in item["body"]
             ]
             if len(matches) != 1:
                 raise ReviewInputError(

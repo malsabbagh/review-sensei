@@ -61,7 +61,14 @@
         "tests/test_checkpoint_publication_acceptance.py",
         "tests/test_publication_cli_recovery.py",
         "tests/test_default_publication_cli_journey.py",
-        "tests/test_override_metadata_integration.py"
+        "tests/test_override_metadata_integration.py",
+        "tests/default_human_inventory_contract.py",
+        "tests/test_default_human_inventory.py",
+        "tests/test_default_human_inventory_store.py",
+        "tests/test_default_human_consumers.py",
+        "tests/test_evidence_capacity.py",
+        "tests/test_default_human_inventory_cli.py",
+        "tests/test_default_human_inventory_publisher.py"
       ],
       "description": "Runs after pip install dist/*.whl from a directory that cannot import checkout src/. Tests load only packaged or generated assets."
     },

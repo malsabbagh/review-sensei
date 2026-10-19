@@ -312,9 +312,10 @@ class GitHubApplication:
         # Every ordinary fresh application can reconstruct supported default
         # inventories from its independently selected durable ledger.
         for publisher in (reviewer, replier):
-            finalizer = getattr(publisher, "finalizer", None)
-            if finalizer is not None:
-                finalizer.human_inventory_reader_factory = self._human_inventory_reader
+            if issubclass(type(publisher), (ReviewPublisher, ConversationPublisher)):
+                publisher.finalizer.human_inventory_reader_factory = (
+                    self._human_inventory_reader
+                )
 
     def _human_inventory_reader(
         self,
