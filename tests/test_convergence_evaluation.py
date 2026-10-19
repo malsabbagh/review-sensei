@@ -16,6 +16,7 @@ from review_sensei_github import GitHubApplication, GitHubWriteOptions
 from review_sensei_github.cli import main as _github_main
 from review_sensei_github.observed import (
     _admitted_material_ids,
+    _ObservedGitHub,
     _ObservedHTTPResponse,
     _ObservedProvider,
     observed_cutover_gaps,
@@ -23,6 +24,7 @@ from review_sensei_github.observed import (
     restored_compatible_baseline,
     run_observed_review_sequence,
 )
+from review_sensei_github.operation_host import RESULT_COMMENT_MARKER
 from review_sensei_github.publication import PublicationResult
 
 from review_sensei.baseline import (
@@ -30,6 +32,7 @@ from review_sensei.baseline import (
     ReviewBaseline,
     baseline_history_document,
 )
+from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.cli import main as _engine_main
 from review_sensei.context import ReviewContextCacheKey
 from review_sensei.convergence import (
@@ -235,6 +238,52 @@ class SequenceReplayTests(unittest.TestCase):
 
 
 class ObservedSequenceTests(unittest.TestCase):
+    def test_observed_default_publication_retains_owned_result_on_the_same_budget(self):
+        github = _ObservedGitHub()
+        budgets = []
+
+        def publication_budget():
+            budget = EvidenceReadBudget()
+            budgets.append(budget)
+            return budget
+
+        with (
+            patch("review_sensei_github.observed._ObservedGitHub", return_value=github),
+            patch(
+                "review_sensei_github.application.EvidenceReadBudget",
+                side_effect=publication_budget,
+            ),
+        ):
+            report = run_observed_review_sequence(
+                (SequenceStep(head_sha="a" * 40, label="retained-initial"),),
+                _policy(),
+            )
+        self.assertEqual(report.events[0].publication_status, "published")
+        self.assertEqual(report.events[0].provider_calls, 1)
+        self.assertEqual(len(budgets), 1)
+        self.assertEqual(budgets[0].calls, len(github.calls))
+        self.assertLessEqual(budgets[0].calls, 60)
+        self.assertTrue(github.issue_comments)
+        for comment in github.issue_comments:
+            self.assertIn(RESULT_COMMENT_MARKER, comment["body"])
+            self.assertEqual(
+                comment["user"],
+                {"id": 42, "login": "reviewsensei[bot]", "type": "Bot"},
+            )
+            self.assertEqual(
+                comment["issue_url"],
+                "https://observed.github.invalid/repos/owner/repo/issues/136",
+            )
+        self.assertTrue(
+            any(
+                method == "POST"
+                and path == "/repos/owner/repo/issues/136/comments"
+                and RESULT_COMMENT_MARKER in body["body"]
+                for method, path, body in github.calls
+                if body is not None
+            )
+        )
+
     def test_observed_harness_records_real_service_and_publication_events(self):
         report = run_observed_review_sequence(
             (
