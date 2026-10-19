@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from review_sensei_github.errors import GitHubPublicationError
 
@@ -36,6 +38,34 @@ from tests.test_review_work import AssessingProvider
 
 
 class DefaultHumanInventoryTests(unittest.TestCase):
+    def assert_windows_rich_publication_hold(self, *, count=77, detail=3):
+        """Windows has no safe local content witness; qualify its finite hold."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger"
+            result, key = human_checkpoint(
+                LocalSessionLedger(path, enable_partition_writes=True),
+                count=count,
+                detail=detail,
+            )
+            state = DefaultHumanState(result.comments)
+            budget = EvidenceReadBudget()
+            with self.assertRaisesRegex(
+                (GitHubPublicationError, ReviewInputError), "budget"
+            ):
+                publish_human(
+                    state,
+                    LocalSessionLedger(path),
+                    result,
+                    key,
+                    publication_budget=budget,
+                )
+            self.assertLessEqual(budget.calls, 64)
+            self.assertLessEqual(len(state.calls), 64)
+            self.assertNotIn("APPROVE", state.events())
+            record = LocalSessionLedger(path).load(IDENTITY).record
+            self.assertIsNotNone(record)
+            self.assertNotEqual(record.transaction.phase, "publication_succeeded")
+
     def crash_before_root(self, state, path, result, key, *, before_intent=False):
         def interrupt(_state, method, target, body):
             if method != "POST" or not isinstance(body, dict):
@@ -108,6 +138,9 @@ class DefaultHumanInventoryTests(unittest.TestCase):
     def assert_complete_pending_publication(
         self, *, count, detail, complete_metadata=True
     ):
+        if count >= 77 and sys.platform == "win32":
+            self.assert_windows_rich_publication_hold(count=count, detail=detail)
+            return
         with tempfile.TemporaryDirectory() as directory:
             ledger = LocalSessionLedger(
                 Path(directory) / "ledger", enable_partition_writes=True
@@ -189,6 +222,12 @@ class DefaultHumanInventoryTests(unittest.TestCase):
         self.assert_complete_pending_publication(count=77, detail=3)
 
     def assert_lifecycle(self, *, count, detail, gate=None):
+        # The rich lifecycle, extra gates, faults and recovery are POSIX
+        # qualification. Windows qualifies only the complete-baseline capacity
+        # hold for these original bodies, never those downstream sequences.
+        if count >= 77 and sys.platform == "win32":
+            self.assert_windows_rich_publication_hold(count=count, detail=detail)
+            return
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "ledger"
             result, key = human_checkpoint(
@@ -295,6 +334,9 @@ class DefaultHumanInventoryTests(unittest.TestCase):
     def test_raw_retained_result_recovers_original_admission_before_publishing_all_human_findings(
         self,
     ):
+        if sys.platform == "win32":
+            self.assert_windows_rich_publication_hold()
+            return
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "ledger"
             result, key = human_checkpoint(
@@ -335,6 +377,9 @@ class DefaultHumanInventoryTests(unittest.TestCase):
     def test_raw_recovery_without_original_inventory_intent_cannot_infer_clean_obligations_or_write_gates(
         self,
     ):
+        if sys.platform == "win32":
+            self.assert_windows_rich_publication_hold()
+            return
         for complete_parts in (False, True):
             with (
                 self.subTest(complete_parts=complete_parts),
@@ -385,6 +430,9 @@ class DefaultHumanInventoryTests(unittest.TestCase):
     def test_changed_missing_or_foreign_authority_and_prose_refuse_before_inference_or_mutation(
         self,
     ):
+        if sys.platform == "win32":
+            self.assert_windows_rich_publication_hold()
+            return
         for fault in (
             "missing-part",
             "changed-part",
@@ -447,6 +495,18 @@ class DefaultHumanInventoryTests(unittest.TestCase):
                     [],
                 )
                 self.assertNotIn("APPROVE", state.events())
+
+    def test_windows_without_local_content_witness_holds_rich_profiles_within_original_limits(
+        self,
+    ):
+        # This simulates only the product's cache-eligibility platform predicate;
+        # native Windows CI additionally exercises its actual filesystem rules.
+        with patch("sys.platform", "win32"):
+            for count, detail in ((77, 3), (100, 2), (250, 1)):
+                with self.subTest(count=count, detail=detail):
+                    self.assert_windows_rich_publication_hold(
+                        count=count, detail=detail
+                    )
 
 
 if __name__ == "__main__":
