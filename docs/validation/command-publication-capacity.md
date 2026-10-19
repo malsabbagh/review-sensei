@@ -37,8 +37,21 @@ and ledger for capacity/evidence repair instead of suggesting an identical retry
 
 ## Compatibility, migration and authority
 
-There is no schema or storage migration. The same owned review and same eligibility
-schema remain authoritative. Existing readers already consume the compact
+There is no schema or storage migration. Native same-review comment listings
+omit modern line/side metadata even with the existing pinned GitHub API version.
+Capacity proof therefore reads the bounded whole-PR review-comment endpoint and
+selects only records with the exact numeric review ID. It preserves the strict
+PR/numeric Bot/commit/path/line/side/instance/body checks. Actual incident evidence
+contains 71 native records in one page, including the 13 exact target comments;
+all 13 match independent individual-comment GETs. No placement is inferred.
+
+The one-page deterministic eligible control consumes 60/60 requests; its unchanged
+replay consumes 58. With 101 unrelated historical comments, pagination is exercised
+and partial reconciliation completes at 56 requests, while the eligible operation
+holds at 60 without approval. This does not qualify arbitrary complete histories.
+No record is truncated and the allowance is never replenished.
+
+The same owned review and eligibility schema remain authoritative. Existing readers already consume the compact
 reference presentation. The repair requires installing a compatible command
 runtime; publishing a source PR does not repair the deployed runtime.
 
@@ -72,6 +85,7 @@ activation, release, merge and deployment are separate operations.
 | Existing recorded 10+10+1 union | `test_command_capacity_recovery` | Serialized ledger preserves 21 decisions; finalizer updates the original owned review within the existing cap, with no inference. |
 | Partial and eligible controls | Same public recovery suite | Partial coverage keeps a non-passing check and cannot approve; an eligible control obeys all ordinary gates. |
 | Replay and ambiguous PUT | Same public recovery suite | Exact owned readback is idempotent; uncertain differing bytes or changed prose on compact replay withhold authority. |
+| Native API shape / historical pagination | Same public recovery suite and actual captured PR326 records | Whole-PR listing supplies native location metadata; foreign-review records cannot substitute; extra pages consume the original allowance. |
 | Source, snapshot and ownership changes | Same public recovery suite | Changed head/base/newest root/prose/location/PR association and expired or foreign-head decisions refuse; late mutation withholds approval. |
 | Ambiguous or indivisible body | Same public recovery suite | Preserve original data and durable decisions, return actionable capacity hold. |
 | Persistent failure reporting | `test_github_application.GitHubApplicationTests.test_persistent_command_capacity_failure_does_not_request_identical_retry` | Failure remains visible and does not request an identical verification retry. |

@@ -2185,10 +2185,17 @@ class ReviewApprovalFinalizer:
                 inline = capacity_http.paginate(
                     path=capacity_http.repository_path(
                         repository,
-                        f"/pulls/{pull_request}/reviews/{chosen['id']}/comments",
+                        f"/pulls/{pull_request}/comments",
                     ),
                     token=token,
                 )
+                inline = [
+                    item
+                    for item in inline
+                    if isinstance(item, dict)
+                    and type(item.get("pull_request_review_id")) is int
+                    and item["pull_request_review_id"] == chosen["id"]
+                ]
                 new_body = compact_command_references(
                     new_body,
                     eligibility=eligibility,
@@ -2254,10 +2261,17 @@ class ReviewApprovalFinalizer:
                 fresh_inline = self.http.paginate(
                     path=self.http.repository_path(
                         repository,
-                        f"/pulls/{pull_request}/reviews/{chosen['id']}/comments",
+                        f"/pulls/{pull_request}/comments",
                     ),
                     token=token,
                 )
+                fresh_inline = [
+                    item
+                    for item in fresh_inline
+                    if isinstance(item, dict)
+                    and type(item.get("pull_request_review_id")) is int
+                    and item["pull_request_review_id"] == chosen["id"]
+                ]
                 if fresh_inline != inline:
                     return False
                 compact_command_references(

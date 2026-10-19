@@ -10,7 +10,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from urllib.error import URLError
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 from review_sensei_github.approval import ApprovalFacts, ReviewApprovalEligibility
 from review_sensei_github.http import GitHubHttp
@@ -229,6 +229,8 @@ class CommandCapacityState:
                 "pull_request_url": "https://api.github.test/repos/owner/repo/pulls/1",
             }
         ]
+        self.inline_history = []
+        self.comment_pages = []
         self.head, self.base = HEAD, BASE
         self.calls = []
         self.checks = []
@@ -256,7 +258,25 @@ class CommandCapacityState:
             if path.endswith("/pulls/1/reviews"):
                 return json_response(self.reviews)
             if path.endswith("/reviews/40/comments"):
-                return json_response(self.inline)
+                # GitHub's review-specific listing is a legacy shape even
+                # under the pinned API version; native locations are absent.
+                return json_response(
+                    [
+                        {
+                            key: value
+                            for key, value in item.items()
+                            if key not in {"line", "side"}
+                        }
+                        for item in self.inline
+                    ]
+                )
+            if path.endswith("/pulls/1/comments"):
+                query = parse_qs(urlsplit(request.full_url).query)
+                page = int(query.get("page", ["1"])[0])
+                size = int(query.get("per_page", ["100"])[0])
+                self.comment_pages.append((page, size))
+                records = self.inline_history + self.inline
+                return json_response(records[(page - 1) * size : page * size])
             if path.endswith("/pulls/1"):
                 return json_response(
                     {
@@ -619,6 +639,58 @@ class CommandCapacityRecoveryTests(unittest.TestCase):
                 )
                 self.assertEqual(budget.calls, len(calls))
                 self.assertLessEqual(budget.calls, 60)
+
+    def test_native_whole_pr_location_shape_recovers_without_individual_hydration(self):
+        state = CommandCapacityState(complete=True)
+        state.inline_history = [
+            {**copy.deepcopy(state.inline[0]), "id": 900, "pull_request_review_id": 39}
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            outcome, budget, calls = state.verify(state.record(directory))
+        self.assertEqual(outcome.status, "approved")
+        self.assertFalse(any(p.endswith("/reviews/40/comments") for _, p, _ in calls))
+        self.assertTrue(state.comment_pages)
+        self.assertEqual(set(state.comment_pages), {(1, 100)})
+        self.assertEqual(budget.calls, len(calls))
+        self.assertLessEqual(budget.calls, 60)
+
+    def test_foreign_review_cannot_replace_a_missing_owned_native_explanation(self):
+        state = CommandCapacityState(complete=True)
+        missing = state.inline.pop(0)
+        state.inline_history = [{**missing, "pull_request_review_id": 39}]
+        with tempfile.TemporaryDirectory() as directory:
+            outcome, budget, calls = state.verify(state.record(directory))
+        self.assertEqual(outcome.diagnostic, "command_body_capacity_unverifiable")
+        self.assertFalse(any(m in {"PUT", "POST", "PATCH"} for m, _, _ in calls))
+        self.assertEqual(budget.calls, len(calls))
+
+    def test_whole_pr_history_paginates_and_never_refills_the_allowance(self):
+        for complete in (False, True):
+            with (
+                self.subTest(complete=complete),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                state = CommandCapacityState(complete=complete)
+                state.inline_history = [
+                    {
+                        **copy.deepcopy(state.inline[0]),
+                        "id": 900 + n,
+                        "pull_request_review_id": 39,
+                    }
+                    for n in range(101)
+                ]
+                outcome, budget, calls = state.verify(state.record(directory))
+                self.assertIn((2, 100), state.comment_pages)
+                self.assertEqual(budget.calls, len(calls))
+                self.assertLessEqual(budget.calls, 60)
+                self.assertNotIn(outcome.status, {"approved", "already_approved"})
+                self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+                if not complete:
+                    self.assertEqual(outcome.status, "approval_withheld")
+                    current = approval_eligibility_from_body(state.reviews[0]["body"])
+                    self.assertEqual(len(current.human_review.resolved), 21)
+                else:
+                    self.assertEqual(budget.calls, 60)
 
     def test_late_prose_mutation_during_finalization_never_approves(self):
         for replay in (False, True):
