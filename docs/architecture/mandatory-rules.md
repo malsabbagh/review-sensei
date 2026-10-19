@@ -626,14 +626,12 @@ larger or more verbose inventories can still exceed inline bounds. Full finding
   downgraded or ambiguously rediscovered concerns remain uncertain, make the
   review partial and retain the prior durable baseline until resolved.
 
-The reusable GitHub adapter can bind OpenRouter approval to independently
-configured retained evidence through `TrustedOpenRouterQualification`.
-Evaluation and runtime configuration digests remain separate, and neither
-profile/caller status nor the historical `not-required` default supplies proof.
-New facts v2 retain provider provenance and a bounded exact-head/result receipt;
-every public finalizer requires matching App-owned eligibility readback and
-revalidates configured OpenRouter authority. Legacy facts remain readable but
-cannot prove exemption. Other providers' new reviews retain their policy.
+`TrustedOpenRouterQualification` binds retained evidence to independently
+configured identities; evaluation/runtime digests stay separate. Caller/profile
+claims and old `not-required` facts supply no proof. Facts v2 retain provider
+and exact-head/result receipt. Every finalizer requires matching App-owned
+eligibility readback and rechecks configured OpenRouter authority. Legacy facts
+remain readable without exemption; other providers' new reviews keep their policy.
 
 Accepted operation results additionally bind their replay to complete immutable
 inventory, original result/facts, source identity and exact evidence. Replays
