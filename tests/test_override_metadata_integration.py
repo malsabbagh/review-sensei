@@ -107,6 +107,25 @@ def _authority_body(
     )
 
 
+def _inline_comment(*, review_id, body="Discussion.", parent=1):
+    return {
+        "id": review_id * 100,
+        "pull_request_review_id": review_id,
+        "in_reply_to_id": parent,
+        "user": {"login": "reviewsensei[bot]", "type": "Bot"},
+        "body": body,
+    }
+
+
+def _legacy_finding_body(*, instance="f" * 64, head=HEAD):
+    concern = "e" * 64
+    return (
+        f"<!-- reviewsensei:instance:v1 instance={instance} concern={concern} -->\n"
+        f"<!-- reviewsensei:finding:v2 repo=99 pr=136 head={head} "
+        f"base={'c' * 40} fingerprint={concern} state=new blocking=true -->"
+    )
+
+
 class HostedOverrideMetadataTests(unittest.TestCase):
     def _run(
         self,
@@ -125,6 +144,7 @@ class HostedOverrideMetadataTests(unittest.TestCase):
         publication=False,
         comment_body=BODY,
         ledger=None,
+        review_comments=None,
     ):
         """Run the public CLI and real handler with synthetic external seams."""
         http = GitHubHttp()
@@ -191,6 +211,10 @@ class HostedOverrideMetadataTests(unittest.TestCase):
                     )
             if "/collaborators/" in url:
                 return permission_status, permission
+            if "/reviews/" in url and "/comments" in url:
+                review_id = int(url.split("/reviews/", 1)[1].split("/", 1)[0])
+                value = (review_comments or {}).get(review_id, [])
+                return value if isinstance(value, tuple) else (200, value)
             if "/comments" in url:
                 return 200, []
             if "/reviews" in url:
@@ -470,6 +494,10 @@ class HostedOverrideMetadataTests(unittest.TestCase):
                     permission={"permission": "admin"},
                     environment={"GITHUB_TOKEN": "synthetic-read-token"},
                     publication=True,
+                    review_comments={
+                        3: [_inline_comment(review_id=3)],
+                        4: [_inline_comment(review_id=4)],
+                    },
                     reviews=[
                         _review(body=_authority_body()),
                         _review(review_id=2, actor="mallory", body=_marker()),
@@ -483,6 +511,14 @@ class HostedOverrideMetadataTests(unittest.TestCase):
                 self.assertEqual(dispositions[0]["fingerprint"], FINGERPRINT)
                 self.assertEqual(dispositions[0]["head_sha"], HEAD)
                 self.assertIn("approval submitted", result.output)
+                for review_id in (3, 4):
+                    self.assertEqual(
+                        sum(
+                            f"/reviews/{review_id}/comments?" in call.args[1]
+                            for call in result.reads.call_args_list
+                        ),
+                        1,
+                    )
                 verified = self._run(
                     permission={"permission": "admin"},
                     environment={"GITHUB_TOKEN": "synthetic-read-token"},
@@ -496,6 +532,128 @@ class HostedOverrideMetadataTests(unittest.TestCase):
                     verified.ledger.load(IDENTITY).record.dispositions, dispositions
                 )
                 self.assertIn("approval submitted", verified.output)
+
+    def test_empty_review_with_legacy_blocker_remains_the_current_inventory(self):
+        for reference, expected in (("RS-ABC123", 1), ("RS-FFFFFF", 0)):
+            with self.subTest(reference=reference):
+                result = self._run(
+                    permission={"permission": "admin"},
+                    environment={"GITHUB_TOKEN": "synthetic-read-token"},
+                    publication=True,
+                    comment_body=f"@reviewsensei override {reference} acceptable risk",
+                    reviews=[
+                        _review(body=_authority_body()),
+                        {**_review(review_id=2, body=""), "state": "COMMENTED"},
+                    ],
+                    review_comments={
+                        2: [
+                            _inline_comment(
+                                review_id=2, body=_legacy_finding_body(), parent=None
+                            )
+                        ]
+                    },
+                )
+                self.assertEqual(result.status, expected, result.output)
+                record = result.ledger.load(IDENTITY).record
+                if expected:
+                    self.assertTrue(record is None or not record.dispositions)
+                else:
+                    self.assertEqual(record.dispositions[0]["fingerprint"], "f" * 64)
+                    self.assertNotIn("approval submitted", result.output)
+                self.assertEqual(
+                    sum(
+                        "/reviews/2/comments?" in call.args[1]
+                        for call in result.reads.call_args_list
+                    ),
+                    1,
+                )
+
+    def test_empty_review_unknown_malformed_or_unreadable_roots_never_fall_back(self):
+        valid = _inline_comment(review_id=2, body=_legacy_finding_body(), parent=None)
+        for comments in (
+            (403, {}),
+            {},
+            [None],
+            [_inline_comment(review_id=2, body="Unknown top-level root.", parent=None)],
+            [
+                _inline_comment(
+                    review_id=2,
+                    body="<!-- reviewsensei:finding:v3 invalid -->",
+                    parent=None,
+                )
+            ],
+            [
+                _inline_comment(
+                    review_id=2, body=_legacy_finding_body(head="d" * 40), parent=None
+                )
+            ],
+            [valid, {**valid, "id": 201}],
+            [{**valid, "pull_request_review_id": 3}],
+            [{**valid, "user": {"login": "mallory", "type": "User"}}],
+            [{**valid, "in_reply_to_id": True}],
+        ):
+            with self.subTest(comments=comments):
+                result = self._run(
+                    permission={"permission": "admin"},
+                    environment={"GITHUB_TOKEN": "synthetic-read-token"},
+                    reviews=[
+                        _review(body=_authority_body()),
+                        {**_review(review_id=2, body=""), "state": "COMMENTED"},
+                    ],
+                    review_comments={2: comments},
+                )
+                self.assertEqual(result.status, 1, result.output)
+                result.broker.authorize_session_mutation.assert_not_called()
+                self.assertIsNone(result.ledger.load(IDENTITY).record)
+
+    def test_empty_discussion_walk_has_one_shared_request_bound(self):
+        for count, expected in ((10, 0), (11, 1)):
+            with self.subTest(count=count):
+                discussions = [
+                    {**_review(review_id=review_id, body=""), "state": "COMMENTED"}
+                    for review_id in range(2, count + 2)
+                ]
+                result = self._run(
+                    permission={"permission": "admin"},
+                    environment={"GITHUB_TOKEN": "synthetic-read-token"},
+                    publication=True,
+                    reviews=[_review(body=_authority_body()), *discussions],
+                    review_comments={
+                        review_id: [_inline_comment(review_id=review_id)]
+                        for review_id in range(2, count + 2)
+                    },
+                )
+                self.assertEqual(result.status, expected, result.output)
+                self.assertEqual(
+                    sum(
+                        "/reviews/" in call.args[1] and "/comments?" in call.args[1]
+                        for call in result.reads.call_args_list
+                    ),
+                    10,
+                )
+                if expected:
+                    result.broker.authorize_session_mutation.assert_not_called()
+
+    def test_expired_discussion_walk_refuses_before_fetch_or_old_inventory(self):
+        with patch("time.monotonic", side_effect=(0.0, 61.0)):
+            result = self._run(
+                permission={"permission": "admin"},
+                environment={"GITHUB_TOKEN": "synthetic-read-token"},
+                reviews=[
+                    _review(body=_authority_body()),
+                    {**_review(review_id=2, body=""), "state": "COMMENTED"},
+                ],
+                review_comments={2: [_inline_comment(review_id=2)]},
+            )
+        self.assertEqual(result.status, 1, result.output)
+        self.assertFalse(
+            any(
+                "/reviews/2/comments?" in call.args[1]
+                for call in result.reads.call_args_list
+            )
+        )
+        result.broker.authorize_session_mutation.assert_not_called()
+        self.assertIsNone(result.ledger.load(IDENTITY).record)
 
     def test_empty_discussion_cannot_reveal_superseded_or_invalid_authority(self):
         for body in (

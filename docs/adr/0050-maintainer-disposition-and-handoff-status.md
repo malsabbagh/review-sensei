@@ -185,19 +185,23 @@ Negative:
 ## Amendment 2026-10-19: empty inline discussion review containers
 
 GitHub can create an App-authored `COMMENTED` review with an empty or null body
-when the App replies to an inline thread. This container carries no finding
-authority and must not replace the current head's finding inventory when a
-maintainer names its displayed IDs. Ignore only those empty `COMMENTED`
-containers while selecting the latest App review for the command reader.
-Nonempty newer reviews, malformed authority markers, other review states and
-scope conflicts keep their existing fail-closed behavior. Never obtain authority
-from another author or head, or recover a superseded inventory through a later
-invalid record.
+when the App replies to an inline thread. Before ignoring that container, read
+its review-specific comments through the existing bounded metadata transport.
+An owned reply is discussion, not replacement authority. A genuine top-level
+legacy finding remains the current inventory; unknown, malformed, duplicate,
+wrong-scope or unreadable roots refuse instead of exposing an older inventory.
+Only a complete empty list or positively owned replies without top-level
+authority permit fallback. Candidate reads share one ten-request/sixty-second
+bound, newest first, and selected inventory is reused without a second fetch.
+Nonempty newer reviews, malformed authority markers and other review states
+keep their existing fail-closed behavior. Never obtain authority from another
+author or head, or recover superseded inventory through a later invalid record.
 
 The public hosted-command regression retains a complete eligibility/index,
 adds empty App discussion containers, records the exact-head decision and then
 verifies it through the real finalizer. Negative cases retain newer blocking,
-partial, malformed, wrong-scope and foreign-head/author refusals. This changes
+partial, malformed, wrong-scope and foreign-head/author refusals, including
+legacy top-level blockers and bounded/unreadable discussion walks. This changes
 neither command authorization nor coverage and approval requirements. Rollback
 restores the previous refusal but can again leave valid displayed IDs
 unaddressable after an inline reply; no schema or persistence migration is needed.
