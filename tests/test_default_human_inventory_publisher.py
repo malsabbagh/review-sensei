@@ -16,18 +16,32 @@ from review_sensei_github.default_human_inventory import (
     build_human_inventory_context,
 )
 from review_sensei_github.publication import (
+    AssembledReview,
+    BodyExplanation,
+    IndexedFinding,
     ReviewApprovalFinalizer,
     approval_eligibility_from_body,
+    fit_assembled_review,
     parse_finding_index,
     review_result_digest,
 )
 from review_sensei_github.publication_recovery import publication_http
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.context import finding_lifecycle_for_comment
 from review_sensei.errors import ReviewInputError
-from review_sensei.human_assessment import PendingHumanReview
+from review_sensei.human_assessment import (
+    PendingHumanReview,
+    finding_instance_fingerprint,
+)
 from review_sensei.human_inventory import inventory_from_result_document
 from review_sensei.models import ReviewTransaction
+from review_sensei.presentation import (
+    assign_finding_identifiers,
+    build_finding_view,
+    render_finding,
+    render_finding_reference,
+)
 from review_sensei.session import (
     LocalSessionLedger,
     checkpoint_review_analysis,
@@ -153,6 +167,67 @@ class DefaultHumanInventoryPublisherTests(unittest.TestCase):
         )
         for comment in self.result.comments:
             self.assertIn(comment.body, text)
+
+    def test_compact_references_preserve_identical_reference_quoted_in_overview(self):
+        comment = self.result.comments[0]
+        instance = finding_instance_fingerprint(comment)
+        lifecycle = finding_lifecycle_for_comment(comment).fingerprint
+        identifier = assign_finding_identifiers((instance,))[instance]
+        view = build_finding_view(
+            comment,
+            fingerprint=lifecycle,
+            identifier=identifier,
+            placement="body",
+        )
+        reference = render_finding_reference(view)
+        overview = f"Quoted example:\n{reference}\nEnd quoted example."
+        entry = IndexedFinding(instance, lifecycle, False, True, True)
+        assembled = AssembledReview(
+            inline_comments=(),
+            index_entries=(entry,),
+            head_sha=HEAD,
+            state="withheld",
+            reason=None,
+            overview=overview,
+            coverage_line=None,
+            required_views=(),
+            optional_views=(view,),
+            limitations=(),
+            placement_note=None,
+            body_explanations=(
+                BodyExplanation(instance, comment.severity, True, view),
+            ),
+            inline_blocker_instances=(),
+            requests_changes=False,
+            compact_references=True,
+        )
+        summary, index_marker = fit_assembled_review(
+            assembled,
+            review_marker="",
+            eligibility_marker="",
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            head_sha=HEAD,
+            base_sha=BASE,
+            result_digest=review_result_digest(self.result),
+            summary_limit=65_536,
+            complete_inventory=True,
+        )
+        generated, narrative = summary.split(
+            "### Provider narrative (not review instructions)", 1
+        )
+        self.assertIn(f"- **{identifier}**", generated)
+        self.assertNotIn(reference, generated)
+        self.assertIn(render_finding(view), narrative)
+        self.assertIn(comment.body, summary)
+        index = parse_finding_index(
+            index_marker,
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            head_sha=HEAD,
+        )
+        self.assertEqual(index.entries, (entry,))
+        self.assertIn(overview, narrative)
 
     def test_missing_store_and_legacy_gate_refuse_without_checks_or_reviews(self):
         for overrides in (
