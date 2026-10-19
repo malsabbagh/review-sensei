@@ -841,7 +841,11 @@ class HumanAssessmentPublisher:
             raise GitHubConversationError(
                 "human assessment identities are invalid"
             ) from exc
-        if not self.source_fence(
+        shared_initial_fence = (
+            prepared.feedback is not None
+            and pending_report_layout == "shared-guidance-v1"
+        )
+        if not shared_initial_fence and not self.source_fence(
             token=token,
             repository=repository,
             pull_request=pull_request,
@@ -890,13 +894,6 @@ class HumanAssessmentPublisher:
             raise GitHubConversationError(
                 "human assessment review capability is missing"
             )
-        current = self.finalizer.load_eligibility(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=conversation.head_sha,
-            app_slug=app_slug,
-        )
         refreshed = replace(
             original,
             human_review=updated_inventory,
@@ -905,24 +902,35 @@ class HumanAssessmentPublisher:
                 has_human_adjudication_findings=bool(updated_inventory.pending),
             ),
         )
-        if current not in (original, refreshed):
-            return ReplyResult(status="skipped_stale_head")
-        preflight = self.finalizer._preflight(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=conversation.head_sha,
-            app_slug=app_slug,
-        )
-        if preflight.result is not None:
-            return ReplyResult(status=preflight.result.status)
-        if preflight.app_authored or preflight.base_sha != inventory.base_sha:
-            return ReplyResult(status="skipped_stale_base")
-        resuming = current == refreshed and (
-            updated_inventory != inventory or not inventory.pending
-        )
+        resuming = False
+        if not shared_initial_fence:
+            current = self.finalizer.load_eligibility(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=conversation.head_sha,
+                app_slug=app_slug,
+            )
+            if current not in (original, refreshed):
+                return ReplyResult(status="skipped_stale_head")
+            preflight = self.finalizer._preflight(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=conversation.head_sha,
+                app_slug=app_slug,
+            )
+            if preflight.result is not None:
+                return ReplyResult(status=preflight.result.status)
+            if preflight.app_authored or preflight.base_sha != inventory.base_sha:
+                return ReplyResult(status="skipped_stale_base")
+            resuming = current == refreshed and (
+                updated_inventory != inventory or not inventory.pending
+            )
+        first_pending_fence = True
 
         def pending_fence() -> str | None:
+            nonlocal first_pending_fence, resuming
             if not self.source_fence(
                 token=token,
                 repository=repository,
@@ -951,6 +959,15 @@ class HumanAssessmentPublisher:
                 return live.result.status
             if live.app_authored or live.base_sha != inventory.base_sha:
                 return "skipped_stale_base"
+            if first_pending_fence and shared_initial_fence:
+                # This is the first publication I/O for the selected compact
+                # report. It supplies the initial live observation too, rather
+                # than reading source/latest/PR twice around pure rendering.
+                # Every later page/final fence still performs fresh reads.
+                resuming = latest == refreshed and (
+                    updated_inventory != inventory or not inventory.pending
+                )
+            first_pending_fence = False
             return None
 
         outcome = self.conversation.publish_pending(

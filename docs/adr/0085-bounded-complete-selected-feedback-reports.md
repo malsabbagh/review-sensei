@@ -24,16 +24,16 @@ retains the original failure oracle.
 starts from a caller-supplied prepared conversation, then exercises public
 feedback preparation, actual local ledger, assessment and publication boundaries.
 It uses the unchanged independently varied fixture,
-resolves the exact selected target, and retains 99 pending obligations at 57
+resolves the exact selected target, and retains 99 pending obligations at 54
 charged original reads. Queue reconstruction never supplies an attempt witness.
-This excludes the ordinary conversation preparation reads; it is not a cold
-application or CLI completion proof. The cold-context regression
-`test_cold_100_with_0_100_250_history_refuses_without_advancing_authority` charges
-that preparation to the same allowance. With 0/100/250 historical comments,
-acceptance uses 38/39/40 calls, then publication refuses at 60. The accepted
-decision remains durable, but all 100 findings remain pending in authority.
-One provisional report is visible; no refreshed authority or approval is issued.
-Safe refusal does not satisfy the cold completion requirement.
+This excludes ordinary conversation preparation reads; it is not a cold
+application or CLI completion proof. Before ADR 0087, charging that preparation
+made 0/100/250 historical-comment profiles refuse at 60 after acceptance at
+38/39/40 calls. [ADR 0087](0087-selected-assessment-context-and-owned-page-readback.md)
+adds an explicit selected-assessment preparation seam and bounded publication
+readback. Its cold library profiles finish at 56/59/60, while ordinary cold
+preparation with 100/250 historical comments still refuses. Safe refusal alone
+does not satisfy a completion requirement.
 
 ## Proposed bounded interfaces
 
@@ -105,7 +105,9 @@ the original attempt witness. Missing retained authority refuses before inferenc
 Neither a compact presentation nor a queue reference activates rich 250
 eligibility, a consuming broker grant, CLI/Worker selection/queue scheduling,
 unknown-provider reconciliation or a fresh process's original-attempt witness.
-The 57-call prepared-context profile has no historical discussion. Cold context,
-joint long-history capacity and accepted-replay delivery remain unqualified.
+The 54-call prepared-context profile has no historical discussion. ADR 0087's
+explicit selected context qualifies a separate cold library profile with
+0/100/250 ordinary historical comments. CLI activation, joint retained feedback
+history and accepted-replay delivery remain unqualified.
 These are implementation and qualification limits, not a permission
 request or a claim that the remaining work is impossible.

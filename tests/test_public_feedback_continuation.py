@@ -335,7 +335,11 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
             (ids[-1],) if targets is None else targets,
         )
         conversation = (
-            publisher.conversation.prepare_context(
+            publisher.conversation.prepare_selected_assessment_context(
+                token="synthetic", selector=selector, app_slug=APP, root_comment_id=10
+            )
+            if cold_context == "selected"
+            else publisher.conversation.prepare_context(
                 token="synthetic",
                 repository="owner/repo",
                 pull_request=1,
@@ -734,17 +738,19 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
                 state.latest_inventory().resolved, prepared.feedback.target_ids
             )
             self.assertEqual(len(state.latest_inventory().pending), 99)
-            self.assertEqual(host.read_budget.calls, 57)
+            self.assertEqual(host.read_budget.calls, 54)
             self.assertEqual(state.reply_count, 1)
             self.assertNotIn("APPROVE", state.events())
             self.assertEqual(state.latest_inventory().inventory_document(), original)
             for item in state.latest_inventory().pending:
                 self.assertIn(item.fingerprint, state.replies[0]["body"])
 
-    def test_cold_100_with_0_100_250_history_refuses_without_advancing_authority(self):
+    def test_ordinary_cold_100_with_long_history_refuses_without_advancing_authority(
+        self,
+    ):
         # Unlike the prepared-context positive control, ordinary conversation
         # preparation consumes this SAME original physical-work allowance.
-        for history_count, accepted_reads in ((0, 38), (100, 39), (250, 40)):
+        for history_count, accepted_reads in ((100, 39), (250, 40)):
             with self.subTest(history_count=history_count):
                 state, publisher, prepared = self.prepare(
                     100, history_count=history_count, cold_context=True
@@ -795,6 +801,192 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
                     # A provisional report is not a refreshed authority receipt.
                     self.assertEqual(state.reply_count, 1)
                     self.assertEqual(state.events(), [])
+
+    def test_selected_cold_100_with_0_100_250_history_completes_original_budget(self):
+        for history_count, final_calls in ((0, 56), (100, 59), (250, 60)):
+            with self.subTest(history_count=history_count):
+                state, publisher, prepared = self.prepare(
+                    100, history_count=history_count, cold_context="selected"
+                )
+                original = prepared.eligibility.human_review.inventory_document()
+                with tempfile.TemporaryDirectory() as directory:
+                    host = LocalFeedbackHost(
+                        directory, publisher, prepared, referenced=True
+                    )
+                    deadline = host.read_budget.wall_deadline_ms
+                    provider = AssessingProvider()
+                    work = host.run(provider)
+                    self.assertEqual(host.read_budget.calls, 34)
+                    result = publisher.publish(
+                        token="synthetic",
+                        review_token="synthetic",
+                        repository="owner/repo",
+                        pull_request=1,
+                        prepared=prepared,
+                        reply=work,
+                        app_slug=APP,
+                        pending_report_layout="shared-guidance-v1",
+                    )
+                    self.assertEqual(result.approval_status, "approval_withheld")
+                    self.assertEqual(len(provider.calls), 1)
+                    self.assertEqual(host.read_budget.calls, final_calls)
+                    self.assertEqual(host.read_budget.wall_deadline_ms, deadline)
+                    self.assertEqual(
+                        state.latest_inventory().resolved, prepared.feedback.target_ids
+                    )
+                    self.assertEqual(len(state.latest_inventory().pending), 99)
+                    self.assertEqual(
+                        state.latest_inventory().inventory_document(), original
+                    )
+                    self.assertEqual(state.events(), ["COMMENT"])
+                    self.assertNotIn("APPROVE", state.events())
+
+    def test_ordinary_cold_100_without_history_completes_at_original_ceiling(self):
+        state, publisher, prepared = self.prepare(100, cold_context=True)
+        with tempfile.TemporaryDirectory() as directory:
+            host = LocalFeedbackHost(directory, publisher, prepared, referenced=True)
+            work = host.run(AssessingProvider())
+            result = publisher.publish(
+                token="synthetic",
+                review_token="synthetic",
+                repository="owner/repo",
+                pull_request=1,
+                prepared=prepared,
+                reply=work,
+                app_slug=APP,
+                pending_report_layout="shared-guidance-v1",
+            )
+            self.assertEqual(result.approval_status, "approval_withheld")
+            self.assertEqual(host.read_budget.calls, 60)
+            self.assertEqual(
+                state.latest_inventory().resolved, prepared.feedback.target_ids
+            )
+            self.assertEqual(len(state.latest_inventory().pending), 99)
+
+    def test_selected_context_keeps_identical_complete_provider_inputs(self):
+        inputs = []
+        for context in (True, "selected"):
+            state, publisher, prepared = self.prepare(
+                100, history_count=250, cold_context=context
+            )
+            with tempfile.TemporaryDirectory() as directory:
+                host = LocalFeedbackHost(
+                    directory, publisher, prepared, referenced=True
+                )
+                provider = AssessingProvider()
+                host.run(provider)
+                inputs.append(
+                    (
+                        prepared.eligibility,
+                        prepared.evidence_bundle,
+                        prepared.feedback,
+                        prepared.source_body,
+                        prepared.authority_digest,
+                        [
+                            replace(request, timeout_seconds=None)
+                            for request in provider.calls
+                        ],
+                    )
+                )
+        self.assertEqual(inputs[0], inputs[1])
+
+    def test_selected_context_requires_explicit_target_and_live_exact_scope(self):
+        for fault in ("targets", "base", "head", "identity", "revision", "author"):
+            with self.subTest(fault=fault):
+                state, publisher, prepared = self.prepare(100)
+                feedback = prepared.feedback
+                selector = FeedbackSelector(
+                    feedback.repository,
+                    feedback.pull_request,
+                    feedback.base_sha,
+                    feedback.head_sha,
+                    feedback.trigger,
+                    tuple(item.reference for item in feedback.sources),
+                    () if fault == "targets" else feedback.target_ids,
+                )
+                if fault == "base":
+                    state.base = "e" * 40
+                elif fault == "head":
+                    state.head = "e" * 40
+                elif fault == "identity":
+                    state.source["id"] = 11
+                elif fault == "revision":
+                    state.source["updated_at"] = "edited"
+                elif fault == "author":
+                    state.source["author_association"] = "NONE"
+                before = publisher.before_read.__self__.calls
+
+                def prepare():
+                    return publisher.conversation.prepare_selected_assessment_context(
+                        token="synthetic", selector=selector, app_slug=APP
+                    )
+
+                if fault in {"identity", "targets"}:
+                    with self.assertRaises(GitHubConversationError):
+                        prepare()
+                    if fault == "targets":
+                        self.assertEqual(publisher.before_read.__self__.calls, before)
+                else:
+                    self.assertTrue(prepare().status.startswith("skipped_"))
+                self.assertEqual(state.events(), [])
+                self.assertEqual(state.reply_count, 0)
+
+    def test_selected_context_retains_complete_multiple_source_closure(self):
+        state, _, original = self.prepare(100)
+        auxiliary = copy.deepcopy(state.source)
+        auxiliary.update(
+            id=11,
+            body="Complete selected context 深🙂. " + "Unabridged detail. " * 100,
+            updated_at="auxiliary",
+        )
+        auxiliary["user"]["id"] = 43
+        original_request = state.http.request
+
+        def request(method, path, **arguments):
+            if method == "GET" and path.endswith("/issues/comments/11"):
+                return 200, copy.deepcopy(auxiliary)
+            return original_request(method, path, **arguments)
+
+        state.http.request = request
+        publisher = HumanAssessmentPublisher(
+            http=state.http, before_read=EvidenceReadBudget().consume
+        )
+        feedback = original.feedback
+        selector = FeedbackSelector(
+            feedback.repository,
+            feedback.pull_request,
+            feedback.base_sha,
+            feedback.head_sha,
+            feedback.trigger,
+            (feedback.trigger, FeedbackReference("issue", 11, "auxiliary")),
+            feedback.target_ids,
+        )
+        context = publisher.conversation.prepare_selected_assessment_context(
+            token="synthetic", selector=selector, app_slug=APP
+        )
+        prepared = publisher.prepare_feedback(
+            token="synthetic",
+            repository="owner/repo",
+            pull_request=1,
+            prepared=context,
+            app_slug=APP,
+            selector=selector,
+            work_budgets=ReviewWorkBudgets(mode="unified"),
+        )
+        self.assertEqual(len(prepared.feedback.sources), 2)
+        self.assertEqual(prepared.eligibility, original.eligibility)
+        self.assertEqual(prepared.evidence_bundle, original.evidence_bundle)
+        self.assertEqual(
+            {item.body for item in prepared.feedback.sources},
+            {state.source["body"], auxiliary["body"]},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            host = LocalFeedbackHost(directory, publisher, prepared, referenced=True)
+            provider = AssessingProvider()
+            host.run(provider)
+            self.assertEqual(len(provider.calls), 1)
+            self.assertIn(auxiliary["body"], provider.calls[0].prompt)
+            self.assertEqual(state.events(), [])
 
     def test_referenced_fresh_reader_reconstructs_inventory_but_not_attempt_witness(
         self,
@@ -946,6 +1138,13 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
             "lost-post",
             "partial-post",
             "readback",
+            "direct-readback",
+            "direct-identity",
+            "direct-owner",
+            "direct-kind",
+            "direct-association",
+            "direct-body",
+            "direct-missing",
             "whole-readback",
         ):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
@@ -959,6 +1158,13 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
 
                 def failing_request(method, path, **arguments):
                     nonlocal scans_after_post
+                    if (
+                        fault == "direct-readback"
+                        and method == "GET"
+                        and "/issues/comments/" in path
+                        and not path.endswith("/10")
+                    ):
+                        raise GitHubConversationError("owned page unavailable")
                     if (
                         method == "POST"
                         and path.endswith("/issues/1/comments")
@@ -981,12 +1187,33 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
                     ):
                         scans_after_post += 1
                         if fault == "readback" or (
-                            fault == "whole-readback" and scans_after_post == 2
+                            fault == "whole-readback" and scans_after_post == 1
                         ):
                             raise GitHubConversationError(
                                 "owned whole page readback unavailable"
                             )
                     result = original_request(method, path, **arguments)
+                    if (
+                        fault.startswith("direct-")
+                        and method == "GET"
+                        and "/issues/comments/" in path
+                        and not path.endswith("/10")
+                    ):
+                        if fault == "direct-missing":
+                            return 404, None
+                        status, comment = result
+                        comment = copy.deepcopy(comment)
+                        if fault == "direct-identity":
+                            comment["id"] = str(comment["id"])
+                        elif fault == "direct-owner":
+                            comment["user"]["login"] = "other[bot]"
+                        elif fault == "direct-kind":
+                            comment["user"]["type"] = "User"
+                        elif fault == "direct-association":
+                            comment["issue_url"] += "0"
+                        elif fault == "direct-body":
+                            comment["body"] += " changed"
+                        return status, comment
                     if method == "POST" and path.endswith("/issues/1/comments"):
                         if fault == "lost-post":
                             raise GitHubConversationError("post outcome unknown")

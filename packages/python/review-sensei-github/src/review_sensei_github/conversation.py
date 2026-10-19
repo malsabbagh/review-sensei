@@ -13,6 +13,7 @@ from typing import Any, Sequence
 from urllib.parse import quote
 
 from review_sensei.errors import LearningLoadError, ReviewInputError
+from review_sensei.feedback import FeedbackSelector
 from review_sensei.learnings import (
     MAX_LEARNING_FILE_BYTES,
     MAX_LEARNING_FILES,
@@ -409,6 +410,64 @@ class ConversationPublisher:
         expected_head_sha: str | None = None,
     ) -> PreparedConversation | ReplyResult:
         """Authorize and bound a mention before any provider invocation."""
+        return self._prepare_context(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            source_comment_id=source_comment_id,
+            source_updated_at=source_updated_at,
+            app_slug=app_slug,
+            root_comment_id=root_comment_id,
+            source_kind=source_kind,
+            expected_head_sha=expected_head_sha,
+        )
+
+    def prepare_selected_assessment_context(
+        self,
+        *,
+        token: str,
+        selector: FeedbackSelector,
+        app_slug: str,
+        root_comment_id: int | None = None,
+    ) -> PreparedConversation | ReplyResult:
+        """Authorize the trigger for explicit selected-feedback preparation.
+
+        This is not ordinary discussion context. The caller must subsequently
+        use ``prepare_feedback`` with this exact selector: it obtains the full
+        retained concern inventory, complete selected-source closure and current
+        required review evidence. None of those are inferred from chat history.
+        Generic conversation diff/learnings/history are not assessment inputs.
+        Every request uses this publisher's original transport/budget.
+        """
+        if not isinstance(selector, FeedbackSelector) or not selector.target_ids:
+            raise GitHubConversationError("selected assessment selector is required")
+        return self._prepare_context(
+            token=token,
+            repository=selector.repository,
+            pull_request=selector.pull_request,
+            source_comment_id=selector.trigger.comment_id,
+            source_updated_at=selector.trigger.updated_at,
+            app_slug=app_slug,
+            root_comment_id=root_comment_id,
+            source_kind=selector.trigger.kind,
+            expected_head_sha=selector.head_sha,
+            assessment_selector=selector,
+        )
+
+    def _prepare_context(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        source_comment_id: int,
+        source_updated_at: str,
+        app_slug: str,
+        root_comment_id: int | None = None,
+        source_kind: str = "inline",
+        expected_head_sha: str | None = None,
+        assessment_selector: FeedbackSelector | None = None,
+    ) -> PreparedConversation | ReplyResult:
 
         if source_kind not in {"inline", "issue"}:
             raise GitHubConversationError("reply source kind is invalid")
@@ -442,6 +501,10 @@ class ConversationPublisher:
             return ReplyResult(status="skipped_source_gone")
         if status < 200 or status >= 300 or not isinstance(source, dict):
             raise GitHubConversationError("reply source lookup failed")
+        if assessment_selector is not None and (
+            type(source.get("id")) is not int or source["id"] != source_comment_id
+        ):
+            raise GitHubConversationError("selected assessment source identity changed")
         self._require_comment_association(
             comment=source,
             repository=repository,
@@ -530,6 +593,38 @@ class ConversationPublisher:
                     pull_request=pull_request,
                     source_kind="inline",
                 )
+
+        if assessment_selector is not None:
+            base_sha = base.get("sha")
+            if base_sha != assessment_selector.base_sha:
+                return ReplyResult(status="skipped_stale_base")
+            try:
+                context = ConversationContext(
+                    messages=tuple(
+                        self._select_thread_messages(
+                            candidates=[],
+                            source=source,
+                            source_comment_id=source_comment_id,
+                            root_comment_id=resolved_root,
+                            source_kind=source_kind,
+                        )
+                    ),
+                    pull_request_number=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                )
+            except (ValueError, UnicodeError) as exc:
+                raise GitHubConversationError(
+                    "conversation context was invalid"
+                ) from exc
+            return PreparedConversation(
+                context=context,
+                source_kind=source_kind,
+                source_comment_id=source_comment_id,
+                source_updated_at=current_updated_at,
+                head_sha=head_sha,
+                root_comment_id=resolved_root,
+            )
 
         try:
             thread_candidates = self._load_comments(
@@ -1198,6 +1293,42 @@ class ConversationPublisher:
         resolution_base_sha: str | None = None,
         resolution_token: str | None = None,
     ) -> ReplyResult:
+        return self._publish(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            source_comment_id=source_comment_id,
+            source_updated_at=source_updated_at,
+            head_sha=head_sha,
+            reply=reply,
+            app_slug=app_slug,
+            root_comment_id=root_comment_id,
+            source_kind=source_kind,
+            pending_page=pending_page,
+            resolution_evidence=resolution_evidence,
+            resolution_base_sha=resolution_base_sha,
+            resolution_token=resolution_token,
+        )
+
+    def _publish(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        source_comment_id: int,
+        source_updated_at: str,
+        head_sha: str,
+        reply: ConversationReply,
+        app_slug: str,
+        root_comment_id: int,
+        source_kind: str = "inline",
+        pending_page: PendingReplyPage | None = None,
+        resolution_evidence: str | None = None,
+        resolution_base_sha: str | None = None,
+        resolution_token: str | None = None,
+        complete_report_readback: bool = False,
+    ) -> ReplyResult:
         if not GIT_SHA_HEX.fullmatch(head_sha):
             raise GitHubConversationError("reply head sha is invalid")
         if not isinstance(reply, ConversationReply):
@@ -1408,14 +1539,26 @@ class ConversationPublisher:
             comment_id = created.get("id")
             if type(comment_id) is int and comment_id > 0:
                 if pending_page is not None:
-                    confirmed = self._find_existing(
-                        token=token,
-                        repository=repository,
-                        pull_request=pull_request,
-                        marker=marker,
-                        app_slug=app_slug,
-                        source_kind=source_kind,
-                        expected_body=body,
+                    confirmed = (
+                        self._owned_pending_page(
+                            token=token,
+                            repository=repository,
+                            pull_request=pull_request,
+                            comment_id=comment_id,
+                            app_slug=app_slug,
+                            source_kind=source_kind,
+                            expected_body=body,
+                        )
+                        if complete_report_readback
+                        else self._find_existing(
+                            token=token,
+                            repository=repository,
+                            pull_request=pull_request,
+                            marker=marker,
+                            app_slug=app_slug,
+                            source_kind=source_kind,
+                            expected_body=body,
+                        )
                     )
                     if confirmed != comment_id:
                         raise GitHubConversationTransientError(
@@ -1579,7 +1722,13 @@ class ConversationPublisher:
                     comment_id=last.comment_id,
                     assessment_status="pending_delivery_incomplete",
                 )
-            last = self.publish(**page_arguments, pending_page=page)
+            last = (
+                self._publish(
+                    **page_arguments, pending_page=page, complete_report_readback=True
+                )
+                if layout == "shared-guidance-v1"
+                else self.publish(**page_arguments, pending_page=page)
+            )
             if last.status not in {"replied", "already_replied"}:
                 return ReplyResult(
                     status=last.status,
@@ -1616,6 +1765,50 @@ class ConversationPublisher:
             status="replied" if created else "already_replied",
             comment_id=last.comment_id,
         )
+
+    def _owned_pending_page(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        comment_id: int,
+        app_slug: str,
+        source_kind: str,
+        expected_body: str,
+    ) -> int | None:
+        """Read the known successful POST id before the final whole-report scan.
+
+        This private path never replaces negative lookup or ambiguous-POST
+        reconciliation. Only the enclosing compact report transaction uses it;
+        that transaction still scans every report page/duplicate/conflict before
+        its last live source/PR/latest-authority fence.
+        """
+        suffix = "pulls" if source_kind == "inline" else "issues"
+        status, comment = self.http.request(
+            "GET",
+            self.http.repository_path(repository, f"/{suffix}/comments/{comment_id}"),
+            token=token,
+        )
+        if status != 200 or not isinstance(comment, dict):
+            raise GitHubConversationError("pending reply page readback unavailable")
+        self._require_comment_association(
+            comment=comment,
+            repository=repository,
+            pull_request=pull_request,
+            source_kind=source_kind,
+        )
+        user = comment.get("user")
+        if (
+            type(comment.get("id")) is not int
+            or comment["id"] != comment_id
+            or comment.get("body") != expected_body
+            or not isinstance(user, dict)
+            or user.get("login") != app_slug
+            or user.get("type") != "Bot"
+        ):
+            raise GitHubConversationError("pending reply page readback conflicts")
+        return comment_id
 
     def _completed_pending_report(
         self,

@@ -208,6 +208,16 @@ class State:
         if request.method == "GET":
             if path.endswith("/issues/comments/10"):
                 return json_response(self.source)
+            if "/issues/comments/" in path:
+                comment = next(
+                    (
+                        item
+                        for item in self.replies
+                        if path.endswith(f"/issues/comments/{item['id']}")
+                    ),
+                    None,
+                )
+                return json_response(comment, 200 if comment else 404)
             if path.endswith("/pulls/1"):
                 return json_response(self.pr())
             if path.endswith("/pulls/1/reviews"):

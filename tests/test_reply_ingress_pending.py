@@ -548,7 +548,7 @@ class PendingDeliveryTests(unittest.TestCase):
                 and state.reply_count == 3
             ):
                 scans_after_last_post += 1
-                if scans_after_last_post == 2:
+                if scans_after_last_post == 1:
                     raise GitHubConversationError("whole report readback unavailable")
             return original_request(method, path, **arguments)
 
