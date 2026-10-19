@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from copy import copy
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
 
 from review_sensei.baseline import ReviewBaseline
+from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.budgets import ReviewWorkBudgets
 from review_sensei.context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from review_sensei.convergence import (
@@ -108,6 +110,8 @@ class GitHubWriteOptions:
     mention_replies: bool = False
     upload_artifacts: bool = False
     github_session_ledger: bool = False
+    operation_entry: str = "enabled"
+    complete_inventory: bool = False
 
     def review_policy(self) -> str:
         """Return the effective review policy mode for this invocation."""
@@ -306,6 +310,46 @@ class GitHubApplication:
         self.replier = replier
         self.session_ledger = session_ledger
 
+    def recover_retained_review_result(
+        self,
+        *,
+        token: str,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        base_sha: str,
+        head_sha: str,
+        app_slug: str,
+        ledger: SessionLedger,
+        configuration_context: Mapping[str, object],
+        evidence_context: Mapping[str, object],
+        convergence_policy: ReviewConvergencePolicy | None = None,
+        budget: EvidenceReadBudget | None = None,
+    ) -> ReviewResult:
+        """Load exact same-PR bytes without inference or acceptance fabrication.
+
+        The caller supplies its independently selected ledger and trusted
+        publication inputs. Recovered bytes do not supply these expectations.
+        Pass the same budget to the subsequent ``publish_review`` call.
+        """
+        from .publication_recovery import recover_retained_review_result
+
+        return recover_retained_review_result(
+            http=self.http,
+            token=token,
+            repository=repository,
+            repository_id=repository_id,
+            pull_request=pull_request,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            app_slug=app_slug,
+            ledger=ledger,
+            configuration_context=configuration_context,
+            evidence_context=evidence_context,
+            convergence_policy=convergence_policy,
+            budget=budget,
+        )
+
     def publish_review(
         self,
         *,
@@ -337,9 +381,13 @@ class GitHubApplication:
         retained_eligibility: ReviewApprovalEligibility | None = None,
         continuation_digest: str | None = None,
         source_guard: Callable[[], bool] | None = None,
+        publication_budget: EvidenceReadBudget | None = None,
     ) -> PublicationResult:
+        reviewer = self.reviewer
         if not options.github_writes or not options.auto_review:
             return PublicationResult(status="disabled")
+        if options.operation_entry not in {"enabled", "disabled"}:
+            raise GitHubPublicationError("operation entry mode is invalid")
         if base_branch is None or base_sha is None:
             raise GitHubPublicationError(
                 "review publication requires expected base branch and sha"
@@ -782,7 +830,65 @@ class GitHubApplication:
             # An explicit empty tuple is a deliberate narrow scope. Do not
             # silently widen it with paths persisted for an earlier head.
             publication_related_paths = () if related_paths is None else related_paths
+        result_retained = False
+        publisher_started = False
         try:
+            if (
+                validated_transaction_recovery
+                and options.operation_entry == "enabled"
+                and self.http is not None
+            ):
+                from .publication_recovery import publication_http, retain_review_result
+
+                prior_budget = (
+                    reviewer.finalizer.evidence_budget
+                    or reviewer.finalizer._operation_budget
+                    if isinstance(reviewer, ReviewPublisher)
+                    else None
+                )
+                if (
+                    publication_budget is not None
+                    and prior_budget is not None
+                    and publication_budget is not prior_budget
+                ):
+                    raise GitHubPublicationError(
+                        "publication budget identity mismatches"
+                    )
+                budget = publication_budget or prior_budget or EvidenceReadBudget()
+                transport = publication_http(self.http, budget)
+                if isinstance(reviewer, ReviewPublisher):
+                    reviewer = copy(reviewer)
+                    reviewer.http = transport
+                    reviewer.finalizer = copy(reviewer.finalizer)
+                    reviewer.finalizer.http = transport
+                    reviewer.finalizer.evidence_budget = budget
+                    reviewer.checks = copy(reviewer.checks)
+                    reviewer.checks.http = transport
+                if (
+                    ledger is None
+                    or configuration_context is None
+                    or evidence_context is None
+                ):
+                    raise GitHubPublicationError(
+                        "publication retention context is incomplete"
+                    )
+                retain_review_result(
+                    http=transport,
+                    token=token,
+                    result=result,
+                    identity=identity,
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                    ledger=ledger,
+                    configuration_context=configuration_context,
+                    evidence_context=evidence_context,
+                    policy=policy,
+                )
+                result_retained = True
+                transaction_record = load_transaction(ledger)
+                if transaction_record.transaction is not None:
+                    result = replace(result, transaction=transaction_record.transaction)
             prepared_publishable: PublishableReview | None = None
             if (
                 operator_mode
@@ -790,12 +896,12 @@ class GitHubApplication:
                 and transaction_record is not None
                 and transaction_record.transaction is not None
                 and (
-                    callable(getattr(self.reviewer, "prepare", None))
+                    callable(getattr(reviewer, "prepare", None))
                     or not validated_transaction_recovery
                     or result.review_status == "partial"
                 )
             ):
-                prepare = getattr(self.reviewer, "prepare", None)
+                prepare = getattr(reviewer, "prepare", None)
                 # This is the sole post-admission result: its effective
                 # blockers are both recorded for F3 and passed unchanged to
                 # the publisher below. A publisher adapter may expose only
@@ -943,7 +1049,7 @@ class GitHubApplication:
                             ),
                             _shadow_observation(_shadow_state(prepared, flags)),
                         )
-            publisher_has_prepare = callable(getattr(self.reviewer, "prepare", None))
+            publisher_has_prepare = callable(getattr(reviewer, "prepare", None))
             publisher_result = (
                 prepared_publishable.result
                 if prepared_publishable is not None and not publisher_has_prepare
@@ -988,6 +1094,8 @@ class GitHubApplication:
                 "evidence_confirmed_concerns": evidence_confirmed_concerns,
                 "authorized_dispositions": authorized_dispositions,
             }
+            if options.complete_inventory:
+                publisher_arguments["complete_inventory"] = True
             if transaction_record is not None:
                 from review_sensei.rescan import is_rescan_transaction
 
@@ -1001,6 +1109,7 @@ class GitHubApplication:
                     continuation_digest=continuation_digest,
                     source_guard=source_guard,
                 )
+            publisher_started = True
             publication = (
                 PublicationResult(
                     status="handoff",
@@ -1012,9 +1121,33 @@ class GitHubApplication:
                     or (durable_baseline is not None and current_key is None)
                     or verification_transaction_recovery_required
                 )
-                else self.reviewer.publish(**publisher_arguments)
+                else reviewer.publish(**publisher_arguments)
             )
         except BaseException as publication_error:
+            publication_error.add_note(
+                "publication result retained"
+                if result_retained
+                else "publication result not retained"
+            )
+            if (
+                not publisher_started
+                and isinstance(reviewer, ReviewPublisher)
+                and not isinstance(publication_error, (KeyboardInterrupt, SystemExit))
+            ):
+                try:
+                    reviewer._complete_failed_check(
+                        check_token=self._check_capability_token(exchange_input),
+                        repository=repository,
+                        head_sha=head_sha,
+                        app_slug=app_slug,
+                        policy=options.review_policy(),
+                        transient=False,
+                    )
+                except Exception as check_error:
+                    publication_error.add_note(
+                        "failed publication check could not be updated: "
+                        + type(check_error).__name__
+                    )
             if (
                 ledger is not None
                 and isinstance(result, ReviewResult)

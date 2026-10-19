@@ -2559,11 +2559,38 @@ def record_admitted_blocker_progress(
             # crashed between this CAS and the GitHub write. The progress
             # evidence is already durable; do not charge another generation.
             return record
-        if last.get("generation") != current.generation:
+        failed_checkpoint_placeholder = False
+        if (
+            current.phase == "publication_failed"
+            and set(last) == {"event", "generation"}
+            and type(last.get("generation")) is int
+            and last["generation"] + 1 == current.generation
+            and record.last_committed_reservation_id == current.reservation_id
+        ):
+            # A publication can become unconfirmed before preparation admits
+            # its blocker set (including the pre-POST retention crash fence).
+            # Only the exact checkpoint baseline and reservation can bind this
+            # markerless placeholder to the current durable transaction. An
+            # older/foreign blocker-bearing marker never takes this path.
+            checkpoint = read_session_baseline(ledger, record)
+            failed_checkpoint_placeholder = (
+                checkpoint is not None
+                and checkpoint.complete
+                and checkpoint.generation == last["generation"]
+                and checkpoint.cache_key.repository == current.repository
+                and checkpoint.cache_key.pull_request == current.pull_request
+                and checkpoint.cache_key.base_sha == current.base_sha
+                and checkpoint.cache_key.head_sha == current.head_sha
+                and checkpoint.policy_digest == current.policy_digest
+            )
+        if (
+            last.get("generation") != current.generation
+            and not failed_checkpoint_placeholder
+        ):
             raise ReviewInputError(
                 "durable convergence progress does not match transaction"
             )
-        if current.phase != "publication_pending":
+        if current.phase != "publication_pending" and not failed_checkpoint_placeholder:
             raise ReviewInputError("publication progress phase transition is invalid")
         if set(last) == set(item) and dict(last) != item:
             raise ReviewInputError("durable blocker progress does not match")

@@ -72,6 +72,7 @@ class GitHubIssueCommentOperationPort:
         repository: str,
         pull_request: int,
         app_user_id: int,
+        strict_association: bool = False,
     ) -> None:
         if (
             isinstance(pull_request, bool)
@@ -92,6 +93,10 @@ class GitHubIssueCommentOperationPort:
         )
         self._repository = repository
         self._app_user_id = app_user_id
+        self._issue_url = http.api_url.rstrip("/") + http.repository_path(
+            repository, f"/issues/{pull_request}"
+        )
+        self._strict_association = strict_association
         self.requests = 0
         self._primed: list[object] | None = None
 
@@ -104,7 +109,7 @@ class GitHubIssueCommentOperationPort:
         primed = self._primed
         if primed is not None:
             self._primed = None
-            return tuple(_view(item) for item in primed)
+            return tuple(self._view(item) for item in primed)
         collected: list[OperationComment] = []
         for page in range(1, 11):
             status, payload = self._request(
@@ -112,7 +117,7 @@ class GitHubIssueCommentOperationPort:
             )
             if status != 200 or not isinstance(payload, list) or len(payload) > 100:
                 raise ValueError("operation comment listing is unavailable")
-            collected.extend(_view(item) for item in payload)
+            collected.extend(self._view(item) for item in payload)
             if len(payload) < 100:
                 return tuple(collected)
         raise ValueError("operation comment listing exceeded 10 pages")
@@ -163,7 +168,7 @@ class GitHubIssueCommentOperationPort:
         if status != (201 if created else 200) or not isinstance(payload, dict):
             return None
         try:
-            viewed = _view(payload)
+            viewed = self._view(payload)
         except ValueError:
             return None
         if comment_payload(viewed.body) != comment_payload(body):
@@ -176,12 +181,19 @@ class GitHubIssueCommentOperationPort:
         status, payload = self._request("GET", self._comment_path(comment_id))
         if status != 200 or not isinstance(payload, dict):
             raise ValueError("operation comment readback failed")
-        viewed = _view(payload)
+        viewed = self._view(payload)
         if comment_payload(viewed.body) != comment_payload(body):
             raise ValueError("operation comment readback failed")
         if viewed.user_id != self._app_user_id or viewed.user_type != "Bot":
             raise ValueError("operation comment author mismatch")
         return viewed
+
+    def _view(self, payload: object) -> OperationComment:
+        if self._strict_association and (
+            not isinstance(payload, dict) or payload.get("issue_url") != self._issue_url
+        ):
+            raise ValueError("operation comment pull request association mismatch")
+        return _view(payload)
 
     def _comment_path(self, comment_id: int) -> str:
         return self._http.repository_path(
@@ -257,18 +269,39 @@ class ResultPartStore:
         _parse_event_key(event_key)
         return _join(self._parts(event_key), payload_digest)
 
+    def read_available(self, *, event_key: str) -> tuple[str, bytes] | None:
+        """Read a complete owned payload; its digest alone conveys no authority.
+
+        Publication recovery independently verifies the returned validated result
+        against its exact durable transaction and trusted context.
+        """
+
+        _parse_event_key(event_key)
+        parts = self._parts(event_key)
+        if not parts:
+            return None
+        digest = parts[0].get("result_sha256")
+        if not isinstance(digest, str):
+            raise ValueError("result digest is invalid")
+        return digest, _join(parts, digest)
+
     def _parts(self, event_key: str) -> list[dict[str, object]]:
         found: list[dict[str, object]] = []
+        identities: set[int] = set()
         for comment in self._port.list_comments():
             if RESULT_COMMENT_MARKER not in comment.body:
                 continue
             if comment.user_id != self._app_user_id or comment.user_type != "Bot":
                 continue
+            bounded_comment(comment.body)
             payload = json.loads(comment_payload(comment.body))
             if not isinstance(payload, dict) or payload.get("kind") != "result":
                 raise ValueError("result part is invalid")
             if payload.get("event_key") != event_key:
                 continue
+            if comment.comment_id in identities:
+                raise ValueError("result part identity is duplicated")
+            identities.add(comment.comment_id)
             found.append(payload)
         return found
 
@@ -276,6 +309,12 @@ class ResultPartStore:
 def _join(parts: list[dict[str, object]], payload_digest: str) -> bytes:
     if not parts:
         raise ValueError("result part is missing")
+    if any(
+        type(part.get("count")) is not int
+        or not isinstance(part.get("result_sha256"), str)
+        for part in parts
+    ):
+        raise ValueError("result part is invalid")
     counts = {part.get("count") for part in parts}
     digests = {part.get("result_sha256") for part in parts}
     if len(counts) != 1 or len(digests) != 1 or payload_digest not in digests:
@@ -291,6 +330,15 @@ def _join(parts: list[dict[str, object]], payload_digest: str) -> bytes:
         raise ValueError("result part is missing")
     ordered: dict[int, bytes] = {}
     for part in parts:
+        if set(part) != {
+            "count",
+            "data",
+            "event_key",
+            "index",
+            "kind",
+            "result_sha256",
+        }:
+            raise ValueError("result part is invalid")
         index = part.get("index")
         data = part.get("data")
         if (
@@ -308,6 +356,7 @@ def _join(parts: list[dict[str, object]], payload_digest: str) -> bytes:
     if len(ordered) != count:
         raise ValueError("result part is missing")
     joined = b"".join(ordered[index] for index in range(count))
+    ensure_result_part_capacity(len(joined))
     if hashlib.sha256(joined).hexdigest() != payload_digest:
         raise ValueError("result part digest mismatch")
     return joined
