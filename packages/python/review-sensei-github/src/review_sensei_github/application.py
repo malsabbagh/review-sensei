@@ -384,10 +384,50 @@ class GitHubApplication:
         publication_budget: EvidenceReadBudget | None = None,
     ) -> PublicationResult:
         reviewer = self.reviewer
+        broker = self.broker
         if not options.github_writes or not options.auto_review:
             return PublicationResult(status="disabled")
         if options.operation_entry not in {"enabled", "disabled"}:
             raise GitHubPublicationError("operation entry mode is invalid")
+        prior_budget = (
+            reviewer.finalizer.evidence_budget or reviewer.finalizer._operation_budget
+            if isinstance(reviewer, ReviewPublisher)
+            else None
+        )
+        if (
+            publication_budget is not None
+            and prior_budget is not None
+            and publication_budget is not prior_budget
+        ):
+            raise GitHubPublicationError("publication budget identity mismatches")
+        budget = publication_budget or prior_budget
+        if budget is None and (
+            self.http is not None or isinstance(broker, BrokerClient)
+        ):
+            budget = EvidenceReadBudget()
+        if budget is not None:
+            budget.check()
+            if budget.calls >= 60:
+                raise GitHubPublicationError(
+                    "publication shared request budget exhausted"
+                )
+            if isinstance(broker, BrokerClient):
+                if (
+                    broker.before_request is not None
+                    and broker.before_request != budget.consume
+                ):
+                    raise GitHubPublicationError(
+                        "publication broker budget identity mismatches"
+                    )
+                broker = copy(broker)
+                broker.before_request = budget.consume
+
+        def check_token() -> str | None:
+            token = self._check_capability_token(exchange_input, broker=broker)
+            if budget is not None:
+                budget.check()
+            return token
+
         if base_branch is None or base_sha is None:
             raise GitHubPublicationError(
                 "review publication requires expected base branch and sha"
@@ -500,7 +540,13 @@ class GitHubApplication:
                 ) from exc
             if self.session_ledger is not None:
                 transaction_ledger = self.session_ledger
-                transaction_record = load_transaction(self.session_ledger)
+                if budget is not None:
+                    from .publication_recovery import publication_session_ledger
+
+                    transaction_ledger = publication_session_ledger(
+                        transaction_ledger, budget
+                    )
+                transaction_record = load_transaction(transaction_ledger)
                 if (
                     transaction_record.transaction is not None
                     and transaction_record.transaction.phase == "publication_succeeded"
@@ -510,14 +556,18 @@ class GitHubApplication:
                         status="already_published",
                         diagnostic="transaction-publication-complete",
                     )
-        exchange_input = oidc_token or self.broker.request_oidc_token()
+        exchange_input = oidc_token or broker.request_oidc_token()
+        if budget is not None:
+            budget.check()
         # The publication capability is obtained before the session enrollment
         # is recorded. Enrollment is a durable broker-side witness that this
         # pull request already has a session marker, so recording it for a run
         # that never reaches publication would leave the next run seeing a
         # known witness with no marker, and require authenticated recovery
         # after nothing worse than a transient broker failure.
-        token = self.broker.exchange(exchange_input, capability="review_publish")
+        token = broker.exchange(exchange_input, capability="review_publish")
+        if budget is not None:
+            budget.check()
         session_token: str | None = None
         session_state: str | None = None
         # Only a hosted run has a broker enrollment witness to consult, so the
@@ -538,16 +588,19 @@ class GitHubApplication:
         # `reenroll` and the enrollment retention window exist for.
         if hosted_session_ledger:
             session_token, session_state, _owner = _open_broker_session(
-                self.broker,
+                broker,
                 exchange_input,
                 repository_id=repository_id,
                 pull_request=pull_request,
                 head_sha=head_sha,
             )
+        if budget is not None:
+            budget.check()
         ledger = self._session_ledger_for_token(
             session_token if session_token is not None else token,
             options=options,
             app_slug=app_slug,
+            evidence_budget=budget,
         )
         _require_present_marker(ledger, identity, session_state)
         if (
@@ -830,31 +883,22 @@ class GitHubApplication:
             # An explicit empty tuple is a deliberate narrow scope. Do not
             # silently widen it with paths persisted for an earlier head.
             publication_related_paths = () if related_paths is None else related_paths
+        transport = self.http
         result_retained = False
         publisher_started = False
         try:
-            if (
+            retention_required = (
                 validated_transaction_recovery
                 and options.operation_entry == "enabled"
                 and self.http is not None
+            )
+            if self.http is not None and (
+                retention_required or publication_budget is not None
             ):
-                from .publication_recovery import publication_http, retain_review_result
+                from .publication_recovery import publication_http
 
-                prior_budget = (
-                    reviewer.finalizer.evidence_budget
-                    or reviewer.finalizer._operation_budget
-                    if isinstance(reviewer, ReviewPublisher)
-                    else None
-                )
-                if (
-                    publication_budget is not None
-                    and prior_budget is not None
-                    and publication_budget is not prior_budget
-                ):
-                    raise GitHubPublicationError(
-                        "publication budget identity mismatches"
-                    )
-                budget = publication_budget or prior_budget or EvidenceReadBudget()
+                if budget is None:
+                    raise GitHubPublicationError("publication budget is unavailable")
                 transport = publication_http(self.http, budget)
                 if isinstance(reviewer, ReviewPublisher):
                     reviewer = copy(reviewer)
@@ -864,6 +908,9 @@ class GitHubApplication:
                     reviewer.finalizer.evidence_budget = budget
                     reviewer.checks = copy(reviewer.checks)
                     reviewer.checks.http = transport
+            if retention_required:
+                from .publication_recovery import retain_review_result
+
                 if (
                     ledger is None
                     or configuration_context is None
@@ -1072,7 +1119,7 @@ class GitHubApplication:
                 # approval while the mode withholds it or the reverse.
                 "auto_approve": review_policy == "auto-approve",
                 "reviews_policy": review_policy,
-                "check_token": self._check_capability_token(exchange_input),
+                "check_token": check_token(),
                 "qualification": qualification_state_for_publication(
                     provider=result.provider,
                     model=result.model,
@@ -1136,7 +1183,7 @@ class GitHubApplication:
             ):
                 try:
                     reviewer._complete_failed_check(
-                        check_token=self._check_capability_token(exchange_input),
+                        check_token=check_token(),
                         repository=repository,
                         head_sha=head_sha,
                         app_slug=app_slug,
@@ -1767,7 +1814,9 @@ class GitHubApplication:
                 result = refinalized
         return result
 
-    def _check_capability_token(self, exchange_input: str) -> str | None:
+    def _check_capability_token(
+        self, exchange_input: str, *, broker: BrokerClient | None = None
+    ) -> str | None:
         """Request Checks: write for the merge gate, degrading to no gate.
 
         The gate is a separate authority from review publication, so a broker
@@ -1777,7 +1826,9 @@ class GitHubApplication:
         """
 
         try:
-            return self.broker.exchange(exchange_input, capability="check_publish")
+            return (broker or self.broker).exchange(
+                exchange_input, capability="check_publish"
+            )
         except (GitHubBrokerClientError, GitHubHTTPTransientError):
             return None
 
@@ -1945,8 +1996,13 @@ class GitHubApplication:
         session_attestation: Mapping[str, object] | None = None,
         head_sha: str | None = None,
         actions_token_provider: Callable[[], str] | None = None,
+        evidence_budget: EvidenceReadBudget | None = None,
     ) -> SessionLedger | None:
         if self.session_ledger is not None and not prefer_remote:
+            if evidence_budget is not None:
+                from .publication_recovery import publication_session_ledger
+
+                return publication_session_ledger(self.session_ledger, evidence_budget)
             return self.session_ledger
         if not options.github_session_ledger:
             return None
@@ -1954,7 +2010,7 @@ class GitHubApplication:
 
         if self.http is None:
             raise GitHubPublicationError("GitHub session ledger requires HTTP")
-        ledger = GitHubIssueCommentSessionLedger(
+        ledger: SessionLedger = GitHubIssueCommentSessionLedger(
             self.http,
             token=token,
             app_slug=app_slug,
@@ -1963,7 +2019,12 @@ class GitHubApplication:
             session_attestation=session_attestation,
             head_sha=head_sha,
             actions_token_provider=actions_token_provider,
+            evidence_budget=evidence_budget,
         )
+        if evidence_budget is not None:
+            from .publication_recovery import publication_session_ledger
+
+            ledger = publication_session_ledger(ledger, evidence_budget)
         if session_grant is not None:
             self._bind_consumed_grant(ledger)
         return ledger

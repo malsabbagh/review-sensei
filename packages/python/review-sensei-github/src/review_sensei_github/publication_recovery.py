@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import copy
 from dataclasses import replace
 from typing import Any, Mapping
 from urllib.parse import quote
@@ -92,6 +93,39 @@ def publication_http(
             raise GitHubPublicationError("publication budget identity mismatches")
         return http
     return PublicationBudgetHttp(http, budget)
+
+
+def publication_session_ledger(
+    ledger: SessionLedger, budget: EvidenceReadBudget
+) -> SessionLedger:
+    """Bind actual remote ledger dispatches to the same publication allowance.
+
+    This ledger already charges physical requests itself. Remove only audited
+    wrappers charging that exact budget, without mutating the caller's ledger.
+    """
+    from .human_assessment import FeedbackBudgetHttp
+    from .session_ledger import GitHubIssueCommentSessionLedger
+
+    if not isinstance(ledger, GitHubIssueCommentSessionLedger):
+        return ledger
+    if ledger.evidence_budget is not None and ledger.evidence_budget is not budget:
+        raise GitHubPublicationError("publication ledger budget identity mismatches")
+    copied = copy(ledger)
+    transport = copied.http
+    while type(transport) in {PublicationBudgetHttp, FeedbackBudgetHttp}:
+        if type(transport) is PublicationBudgetHttp:
+            if transport.publication_budget is not budget:
+                raise GitHubPublicationError(
+                    "publication ledger budget identity mismatches"
+                )
+        elif getattr(transport, "before_read") != budget.consume:
+            raise GitHubPublicationError(
+                "publication ledger budget identity mismatches"
+            )
+        transport = getattr(transport, "transport")
+    copied.http = transport
+    copied.evidence_budget = budget
+    return copied
 
 
 def _payload(result: ReviewResult) -> bytes:
@@ -239,6 +273,9 @@ def recover_retained_review_result(
 ) -> ReviewResult:
     """Recover exact owned bytes using an independently selected durable checkpoint."""
     try:
+        budget = budget or EvidenceReadBudget()
+        budget.check()
+        ledger = publication_session_ledger(ledger, budget)
         identity = SessionIdentity(
             repository, pull_request, repository_id=repository_id
         )
@@ -252,7 +289,7 @@ def recover_retained_review_result(
             or transaction.phase == "analysis"
         ):
             raise ReviewInputError("retention requires a durable result checkpoint")
-        transport = publication_http(http, budget or EvidenceReadBudget())
+        transport = publication_http(http, budget)
         store = _store(
             transport,
             token=token,
@@ -336,7 +373,7 @@ def retain_review_result(
             if isinstance(budget, EvidenceReadBudget):
                 # Before any part POST, admit every bounded listing/readback
                 # and a possible lost-response reconciliation, without refill.
-                liability = ensure_result_part_capacity(len(payload)) + 30
+                liability = 2 * ensure_result_part_capacity(len(payload)) + 30
                 if budget.calls + liability > 60:
                     raise ReviewInputError(
                         "retention request liability exceeds the original budget"

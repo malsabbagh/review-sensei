@@ -8,6 +8,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.error import URLError
 from urllib.parse import parse_qs, urlparse
 
 from review_sensei_github import GitHubApplication, GitHubWriteOptions, ReviewPublisher
@@ -23,6 +24,7 @@ from review_sensei.baseline import ReviewBaseline, baseline_finding_from_comment
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.context import ReviewContextCacheKey
 from review_sensei.convergence import ReviewConvergencePolicy
+from review_sensei.coverage import CoverageManifest, FileCoverage
 from review_sensei.models import ReviewComment, ReviewResult, ReviewTransaction
 from review_sensei.session import (
     LocalSessionLedger,
@@ -45,6 +47,7 @@ class RetentionState(State):
         self.part_requests = []
         self.fail_part = None
         self.app_user = {"id": 99, "login": APP, "type": "Bot"}
+        self.session_comment = None
 
     def open(self, request, timeout):
         parsed = urlparse(request.full_url)
@@ -57,7 +60,10 @@ class RetentionState(State):
             self.part_requests.append(request.method)
             if request.method == "GET":
                 page = int(parse_qs(parsed.query).get("page", [1])[0])
-                return json_response(self.parts[(page - 1) * 100 : page * 100])
+                comments = (
+                    [self.session_comment] if self.session_comment else []
+                ) + self.parts
+                return json_response(comments[(page - 1) * 100 : page * 100])
             body = json.loads(request.data)["body"]
             item = {
                 "id": 700 + len(self.parts),
@@ -74,16 +80,29 @@ class RetentionState(State):
                 raise KeyboardInterrupt()
             if self.fail_part == "lost":
                 return json_response({}, 500)
+            if self.fail_part == "echo-missing":
+                return json_response({"id": item["id"]}, 201)
             return json_response(item, 201)
+        if request.method == "GET" and "/issues/comments/" in path:
+            identifier = int(path.rsplit("/", 1)[1])
+            for part in self.parts:
+                if part["id"] == identifier:
+                    self.calls.append(("GET", path, None))
+                    return json_response(part)
+        if self.session_comment is not None and path.endswith("/issues/comments/600"):
+            self.calls.append((request.method, path, None))
+            if request.method == "PATCH":
+                self.session_comment["body"] = json.loads(request.data)["body"]
+            return json_response(self.session_comment)
         return super().open(request, timeout)
 
 
-def checkpoint(ledger, count=77):
+def checkpoint(ledger, count=77, *, body_size=0):
     comments = tuple(
         ReviewComment(
             path="src/app.py",
             line=2,
-            body=f"Independent required decision {i}.",
+            body=f"Independent required decision {i}." + "x" * body_size,
             symbol=f"operation_{i}",
             defect_kind=f"case-{i}",
             needs_human=False,
@@ -152,9 +171,9 @@ def application(state, ledger):
     )
 
 
-def publish(app, result, key, **kwargs):
+def publish(app, result, key, *, options=None, **kwargs):
     return app.publish_review(
-        options=GitHubWriteOptions(auto_review=True, github_writes=True),
+        options=options or GitHubWriteOptions(auto_review=True, github_writes=True),
         oidc_token="oidc",
         repository="owner/repo",
         repository_id=1,
@@ -192,6 +211,376 @@ def recover(app, ledger, **kwargs):
 
 
 class PublicationRecoveryTests(unittest.TestCase):
+    def test_multipart_fallback_readbacks_are_preflighted_and_charged(self):
+        for initial_calls in (0, 20):
+            with (
+                self.subTest(initial_calls=initial_calls),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                ledger = LocalSessionLedger(Path(directory))
+                result, key = checkpoint(ledger, body_size=2000)
+                state = RetentionState()
+                state.fail_part = "echo-missing"
+                budget = EvidenceReadBudget()
+                for _ in range(initial_calls):
+                    budget.consume()
+                with self.assertRaisesRegex(
+                    GitHubPublicationError,
+                    "liability" if initial_calls else "finding index",
+                ):
+                    publish(
+                        application(state, ledger),
+                        result,
+                        key,
+                        publication_budget=budget,
+                    )
+                self.assertEqual(budget.calls - initial_calls, len(state.calls))
+                self.assertLessEqual(budget.calls, 60)
+                if initial_calls:
+                    self.assertEqual(state.part_requests.count("POST"), 0)
+                else:
+                    self.assertGreaterEqual(len(state.parts), 4)
+                    self.assertEqual(
+                        len(
+                            [
+                                p
+                                for m, p, _ in state.calls
+                                if m == "GET" and "/issues/comments/" in p
+                            ]
+                        ),
+                        len(state.parts),
+                    )
+                    self.assertEqual(
+                        recover(application(state, ledger), ledger).content_digest(),
+                        result.content_digest(),
+                    )
+
+    def test_partial_checkpoint_publishes_prose_and_replays_without_clean_authority(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = LocalSessionLedger(Path(directory))
+            prepared = prepare_review_transaction(
+                ledger,
+                IDENTITY,
+                POLICY,
+                reservation_id="d" * 64,
+                base_sha=BASE,
+                head_sha=HEAD,
+                configuration_digest=ReviewTransaction.compute_configuration_digest(
+                    CONFIGURATION
+                ),
+                evidence_digest=ReviewTransaction.compute_evidence_digest(EVIDENCE),
+            )
+            result = checkpoint_review_analysis(
+                ledger,
+                IDENTITY,
+                prepared,
+                ReviewResult(
+                    summary="Partial validated work.",
+                    comments=(
+                        ReviewComment(
+                            path="src/app.py", line=2, body="Retained partial finding."
+                        ),
+                    ),
+                    provider="fixture",
+                    model="fixture-model",
+                    review_status="partial",
+                    coverage=CoverageManifest(
+                        files=(
+                            FileCoverage(path="src/app.py", outcome="reviewed"),
+                            FileCoverage(
+                                path="other.bin",
+                                outcome="budget-exhausted",
+                                reason="provider-call-budget",
+                            ),
+                        ),
+                        enumerated_paths=("src/app.py", "other.bin"),
+                    ),
+                ),
+            )
+            state = RetentionState()
+            state.reviews = []
+            state.fail_part = "crash-after"
+            with self.assertRaises(KeyboardInterrupt):
+                publish(application(state, ledger), result, None)
+            state.fail_part = None
+            fresh = LocalSessionLedger(Path(directory))
+            app = application(state, fresh)
+            budget = EvidenceReadBudget()
+            restored = recover(app, fresh, budget=budget)
+            self.assertEqual(restored.review_status, "partial")
+            outcome = publish(
+                app,
+                restored,
+                None,
+                publication_budget=budget,
+                options=GitHubWriteOptions(
+                    auto_review=True, github_writes=True, complete_inventory=True
+                ),
+            )
+            self.assertEqual(outcome.status, "published")
+            self.assertTrue(
+                any("Retained partial finding." in r["body"] for r in state.reviews)
+            )
+            self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+            self.assertTrue(
+                all(c.get("conclusion") != "success" for c in state.check_runs)
+            )
+            record = fresh.load(IDENTITY).record
+            self.assertEqual(record.failed_attempts, 1)
+            self.assertEqual(record.completed_initial_reviews, 0)
+            self.assertIsNone(record.convergence_history)
+            self.assertEqual(record.transaction.phase, "publication_succeeded")
+
+    def test_remote_session_reads_and_actual_broker_share_one_physical_budget(self):
+        from review_sensei_github.broker_client import BrokerClient
+        from review_sensei_github.session_ledger import (
+            GitHubIssueCommentSessionLedger,
+            render_session_comment,
+        )
+
+        for exhausted in (False, True):
+            with (
+                self.subTest(exhausted=exhausted),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                ledger = LocalSessionLedger(Path(directory))
+                result, key = checkpoint(ledger)
+                state = RetentionState()
+                state.reviews = []
+                state.session_comment = {
+                    "id": 600,
+                    "body": render_session_comment(
+                        repository_id=1,
+                        pull_request=1,
+                        record=ledger.load(IDENTITY).record,
+                    ),
+                    "user": state.app_user,
+                    "issue_url": "https://api.github.test/repos/owner/repo/issues/1",
+                }
+                broker_calls = []
+
+                def broker_open(request, timeout):
+                    broker_calls.append(request)
+                    body = json.loads(request.data)
+                    if body.get("capability") == "review_session":
+                        return json_response(
+                            {
+                                "token": "session-token",
+                                "capability": "review_session",
+                                "session_state": "known",
+                            }
+                        )
+                    return json_response({"token": "capability-token"})
+
+                broker = BrokerClient(
+                    broker_url="https://broker.github.test/token", opener=broker_open
+                )
+                app = GitHubApplication(
+                    broker=broker,
+                    http=state.http,
+                    reviewer=ReviewPublisher(http=state.http),
+                    learner=_Noop(),
+                    replier=_Noop(),
+                )
+                budget = EvidenceReadBudget()
+                if exhausted:
+                    for _ in range(60):
+                        budget.consume()
+                with self.assertRaisesRegex(
+                    Exception, "budget" if exhausted else "finding index"
+                ):
+                    publish(
+                        app,
+                        result,
+                        key,
+                        publication_budget=budget,
+                        options=GitHubWriteOptions(
+                            auto_review=True,
+                            github_writes=True,
+                            github_session_ledger=True,
+                        ),
+                    )
+                if exhausted:
+                    self.assertEqual(state.calls, [])
+                    self.assertEqual(broker_calls, [])
+                    clock = [0.0]
+                    expired = EvidenceReadBudget(clock=lambda: clock[0])
+                    clock[0] = 61.0
+                    remote = GitHubIssueCommentSessionLedger(
+                        state.http, token="read", app_slug=APP
+                    )
+                    with self.assertRaisesRegex(GitHubPublicationError, "deadline"):
+                        recover(app, remote, budget=expired)
+                    self.assertEqual(state.calls, [])
+                else:
+                    self.assertEqual(budget.calls, len(state.calls) + len(broker_calls))
+                    self.assertTrue(state.parts)
+                    self.assertGreater(len(broker_calls), 1)
+                    self.assertLessEqual(budget.calls, 60)
+                self.assertIsNone(broker.before_request)
+
+    def test_fresh_owner_completes_retained_77_without_provider_or_budget_refill(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = LocalSessionLedger(Path(directory))
+            result, key = checkpoint(ledger)
+            state = RetentionState()
+            state.reviews = []
+            with self.assertRaisesRegex(GitHubPublicationError, "finding index"):
+                publish(application(state, ledger), result, key)
+            first_posts = state.part_requests.count("POST")
+            state.calls.clear()
+            fresh = LocalSessionLedger(Path(directory))
+            app = application(state, fresh)
+            budget = EvidenceReadBudget()
+            restored = recover(app, fresh, budget=budget)
+            reads_before_publish = budget.calls
+            outcome = publish(
+                app,
+                restored,
+                key,
+                publication_budget=budget,
+                options=GitHubWriteOptions(
+                    auto_review=True, github_writes=True, complete_inventory=True
+                ),
+            )
+            self.assertEqual(outcome.status, "published")
+            self.assertEqual(state.part_requests.count("POST"), first_posts)
+            self.assertGreater(reads_before_publish, 0)
+            self.assertEqual(budget.calls, len(state.calls))
+            self.assertLessEqual(budget.calls, 60)
+            roots = [
+                body
+                for method, path, body in state.calls
+                if method == "POST" and path.endswith("/reviews") and "comments" in body
+            ]
+            self.assertEqual(len(roots), 1)
+            for comment in result.comments:
+                self.assertIn(comment.body, roots[0]["body"])
+            self.assertEqual(
+                fresh.load(IDENTITY).record.transaction.phase, "publication_succeeded"
+            )
+            self.assertEqual(fresh.load(IDENTITY).record.completed_initial_reviews, 1)
+            self.assertEqual(
+                fresh.load(IDENTITY).record.completed_verification_rounds, 0
+            )
+
+    def test_lost_review_post_fresh_owner_reuses_exact_root_with_or_without_retention(
+        self,
+    ):
+        for operation in ("enabled", "disabled"):
+            with (
+                self.subTest(operation=operation),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                ledger = LocalSessionLedger(Path(directory))
+                result, key = checkpoint(ledger)
+                state = RetentionState()
+                state.reviews = []
+                original = state.http.opener
+                lost = False
+
+                def transport(request, timeout):
+                    nonlocal lost
+                    path = urlparse(request.full_url).path
+                    if lost and request.method == "GET" and path.endswith("/reviews"):
+                        state.calls.append(("GET", path, None))
+                        raise URLError("synthetic unavailable readback")
+                    response = original(request, timeout)
+                    if (
+                        request.method == "POST"
+                        and path.endswith("/reviews")
+                        and not lost
+                    ):
+                        lost = True
+                        raise URLError("synthetic lost review acknowledgement")
+                    return response
+
+                state.http.opener = transport
+                opts = GitHubWriteOptions(
+                    auto_review=True,
+                    github_writes=True,
+                    complete_inventory=True,
+                    operation_entry=operation,
+                )
+                budget = EvidenceReadBudget()
+                with self.assertRaisesRegex(GitHubPublicationError, "reconciliation"):
+                    publish(
+                        application(state, ledger),
+                        result,
+                        key,
+                        options=opts,
+                        publication_budget=budget,
+                    )
+                self.assertEqual(budget.calls, len(state.calls))
+                self.assertEqual(len(state.reviews), 1)
+                self.assertEqual(
+                    ledger.load(IDENTITY).record.transaction.phase, "publication_failed"
+                )
+                state.http.opener = original
+                state.calls.clear()
+                fresh = LocalSessionLedger(Path(directory))
+                app = application(state, fresh)
+                retry_budget = EvidenceReadBudget()
+                retry_result = (
+                    recover(app, fresh, budget=retry_budget)
+                    if operation == "enabled"
+                    else result
+                )
+                outcome = publish(
+                    app,
+                    retry_result,
+                    key,
+                    options=opts,
+                    publication_budget=retry_budget,
+                )
+                self.assertEqual(outcome.status, "already_published")
+                self.assertEqual(retry_budget.calls, len(state.calls))
+                self.assertLessEqual(retry_budget.calls, 60)
+                self.assertFalse(
+                    [
+                        body
+                        for method, path, body in state.calls
+                        if method == "POST"
+                        and path.endswith("/reviews")
+                        and "comments" in body
+                    ]
+                )
+                self.assertEqual(
+                    len(
+                        [r for r in state.reviews if "Findings explained" in r["body"]]
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    fresh.load(IDENTITY).record.completed_initial_reviews, 1
+                )
+
+    def test_disabled_retention_still_honors_exhausted_publication_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = LocalSessionLedger(Path(directory))
+            result, key = checkpoint(ledger, 1)
+            state = RetentionState()
+            budget = EvidenceReadBudget()
+            for _ in range(60):
+                budget.consume()
+            with self.assertRaisesRegex(Exception, "budget"):
+                publish(
+                    application(state, ledger),
+                    result,
+                    key,
+                    publication_budget=budget,
+                    options=GitHubWriteOptions(
+                        auto_review=True,
+                        github_writes=True,
+                        operation_entry="disabled",
+                        complete_inventory=True,
+                    ),
+                )
+            self.assertEqual(state.calls, [])
+            self.assertEqual(budget.calls, 60)
+
     def test_default_publication_failure_retains_exact_result_for_fresh_owner(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
