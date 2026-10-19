@@ -407,6 +407,10 @@ def _legacy_inventory(
     repository: str,
     pull_request: int,
     review: dict[str, Any],
+    empty_discussion: bool = False,
+    repository_id: int | None = None,
+    app_slug: str | None = None,
+    before_read=None,
 ):
     """Eligibility needs-human IDs, plus inline instance/lifecycle pairs."""
 
@@ -419,6 +423,7 @@ def _legacy_inventory(
         finding_blocking_from_body,
         finding_fingerprint_from_body,
         finding_instance_from_body,
+        finding_publication_scope,
     )
 
     body = review.get("body")
@@ -455,15 +460,61 @@ def _legacy_inventory(
             token=token,
             max_requests=MAX_PAGINATION_PAGES,
             timeout_seconds=60,
+            before_read=before_read,
         )
     except GitHubHTTPError as exc:
         raise ReviewInputError("current review inventory is incomplete") from exc
+    if not isinstance(comments, list):
+        raise ReviewInputError("current review inventory is incomplete")
+    comment_ids: set[int] = set()
+    root_base: str | None = None
     for comment in comments:
         if not isinstance(comment, dict):
+            if empty_discussion:
+                raise ReviewInputError("current review inventory is incomplete")
             continue
         comment_body = comment.get("body")
+        if empty_discussion:
+            user = comment.get("user")
+            comment_id = comment.get("id")
+            if (
+                type(comment_id) is not int
+                or comment_id < 1
+                or comment_id in comment_ids
+                or type(comment.get("pull_request_review_id")) is not int
+                or comment["pull_request_review_id"] != review_id
+                or not isinstance(user, dict)
+                or user.get("type") != "Bot"
+                or not isinstance(user.get("login"), str)
+                or user["login"].casefold() != (app_slug or "").casefold()
+                or not isinstance(comment_body, str)
+            ):
+                raise ReviewInputError("current review inventory is incomplete")
+            comment_ids.add(comment_id)
+            parent = comment.get("in_reply_to_id")
+            if parent is not None:
+                if type(parent) is not int or parent < 1:
+                    raise ReviewInputError("current review inventory is incomplete")
+                # A positively owned inline reply is discussion, not a new
+                # top-level finding, regardless of IDs quoted in its prose.
+                continue
         instance = finding_instance_from_body(comment_body)
         lifecycle = finding_fingerprint_from_body(comment_body)
+        scope = finding_publication_scope(comment_body) if empty_discussion else None
+        if empty_discussion:
+            if (
+                instance is None
+                or lifecycle is None
+                or instance in seen
+                or scope is None
+                or scope[:3] != (repository_id, pull_request, review.get("commit_id"))
+                or (root_base is not None and root_base != scope[3])
+                or comment_body.count("<!-- reviewsensei:finding:") != 1
+            ):
+                # Unknown, malformed or conflicting top-level roots must not
+                # expose an older clean inventory as if this were only replies.
+                raise ReviewInputError("current review inventory is incomplete")
+            root_base = scope[3]
         if not isinstance(instance, str) or instance in seen or lifecycle is None:
             continue
         seen.add(instance)
@@ -473,7 +524,7 @@ def _legacy_inventory(
                 instance=instance,
                 lifecycle=lifecycle,
                 blocking=blocking,
-                needs_human=False,
+                needs_human=scope[-1] is True if scope is not None else False,
                 body_placed=False,
                 overridable=True,
             )
@@ -498,6 +549,8 @@ def _override_facts(
     from the latest App review on this head. Older heads are returned only so
     a receipt can name the commit that last displayed an unknown ID.
     """
+
+    from time import monotonic
 
     from review_sensei_github.errors import GitHubHTTPError
     from review_sensei_github.http import MAX_PAGINATION_PAGES
@@ -536,8 +589,30 @@ def _override_facts(
     if not isinstance(reviews, list):
         raise ReviewInputError("current review fingerprints are unavailable")
     latest: dict[str, Any] | None = None
+    latest_legacy = None
     prior: dict[str, dict[str, Any]] = {}
-    for review in reviews:
+    legacy_requests = 0
+    legacy_deadline = monotonic() + 60
+
+    def before_legacy_read() -> float:
+        nonlocal legacy_requests
+        remaining = legacy_deadline - monotonic()
+        if legacy_requests >= MAX_PAGINATION_PAGES or remaining <= 0:
+            raise ReviewInputError("current review inventory is incomplete")
+        legacy_requests += 1
+        return min(60, remaining)
+
+    # Inspect only newer candidates, with one shared bounded metadata walk.
+    # An authoritative current-head record ends discussion-container fallback.
+    for review in sorted(
+        reviews,
+        key=lambda item: (
+            item.get("id", -1)
+            if isinstance(item, dict) and type(item.get("id")) is int
+            else -1
+        ),
+        reverse=True,
+    ):
         if not isinstance(review, dict):
             continue
         user = review.get("user")
@@ -553,14 +628,32 @@ def _override_facts(
         ):
             continue
         if commit_id == head_sha:
-            if latest is None or review_id >= int(latest["id"]):
-                latest = review
+            if latest is not None:
+                continue
+            if review.get("state") == "COMMENTED" and review.get("body") in (None, ""):
+                candidate = _legacy_inventory(
+                    http,
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    review=review,
+                    empty_discussion=True,
+                    repository_id=repository_id,
+                    app_slug=app_slug,
+                    before_read=before_legacy_read,
+                )
+                if not candidate:
+                    continue
+                latest_legacy = candidate
+            latest = review
             continue
         previous = prior.get(commit_id)
         if previous is None or review_id >= int(previous["id"]):
             prior[commit_id] = review
     inventory: tuple[Any, ...] = ()
-    if latest is not None and isinstance(latest.get("body"), str):
+    if latest_legacy is not None:
+        inventory = latest_legacy
+    elif latest is not None and isinstance(latest.get("body"), str):
         index = finding_inventory_for_head(
             latest["body"],
             repository_id=repository_id,
@@ -576,6 +669,7 @@ def _override_facts(
                 repository=repository,
                 pull_request=pull_request,
                 review=latest,
+                before_read=before_legacy_read,
             )
     prior_heads: list[tuple[str, tuple[Any, ...]]] = []
     for commit_id, review in prior.items():

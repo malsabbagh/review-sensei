@@ -641,3 +641,8 @@ application boundary or grant another provider allowance. Unbound older accepted
 payloads require a new authorized mention. See the replay amendment in
 [ADR 0061](adr/0061-human-reply-reassessment.md) and the finite source matrix in
 [large lifecycle qualification](validation/large-lifecycle.md).
+
+Only confirmed owned replies or a complete empty comment list permit fallback.
+Genuine top-level legacy findings retain their exact-head inventory authority.
+Unknown, malformed, conflicting or unreadable roots refuse fallback.
+The metadata walk retains one shared ten-request, sixty-second bound.
