@@ -910,14 +910,6 @@ class HumanAssessmentPublisher:
             raise GitHubConversationError(
                 "human assessment identities are invalid"
             ) from exc
-        if not self.source_fence(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            prepared=prepared,
-            app_slug=app_slug,
-        ):
-            return ReplyResult(status="skipped_edited_source")
         if "<!-- reviewsensei:" in reply.body:
             raise GitHubConversationError(
                 "human assessment reply contains a reserved marker"
@@ -959,13 +951,6 @@ class HumanAssessmentPublisher:
             raise GitHubConversationError(
                 "human assessment review capability is missing"
             )
-        current = self.finalizer.load_eligibility(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=conversation.head_sha,
-            app_slug=app_slug,
-        )
         refreshed = replace(
             original,
             human_review=updated_inventory,
@@ -974,24 +959,14 @@ class HumanAssessmentPublisher:
                 has_human_adjudication_findings=bool(updated_inventory.pending),
             ),
         )
-        if current not in (original, refreshed):
-            return ReplyResult(status="skipped_stale_head")
-        preflight = self.finalizer._preflight(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            head_sha=conversation.head_sha,
-            app_slug=app_slug,
-        )
-        if preflight.result is not None:
-            return ReplyResult(status=preflight.result.status)
-        if preflight.app_authored or preflight.base_sha != inventory.base_sha:
-            return ReplyResult(status="skipped_stale_base")
-        resuming = current == refreshed and (
-            updated_inventory != inventory or not inventory.pending
-        )
+        # Receipt scans and local report framing cannot activate decisions.
+        # Acquire the complete fresh source/root/PR fence in the pending-page
+        # callback immediately before each write or reconciled return instead
+        # of spending another identical fence before that read-only work.
+        resuming = False
 
         def pending_fence() -> str | None:
+            nonlocal resuming
             if not self.source_fence(
                 token=token,
                 repository=repository,
@@ -1020,6 +995,9 @@ class HumanAssessmentPublisher:
                 return live.result.status
             if live.app_authored or live.base_sha != inventory.base_sha:
                 return "skipped_stale_base"
+            resuming = latest == refreshed and (
+                updated_inventory != inventory or not inventory.pending
+            )
             return None
 
         self._preflight_reference_capacity(prepared, refreshed)

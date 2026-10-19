@@ -1555,11 +1555,10 @@ class ConversationPublisher:
             decision_reasons=decision_reasons,
             assessment_digest=assessment_digest,
         )
-        failure = fence()
-        if failure is not None:
-            return ReplyResult(
-                status=failure, assessment_status="pending_delivery_incomplete"
-            )
+        # Receipt enumeration is read-only. Fence after that scan, immediately
+        # before reusing a completed report or writing each missing page; an
+        # extra pre-scan fence consumes the same original operation allowance
+        # without protecting any additional mutation or authoritative return.
         previous = self._completed_pending_report(
             token=arguments["token"],
             repository=arguments["repository"],
