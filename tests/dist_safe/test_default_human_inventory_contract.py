@@ -26,6 +26,7 @@ import test_default_human_inventory_cli  # noqa: E402
 import test_default_human_inventory_publisher  # noqa: E402
 import test_default_human_inventory_store  # noqa: E402
 import test_default_human_reader_binding  # noqa: E402
+import test_feedback_fence_budget  # noqa: E402
 
 
 class InstalledDefaultHumanInventoryTests(
@@ -54,6 +55,12 @@ class InstalledDefaultHumanStorageTests(
 
 class InstalledDefaultHumanReaderBindingTests(
     test_default_human_reader_binding.DefaultHumanReaderBindingTests
+):
+    pass
+
+
+class InstalledReplyBrokerBudgetTests(
+    test_feedback_fence_budget.ReplyBrokerBudgetTests
 ):
     pass
 

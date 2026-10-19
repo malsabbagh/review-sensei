@@ -69,7 +69,8 @@
         "tests/test_evidence_capacity.py",
         "tests/test_default_human_inventory_cli.py",
         "tests/test_default_human_inventory_publisher.py",
-        "tests/test_default_human_reader_binding.py"
+        "tests/test_default_human_reader_binding.py",
+        "tests/test_feedback_fence_budget.py"
       ],
       "description": "Runs after pip install dist/*.whl from a directory that cannot import checkout src/. Tests load only packaged or generated assets."
     },

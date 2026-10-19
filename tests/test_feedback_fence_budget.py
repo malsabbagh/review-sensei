@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from copy import deepcopy
 
+from review_sensei_github import (
+    BrokerClient,
+    GitHubApplication,
+    GitHubWriteOptions,
+    ReviewPublisher,
+)
 from review_sensei_github.conversation import ConversationPublisher
 from review_sensei_github.human_assessment import HumanAssessmentPublisher
 from review_sensei_github.publication_recovery import publication_http
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.errors import ReviewInputError
 from review_sensei.human_assessment import HumanAssessmentService
 from review_sensei.models import ConversationReply
+from tests.fake_github_http import json_response
 from tests.test_human_assessment import APP, HEAD, Provider, State, response_for
 
 
@@ -76,6 +85,7 @@ class FeedbackFenceBudgetTests(unittest.TestCase):
         self.assertLess(fence_ends[0], write)
         self.assertGreater(fence_ends[-1], write)
         self.assertEqual(self.budget.calls, len(self.state.calls))
+
         self.assertEqual(self.state.events(), [])
 
     def test_exact_receipt_replay_fences_after_scan_without_duplicate_write(self):
@@ -160,6 +170,66 @@ class FeedbackFenceBudgetTests(unittest.TestCase):
         self.assertIn(("GET", "/repos/owner/repo/pulls/1/reviews"), between)
         self.assertIn(("GET", "/repos/owner/repo/pulls/1"), between)
         self.assertEqual(self.budget.calls, len(self.state.calls))
+
+
+class ReplyBrokerBudgetTests(unittest.TestCase):
+    def reply(self, *, expire_after_review=False):
+        self.state = State()
+        self.clock = [0.0]
+        self.budget = EvidenceReadBudget(clock=lambda: self.clock[0])
+        self.broker_calls = []
+
+        def exchange(request, timeout):
+            capability = json.loads(request.data)["capability"]
+            self.broker_calls.append((capability, timeout))
+            if expire_after_review and capability == "review_publish":
+                self.clock[0] = 60.0
+            return json_response({"token": "synthetic"})
+
+        application = GitHubApplication(
+            broker=BrokerClient(opener=exchange),
+            http=self.state.http,
+            reviewer=ReviewPublisher(http=self.state.http),
+            learner=None,
+            replier=ConversationPublisher(http=self.state.http),
+        )
+        return application.generate_and_publish_reply(
+            options=GitHubWriteOptions(github_writes=True, mention_replies=True),
+            oidc_token="synthetic",
+            read_token="read",
+            repository="owner/repo",
+            pull_request=1,
+            source_comment_id=10,
+            source_updated_at="updated",
+            expected_head_sha=HEAD,
+            reply_provider=Provider(response_for(self.state.eligibility)),
+            model="fixture",
+            app_slug=APP,
+            root_comment_id=10,
+            source_kind="issue",
+            evidence_budget=self.budget,
+        )
+
+    def test_every_real_broker_capability_dispatch_shares_the_http_allowance(self):
+        outcome = self.reply()
+        self.assertEqual(outcome.approval_status, "approved")
+        self.assertEqual(
+            [name for name, _ in self.broker_calls],
+            ["issue_reply", "review_publish", "check_publish"],
+        )
+        self.assertEqual(
+            self.budget.calls, len(self.state.calls) + len(self.broker_calls)
+        )
+        self.assertLessEqual(self.budget.calls, 60)
+        self.assertTrue(all(0 < timeout <= 30 for _, timeout in self.broker_calls))
+
+    def test_expired_original_deadline_prevents_check_capability_dispatch(self):
+        with self.assertRaises(ReviewInputError):
+            self.reply(expire_after_review=True)
+        self.assertEqual(
+            [name for name, _ in self.broker_calls], ["issue_reply", "review_publish"]
+        )
+        self.assertNotIn("APPROVE", self.state.events())
 
 
 if __name__ == "__main__":

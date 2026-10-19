@@ -2943,7 +2943,9 @@ class GitHubApplication:
                             exchange_input,
                             capability="review_publish",
                         )
-                        check_token = self._check_capability_token(exchange_input)
+                        check_token = self._check_capability_token(
+                            exchange_input, broker=broker
+                        )
                     reply_outcome = assessor.publish(
                         token=capability_token,
                         review_token=review_token,

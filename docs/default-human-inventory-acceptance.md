@@ -32,6 +32,13 @@ service timing or real provider correctness.
 | Local immutable-part read cost (#240, #269) | Bounded POSIX immutable-byte cache with fresh containment/device/inode/size/mtime/ctime witness | `test_local_partition_read_cache` immutable-part cache tests; lifecycle matrix above | Mutable roots remain fresh. Windows uses full hashing; rich Windows capacity is explicitly held rather than positively qualified. |
 | Reusable and installed CLI (#246) | Actual CLI, distribution-safe test and post-package lifecycle contract | Three `test_default_human_inventory_cli.DefaultHumanInventoryCliTests` cases; `dist_safe/test_default_human_inventory_contract.py`; `published_cli/lifecycle.py` | CLI test covers raw proposal admission, fresh recovery without result file/provider construction, partial human reply and changed trusted key refusal. Installed runs must prove wheel origin and exact bytes. |
 
+The real `BrokerClient` reply regression in
+`test_feedback_fence_budget.ReplyBrokerBudgetTests` counts all three capability
+exchanges together with physical GitHub HTTP dispatches, and proves an expired
+original deadline prevents check-token dispatch. The broker transport is a
+fixture here; hosted broker elapsed-time and delivery qualification remain
+separate. Both tests also run against the installed package.
+
 ## Related coverage and remaining conditions
 
 Large legacy reports also consolidate common guidance and use bounded two-scan
