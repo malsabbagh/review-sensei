@@ -24,10 +24,12 @@ from .operation_host import (
     AdmissionProof,
     ExecutionResult,
     InMemoryOperationStore,
+    OperationHandle,
     OperationHost,
     OperationRefusal,
     OperationRequest,
     ProviderOutput,
+    RestoredOperation,
     TransitionPlan,
     _binding,
     _event_key_text,
@@ -169,6 +171,39 @@ class HostedProviderResult:
     fresh: object | None
     replay_payload: bytes | None
     payload_digest: str | None
+    operation: RestoredOperation | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HostedComputationIdentity:
+    """Complete caller-owned computation identity, separate from store cursor.
+
+    These digests bind retained work; they do not authenticate a source or grant.
+    The caller must obtain its admission proof from actual verified authority.
+    """
+
+    operation_id: str
+    inventory_digest: str
+    source_digest: str
+
+    def __post_init__(self) -> None:
+        if any(
+            not isinstance(value, str) or _HEX64.fullmatch(value) is None
+            for value in (self.operation_id, self.inventory_digest, self.source_digest)
+        ):
+            raise ReviewInputError("hosted computation identity is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class HostedOperationExecution:
+    """Actual restored handle supplied inside the charged computation callback.
+
+    The handle retains its original admission binding/deadline. Declared host
+    dispatch liability is not a measurement of all physical GitHub/broker calls.
+    """
+
+    handle: OperationHandle
+    request: OperationRequest
 
 
 def _computation_cursor(
@@ -343,6 +378,9 @@ def run_hosted_provider(
     encode: Callable[[object], bytes],
     parts: ResultPartStore | None = None,
     now: Callable[[], int] | None = None,
+    bootstrap_dispatches: int = 1,
+    identity: HostedComputationIdentity | None = None,
+    execute_with_operation: Callable[[HostedOperationExecution], object] | None = None,
 ) -> HostedProviderResult | OperationRefusal:
     """Admit one trigger, call the provider once, and keep the validated bytes.
 
@@ -351,7 +389,17 @@ def run_hosted_provider(
     Fresh work requires owned ResultPartStore capacity; without it, only an
     already accepted embedded result can replay. A result_missing refusal before
     admission can be retried with that storage configured and the same identity.
+    The optional handle-aware callback receives only a real restored admission;
+    it cannot receive an unaccepted fresh result on a failed computation.
     """
+
+    if (
+        identity is not None and not isinstance(identity, HostedComputationIdentity)
+    ) or (
+        execute_with_operation is not None
+        and (identity is None or not callable(execute_with_operation))
+    ):
+        return OperationRefusal("invalid")
 
     proof = github_admission_proof(
         repository_id=repository_id,
@@ -391,9 +439,15 @@ def run_hosted_provider(
     root, generation, target = cursor
     request = OperationRequest(
         event_id=event,
-        operation_id=_sha256(f"operation\n{reservation_id}"),
-        inventory_digest=_sha256(f"inventory\n{repository_id}:{pull_request}"),
-        source_digest=_sha256(f"source\n{delivery_id}"),
+        operation_id=identity.operation_id
+        if identity is not None
+        else _sha256(f"operation\n{reservation_id}"),
+        inventory_digest=identity.inventory_digest
+        if identity is not None
+        else _sha256(f"inventory\n{repository_id}:{pull_request}"),
+        source_digest=identity.source_digest
+        if identity is not None
+        else _sha256(f"source\n{delivery_id}"),
         root_sha=root,
         root_generation=generation,
         producer_contract=trigger,
@@ -413,7 +467,17 @@ def run_hosted_provider(
     captured: dict[str, object] = {}
 
     def provider_call() -> ProviderOutput:
-        value = execute()
+        if execute_with_operation is None:
+            value = execute()
+        else:
+            restored = host.restore_operation(proof, request)
+            if not isinstance(restored, RestoredOperation):
+                raise ReviewInputError(
+                    "original hosted operation handle is unavailable"
+                )
+            value = execute_with_operation(
+                HostedOperationExecution(restored.handle, request)
+            )
         captured["value"] = value
         payload = encode(value)
         if not isinstance(payload, bytes) or not payload:
@@ -432,11 +496,12 @@ def run_hosted_provider(
         validator=lambda output, measured: measured == len(output.output),
         grant=grant,
         server_started_ms=server_started_ms,
+        bootstrap_dispatches=bootstrap_dispatches,
     )
     if isinstance(admitted, OperationRefusal):
         return admitted
     if admitted.status != "accepted" or admitted.packet is None:
-        if "value" in captured:
+        if "value" in captured and execute_with_operation is None:
             return HostedProviderResult(captured["value"], None, None)
         return OperationRefusal(admitted.reason or "provider_unknown")
     payload_digest = admitted.packet.payload_digest
@@ -467,10 +532,14 @@ def run_hosted_provider(
     )
     if refused is not None:
         return refused
+    restored = host.restore_operation(proof, request)
+    if not isinstance(restored, RestoredOperation):
+        return OperationRefusal("result_missing")
     return HostedProviderResult(
         captured.get("value"),
         None if "value" in captured else retained,
         payload_digest,
+        restored,
     )
 
 
@@ -691,11 +760,35 @@ def call_operation_trigger(
     decode: Callable[[bytes], object],
     parts: ResultPartStore | None = None,
     now_ms: int | None = None,
+    identity: HostedComputationIdentity | None = None,
+    execute_with_operation: Callable[[HostedOperationExecution], object] | None = None,
+    clock: Callable[[], int] | None = None,
+    server_started_ms: int | None = None,
+    bootstrap_dispatches: int | None = None,
 ) -> object:
     """Run one trigger, or decode the bytes already accepted for it."""
 
-    # The host clock is a 32-bit generation counter, not Unix time.
-    started = 1_000 if now_ms is None else now_ms
+    # Preserve the existing structural wrapper by default. A handle-aware
+    # caller must supply its original clock origin and measured bootstrap;
+    # neither a new origin nor the fixture clock can qualify that lifecycle.
+    if execute_with_operation is not None and (
+        not callable(clock)
+        or server_started_ms is None
+        or identity is None
+        or bootstrap_dispatches is None
+    ):
+        raise ReviewInputError("operation entry requires original clock and identity")
+    if (clock is None) != (server_started_ms is None) or (
+        clock is not None and now_ms is not None
+    ):
+        raise ReviewInputError("operation entry clock configuration is invalid")
+    started = (
+        server_started_ms
+        if server_started_ms is not None
+        else 1_000
+        if now_ms is None
+        else now_ms
+    )
     admitted = run_hosted_provider(
         store,
         trigger=trigger,
@@ -712,7 +805,12 @@ def call_operation_trigger(
         execute=execute,
         encode=encode,
         parts=parts,
-        now=lambda: started,
+        now=clock if clock is not None else lambda: started,
+        bootstrap_dispatches=1
+        if bootstrap_dispatches is None
+        else bootstrap_dispatches,
+        identity=identity,
+        execute_with_operation=execute_with_operation,
     )
     if isinstance(admitted, OperationRefusal):
         raise ReviewInputError(f"operation entry refused: {admitted.reason}")

@@ -51,6 +51,10 @@ MAX_EVENTS_PER_SCOPE = 256
 MAX_TRANSITIONS_PER_EVENT = 64
 MAX_RETAINED_TRANSITIONS = 16_384
 _MAX_GENERATION = 2_147_483_647
+# Timestamp values use the existing comment protocol's safe JSON-integer
+# domain. A cursor generation is not a wall clock (Unix milliseconds already
+# exceed its 32-bit ceiling). Retain room for the whole original deadline.
+_MAX_TIMESTAMP_MS = 9_007_199_254_740_991
 _HELD = frozenset({"inflight", "unknown", "pending"})
 _HEX64 = re.compile(r"^[a-f0-9]{64}$")
 _HEX32 = re.compile(r"^[a-f0-9]{32}$")
@@ -1136,7 +1140,7 @@ class OperationHost:
             return None
         if isinstance(now, bool) or not isinstance(now, int) or now < 0:
             return None
-        if now > _MAX_GENERATION - CONTROL_DEADLINE_MS:
+        if now > _MAX_TIMESTAMP_MS - CONTROL_DEADLINE_MS:
             return None
         return now
 
@@ -1232,7 +1236,7 @@ REVIEW_TRIGGERS = frozenset({"full-review", "reply", "reassessment", "verify"})
 OPERATION_COMMENT_MARKER = "<!-- review-sensei-operation -->"
 RESULT_COMMENT_MARKER = "<!-- review-sensei-result -->"
 _COMMENT_BOUND = 60_000
-_STAMP_MAX = 9_007_199_254_740_991
+_STAMP_MAX = _MAX_TIMESTAMP_MS
 _TRANSITION_STATES = frozenset({"inflight", "unknown", "pending", "confirmed"})
 _PLAN_KEY = re.compile(r"^[A-Za-z0-9._|,:-]{1,4096}$")
 _EVENT_FIELDS = frozenset(
