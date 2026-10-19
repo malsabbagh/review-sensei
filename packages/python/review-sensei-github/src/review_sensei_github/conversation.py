@@ -30,6 +30,7 @@ from review_sensei.models import (
 from review_sensei.presentation import append_response_instructions
 from review_sensei.validation import validate_repository_path
 
+from .approval import ReviewApprovalEligibility
 from .errors import (
     GitHubConversationError,
     GitHubConversationTransientError,
@@ -75,6 +76,20 @@ DIFF_HUNK_HEADER = re.compile(
     r"\+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@"
 )
 MARKER_PREFIX = "<!-- reviewsensei:reply:v1"
+
+
+@dataclass(frozen=True)
+class _PendingPageStage:
+    """Internal page admission after a strict same-report subset scan.
+
+    This replaces only repeated receipt enumeration. Source authorization,
+    root association and the live PR preflight still execute in ``publish``.
+    The final whole-report scan must confirm every acknowledged ID and body.
+    """
+
+    owner: object
+    scope: tuple[object, ...]
+    page: PendingReplyPage
 
 
 def _digest(value: str) -> str:
@@ -1236,11 +1251,31 @@ class ConversationPublisher:
         resolution_evidence: str | None = None,
         resolution_base_sha: str | None = None,
         resolution_token: str | None = None,
+        _pending_stage: _PendingPageStage | None = None,
     ) -> ReplyResult:
         if not GIT_SHA_HEX.fullmatch(head_sha):
             raise GitHubConversationError("reply head sha is invalid")
         if not isinstance(reply, ConversationReply):
             raise GitHubConversationError("reply is invalid")
+        if _pending_stage is not None and (
+            not isinstance(_pending_stage, _PendingPageStage)
+            or _pending_stage.owner is not self
+            or _pending_stage.page != pending_page
+            or pending_page is None
+            or reply.resolve
+            or _pending_stage.scope
+            != (
+                repository,
+                pull_request,
+                source_comment_id,
+                source_updated_at,
+                head_sha,
+                app_slug,
+                root_comment_id,
+                source_kind,
+            )
+        ):
+            raise GitHubConversationError("pending reply stage is invalid")
         marker = reply_marker(
             source_comment_id=source_comment_id,
             source_updated_digest=_digest(source_updated_at),
@@ -1341,14 +1376,18 @@ class ConversationPublisher:
             root_body = root.get("body")
             root_is_blocking_finding = finding_declares_blocking(root_body)
 
-        existing = self._find_existing(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            marker=marker,
-            app_slug=app_slug,
-            source_kind=source_kind,
-            expected_body=body if pending_page is not None else None,
+        existing = (
+            None
+            if _pending_stage is not None
+            else self._find_existing(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                marker=marker,
+                app_slug=app_slug,
+                source_kind=source_kind,
+                expected_body=body if pending_page is not None else None,
+            )
         )
         if existing is not None:
             if self._can_record_resolution(
@@ -1429,6 +1468,10 @@ class ConversationPublisher:
                 body=request_body,
             )
         except GitHubHTTPTransientError as exc:
+            if _pending_stage is not None:
+                raise GitHubConversationTransientError(
+                    "pending reply page acknowledgement is unknown"
+                ) from exc
             existing_after = self._find_existing(
                 token=token,
                 repository=repository,
@@ -1446,6 +1489,10 @@ class ConversationPublisher:
         if status == 201 and isinstance(created, dict):
             comment_id = created.get("id")
             if type(comment_id) is int and comment_id > 0:
+                if _pending_stage is not None:
+                    return ReplyResult(
+                        status="pending_page_staged", comment_id=comment_id
+                    )
                 if pending_page is not None:
                     confirmed = self._find_existing(
                         token=token,
@@ -1490,6 +1537,12 @@ class ConversationPublisher:
                         approval_diagnostic=resolution.approval_diagnostic,
                     )
                 return ReplyResult(status="replied", comment_id=comment_id)
+        if _pending_stage is not None and (
+            status == 201 or status in {409, 422, 429} or status >= 500
+        ):
+            raise GitHubConversationTransientError(
+                "pending reply page acknowledgement is unknown"
+            )
         if status == 422 or status == 409 or status == 429 or status >= 500:
             existing_after = self._find_existing(
                 token=token,
@@ -1579,6 +1632,13 @@ class ConversationPublisher:
             decision_reasons=decision_reasons,
             assessment_digest=assessment_digest,
         )
+        if (
+            isinstance(eligibility, ReviewApprovalEligibility)
+            and eligibility.human_inventory_reference is not None
+        ):
+            return self._stage_pending_report(
+                pages=pages, fence=fence, arguments=arguments
+            )
         # Receipt enumeration is read-only. Fence after that scan, immediately
         # before reusing a completed report or writing each missing page; an
         # extra pre-scan fence consumes the same original operation allowance
@@ -1635,6 +1695,104 @@ class ConversationPublisher:
             comment_id=last.comment_id,
         )
 
+    def _stage_pending_report(
+        self,
+        *,
+        pages: tuple[PendingReplyPage, ...],
+        fence: Callable[[], str | None],
+        arguments: dict[str, Any],
+    ) -> ReplyResult:
+        """Stage v5 pages between two complete, strict receipt scans.
+
+        An uncertain write stops staging. Only a complete final remote proof
+        can reconcile it; the next invocation may resume a validated subset.
+        No partial receipt authorizes a resolution or approval transition.
+        """
+        scan_arguments = {
+            key: arguments[key]
+            for key in (
+                "token",
+                "repository",
+                "pull_request",
+                "source_comment_id",
+                "source_updated_at",
+                "head_sha",
+                "app_slug",
+            )
+        }
+        scan_arguments.update(
+            source_kind=arguments.get("source_kind", "inline"),
+            report_digest=pages[0].report_digest,
+            pages=pages,
+            strict_association=True,
+        )
+        known = self._pending_report_parts(**scan_arguments)
+        if len(known) == len(pages):
+            failure = fence()
+            return ReplyResult(
+                status=failure or "already_replied",
+                comment_id=known[len(pages)],
+                assessment_status="pending_delivery_incomplete" if failure else None,
+            )
+        page_arguments = {
+            **arguments,
+            "reply": ConversationReply(arguments["reply"].body, False),
+        }
+        scope = tuple(
+            arguments.get(key, "inline") if key == "source_kind" else arguments[key]
+            for key in (
+                "repository",
+                "pull_request",
+                "source_comment_id",
+                "source_updated_at",
+                "head_sha",
+                "app_slug",
+                "root_comment_id",
+                "source_kind",
+            )
+        )
+        acknowledged = dict(known)
+        for page in pages:
+            if page.index + 1 in known:
+                continue
+            failure = fence()
+            if failure is not None:
+                return ReplyResult(
+                    status=failure,
+                    assessment_status="pending_delivery_incomplete",
+                )
+            try:
+                staged = self.publish(
+                    **page_arguments,
+                    pending_page=page,
+                    _pending_stage=_PendingPageStage(self, scope, page),
+                )
+            except GitHubConversationTransientError:
+                # Never issue a further POST when the last outcome is unknown.
+                break
+            if staged.status != "pending_page_staged":
+                return ReplyResult(
+                    status=staged.status,
+                    comment_id=staged.comment_id,
+                    assessment_status="pending_delivery_incomplete",
+                )
+            assert staged.comment_id is not None
+            acknowledged[page.index + 1] = staged.comment_id
+        confirmed = self._pending_report_parts(**scan_arguments)
+        if len(confirmed) != len(pages) or any(
+            confirmed.get(index) != comment_id
+            for index, comment_id in acknowledged.items()
+        ):
+            raise GitHubConversationTransientError(
+                "pending reply report readback is incomplete or changed; retry reconciliation"
+            )
+        failure = fence()
+        return ReplyResult(
+            status=failure or "replied",
+            comment_id=confirmed[len(pages)],
+            assessment_status="pending_delivery_incomplete" if failure else None,
+        )
+
     def _completed_pending_report(
         self,
         *,
@@ -1650,6 +1808,36 @@ class ConversationPublisher:
         app_slug: str,
     ) -> int | None:
         """Reconcile complete earlier delivery for the same authoritative state."""
+        found = self._pending_report_parts(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            source_kind=source_kind,
+            source_comment_id=source_comment_id,
+            source_updated_at=source_updated_at,
+            head_sha=head_sha,
+            report_digest=report_digest,
+            pages=pages,
+            app_slug=app_slug,
+        )
+        return found[len(pages)] if len(found) == len(pages) else None
+
+    def _pending_report_parts(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        source_kind: str,
+        source_comment_id: int,
+        source_updated_at: str,
+        head_sha: str,
+        report_digest: str,
+        pages: tuple[PendingReplyPage, ...],
+        app_slug: str,
+        strict_association: bool = False,
+    ) -> dict[int, int]:
+        """Validate every matching owned receipt, including incomplete subsets."""
         marker = (
             reply_marker(
                 source_comment_id=source_comment_id,
@@ -1692,6 +1880,13 @@ class ConversationPublisher:
                 or comment["id"] < 1
             ):
                 raise GitHubConversationError("pending reply receipt conflicts")
+            if strict_association:
+                self._require_comment_association(
+                    comment=comment,
+                    repository=repository,
+                    pull_request=pull_request,
+                    source_kind=source_kind,
+                )
             index, count = int(parsed[1]), int(parsed[2])
             if (
                 not 1 <= index <= count == len(pages)
@@ -1707,9 +1902,7 @@ class ConversationPublisher:
             counts.add(count)
         if len(counts) > 1:
             raise GitHubConversationError("pending reply receipt conflicts")
-        if counts and set(found) == set(range(1, next(iter(counts)) + 1)):
-            return found[max(found)]
-        return None
+        return found
 
     @bounded_reply_publication
     def publish_current(self, **arguments) -> ReplyResult:
