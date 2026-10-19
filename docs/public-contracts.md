@@ -1340,3 +1340,36 @@ but cannot clear human findings without this inventory. The document is not a
 provider-controlled public result; only the App publisher records it. Literal
 evidence validation and authenticated source/base/head checks precede every
 update. See [ADR 0061](adr/0061-human-reply-reassessment.md).
+
+## Bounded default publication and result retention
+
+`github.publication_inventory` is `legacy` by default and accepts only `legacy`
+or `complete`. Updated v1 index readers accept at most 250 entries. The default
+writer remains limited to 64 until trusted configuration explicitly selects
+`complete`; both reusable-workflow lanes forward that policy. The complete writer
+preserves full finding prose and identities or refuses before review/check writes.
+Existing 65,536-byte review, individual-item, future-assessment and path limits
+still apply. Compact 250-entry acceptance is not qualification of every rich
+250-finding review. Complete-profile replay checks authenticated actual prose and
+placement rather than treating an identity-only old review as complete.
+
+An identity-bound publication with `github.operation_entry: enabled` stores the
+final validated canonical ReviewResult using existing owned PR result parts before
+review/check publication. No raw diff, provider prompt or credential is stored,
+and `github.artifacts: none` continues to disable diagnostics artifacts. The
+existing `operation_entry: disabled` and writes-disabled paths remain opt-outs.
+`github review --recover-retained` loads these bytes without inference and requires
+the exact repository/PR/base/head, trusted configuration/evidence contexts and an
+independent session ledger. The accepted-operation guard remains in force. Only
+a validated durable transaction permits removing its mutable envelope when
+comparing the exact precheckpoint operation-accepted content. Other differences
+refuse. Transaction-bound publication identity includes its logical transaction
+and content, excluding mutable phase/generation; unbound legacy identity is
+unchanged. Existing older transaction-hash publications cannot be silently adopted.
+
+Retention, acceptance reads, ledger reads and publication share one 60-second,
+60 ordinary / 64 total dispatch budget per publication attempt. A failed or
+interrupted initial retention write enters an unconfirmed publication phase;
+fresh owners reconcile complete owned parts and cannot blindly recreate missing
+parts. This is conservative serial recovery, not distributed atomic compare-and-swap
+for comment-ledger concurrent writers. See [the rollout and recovery runbook](validation/default-publication-recovery.md).

@@ -82,6 +82,11 @@ def _github_parser() -> argparse.ArgumentParser:
     )
     publication_source = review.add_mutually_exclusive_group()
     publication_source.add_argument("--result", type=Path)
+    publication_source.add_argument(
+        "--recover-retained",
+        action="store_true",
+        help="Recover the original transaction-bound result from owned PR parts without inference; trusted contexts and a session ledger remain required.",
+    )
     review.add_argument(
         "--configuration-context",
         type=Path,
@@ -158,6 +163,21 @@ def _github_parser() -> argparse.ArgumentParser:
             "Canonical github.reviews mode: auto-approve (default), blocking, "
             "or advisory. Takes precedence over the approval boolean."
         ),
+    )
+    review.add_argument(
+        "--config", type=Path, help="Trusted publication configuration file"
+    )
+    review.add_argument(
+        "--publication-inventory",
+        choices=("legacy", "complete"),
+        default=None,
+        help="Enable complete larger inventories only after all readers support them; default comes from trusted configuration.",
+    )
+    review.add_argument(
+        "--operation-entry",
+        choices=("enabled", "disabled"),
+        default=None,
+        help="Preserve the configured validated-result retention policy.",
     )
     review.add_argument(
         "--enable-learning-prs",
@@ -322,13 +342,16 @@ def _require_accepted_result(
     repository: str,
     pull_request: int,
     app_slug: str,
+    operation_entry: str | None = None,
+    publication_http: Any = None,
+    checkpoint: dict[str, Any] | None = None,
 ) -> None:
     """Refuse publication when an operation record accepted different bytes."""
 
     if not os.environ.get("GITHUB_RUN_ID", "").strip():
         return
     configuration = load_configuration(None)
-    if configuration.github.operation_entry != "enabled":
+    if (operation_entry or configuration.github.operation_entry) != "enabled":
         return
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if not isinstance(token, str) or not token.strip():
@@ -337,7 +360,7 @@ def _require_accepted_result(
     from review_sensei_github.http import MAX_PAGINATION_PAGES, GitHubHttp
     from review_sensei_github.operation_entry import accepted_payload_matches
 
-    http = GitHubHttp()
+    http = publication_http if publication_http is not None else GitHubHttp()
     try:
         comments = http.paginate(
             path=http.repository_path(repository, f"/issues/{pull_request}/comments"),
@@ -373,6 +396,20 @@ def _require_accepted_result(
         ).encode()
     ).hexdigest()
     match = accepted_payload_matches(tuple(bodies), digest)
+    if match is False and checkpoint is not None:
+        from review_sensei.session import load_review_transaction_for_publication
+
+        # Analysis accepts bytes before the durable checkpoint adds its
+        # transaction envelope. Only an independently validated durable
+        # transaction permits that one normalization; retained part hashes do
+        # not constitute an operation acceptance proof.
+        load_review_transaction_for_publication(result=result, **checkpoint)
+        original = result.to_dict()
+        original.pop("transaction", None)
+        original_digest = hashlib.sha256(
+            json.dumps(original, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        match = accepted_payload_matches(tuple(bodies), original_digest)
     if match is False:
         raise ReviewInputError(
             "published result does not match the accepted operation record"
@@ -982,7 +1019,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             "base_sha": args.base_sha,
             "head_sha": args.head_sha,
         }
-        if args.recover_from and args.enable_learning_prs:
+        if (args.recover_from or args.recover_retained) and args.enable_learning_prs:
             outcome = RunOutcome(
                 "publication_failed",
                 diagnostic="recovery_learning_prs_refused",
@@ -1069,7 +1106,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             emit_host_outcome(outcome, output_path=args.outcome)
             print(review_publication.status)
             return run_outcome_exit_code(outcome.status)
-        if args.result is None:
+        if args.result is None and not args.recover_retained:
             outcome = RunOutcome(
                 "publication_failed",
                 diagnostic="publication_failed",
@@ -1077,16 +1114,22 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             )
             emit_host_outcome(outcome, output_path=args.outcome)
             print(
-                "review-sensei: review publication requires --result or --recover-from",
+                "review-sensei: review publication requires --result, --recover-from or --recover-retained",
                 file=sys.stderr,
             )
             print(outcome.status)
             return run_outcome_exit_code(outcome.status)
-        result = ReviewResult.from_dict(
-            json.loads(
-                read_bounded_utf8(args.result, maximum=2_097_152, label="result")
-            )
+        publication_configuration = load_configuration(args.config)
+        publication_inventory = (
+            args.publication_inventory
+            or publication_configuration.github.publication_inventory
         )
+        operation_entry = (
+            args.operation_entry or publication_configuration.github.operation_entry
+        )
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+
+        publication_budget = EvidenceReadBudget()
         configuration_context = (
             _load_context_document(
                 args.configuration_context,
@@ -1100,6 +1143,62 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             if args.evidence_context is not None
             else None
         )
+        if args.recover_retained:
+            if operation_entry != "enabled":
+                raise ReviewInputError(
+                    "retained result recovery requires operation_entry: enabled"
+                )
+            if not args.enable_review or not args.base_sha:
+                raise ReviewInputError(
+                    "retained result recovery requires review publication and exact base SHA"
+                )
+            if configuration_context is None or evidence_context is None:
+                raise ReviewInputError(
+                    "retained result recovery requires trusted configuration and evidence contexts"
+                )
+            metadata_token = os.environ.get("GITHUB_TOKEN") or os.environ.get(
+                "GH_TOKEN"
+            )
+            if not isinstance(metadata_token, str) or not metadata_token.strip():
+                raise ReviewInputError(
+                    "retained result recovery requires a metadata token"
+                )
+            recovery_ledger = session_ledger
+            if recovery_ledger is None and args.github_session_ledger:
+                from review_sensei_github.session_ledger import (
+                    GitHubIssueCommentSessionLedger,
+                )
+
+                recovery_ledger = GitHubIssueCommentSessionLedger(
+                    http,
+                    token=metadata_token.strip(),
+                    app_slug=args.app_slug,
+                    evidence_budget=publication_budget,
+                )
+            if recovery_ledger is None:
+                raise ReviewInputError(
+                    "retained result recovery requires a session ledger"
+                )
+            result = application.recover_retained_review_result(
+                token=metadata_token.strip(),
+                repository=args.repository,
+                repository_id=args.repository_id,
+                pull_request=args.pull_request,
+                base_sha=args.base_sha,
+                head_sha=args.head_sha,
+                app_slug=args.app_slug,
+                ledger=recovery_ledger,
+                configuration_context=configuration_context,
+                evidence_context=evidence_context,
+                convergence_policy=convergence_policy,
+                budget=publication_budget,
+            )
+        else:
+            result = ReviewResult.from_dict(
+                json.loads(
+                    read_bounded_utf8(args.result, maximum=2_097_152, label="result")
+                )
+            )
         admission_baseline = None
         admission_current_key = None
         if args.admission_context is not None:
@@ -1120,11 +1219,63 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 )
             except ReviewInputError as exc:
                 raise ReviewInputError(f"admission context is invalid: {exc}") from exc
+        acceptance_checkpoint = None
+        acceptance_http = None
+        if os.environ.get("GITHUB_RUN_ID", "").strip() and operation_entry == "enabled":
+            from review_sensei_github.publication_recovery import publication_http
+
+            acceptance_http = publication_http(http, publication_budget)
+            if result.transaction is not None and configuration_context is not None:
+                from review_sensei.models import ReviewTransaction
+                from review_sensei.session import SessionIdentity
+
+                acceptance_ledger = session_ledger
+                if args.recover_retained:
+                    acceptance_ledger = recovery_ledger
+                if acceptance_ledger is None and args.github_session_ledger:
+                    from review_sensei_github.session_ledger import (
+                        GitHubIssueCommentSessionLedger,
+                    )
+
+                    read_token = os.environ.get("GITHUB_TOKEN") or os.environ.get(
+                        "GH_TOKEN"
+                    )
+                    if not isinstance(read_token, str) or not read_token.strip():
+                        raise ReviewInputError("operation record is unavailable")
+                    acceptance_ledger = GitHubIssueCommentSessionLedger(
+                        http,
+                        token=read_token.strip(),
+                        app_slug=args.app_slug,
+                        evidence_budget=publication_budget,
+                    )
+                if acceptance_ledger is not None:
+                    acceptance_checkpoint = dict(
+                        ledger=acceptance_ledger,
+                        identity=SessionIdentity(
+                            repository=args.repository,
+                            pull_request=args.pull_request,
+                            repository_id=args.repository_id,
+                        ),
+                        base_sha=args.base_sha,
+                        head_sha=args.head_sha,
+                        policy_digest=convergence_policy.digest(),
+                        configuration_digest=ReviewTransaction.compute_configuration_digest(
+                            configuration_context
+                        ),
+                        evidence_digest=ReviewTransaction.compute_evidence_digest(
+                            evidence_context
+                            if evidence_context is not None
+                            else {"evidence_policy": "legacy", "snapshot_sha256": None}
+                        ),
+                    )
         _require_accepted_result(
             result,
             repository=args.repository,
             pull_request=args.pull_request,
             app_slug=args.app_slug,
+            operation_entry=operation_entry,
+            publication_http=acceptance_http,
+            checkpoint=acceptance_checkpoint,
         )
         try:
             review_outcome = application.publish_review(
@@ -1134,6 +1285,8 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     auto_approve=args.enable_auto_approve,
                     reviews_policy=getattr(args, "reviews_policy", None),
                     github_session_ledger=getattr(args, "github_session_ledger", False),
+                    complete_inventory=publication_inventory == "complete",
+                    operation_entry=operation_entry,
                 ),
                 oidc_token=args.oidc_token,
                 repository=args.repository,
@@ -1150,6 +1303,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 evidence_context=evidence_context,
                 baseline=admission_baseline,
                 current_key=admission_current_key,
+                publication_budget=publication_budget,
             )
         except GitHubPublicationTransientError as exc:
             outcome = RunOutcome(
