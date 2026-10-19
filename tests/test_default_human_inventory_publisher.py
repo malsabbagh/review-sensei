@@ -321,6 +321,90 @@ class DefaultHumanInventoryPublisherTests(unittest.TestCase):
         self.assertEqual(again.status, "already_published")
         self.assertEqual(len(self.state.reviews), 1)
 
+    def small_publication(self, *, human):
+        comment = replace(
+            self.result.comments[0],
+            needs_human=human,
+            effective_blocking=False,
+            severity=self.result.comments[0].severity if human else "low",
+        )
+        result = replace(self.result, transaction=None, comments=(comment,))
+        ledger = LocalSessionLedger(Path(self.directory.name) / "small")
+        prepared = prepare_review_transaction(
+            ledger,
+            IDENTITY,
+            POLICY,
+            reservation_id="e" * 64,
+            base_sha=BASE,
+            head_sha=HEAD,
+            configuration_digest=self.context.configuration_digest,
+            evidence_digest=self.context.evidence_digest,
+        )
+        result = checkpoint_review_analysis(ledger, IDENTITY, prepared, result)
+        context = build_human_inventory_context(
+            http=self.http,
+            token="synthetic",
+            ledger=ledger,
+            identity=IDENTITY,
+            base_sha=BASE,
+            head_sha=HEAD,
+            app_slug=APP,
+            publication_digest=review_result_digest(result),
+            policy_digest=POLICY.digest(),
+            configuration_digest=self.context.configuration_digest,
+            evidence_digest=self.context.evidence_digest,
+            budget=self.budget,
+        )
+        store = HumanInventoryStore(self.http, "synthetic", ledger, context)
+        staged = []
+        original = store.stage
+
+        def observe(document, **kwargs):
+            reference = original(document, **kwargs)
+            staged.append((reference, document))
+            return reference
+
+        with patch.object(store, "stage", side_effect=observe):
+            outcome = self.publish(
+                result=result, human_inventory_store=store, auto_approve=False
+            )
+        self.assertEqual(outcome.status, "published")
+        self.assertEqual(len(staged), 1)
+        reference, document = staged[0]
+        self.assertEqual(store.read(reference), document)
+        eligibility = approval_eligibility_from_body(self.state.reviews[-1]["body"])
+        self.assertIsNone(eligibility.human_inventory_reference)
+        self.assertIsNone(eligibility.partitioned_root)
+        index = parse_finding_index(
+            document["finding_index"],
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            head_sha=HEAD,
+        )
+        self.assertEqual(len(index.entries), 1)
+        self.assertEqual(index.entries[0].needs_human, human)
+        self.assertFalse(index.entries[0].blocking)
+        self.assertFalse(result.to_dict()["comments"][0].get("needs_human", False))
+        return document, result
+
+    def test_small_legacy_compatible_review_also_retains_exact_runtime_admission(self):
+        document, result = self.small_publication(human=True)
+        restored = inventory_from_result_document(
+            document["human_inventory"],
+            result_digest=review_result_digest(result),
+            base_sha=BASE,
+        )
+        self.assertEqual(
+            restored.inventory_document(),
+            PendingHumanReview.from_result(result, BASE).inventory_document(),
+        )
+
+    def test_clean_review_retains_explicit_null_inventory_and_complete_admission_index(
+        self,
+    ):
+        document, _ = self.small_publication(human=False)
+        self.assertIsNone(document["human_inventory"])
+
 
 if __name__ == "__main__":
     unittest.main()

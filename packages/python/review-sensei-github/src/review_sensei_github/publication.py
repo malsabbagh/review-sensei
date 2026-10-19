@@ -3527,41 +3527,42 @@ class ReviewPublisher:
         # before the first inventory, check, or review write. No reference or
         # caller-supplied hash can authorize a new staging attempt.
         needs_human_inventory = False
+        stage_human_inventory = complete_inventory and human_inventory_store is not None
         human_inventory = prospective_eligibility.human_review
+        if stage_human_inventory:
+            from .default_human_inventory import (
+                HumanInventoryReference,
+                HumanInventoryStore,
+            )
+
+            if not isinstance(human_inventory_store, HumanInventoryStore):
+                raise GitHubPublicationError("human inventory store is invalid")
+            context = human_inventory_store.context
+            if (
+                context.repository != repository
+                or context.repository_id != repository_id
+                or context.pull_request != pull_request
+                or context.base_sha != base_sha
+                or context.head_sha != head_sha
+                or context.app_slug.casefold() != app_slug.casefold()
+                or context.original_content_digest != result.content_digest()
+                or context.publication_digest != review_result_digest(result)
+                or context.budget
+                is not (
+                    self.finalizer.evidence_budget or self.finalizer._operation_budget
+                )
+                or result.transaction is None
+                or context.transaction_id != result.transaction.transaction_id
+            ):
+                raise GitHubPublicationError(
+                    "human inventory store authority mismatches publication"
+                )
         if human_inventory is not None:
             try:
                 human_inventory.to_dict()
             except ReviewInputError:
-                if not complete_inventory or human_inventory_store is None:
+                if not stage_human_inventory:
                     raise
-                from .default_human_inventory import (
-                    HumanInventoryReference,
-                    HumanInventoryStore,
-                )
-
-                if not isinstance(human_inventory_store, HumanInventoryStore):
-                    raise GitHubPublicationError("human inventory store is invalid")
-                context = human_inventory_store.context
-                if (
-                    context.repository != repository
-                    or context.repository_id != repository_id
-                    or context.pull_request != pull_request
-                    or context.base_sha != base_sha
-                    or context.head_sha != head_sha
-                    or context.app_slug.casefold() != app_slug.casefold()
-                    or context.original_content_digest != result.content_digest()
-                    or context.publication_digest != review_result_digest(result)
-                    or context.budget
-                    is not (
-                        self.finalizer.evidence_budget
-                        or self.finalizer._operation_budget
-                    )
-                    or result.transaction is None
-                    or context.transaction_id != result.transaction.transaction_id
-                ):
-                    raise GitHubPublicationError(
-                        "human inventory store authority mismatches publication"
-                    )
                 prospective_eligibility = replace(
                     prospective_eligibility,
                     human_inventory_reference=HumanInventoryReference(
@@ -3925,17 +3926,21 @@ class ReviewPublisher:
                 raise GitHubPublicationError(
                     "complete inline publication requires reconciliation of retained explanations"
                 )
-        if needs_human_inventory:
+        if stage_human_inventory:
             from review_sensei.human_inventory import inventory_result_document
 
             assert human_inventory_store is not None
-            assert human_inventory is not None
             assert complete_review is not None
+            # The full index preserves runtime admission even for a small or
+            # clean review. Raw ReviewResult retention omits those flags, so
+            # absence of a human inventory alone must never mean clean recovery.
             reference = human_inventory_store.stage(
                 {
                     "human_inventory": inventory_result_document(
                         human_inventory, result_digest=review_result_digest(result)
-                    ),
+                    )
+                    if human_inventory is not None
+                    else None,
                     "finding_index": finding_index_marker(
                         repository_id=repository_id,
                         pull_request=pull_request,
@@ -3949,9 +3954,10 @@ class ReviewPublisher:
                 },
                 allow_start=allow_human_inventory_start,
             )
-            prospective_eligibility = replace(
-                prospective_eligibility, human_inventory_reference=reference
-            )
+            if needs_human_inventory:
+                prospective_eligibility = replace(
+                    prospective_eligibility, human_inventory_reference=reference
+                )
             # Staging is nonauthoritative and may span multiple requests. Fence
             # the actual PR again before check/root mutations; retained parts
             # remain evidence if that original head changed during staging.
