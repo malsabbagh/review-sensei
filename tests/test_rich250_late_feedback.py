@@ -22,6 +22,7 @@ from review_sensei_github.errors import (
 from review_sensei_github.human_assessment import HumanAssessmentPublisher
 from review_sensei_github.partitioned_assessment import PartitionedAssessmentPlan
 from review_sensei_github.prose_publication import CommentReviewProseStore
+from review_sensei_github.publication_parts import prepare_finding_prose_parts
 
 from review_sensei.assessment_queue import pack_queue_state
 from review_sensei.bounded_evidence import EvidenceReadBudget
@@ -30,6 +31,7 @@ from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.errors import ReviewInputError
 from review_sensei.evidence import evidence_digest
 from review_sensei.feedback import FeedbackReference, FeedbackSelector
+from review_sensei.human_assessment import finding_instance_fingerprint
 from review_sensei.presentation import assign_finding_identifiers
 from review_sensei.session import LocalSessionLedger, mutate_commit
 from tests.test_evidence_capacity import human_result, publication_diff, varied_comments
@@ -163,9 +165,11 @@ class Rich250LateFeedbackTests(unittest.TestCase):
         feedback_budget=None,
         history_count=0,
         review_history_count=0,
+        comments_override=None,
+        target_override=None,
     ):
         state = RichState(history_count=history_count)
-        comments = varied_comments(250, detail=1, unique_paths=250)
+        comments = comments_override or varied_comments(250, detail=1, unique_paths=250)
         state.files = [
             {"filename": item.path, "patch": DIFF, "additions": 1, "deletions": 1}
             for item in comments
@@ -225,9 +229,12 @@ class Rich250LateFeedbackTests(unittest.TestCase):
         publisher = HumanAssessmentPublisher(
             http=state.http, before_read=budget.consume, partitioned_reader=reader
         )
-        target = sorted(
-            item.fingerprint for item in receipt.eligibility.human_review.findings
-        )[-1]
+        target = (
+            target_override
+            or sorted(
+                item.fingerprint for item in receipt.eligibility.human_review.findings
+            )[-1]
+        )
         reference = FeedbackReference("issue", 10, "assessment-1")
         selector = FeedbackSelector(
             "owner/repo", 1, BASE, HEAD, reference, (reference,), (target,)
@@ -898,3 +905,75 @@ class Rich250LateFeedbackTests(unittest.TestCase):
                     self.assertEqual(len(provider.calls), 1)
                     self.assertIsNone(host.accepted_context)
             host.plan = original
+
+    def test_cross_part_prefix_collision_uses_complete_original_alias_set(self):
+        comments = list(varied_comments(250, detail=1, unique_paths=250))
+        # Fixed genuine SHA256 prefix collision, derived from these exact
+        # validated comments. No monkeypatch or synthetic claimed fingerprint.
+        for index, nonce in ((0, 40998), (1, 1405)):
+            comments[index] = replace(
+                comments[index],
+                body=comments[index].body
+                + f"\n\nTrace receipt: {index}-{nonce}; verify its original generation before acknowledging.",
+            )
+        first, second = (finding_instance_fingerprint(item) for item in comments[:2])
+        self.assertEqual(
+            first, "cc4cfaaf712c1664052965d9f66411aaaef4f7454fd8d6eb85a205951e1ad531"
+        )
+        self.assertEqual(
+            second, "cc4cfa98b6ac55d53da67c5d658255329190a4f3cab6ff01da49ee5f328c45d9"
+        )
+        self.assertEqual(first[:6], second[:6])
+        identifiers = tuple(finding_instance_fingerprint(item) for item in comments)
+        aliases = assign_finding_identifiers(identifiers)
+        parts = prepare_finding_prose_parts(tuple(comments), head_sha=HEAD)
+        part_by_id = {
+            identifier: part.index for part in parts for identifier in part.instances
+        }
+        self.assertNotEqual(part_by_id[first], part_by_id[second])
+        self.assertEqual((part_by_id[second], part_by_id[first]), (2, 3))
+        for identifier in (first, second):
+            part = parts[part_by_id[identifier]]
+            self.assertIn(f"`{aliases[identifier]}`", part.body)
+            self.assertNotEqual(
+                aliases[identifier],
+                assign_finding_identifiers((identifier,))[identifier],
+            )
+            self.assertNotEqual(
+                aliases[identifier],
+                assign_finding_identifiers(part.instances)[identifier],
+            )
+        with tempfile.TemporaryDirectory() as directory:
+            values = self.fixture(
+                directory, comments_override=tuple(comments), target_override=first
+            )
+            state, publisher, prepared, work, provider, host = values
+            self.publish(values)
+            root = state.reviews[-1]["body"]
+            self.assertIn(f"`{aliases[first]}` (`{first}`)", root)
+            self.assertNotIn(f"`{aliases[second]}` (`{second}`)", root)
+            self.assertIn(
+                "Every other visible finding ID in these historical reports remains pending",
+                root,
+            )
+            self.assertIn("their earlier pending labels are historical", root)
+            self.assertEqual(host.plan.context.budget.calls, 53)
+            roots = len(state.reviews)
+            self.publish(values)
+            self.assertEqual(len(state.reviews), roots)
+            self.assertEqual(host.plan.context.budget.calls, 57)
+            latest = publisher.finalizer.load_eligibility(
+                token="synthetic",
+                repository="owner/repo",
+                pull_request=1,
+                head_sha=HEAD,
+                app_slug=APP,
+                require_valid=True,
+            )
+            self.assertEqual(latest.human_review.resolved, (first,))
+            self.assertIn(
+                second, {item.fingerprint for item in latest.human_review.pending}
+            )
+            self.assertEqual(len(latest.human_review.pending), 249)
+            self.assertEqual(len(provider.calls), 1)
+            self.assertNotIn("APPROVE", state.events())

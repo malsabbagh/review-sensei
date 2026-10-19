@@ -191,6 +191,13 @@ the accepted decision in its original queue without claiming root delivery or
 approval. The 100-review-record first delivery does not qualify its replay.
 Known insufficient delivery capacity refuses before an authority mutation.
 
+`test_cross_part_prefix_collision_uses_complete_original_alias_set` uses two
+genuine SHA256 finding IDs with the same six-character prefix, split across
+prose parts 3 and 4. Root aliases come from the same complete original 250-ID
+set, so neither subset-only nor per-part alias assignment can rename a visible
+finding. The resolved alias/full-ID pair and every-other-alias-pending rule
+preserve unambiguous status for all 249 retained pending findings.
+
 Additional tests cover schema-valid/in-place root edits, exact root byte binding,
 prose missing/duplicate/owner/head/placement/body faults before dispatch (zero
 provider calls), changes after provider (no accepted receipt), pre-publication
