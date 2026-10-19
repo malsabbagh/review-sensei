@@ -187,6 +187,25 @@ class DistributionLaneTests(unittest.TestCase):
                 with self.subTest(module=module.name, imported=name):
                     self.assertIn(f"tests/{name}.py", helpers)
 
+    def test_override_metadata_contract_helper_closure_is_installation_safe(self):
+        """The public command fixture must not pull checkout-only tests in."""
+        helpers = set(CONTRACT["lanes"]["dist_safe"]["helpers"])
+        pending = [ROOT / "tests/dist_safe/test_override_metadata_contract.py"]
+        inspected: set[Path] = set()
+        runtime = {"review_sensei", "review_sensei_github"}
+        while pending:
+            module = pending.pop()
+            if module in inspected:
+                continue
+            inspected.add(module)
+            for name in _top_level_imports(module) - sys.stdlib_module_names - runtime:
+                relative = f"tests/{name}.py"
+                with self.subTest(module=module.name, imported=name):
+                    self.assertIn(relative, helpers)
+                    self.assertTrue((ROOT / relative).is_file())
+                pending.append(ROOT / relative)
+        self.assertIn(ROOT / "tests/test_override_metadata_integration.py", inspected)
+
     def test_dist_safe_lane_imports_nothing_beyond_the_installed_artifact(self):
         """The lane proves the artifact is self-sufficient, so bound its imports.
 

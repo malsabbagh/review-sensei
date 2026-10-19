@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.8.2 - 2026-10-19
+
+- Keep current-head finding IDs addressable after App inline discussion replies
+  create empty review containers; preserve newer review authority and refusals.
+
 - Preserve prior concerns and history across every admitted full baseline
   refresh, including changed base/model recovery; omitted findings remain partial.
 - Bound provider transport to the original remaining review deadline, recheck
@@ -15,6 +20,10 @@
   Positive runtime report binding and legacy standalone finalizer qualification
   remain pending. Extend installed/post-package lifecycle acceptance with explicit
   finite capacity and deployment limitations.
+
+## review-sensei-github 0.3.2 - 2026-10-19
+
+- Pin `review-sensei==0.8.2`.
 
 ## 0.8.1 - 2026-10-18
 
