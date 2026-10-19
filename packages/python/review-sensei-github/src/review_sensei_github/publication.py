@@ -5565,6 +5565,7 @@ class ReviewPublisher:
                 repository, f"/pulls/{pull_request}/reviews/{review_id}/comments"
             ),
             token=token,
+            page_sizes=(100, 50, 25, 5, 1),
             max_requests=MAX_PAGINATION_PAGES,
             timeout_seconds=60,
         )
