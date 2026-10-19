@@ -8,16 +8,18 @@ from hashlib import sha256
 from urllib.error import URLError
 from urllib.parse import parse_qs, urlparse
 
-from review_sensei_github import GitHubPublicationError, ReviewPublisher
+from review_sensei_github import GitHubHttp, GitHubPublicationError, ReviewPublisher
 from review_sensei_github.publication import (
     IndexedFinding,
     PublicationLimitError,
+    ReviewApprovalFinalizer,
     approval_eligibility_from_body,
     finding_index_marker,
     parse_finding_index,
     review_result_digest,
 )
 
+from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.context import finding_lifecycle_for_comment
 from review_sensei.convergence import BlockerCandidate, ReviewConvergencePolicy
 from review_sensei.errors import ReviewInputError
@@ -114,6 +116,48 @@ def inline_state():
 
 
 class CompleteInventoryPublicationTests(unittest.TestCase):
+    def test_shared_publication_transport_charges_each_physical_review_read_once(self):
+        state = State()
+        budget = EvidenceReadBudget()
+
+        class SharedTransport(GitHubHttp):
+            def __init__(self):
+                self.publication_budget = budget
+                self.api_url = state.http.api_url
+
+            def request(self, method, path, *, token, body=None, timeout_seconds=None):
+                remaining = budget.consume()
+                return state.http.request(
+                    method,
+                    path,
+                    token=token,
+                    body=body,
+                    timeout_seconds=min(remaining, timeout_seconds)
+                    if timeout_seconds is not None
+                    else remaining,
+                )
+
+        finalizer = ReviewApprovalFinalizer(
+            http=SharedTransport(), evidence_budget=budget
+        )
+        self.assertIsNotNone(
+            finalizer.load_eligibility(
+                token="synthetic",
+                repository="owner/repo",
+                pull_request=1,
+                head_sha=HEAD,
+                app_slug=APP,
+                require_valid=True,
+            )
+        )
+        physical = sum(
+            path.endswith("/reviews")
+            for method, path, _ in state.calls
+            if method == "GET"
+        )
+        self.assertEqual(physical, 1)
+        self.assertEqual(budget.calls, physical)
+
     def assert_no_mutations(self, state):
         self.assertFalse(
             [

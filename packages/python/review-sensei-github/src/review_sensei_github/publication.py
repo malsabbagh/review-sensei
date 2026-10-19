@@ -1315,6 +1315,16 @@ class _BudgetedReviewPagination(GitHubHttp):
         timeout_seconds: float | None = None,
     ) -> tuple[int, dict[str, Any] | list[Any] | None]:
         try:
+            if getattr(self.transport, "publication_budget", None) is self.budget:
+                result = self.transport.request(
+                    method,
+                    path,
+                    token=token,
+                    body=body,
+                    timeout_seconds=timeout_seconds,
+                )
+                self.budget.check()
+                return result
             remaining = self.budget.consume()
             result = self.transport.request(
                 method,
