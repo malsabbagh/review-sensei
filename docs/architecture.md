@@ -1,40 +1,31 @@
 ## Default human inventory references
 
-Complete publication may use closed eligibility schema 5 when the admitted human
-inventory exceeds legacy future-assessment capacity. Purpose-bound owned parts
-preserve every admitted instance, metadata and original index. Independent durable
-transaction and live repository/PR/base/head/numeric Bot authority are required;
-references alone grant none. Inference, decisions and approval require fresh
-complete original prose and index verification. Nonauthoritative receipt pages
-may use fresh metadata fences; these never authorize a decision. Ordinary
-approval facts, provider qualification and all other blockers
-remain authoritative through partial and final resolution. Preflight the largest
-future resolution receipt and existing prose/frame limits before mutation.
-
-Only original live admission may start writes. Durable intent precedes data;
-unknown or incomplete writes hold without blind recreation. Publication and reply
-operations share their original finite evidence budget through broker, storage,
-readers and mutable fences. Missing or conflicting evidence withholds decisions.
-Reader-first rollout and trusted complete emission remain required. See ADR 0094.
-The packaged v5 schema validates structure; explicit rescan uses the trusted reader
-and one original command read allowance.
+Beyond legacy future-assessment capacity, closed schema 5 owned purpose-bound parts
+preserve every admitted human instance/metadata/original index. References grant no authority:
+require independent durable transaction and live repository/PR/base/head/numeric Bot
+identity. Inference/decisions/approval require fresh complete original prose/index verification.
+Receipt metadata fences never authorize decisions. All approval facts/provider qualification/other blockers
+persist through resolution. Preflight largest future receipt and prose/frame bounds.
+Only original live admission starts writes; durable intent precedes data. Unknown/incomplete
+writes hold without blind recreation. One original finite evidence budget covers
+publication/reply broker/storage/readers/mutable fences. Missing/conflicting evidence withholds
+decisions. Require reader-first rollout and trusted complete emission. See ADR 0094.
 
 ## Bounded default publication and retained recovery
 
-Default writers emit at most 64 indexed findings. Updated readers accept 250;
-trusted `github.publication_inventory: complete` activates larger emission only
-after reader-first rollout. Complete publication preserves every identity and
-explanation within existing body, individual-item, path and future-assessment
-bounds; overflow refuses without truncation. Exact replay verifies retained prose.
+Writers default to at most 64 findings; readers accept 250. Only trusted
+`github.publication_inventory: complete` enables larger emission after reader-first
+rollout. Preserve every identity/explanation within body/item/path/future-assessment
+bounds; refuse overflow without truncation. Exact replay verifies prose.
+With `github.operation_entry: enabled`, retain transaction-bound validated result bytes in owned PR comments
+before review/check mutation; never retain raw diffs/prompts/credentials or enable
+diagnostics. Recovery validates durable transaction and trusted exact-current-snapshot
+contexts, preserving admission/acceptance. One publication-attempt budget covers retention/reads/
+publication. Unconfirmed writes require complete owned readback; missing/conflicting
+parts refuse creation. Existing opt-outs remain. See ADR 0093.
 
-With `github.operation_entry: enabled`, transaction-bound publication retains
-validated result bytes in owned PR comments before review/check mutations.
-Retention never stores raw diffs, prompts or credentials and does not enable
-diagnostics artifacts. Recovery validates the durable transaction and trusted
-contexts for the current exact snapshot, preserving admission and acceptance.
-One publication-attempt budget covers retention, reads and publication. An
-unconfirmed write requires complete owned readback; missing or conflicting parts
-refuse further creation. Existing opt-outs remain effective. See ADR 0093.
+The packaged v5 schema validates structure; explicit rescan uses the trusted reader
+and one original command read allowance.
 
 # Architecture
 
@@ -329,28 +320,23 @@ same validated result.
 - `ProviderRequest` is the provider-facing prompt contract.
 - `ProviderResponse` normalizes provider text without retaining raw request
   context.
-  OpenRouter preserves requested model, observed model/upstream and reported
-  fingerprint independently; optional `ProviderTokenUsage` contains only three
-  bounded provider-reported counters. Invalid optional protocol metadata stays
-  unknown. Live evaluation aggregates a counter only when every attempt reported
-  it; failures and cancellation remain attempted work. Routing identifiers retain
-  their full bounded family/variant/region/tier prefix through canonical YAML,
-  resolver, CLI and hosted plan. Published model mappings restrict prefixes to
-  the same upstream family; trusted typed `ProviderSettings` reaches the adapter
-  without ambient environment replacing its policy. Named profiles retain exact
-  policy binding. Routing prefixes participate in policy
-  digests. Eligibility for DeepSeek/Morph evidence collection is distinct from
-  passing qualification and approval (proposed ADR 0081).
+  OpenRouter separates requested model, observed model/upstream and reported fingerprint.
+  Optional `ProviderTokenUsage` contains only three bounded reported counters;
+  invalid optional metadata stays unknown. Aggregate only counters every attempt
+  reports; failures/cancellation remain attempted work. Retain full bounded family/
+  variant/region/tier prefixes through canonical YAML/resolver/CLI/hosted plan;
+  published mappings require the same upstream family. Trusted `ProviderSettings`
+  forbids ambient policy replacement; named profiles retain exact binding and prefixes
+  enter policy digests. DeepSeek/Morph evidence eligibility is not qualification/
+  approval. See proposed ADR 0081.
 
-Live evaluation keeps exact deterministic fixture conformance distinct from
-actual model quality. The bounded report control retains complete fixture
-inventory and identity plus unchanged thresholds; promotion readers verify the
-conjunction and complete attempted live inventory. Fixture work never enters
-live usage, and expected recall includes missed findings. Historical unbound
-reports parse but cannot newly authorize support. See proposed ADR 0082.
-Composite controls reject missing live engine/prompt identities with a bounded
-input diagnostic. OpenRouter endpoint metadata passes the adapter's strict
-allowlist before live evaluation dispatch or public report construction.
+Live evaluation separates exact fixture conformance/model quality. Bounded controls
+retain complete fixture inventory/identity and unchanged thresholds; promotion verifies
+their conjunction and complete attempted live inventory. Fixture work never enters
+live usage; recall includes misses. Old unbound reports parse but cannot newly authorize
+support. Composite controls reject missing live engine/prompt identity with bounded
+diagnostics. Apply strict adapter OpenRouter endpoint-metadata allowlist before live
+dispatch/report construction. See proposed ADR 0082.
 - `Stage` declares one provider invocation, its expected output sections,
   optional structured `ReviewCategory` values, and an optional canonical
   `provider_profile`. Per-stage profiles cannot expand a local/private run onto
@@ -853,12 +839,10 @@ The positive runtime evidence path and legacy standalone-finalizer binding
 remain open under #115; see [the runtime boundary](openrouter-qualification.md#runtime-approval-boundary-115)
 and [ADR 0045](adr/0045-openrouter-trusted-configuration.md).
 
-The qualification harness separately requires every live report to bind its
-actual requested routing-policy digest and base URL to the selected target.
-Missing bindings or a changed suffix/endpoint fail before support can be minted
-or loaded. Old report bytes still parse but cannot newly authorize unbound live
-support; historical targets remain eligible. This report-target check does not
-supply the still-missing runtime approval binding. See ADR 0081.
+Live reports must bind actual requested routing-policy digest/base URL to selected target;
+missing bindings or changed suffix/endpoint refuse support creation/loading. Old
+reports parse but cannot newly authorize unbound live support; historical targets
+remain eligible. Runtime approval binding remains missing. See ADR 0081.
 
 Before an enabled review reaches either provider, the reusable workflow runs a
 read-only authoritative pull-request preflight. It validates the repository
@@ -1152,12 +1136,10 @@ permit managed upgrades while operator edits fail closed. See
 [ADR 0080](adr/0080-explicit-incomplete-review-rescans.md).
 
 
-Ordinary `ConversationService.reply` uses the existing generic call executor and
-an optional `ResourceBudgetTracker`. Its default public budget remains bounded;
-callers pass their original tracker to retain elapsed time, attempted calls and
-aggregate prompt/output accounting across transport retries and one JSON or
-non-object correction. Semantic reply failures never request correction. The
-GitHub caller creates that tracker before context preparation and retains it
-through operation entry and generation; expiry, exhaustion or cancellation
-cannot publish a generated reply. Provider adapters receive the remaining
-request deadline and their configured output cap without backend-specific policy.
+`ConversationService.reply` uses the generic executor and optional original
+`ResourceBudgetTracker`: retain elapsed time/calls/aggregate prompt/output accounting
+across transport retries and one JSON/non-object correction within bounded defaults.
+Semantic failures never request correction. GitHub creates the tracker before context
+preparation, retaining it through operation entry/generation; expiry/exhaustion/
+cancellation cannot publish replies. Adapters receive remaining deadline and configured
+output cap without backend-specific policy.

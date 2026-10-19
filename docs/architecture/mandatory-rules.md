@@ -1,61 +1,31 @@
-## Default human inventory references
 
-Complete publication may use closed eligibility schema 5 when the admitted human
-inventory exceeds legacy future-assessment capacity. Purpose-bound owned parts
-preserve every admitted instance, metadata and original index. Independent durable
-transaction and live repository/PR/base/head/numeric Bot authority are required;
-references alone grant none. Inference, decisions and approval require fresh
-complete original prose and index verification. Nonauthoritative receipt pages
-may use fresh metadata fences; these never authorize a decision. Ordinary
-approval facts, provider qualification and all other blockers
-remain authoritative through partial and final resolution. Preflight the largest
-future resolution receipt and existing prose/frame limits before mutation.
+Beyond legacy future-assessment capacity, closed schema 5 owned purpose-bound parts
+preserve every admitted human instance/metadata/original index. References grant no authority:
+require independent durable transaction and live repository/PR/base/head/numeric Bot
+identity. Inference/decisions/approval require fresh complete original prose/index verification.
+Receipt metadata fences never authorize decisions. All approval facts/provider qualification/other blockers
+persist through resolution. Preflight largest future receipt and prose/frame bounds.
+Only original live admission starts writes; durable intent precedes data. Unknown/incomplete
+writes hold without blind recreation. One original finite evidence budget covers
+publication/reply broker/storage/readers/mutable fences. Missing/conflicting evidence withholds
+decisions. Require reader-first rollout and trusted complete emission. See ADR 0094.
 
-Only original live admission may start writes. Durable intent precedes data;
-unknown or incomplete writes hold without blind recreation. Publication and reply
-operations share their original finite evidence budget through broker, storage,
-readers and mutable fences. Missing or conflicting evidence withholds decisions.
-Reader-first rollout and trusted complete emission remain required. See ADR 0094.
 
 ## Bounded default publication and retained recovery
 
-Default writers emit at most 64 indexed findings. Updated readers accept 250;
-trusted `github.publication_inventory: complete` activates larger emission only
-after reader-first rollout. Complete publication preserves every identity and
-explanation within existing body, individual-item, path and future-assessment
-bounds; overflow refuses without truncation. Exact replay verifies retained prose.
+Writers default to at most 64 findings; readers accept 250. Only trusted
+`github.publication_inventory: complete` enables larger emission after reader-first
+rollout. Preserve every identity/explanation within body/item/path/future-assessment
+bounds; refuse overflow without truncation. Exact replay verifies prose.
+With `github.operation_entry: enabled`, retain transaction-bound validated result bytes in owned PR comments
+before review/check mutation; never retain raw diffs/prompts/credentials or enable
+diagnostics. Recovery validates durable transaction and trusted exact-current-snapshot
+contexts, preserving admission/acceptance. One publication-attempt budget covers retention/reads/
+publication. Unconfirmed writes require complete owned readback; missing/conflicting
+parts refuse creation. Existing opt-outs remain. See ADR 0093.
 
-With `github.operation_entry: enabled`, transaction-bound publication retains
-validated result bytes in owned PR comments before review/check mutations.
-Retention never stores raw diffs, prompts or credentials and does not enable
-diagnostics artifacts. Recovery validates the durable transaction and trusted
-contexts for the current exact snapshot, preserving admission and acceptance.
-One publication-attempt budget covers retention, reads and publication. An
-unconfirmed write requires complete owned readback; missing or conflicting parts
-refuse further creation. Existing opt-outs remain effective. See ADR 0093.
+<!-- selected-design -->
 
-<!--
-supplemental-ledger
-These docs/architecture.md parts stay supplemental. They are historical narrative
-or non-normative reference. Every normative line copied below is verbatim.
-- preamble: pipelines guide snapshot pointer
-- Boundary map diagram, except the test-only production-map exclusion
-- Selected design: historical combined-workflow versus provider-protocol choice
-- Future extension points: prospective adapter notes, except the learning-publisher rule
-- OIDC exchange figure, except the metadata-only audit constraint
-- explanatory sentences with no MUST, MUST NOT, never, only, refuse, or retain constraint
--->
-
-```supplemental-ledger
-omitted:
-  - preamble
-  - boundary-map-diagram
-  - selected-design
-  - future-extension-prospective-notes
-  - oidc-exchange-figure
-```
-
-## Explicit human file review (local, opt-in)
 
 The proposed [human file review adapter](human-file-review.md) binds selected
 unsupported binary changes and generated files excluded by policy to the exact
@@ -73,7 +43,6 @@ composition and deployed resource qualification remain pending.
 Recording a confirmation is not approval.
 See [Proposed ADR 0077](adr/0077-explicit-human-file-review.md).
 
-## Provider response completeness and capability identity
 
 reassessment check that identity before planning and dispatch. Ollama advertises
 the contract only with explicit fixed-model `require_completion_metadata=True`:
@@ -81,7 +50,6 @@ it requires normal completion, exact model and bounded integer token usage befor
 returning text. Present incomplete, length-terminated or over-cap metadata also
 refuses in legacy mode; absent legacy metadata retains its prior disposition.
 
-## npm launcher and standalone boundary (issue #103)
 
 implementation. `packages/npm/cli/bin/review-sensei.js` is the only package
 that exposes the `review-sensei` command; it selects one exact platform package,
@@ -92,7 +60,6 @@ independent lane. A
 partial or compromised release is handled version-forward, never by moving a
 tag or replacing a tarball. See [ADR 0031](adr/0031-npm-launcher-and-standalone-platform-packages.md).
 
-## Boundary map
 
 (fixture adapter: test-only seam, omitted from production map)
 
@@ -120,7 +87,6 @@ clean review. Candidate text and snapshot contents remain untrusted data.
 evaluation loader and `FixtureProvider` into the unchanged `ReviewService`.
 Reports retain only aggregate, non-monetary metrics. Live endpoints are
 
-## Quality and supply-chain boundary
 
 The repository quality boundary is deterministic and provider-independent. The
 `quality` CI job runs Ruff formatting/linting, mypy, compileall, and branch
@@ -138,7 +104,6 @@ The public JSON schemas are structural contracts only. They reject malformed
 number ceilings documented in the README and ADR 0007. Profiles can only move
 downward. Canonical NFC UTF-8 repository paths and strict Git C-quoted paths are
 
-## Portable workflow boundary
 
 `src/review_sensei/workflow.py` owns the portable manual GitHub Actions boundary.
 It validates untrusted workflow inputs (`base_ref`, `head_ref`,
@@ -161,7 +126,6 @@ backends on GitHub-hosted compute, local backends on the operator's
 self-hosted runner (labelled `ollama` in the example), which must have Ollama
 and the selected model provisioned before dispatch. Provider egress is explicit
 
-## GitHub App setup migration boundary
 
 marker. Before creating a setup pull request, the Cloudflare Worker or Python
 adapter reads only the three known generated paths from the trusted default
@@ -174,7 +138,6 @@ exactly current, and its comparison changes generated paths only, and is never
 force-moved; it changes no path outside the generated set, preserving
 learnings, secrets, existing variables, and unrelated repository files. See ADR
 
-## Domain contracts
 
 - `ReviewRequest` contains a unified diff and optional repository metadata.
 - `ReviewRequest.learnings` contains only approved `LearningEntry` values loaded
@@ -297,7 +260,6 @@ learnings, secrets, existing variables, and unrelated repository files. See ADR
   are reference data, not instructions, and are serialized under the owning
   lens through `{review_context}`.
 
-## Review stage configuration
 
 an inline `categories` array. A stage cannot combine both forms. Reusing an id
 in multiple stages is allowed only when its title and focus items are identical,
@@ -360,7 +322,6 @@ The context loader rejects traversal, symlinks, secret-like names, unsupported
 text formats, unreadable or empty files, excessive file counts, and per-file or
 aggregate size violations. Selection and serialization are deterministic.
 
-## Failure behavior
 
 - Provider transport or envelope failures raise `ProviderError`.
 - Invalid JSON, stage output, categories, or learning proposals receive one
@@ -390,7 +351,6 @@ aggregate size violations. Selection and serialization are deterministic.
 - Expected failures from the bounded path, diff, request, transport, and result
   seams are static/sanitized and do not include supplied secret markers.
 
-## Review admission without a PR-wide count
 
 There is no automatic-review budget to spend: a legitimate changed-head
 update is reviewable no matter how many rounds this pull request has already
@@ -405,7 +365,6 @@ the per-head failed-attempt retry bound. Counters in the ledger
 (`completed_initial_reviews`, `completed_verification_rounds`) are diagnostic
 history, bounded for storage only, and never decide admission.
 
-## Future extension points
 
 - The GitHub learning publisher converts validated `learning_proposals` into a
   single ReviewSensei-owned draft PR per source PR. It uses content-addressed
@@ -415,7 +374,6 @@ history, bounded for storage only, and never decide admission.
   base; closed, deleted, manually edited, fork-owned, or ambiguous artifacts
   fail closed. Only merged learning files are eligible for later reviews.
 
-## Open-source integration
 
 The primary distribution is the open-source package and CLI. Repositories run
 ReviewSensei themselves in GitHub Actions: checkout the trusted base, fetch the
@@ -438,7 +396,6 @@ hosted review engine. The Worker applies a bounded Web Crypto HMAC gate and
 payload validation, then a single named SQLite-backed Durable Object stores
 only delivery identity, digest, state, and a short lease. The same Worker uses
 
-## Release engineering boundary
 
 provider-neutral review engine. `pyproject.toml` is the single package metadata
 source; `setup.py` is retained only as a metadata-free compatibility shim for
@@ -456,7 +413,6 @@ PyPI-primary and executing-commit install paths prove that identity in
 `review_sensei.release_manifest`; live disposable-repository canary and `v5`
 tag movement remain operator-only. See [ADR 0038](adr/0038-release-compatibility-manifest.md).
 
-## Public landing-page analytics boundary
 
 collected by the published tags. The page must not put source code, diffs,
 prompts, review comments, credentials, or other sensitive ReviewSensei data in
@@ -475,7 +431,6 @@ Rollback is code-only for the repository integration: revert the snippets in
 a reviewed PR, merge to `main`, and verify that the deployed page no longer
 requests the GTM endpoints. For an active incident, the GTM workspace owner
 
-## Publication boundary
 
 `malsabbagh/review-sensei` through a reproducible publication pipeline. An
 exclusion manifest (`.publication/exclusions.json`) lists every internal-only
@@ -489,7 +444,6 @@ is superseded for now. The Cloudflare package is only an optional installation
 bootstrap ingress; customer Actions still own review execution and provider
 compute. A hosted review service would require a new ADR and a fresh issue set.
 
-## OIDC installation-token broker
 
 The optional OIDC installation-token broker is a narrow boundary outside the
 provider-neutral review core: `oidc.py` verifies GitHub Actions identity and
@@ -500,7 +454,6 @@ or GitHub failures are rejected fail-closed.
 
         -> audit (non-secret metadata only)
 
-## Issue-64 setup-v4 tagged publication architecture
 
 adds a distinct version-2 session grant. The Worker transiently reloads complete
 human sources to verify numeric actors, exact snapshot and selection digests;
@@ -615,7 +568,6 @@ ceiling. Upgraded readers treat oversized trusted terminal markers as unreadable
 authority and prohibit initialization. Expanded writers require quiescing older
 readers/writers; rollback retains upgraded readers rather than resetting state.
 
-### Learning publication lifecycle (Issue #97)
 
 Learning publication is a hosting-side reconciliation boundary. The source
 PR's numeric repository id, PR number, head SHA, and default base head are
@@ -646,7 +598,6 @@ closed.
 See ADR 0026 and the learning publisher implementation for the complete
 candidate precedence and recovery rules.
 
-## Ownership, licensing, and commercial boundary
 
 [ADR 0072](adr/0072-lossless-inline-review-evidence.md). Small baseline and human
 inventories retain their legacy JSON shape; larger inventories share a bounded
@@ -677,45 +628,36 @@ application boundary or grant another provider allowance. Unbound older accepted
 payloads require a new authorized mention. See the replay amendment in
 [ADR 0061](adr/0061-human-reply-reassessment.md) and the finite source matrix in
 [large lifecycle qualification](validation/large-lifecycle.md).
-  OpenRouter preserves requested model, observed model/upstream and reported
-  fingerprint independently; optional `ProviderTokenUsage` contains only three
-  bounded provider-reported counters. Invalid optional protocol metadata stays
-  unknown. Live evaluation aggregates a counter only when every attempt reported
-  it; failures and cancellation remain attempted work. Routing identifiers retain
-  their full bounded family/variant/region/tier prefix through canonical YAML,
-  resolver, CLI and hosted plan. Published model mappings restrict prefixes to
-  the same upstream family; trusted typed `ProviderSettings` reaches the adapter
-  without ambient environment replacing its policy. Named profiles retain exact
-  policy binding. Routing prefixes participate in policy
-  digests. Eligibility for DeepSeek/Morph evidence collection is distinct from
-  passing qualification and approval (proposed ADR 0081).
+  OpenRouter separates requested model, observed model/upstream and reported fingerprint.
+  Optional `ProviderTokenUsage` contains only three bounded reported counters;
+  invalid optional metadata stays unknown. Aggregate only counters every attempt
+  reports; failures/cancellation remain attempted work. Retain full bounded family/
+  variant/region/tier prefixes through canonical YAML/resolver/CLI/hosted plan;
+  published mappings require the same upstream family. Trusted `ProviderSettings`
+  forbids ambient policy replacement; named profiles retain exact binding and prefixes
+  enter policy digests. DeepSeek/Morph evidence eligibility is not qualification/
+  approval. See proposed ADR 0081.
 
-The qualification harness separately requires every live report to bind its
-actual requested routing-policy digest and base URL to the selected target.
-Missing bindings or a changed suffix/endpoint fail before support can be minted
-or loaded. Old report bytes still parse but cannot newly authorize unbound live
-support; historical targets remain eligible. This report-target check does not
-supply the still-missing runtime approval binding. See ADR 0081.
+Live reports must bind actual requested routing-policy digest/base URL to selected target;
+missing bindings or changed suffix/endpoint refuse support creation/loading. Old
+reports parse but cannot newly authorize unbound live support; historical targets
+remain eligible. Runtime approval binding remains missing. See ADR 0081.
 
-Ordinary `ConversationService.reply` uses the existing generic call executor and
-an optional `ResourceBudgetTracker`. Its default public budget remains bounded;
-callers pass their original tracker to retain elapsed time, attempted calls and
-aggregate prompt/output accounting across transport retries and one JSON or
-non-object correction. Semantic reply failures never request correction. The
-GitHub caller creates that tracker before context preparation and retains it
-through operation entry and generation; expiry, exhaustion or cancellation
-cannot publish a generated reply. Provider adapters receive the remaining
-request deadline and their configured output cap without backend-specific policy.
+`ConversationService.reply` uses the generic executor and optional original
+`ResourceBudgetTracker`: retain elapsed time/calls/aggregate prompt/output accounting
+across transport retries and one JSON/non-object correction within bounded defaults.
+Semantic failures never request correction. GitHub creates the tracker before context
+preparation, retaining it through operation entry/generation; expiry/exhaustion/
+cancellation cannot publish replies. Adapters receive remaining deadline and configured
+output cap without backend-specific policy.
 
-Live evaluation keeps exact deterministic fixture conformance distinct from
-actual model quality. The bounded report control retains complete fixture
-inventory and identity plus unchanged thresholds; promotion readers verify the
-conjunction and complete attempted live inventory. Fixture work never enters
-live usage, and expected recall includes missed findings. Historical unbound
-reports parse but cannot newly authorize support. See proposed ADR 0082.
-Composite controls reject missing live engine/prompt identities with a bounded
-input diagnostic. OpenRouter endpoint metadata passes the adapter's strict
-allowlist before live evaluation dispatch or public report construction.
+Live evaluation separates exact fixture conformance/model quality. Bounded controls
+retain complete fixture inventory/identity and unchanged thresholds; promotion verifies
+their conjunction and complete attempted live inventory. Fixture work never enters
+live usage; recall includes misses. Old unbound reports parse but cannot newly authorize
+support. Composite controls reject missing live engine/prompt identity with bounded
+diagnostics. Apply strict adapter OpenRouter endpoint-metadata allowlist before live
+dispatch/report construction. See proposed ADR 0082.
 
 Only confirmed owned replies or a complete empty comment list permit fallback.
 Genuine top-level legacy findings retain their exact-head inventory authority.
