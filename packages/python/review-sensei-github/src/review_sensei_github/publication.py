@@ -54,7 +54,6 @@ from review_sensei.presentation import (
     render_body_findings,
     render_check_permission_warning,
     render_finding,
-    render_finding_reference,
     render_review_summary,
 )
 from review_sensei.validation import validate_bounded_text
@@ -761,15 +760,9 @@ def _render_assembled_summary(
             placement_note=assembled.placement_note,
             reason=assembled.reason,
             omitted_explanations=len(omitted_identifiers),
-        )
+        ),
+        compact_references=assembled.compact_references,
     )
-    if assembled.compact_references:
-        # Full explanations remain in their exact body/inline placements. The
-        # root retains every command identifier without repeating excerpts.
-        for view in (*assembled.required_views, *assembled.optional_views):
-            summary = summary.replace(
-                render_finding_reference(marked(view)), f"- **{view.identifier}**"
-            )
     prose = tuple(
         item.view
         for item in kept_explanations

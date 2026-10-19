@@ -741,8 +741,17 @@ def append_response_instructions(text: str) -> str:
     return f"{text}\n\n{MAINTAINER_RESPONSE_INSTRUCTIONS}"
 
 
-def render_review_summary(view: ReviewSummaryView) -> str:
+def render_review_summary(
+    view: ReviewSummaryView, *, compact_references: bool = False
+) -> str:
     """Render the §9 review summary: heading, facts, counts, references, action."""
+
+    def reference(item: FindingView) -> str:
+        # Compact only structured rows; overview and limitation prose may quote
+        # an identical reference and must retain their original text.
+        if compact_references:
+            return f"- **{item.identifier}**"
+        return render_finding_reference(item)
 
     lines = [_HEADING_STATES[view.state], ""]
     lines.append(f"Reviewed head: `{view.head_sha[:7]}`")
@@ -763,13 +772,13 @@ def render_review_summary(view: ReviewSummaryView) -> str:
         lines.extend(["", count_line])
     if view.required:
         lines.extend(["", "### Defects" if advisory else "### Required"])
-        lines.extend(render_finding_reference(item) for item in view.required)
+        lines.extend(reference(item) for item in view.required)
     if view.decisions:
         lines.extend(["", "### Required decisions"])
-        lines.extend(render_finding_reference(item) for item in view.decisions)
+        lines.extend(reference(item) for item in view.decisions)
     if view.optional or view.optional_grouped:
         lines.extend(["", "### Optional"])
-        lines.extend(render_finding_reference(item) for item in view.optional)
+        lines.extend(reference(item) for item in view.optional)
         if view.optional_grouped and view.omitted_explanations:
             label = (
                 "1 additional optional suggestion remains open"
