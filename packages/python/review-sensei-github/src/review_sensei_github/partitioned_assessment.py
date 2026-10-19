@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Callable, Protocol
 
 from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.errors import ReviewInputError
+from review_sensei.presentation import assign_finding_identifiers
 from review_sensei.reassessment_work import HumanAssessmentWork, validate_work
 
 from .conversation import ReplyResult
@@ -178,13 +179,18 @@ def publish_partitioned_assessment(
         f"[part {item.index + 1}](https://github.com/{repository}/pull/{pull_request}#pullrequestreview-{item.review_id})"
         for item in receipts
     )
-    resolved = ", ".join(f"`{item}`" for item in sorted(updated.resolved))
+    aliases = assign_finding_identifiers(
+        item.fingerprint for item in inventory.findings
+    )
+    resolved = ", ".join(
+        f"`{aliases[item]}` (`{item}`)" for item in sorted(updated.resolved)
+    )
     rationale = "\n".join(
         f"- `{item.fingerprint}`: {item.rationale}" for item in decisions
     )
     prefix = (
-        f"{work.reply.body}\n\nCurrent pending findings: **{len(updated.pending)}**. Resolved full finding IDs: {resolved}.\n\n"
-        f"Every other full finding ID in these historical reports remains pending: {navigation}. "
+        f"{work.reply.body}\n\nCurrent pending findings: **{len(updated.pending)}**. Resolved finding IDs: {resolved}.\n\n"
+        f"Every other visible finding ID in these historical reports remains pending: {navigation}. "
         "The linked reports retain every original concern and required path; their earlier pending labels are historical. Approval remains withheld.\n\n"
         f"{rationale}\n\n"
     )

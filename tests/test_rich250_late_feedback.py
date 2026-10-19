@@ -30,6 +30,7 @@ from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.errors import ReviewInputError
 from review_sensei.evidence import evidence_digest
 from review_sensei.feedback import FeedbackReference, FeedbackSelector
+from review_sensei.presentation import assign_finding_identifiers
 from review_sensei.session import LocalSessionLedger, mutate_commit
 from tests.test_evidence_capacity import human_result, publication_diff, varied_comments
 from tests.test_human_assessment import APP, BASE, DIFF, HEAD
@@ -300,6 +301,20 @@ class Rich250LateFeedbackTests(unittest.TestCase):
                 {item.path for item in prepared.eligibility.human_review.findings},
             )
             first = publish()
+            aliases = assign_finding_identifiers(
+                item.fingerprint for item in prepared.eligibility.human_review.findings
+            )
+            target = prepared.feedback.target_ids[0]
+            self.assertIn(
+                f"`{aliases[target]}` (`{target}`)", state.reviews[-1]["body"]
+            )
+            self.assertIn(
+                "Every other visible finding ID in these historical reports remains pending",
+                state.reviews[-1]["body"],
+            )
+            historical = "\n".join(item["body"] for item in state.reviews[:-1])
+            for identifier in aliases.values():
+                self.assertIn(f"`{identifier}`", historical)
             self.assertEqual(host.plan.context.budget.calls, 53)
             self.assertIsNone(
                 host.queue_host.ledger.load(

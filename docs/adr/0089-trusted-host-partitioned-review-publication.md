@@ -79,8 +79,9 @@ remain in the actual dispatch/acceptance path; no preparation fence is removed.
 Add `HumanAssessmentPublisher.publish_partitioned` for an accepted partial
 assessment with findings still pending. It validates the actual work against
 original inventory, complete evidence and selected source, then builds a bounded
-resolution root. Every resolved full ID is explicit; the remaining count and
-rule that every other ID remains pending are visible. Navigation links every
+resolution root. Every resolved full ID is explicitly paired with the same unique RS alias
+rendered in the retained prose; the remaining count and rule that every other
+visible RS alias remains pending are visible. Navigation links every
 retained full-prose part, clearly marked historical, preserving all concerns,
 reasons and required paths without duplicating their bodies. Immutable manifests,
 result/policy/configuration/producer identity and provider qualification facts
