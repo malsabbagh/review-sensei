@@ -4,7 +4,7 @@
 - Date: 2026-10-19
 - Decision owner / reviewers: ReviewSensei maintainers
 - Linked GitHub Issue: [#238](https://github.com/malsabbagh/review-sensei/issues/238), [#246](https://github.com/malsabbagh/review-sensei/issues/246), [#267](https://github.com/malsabbagh/review-sensei/issues/267)
-- Linked PR: pending; repairs the default publication failure observed on [#316](https://github.com/malsabbagh/review-sensei/pull/316)
+- Linked PR: [#325](https://github.com/malsabbagh/review-sensei/pull/325); repairs the default publication failure observed on [#316](https://github.com/malsabbagh/review-sensei/pull/316)
 
 ## Context
 
