@@ -146,6 +146,9 @@ class LargePublicLifecycleTests(unittest.TestCase):
                 self.assertEqual(first.approval_status, "approval_withheld")
                 self.assertEqual(len(provider.calls), 8)
                 self.assertEqual(len(state.latest_inventory().pending), count - 32)
+                self.assertFalse(
+                    any("/reactions" in path for _, path, _ in state.calls)
+                )
                 snapshot = (
                     deepcopy(state.operation_comments.comments),
                     len(state.reviews),
@@ -359,7 +362,7 @@ class LargePublicLifecycleTests(unittest.TestCase):
                     counts.append(len(current.pending))
                     self.assertEqual(counts[-1], max(0, count - 32 * len(counts)))
                     self.assertLessEqual(len(provider.calls), 8)
-                    self.assertLessEqual(len(state.calls) - before_calls, 128)
+                    self.assertLessEqual(len(state.calls) - before_calls, 60)
                     for request in provider.calls:
                         self.assertIn(state.source["body"], request.prompt)
                         self.assertLessEqual(len(request.prompt.encode()), 48 * 1024)

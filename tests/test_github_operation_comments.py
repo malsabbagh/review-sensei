@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import unittest
+from urllib.parse import parse_qs, urlparse
 
 from review_sensei_github.operation_comments import (
     MAX_RESULT_PARTS,
@@ -105,6 +106,135 @@ class PortTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exceeded 10 pages"):
             port.list_comments()
         self.assertEqual(http.calls, ["GET"] * 10)
+
+    def test_real_oversized_pages_reduce_size_without_losing_items_or_refilling_budget(
+        self,
+    ):
+        from review_sensei_github.http import GitHubHttp
+        from review_sensei_github.publication_recovery import publication_http
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+        from tests.fake_github_http import json_response
+
+        comments = [
+            {
+                "id": index + 1,
+                "body": str(index) + "x" * 40_000,
+                "user": {"id": 42, "type": "Bot"},
+            }
+            for index in range(17)
+        ]
+        calls = []
+
+        def open_page(request, timeout):
+            query = parse_qs(urlparse(request.full_url).query)
+            size, page = int(query["per_page"][0]), int(query["page"][0])
+            calls.append((size, page, timeout))
+            offset = (page - 1) * size
+            return json_response(comments[offset : offset + size])
+
+        budget = EvidenceReadBudget()
+        port = GitHubIssueCommentOperationPort(
+            publication_http(GitHubHttp(opener=open_page), budget),
+            token="synthetic",
+            repository="acme/widgets",
+            pull_request=7,
+            app_user_id=42,
+        )
+        observed = port.list_comments()
+        self.assertEqual([item.comment_id for item in observed], list(range(1, 18)))
+        self.assertEqual(
+            [item.body for item in observed], [item["body"] for item in comments]
+        )
+        self.assertEqual(
+            [item[:2] for item in calls],
+            [(100, 1), (20, 1), (10, 1), (10, 2)],
+        )
+        self.assertEqual(port.requests, budget.calls)
+        self.assertEqual(port.requests, len(calls))
+        self.assertTrue(all(0 < timeout <= 60 for _, _, timeout in calls))
+        # A new scan must see new data while avoiding already disproved sizes.
+        # The hint survives the reply wrapper without bypassing its own gate.
+        from review_sensei_github.reply_budget import ReplyPublicationHttp
+
+        comments.append(
+            {"id": 18, "body": "new item", "user": {"id": 42, "type": "Bot"}}
+        )
+        wrapped = ReplyPublicationHttp(port._http)
+        second = wrapped.paginate(
+            path="/repos/acme/widgets/issues/7/comments",
+            token="synthetic",
+            page_sizes=(100, 20, 10, 5, 1),
+            max_requests=10,
+        )
+        self.assertEqual([item["id"] for item in second], list(range(1, 19)))
+        self.assertEqual([item[0] for item in calls[4:]], [10, 10])
+        self.assertEqual(wrapped.requests, 2)
+        self.assertEqual(budget.calls, len(calls))
+
+    def test_oversized_individual_item_refuses_at_one_item_without_partial_inventory(
+        self,
+    ):
+        from review_sensei_github.errors import GitHubHTTPResponseTooLargeError
+        from review_sensei_github.http import GitHubHttp
+
+        from tests.fake_github_http import json_response
+
+        calls = []
+
+        def open_page(request, timeout):
+            calls.append(request.full_url)
+            return json_response(
+                [{"id": 1, "body": "x" * 600_000, "user": {"id": 42, "type": "Bot"}}]
+            )
+
+        port = GitHubIssueCommentOperationPort(
+            GitHubHttp(opener=open_page),
+            token="synthetic",
+            repository="acme/widgets",
+            pull_request=7,
+            app_user_id=42,
+        )
+        with self.assertRaises(GitHubHTTPResponseTooLargeError):
+            port.list_comments()
+        self.assertEqual(len(calls), 5)
+        self.assertIn("per_page=1&", calls[-1])
+
+    def test_later_oversized_page_preserves_exact_offset_at_smaller_size(self):
+        from review_sensei_github.http import GitHubHttp
+
+        from tests.fake_github_http import json_response
+
+        comments = [
+            {
+                "id": index + 1,
+                "body": "small" if index < 25 else "x" * 40_000,
+                "user": {"id": 42, "type": "Bot"},
+            }
+            for index in range(50)
+        ]
+        calls = []
+
+        def open_page(request, timeout):
+            query = parse_qs(urlparse(request.full_url).query)
+            size, page = int(query["per_page"][0]), int(query["page"][0])
+            calls.append((size, page))
+            offset = (page - 1) * size
+            return json_response(comments[offset : offset + size])
+
+        port = GitHubIssueCommentOperationPort(
+            GitHubHttp(opener=open_page),
+            token="synthetic",
+            repository="acme/widgets",
+            pull_request=7,
+            app_user_id=42,
+        )
+        observed = port.list_comments()
+        self.assertEqual([item.comment_id for item in observed], list(range(1, 51)))
+        self.assertEqual(calls[:4], [(100, 1), (20, 1), (20, 2), (10, 3)])
+        self.assertEqual(calls[-1], (10, 6))
+        self.assertEqual(port.requests, len(calls))
+        self.assertLessEqual(port.requests, 10)
 
     def test_a_lost_post_is_not_retried(self):
         http = FakeHttp()

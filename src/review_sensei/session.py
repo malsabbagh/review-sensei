@@ -21,6 +21,7 @@ import json
 import ntpath
 import os
 import re
+import stat
 import sys
 import tempfile
 from dataclasses import InitVar, dataclass, field, replace
@@ -32,6 +33,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping, Protocol, Sequence, ca
 from .bounded_evidence import (
     INLINE_ENCODING,
     MAX_PART_BYTES,
+    MAX_PART_READS,
     MAX_STORED_PART_BYTES,
     MAX_STORED_PARTS,
     PARTITION_ENCODING,
@@ -3393,7 +3395,11 @@ class LocalSessionLedger:
     Its atomic file replacement protects individual writes, but it does not
     claim inter-process locking; concurrent hosted jobs should use the
     GitHub-backed adapter instead, whose hosted checks are also best-effort
-    unless the deployment serializes writers.
+    unless the deployment serializes writers. Canonical content-addressed part
+    bytes may be reused within this instance, but every use freshly checks local
+    containment and inode metadata. Mutable roots and transactions are never
+    cached. This is the same trusted local operator profile, not a filesystem
+    adversary or distributed locking guarantee.
 
     Recovery from an expired session is explicit: ``reenroll`` is the only
     operation that may retire an expired record and its enrollment witness, and
@@ -3424,6 +3430,9 @@ class LocalSessionLedger:
         self._activation_ticket: EvidenceTailTicket | None = None
         self._activation_identity: SessionIdentity | None = None
         self._tail_preparing = False
+        self._part_documents: dict[
+            tuple[SessionIdentity, str], tuple[tuple[int, ...], bytes]
+        ] = {}
 
     def _control_accounting_enabled(self) -> bool:
         return self._shared_control_budget or self.enable_partition_writes
@@ -3533,14 +3542,19 @@ class LocalSessionLedger:
         )
 
     def _part_directory(
-        self, identity: SessionIdentity, *, storage_id: str | None = None
+        self,
+        identity: SessionIdentity,
+        *,
+        storage_id: str | None = None,
+        inspection_charged: bool = False,
     ) -> Path:
         if (
             self._activation_ticket is not None
             and identity != self._activation_identity
         ):
             raise ReviewInputError("activation part identity changed")
-        self._dispatch_evidence(f"part:{storage_id}:directory")
+        if not inspection_charged:
+            self._dispatch_evidence(f"part:{storage_id}:directory")
         root = self.root.resolve()
         directory = (
             self.root
@@ -3558,21 +3572,83 @@ class LocalSessionLedger:
             raise ReviewInputError("partition directory is outside ledger root")
         return resolved
 
+    @staticmethod
+    def _part_observation(value: os.stat_result) -> tuple[int, ...]:
+        if not stat.S_ISREG(value.st_mode):
+            raise ReviewInputError("local partition must be a regular file")
+        return (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+
     def _read_part(
         self, identity: SessionIdentity, storage_id: str
     ) -> AuthenticatedPart:
         if not re.fullmatch(r"[a-f0-9]{64}", storage_id):
             raise ReviewInputError("local partition identity is invalid")
+        key = (identity, storage_id)
+        cached = self._part_documents.get(key)
+        # Sealed activation plans retain their original exact dispatch labels
+        # and liability. This optimization never discounts or rewrites a tail.
+        if (
+            cached is not None
+            # Windows Python 3.11 exposes creation time as st_ctime. It cannot
+            # authenticate a cache hit after a same-size edit restoring mtime.
+            and sys.platform != "win32"
+            and self._activation_ticket is None
+            and not self._tail_preparing
+        ):
+            self._dispatch_evidence(f"part:{storage_id}:cached-observation")
+            path = (
+                self._part_directory(
+                    identity, storage_id=storage_id, inspection_charged=True
+                )
+                / storage_id
+            )
+            try:
+                observation = self._part_observation(path.stat(follow_symlinks=False))
+            except OSError as exc:
+                raise ReviewInputError("local partition is missing or invalid") from exc
+            if observation == cached[0]:
+                self.evidence_budget.check()
+                # Return a fresh document, never a mutable cached authority object.
+                return AuthenticatedPart(
+                    json.loads(cached[1]), self.evidence_producer()
+                )
+            # Metadata changed: the old proof grants nothing. Read, hash and
+            # authenticate the current inode through the ordinary cold path.
+            del self._part_documents[key]
         self._dispatch_evidence(f"part:{storage_id}:resolve")
         path = self._part_directory(identity, storage_id=storage_id) / storage_id
         self._dispatch_evidence(f"part:{storage_id}:read")
         if path.is_symlink():
             raise ReviewInputError("local partition must not be a symlink")
         try:
+            named_before = self._part_observation(path.stat(follow_symlinks=False))
             with path.open("rb") as handle:
+                before = self._part_observation(os.fstat(handle.fileno()))
                 raw = handle.read(MAX_PART_BYTES + 1)
+                after = self._part_observation(os.fstat(handle.fileno()))
+                current = self._part_observation(path.stat(follow_symlinks=False))
+            # CPython 3.12 Windows fstat exposes change time, while pathname
+            # stat preserves creation time in st_ctime. Compare complete
+            # observations within each API; bridge them through common file
+            # identity/mode/size/mtime fields. This never permits a cache hit
+            # on Windows: every read still authenticates the complete bytes.
+            same_file = (
+                after[:-1] == current[:-1]
+                if sys.platform == "win32"
+                else after == current
+            )
             if (
-                len(raw) > MAX_PART_BYTES
+                before != after
+                or named_before != current
+                or not same_file
+                or len(raw) > MAX_PART_BYTES
                 or hashlib.sha256(raw).hexdigest() != storage_id
             ):
                 raise ValueError("invalid part")
@@ -3582,6 +3658,13 @@ class LocalSessionLedger:
         except (OSError, ValueError, UnicodeError) as exc:
             raise ReviewInputError("local partition is missing or invalid") from exc
         self.evidence_budget.check()
+        if key not in self._part_documents and (
+            len(self._part_documents) >= MAX_PART_READS
+            or sum(len(item[1]) for item in self._part_documents.values()) + len(raw)
+            > MAX_PART_READS * MAX_PART_BYTES
+        ):
+            raise ReviewInputError("local partition cache exceeds finite capacity")
+        self._part_documents[key] = (current, raw)
         return AuthenticatedPart(document, self.evidence_producer())
 
     def read_evidence(

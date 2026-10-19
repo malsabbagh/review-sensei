@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from review_sensei_github.approval import approval_eligibility_from_result
+from review_sensei_github.http import GitHubHttp
 from review_sensei_github.publication import approval_eligibility_marker, review_marker
 from review_sensei_github.rescan import resolve_rescan
 from review_sensei_github.review_hooks import GitHubReviewHooks
@@ -532,8 +533,9 @@ class RescanAdmissionTests(unittest.TestCase):
         self.assertEqual(changed.record.failed_attempts, 0)
 
 
-class AuthorityHTTP:
+class AuthorityHTTP(GitHubHttp):
     def __init__(self, bound, *, complete=False):
+        super().__init__()
         result = tx._result() if complete else partial.partial_result()
         eligibility = approval_eligibility_from_result(
             result, head_sha=tx.HEAD_SHA, enabled=True, app_authored=False
@@ -566,6 +568,8 @@ class AuthorityHTTP:
         return "/repos/" + repository + suffix
 
     def request(self, method, path, **kwargs):
+        if path.split("?")[0].endswith("/reviews"):
+            return 200, [self.review]
         if "/actions/runs/" in path:
             return 200, {
                 "id": 10,
@@ -627,6 +631,17 @@ class RescanHostTests(unittest.TestCase):
 
     def write_event(self):
         self.event_path.write_text(json.dumps(self.event))
+
+    def test_unbudgeted_caller_ledger_keeps_its_post_command_lifecycle(self):
+        self.ledger.evidence_budget = None
+        authorized = resolve_rescan(
+            self.args, self.ledger, actions_token="synthetic-actions-token"
+        )
+        self.assertEqual(authorized.request_id, 10)
+        self.assertIsNone(self.ledger.evidence_budget)
+        # The caller still owns this ledger for later admission/checkpoint work;
+        # a command-local read deadline must not silently become its deadline.
+        self.assertEqual(self.ledger.load(tx.IDENTITY).status, "ok")
 
     def test_dispatch_and_comment_bind_distinct_stable_request_identities(self):
         self.assertEqual(
@@ -1121,29 +1136,26 @@ class RescanPublicationTests(unittest.TestCase):
         """Owned same-PR result parts, separate from rescan receipt authority."""
         gates = partial.gates
         retained = []
-        identity_read = False
+        payload["base"]["repo"]["full_name"] = tx.IDENTITY.repository
 
         def matches(request):
             return (
                 "/users/" in request.full_url
                 or "/issues/146/comments" in request.full_url
-                or (identity_read and request.full_url.endswith("/pulls/146"))
+                or request.full_url.endswith("/pulls/146")
             )
 
         def respond(request):
-            nonlocal identity_read
             if "/users/" in request.full_url:
-                identity_read = True
                 return gates.json_response(
                     {"id": 99, "login": gates.APP, "type": "Bot"}
                 )
             if request.full_url.endswith("/pulls/146"):
-                identity_read = False
                 return gates.json_response(payload)
             if request.method == "POST":
                 retained.append(
                     {
-                        "id": 700,
+                        "id": 700 + len(retained),
                         "body": json.loads(request.data)["body"],
                         "user": {"id": 99, "login": gates.APP, "type": "Bot"},
                         "issue_url": "https://api.github.test/repos/owner/repo/issues/146",
@@ -1178,9 +1190,7 @@ class RescanPublicationTests(unittest.TestCase):
         retained, retention = self.retention_route(payload)
         http, calls = gates.make_http(
             [
-                gates.json_response(payload),
                 gates.json_response([old_review]),
-                gates.json_response(payload),
                 gates.json_response({"id": 6}),
             ],
             routes=((checks.matches, checks.respond), retention),
@@ -1211,7 +1221,7 @@ class RescanPublicationTests(unittest.TestCase):
         )
         self.assertEqual(app.publish_review(**kwargs).status, "published")
         self.assertEqual(app.publish_review(**kwargs).status, "already_published")
-        self.assertEqual(len(retained), 1)
+        self.assertEqual(len(retained), 3)
         bodies = [
             json.loads(body)
             for method, url, body in calls
@@ -1256,7 +1266,6 @@ class RescanPublicationTests(unittest.TestCase):
                 retained, retention = self.retention_route(payload)
                 http, calls = gates.make_http(
                     [
-                        gates.json_response(payload),
                         gates.json_response([AuthorityHTTP(old).review]),
                     ],
                     routes=((checks.matches, checks.respond), retention),
@@ -1292,7 +1301,7 @@ class RescanPublicationTests(unittest.TestCase):
                         evidence_context=tx.EVIDENCE,
                     )
                 self.assertEqual(outcome.status, "already_published")
-                self.assertEqual(len(retained), 1)
+                self.assertEqual(len(retained), 3)
                 self.assertNotIn("explicit_reanalysis", publish.call_args.kwargs)
                 self.assertFalse(
                     any(

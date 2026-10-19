@@ -1373,3 +1373,61 @@ interrupted initial retention write enters an unconfirmed publication phase;
 fresh owners reconcile complete owned parts and cannot blindly recreate missing
 parts. This is conservative serial recovery, not distributed atomic compare-and-swap
 for comment-ledger concurrent writers. See [the rollout and recovery runbook](validation/default-publication-recovery.md).
+
+
+## Default human inventory reference eligibility (schema 5)
+
+The closed document contains `schema_version: "5"`, `head_sha`, `result_digest`,
+ordinary `facts`, `human_inventory_reference` and `human_resolution`. The reference
+has closed fields `schema_version: "1.0"`, `purpose: "default-human-inventory"`,
+`event_key` and `payload_digest`. The event key is two lowercase 64-hex digests
+separated by one tab; the payload digest is lowercase 64-hex. References never
+supply trusted transaction or repository authority. Resolution contains the
+immutable inventory digest and the complete sorted resolved-ID subset; pending
+IDs and ordinary human-pending facts must agree. Unknown fields, unresolved
+references and mismatched digests fail closed without falling back to an older
+clean root. Legacy human documents keep their original 24 KiB bound.
+
+The complete profile may select this format after initial and largest-future
+framing preflight. Owned parts preserve the closed admitted human inventory,
+canonical original index and bounded visible-prose receipt list. The store binds
+purpose, repository identity, PR, base/head, configured numeric Bot, original
+transaction/content/publication and policy/configuration/evidence digests.
+Initial-write authorization is explicit and comes from live admission. A durable
+purpose-specific intent precedes data writes. Fresh recovery reconciles a complete
+owned set; missing, conflicting or uncertain incomplete storage remains held.
+Fresh consumer operations share one budget and revalidate mutable authority and
+the original complete visible explanation before applying decisions. Standard
+approval gates, including legitimately `not-required` provider qualification,
+remain unchanged. See [ADR 0094](adr/0094-default-human-inventory-reference.md).
+
+For schema 5, initial inference, decision persistence and final approval require
+fresh complete visible-prose validation. Nonauthoritative pending-receipt pages
+may use fresh transaction/head/owned-root/index metadata fences between those
+full proofs. A metadata fence never permits a decision or approval. Pending
+reports retain every full ID and path; repeated common guidance is stated once.
+The original explanations remain in their verified body/inline placements.
+
+The packaged `eligibility-v5.schema.json` validates this closed public structure.
+The adapter validates schema 5 before calling its trusted inventory reader and
+validates generated documents too. Structural validity does not authenticate a
+reference, resolution subset, ledger, root, visible prose, or approval facts.
+Those semantic and live-authority checks remain mandatory.
+
+Reader cache scope includes effective credential identity and the original read
+budget. The default finalizer follows each call's token; optional
+`human_inventory_read_token` binds an existing operation's metadata credential
+separately from mutation tokens. No credential or credential digest is serialized,
+and changing credentials does not refill the original allowance.
+
+Explicit rescan verifies schema 5 through the independent session ledger and
+complete current root/prose proof before authorizing incomplete-review reanalysis.
+It reuses a supplied ledger allowance across all command reads. If no operation
+allowance exists yet, command entry creates one bounded read allowance and binds
+only a command-local ledger copy; it does not install a deadline on the caller's
+later inference/checkpoint lifecycle. This is not an approval grant. Default
+finalization, conversation, maintainer decisions and explicit rescan use schema 5
+readers. Maintainer legacy-inventory fallback applies only when the complete
+finding index is absent; a default schema 5 publication retains that index.
+The separately proposed local opt-in human-file-review adapter remains legacy
+inline-root only and does not gain schema 5 support from this change.

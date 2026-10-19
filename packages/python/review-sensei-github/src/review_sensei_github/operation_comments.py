@@ -1,6 +1,6 @@
 """GitHub issue-comment port for the operation record and result parts.
 
-Listing stops at 10 pages of 100 and requires a short final page. A lost POST
+Listing uses at most 10 dispatches, adaptive bounded pages and a short final page. A lost POST
 is not retried. Readback compares the canonical JSON payload byte for byte.
 """
 
@@ -10,7 +10,9 @@ import base64
 import hashlib
 import json
 import math
+import time
 
+from .errors import GitHubHTTPResponseTooLargeError
 from .http import GitHubHttp
 from .operation_host import (
     _COMMENT_BOUND,
@@ -114,16 +116,52 @@ class GitHubIssueCommentOperationPort:
             self._primed = None
             return tuple(self._view(item) for item in primed)
         collected: list[OperationComment] = []
-        for page in range(1, 11):
-            status, payload = self._request(
-                "GET", f"{self._list_path}?per_page=100&page={page}"
-            )
-            if status != 200 or not isinstance(payload, list) or len(payload) > 100:
+        page_sizes = (100, 20, 10, 5, 1)
+        hint = (
+            self._http.pagination_page_size(self._list_path)
+            if isinstance(self._http, GitHubHttp)
+            else 100
+        )
+        size_index = next(
+            index for index, size in enumerate(page_sizes) if size <= hint
+        )
+        deadline = time.monotonic() + 60
+        for _ in range(10):
+            page_size = page_sizes[size_index]
+            if len(collected) % page_size:
+                raise ValueError("operation comment listing offset conflicts")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError("operation comment listing deadline exceeded")
+            page = len(collected) // page_size + 1
+            try:
+                status, payload = self._request(
+                    "GET",
+                    f"{self._list_path}?per_page={page_size}&page={page}",
+                    timeout_seconds=remaining,
+                )
+            except GitHubHTTPResponseTooLargeError:
+                if size_index + 1 == len(page_sizes):
+                    raise
+                size_index += 1
+                while len(collected) % page_sizes[size_index]:
+                    size_index += 1
+                continue
+            if (
+                status != 200
+                or not isinstance(payload, list)
+                or len(payload) > page_size
+            ):
                 raise ValueError("operation comment listing is unavailable")
             collected.extend(self._view(item) for item in payload)
-            if len(payload) < 100:
+            identifiers = [item.comment_id for item in collected]
+            if len(set(identifiers)) != len(identifiers):
+                raise ValueError(
+                    "operation comment listing contains duplicate identities"
+                )
+            if len(payload) < page_size:
                 return tuple(collected)
-        raise ValueError("operation comment listing exceeded 10 pages")
+        raise ValueError("operation comment listing exceeded 10 pages or requests")
 
     def create(self, body: str) -> OperationComment:
         bounded_comment(body)
@@ -209,9 +247,12 @@ class GitHubIssueCommentOperationPort:
         path: str,
         *,
         body: dict[str, object] | None = None,
+        timeout_seconds: float | None = None,
     ) -> tuple[int, object]:
         self.requests += 1
-        return self._http.request(method, path, token=self._token, body=body)
+        return self._http.request(
+            method, path, token=self._token, body=body, timeout_seconds=timeout_seconds
+        )
 
 
 class ResultPartStore:

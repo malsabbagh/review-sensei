@@ -189,6 +189,17 @@ class GitHubHttp:
             pass
         return ""
 
+    def pagination_page_size(self, path: str) -> int:
+        """Propagate an operation-local size hint through audited wrappers.
+
+        This carries no response bytes or completeness/authority decision.
+        Every scan still dispatches and proves its own bounded final page.
+        """
+        transport = self.__dict__.get("transport")
+        reader = getattr(transport, "pagination_page_size", None)
+        hint = reader(path) if callable(reader) else 100
+        return hint if type(hint) is int and 1 <= hint <= 100 else 100
+
     def paginate(
         self,
         *,
@@ -250,6 +261,9 @@ class GitHubHttp:
             or timeout_seconds <= 0
         ):
             raise GitHubHTTPError("GitHub pagination timeout is invalid")
+        hint = self.pagination_page_size(path)
+        compatible_sizes = tuple(size for size in page_sizes if size <= hint)
+        page_sizes = compatible_sizes or page_sizes
         deadline = (
             monotonic() + timeout_seconds if timeout_seconds is not None else math.inf
         )

@@ -14,7 +14,7 @@ import re
 from copy import copy
 from dataclasses import replace
 from typing import Any, Mapping
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 from review_sensei.bounded_evidence import EvidenceReadBudget, canonical_bytes
 from review_sensei.convergence import ReviewConvergencePolicy
@@ -57,6 +57,11 @@ class PublicationBudgetHttp(GitHubHttp):
         ):
             raise GitHubPublicationError("publication budget identity mismatches")
         self._already_charged = known_wrapper or known_feedback
+        self._page_size_hints: dict[str, int] = {}
+
+    def pagination_page_size(self, path: str) -> int:
+        """Reuse only a bounded page-size observation, never response data."""
+        return self._page_size_hints.get(path, 100)
 
     def request(
         self,
@@ -82,6 +87,15 @@ class PublicationBudgetHttp(GitHubHttp):
             else remaining,
         )
         budget.check()
+        if method == "GET" and isinstance(response[1], list):
+            parsed = urlsplit(path)
+            sizes = parse_qs(parsed.query).get("per_page", [])
+            if len(sizes) == 1 and sizes[0].isdigit():
+                size = int(sizes[0])
+                if 1 <= size <= 100 and len(response[1]) <= size:
+                    self._page_size_hints[parsed.path] = min(
+                        size, self.pagination_page_size(parsed.path)
+                    )
         return response
 
 

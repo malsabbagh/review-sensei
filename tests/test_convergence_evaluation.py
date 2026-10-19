@@ -264,8 +264,13 @@ class ObservedSequenceTests(unittest.TestCase):
         self.assertEqual(budgets[0].calls, len(github.calls))
         self.assertLessEqual(budgets[0].calls, 60)
         self.assertTrue(github.issue_comments)
+        self.assertEqual(len(github.issue_comments), 3)
         for comment in github.issue_comments:
-            self.assertIn(RESULT_COMMENT_MARKER, comment["body"])
+            self.assertTrue(
+                RESULT_COMMENT_MARKER in comment["body"]
+                or "<!-- reviewsensei:default-human-inventory-intent:v1 -->"
+                in comment["body"]
+            )
             self.assertEqual(
                 comment["user"],
                 {"id": 42, "login": "reviewsensei[bot]", "type": "Bot"},

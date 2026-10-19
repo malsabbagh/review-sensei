@@ -27,6 +27,7 @@ from review_sensei.diff import analyze_diff
 from review_sensei.disposition import MaintainerCommand
 from review_sensei.errors import ReviewInputError
 from review_sensei.human_assessment import (
+    MAX_HUMAN_FINDINGS,
     HumanAssessmentDecision,
     HumanAssessmentReply,
     HumanAssessmentService,
@@ -309,6 +310,42 @@ class GitHubApplication:
         self.learner = learner
         self.replier = replier
         self.session_ledger = session_ledger
+        # Every ordinary fresh application can reconstruct supported default
+        # inventories from its independently selected durable ledger.
+        for publisher in (reviewer, replier):
+            if issubclass(type(publisher), (ReviewPublisher, ConversationPublisher)):
+                publisher.finalizer.human_inventory_reader_factory = (
+                    self._human_inventory_reader
+                )
+
+    def _human_inventory_reader(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        head_sha: str,
+        app_slug: str,
+        budget: EvidenceReadBudget,
+    ) -> Any:
+        from .default_human_reader import DefaultHumanInventoryReader
+        from .session_ledger import GitHubIssueCommentSessionLedger
+
+        ledger = self.session_ledger
+        if ledger is None:
+            ledger = GitHubIssueCommentSessionLedger(
+                self.http, token=token, app_slug=app_slug, evidence_budget=budget
+            )
+        return DefaultHumanInventoryReader(
+            http=self.http,
+            ledger=ledger,
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            app_slug=app_slug,
+            budget=budget,
+        )
 
     def recover_retained_review_result(
         self,
@@ -884,8 +921,17 @@ class GitHubApplication:
             # silently widen it with paths persisted for an earlier head.
             publication_related_paths = () if related_paths is None else related_paths
         transport = self.http
+        # Retention fences its first POST by advancing the durable phase. Capture
+        # the original live admission before that intentional transition.
+        may_start_human_inventory = bool(
+            transaction_record is not None
+            and transaction_record.transaction is not None
+            and transaction_record.transaction.phase == "publication_pending"
+            and isinstance(result, ReviewResult)
+        )
         result_retained = False
         publisher_started = False
+        admission_recovery_held = False
         try:
             retention_required = (
                 validated_transaction_recovery
@@ -936,6 +982,45 @@ class GitHubApplication:
                 transaction_record = load_transaction(ledger)
                 if transaction_record.transaction is not None:
                     result = replace(result, transaction=transaction_record.transaction)
+            admitted_inventory_store = None
+            if (
+                retention_required
+                and ledger is not None
+                and budget is not None
+                and result.transaction is not None
+                and isinstance(reviewer, ReviewPublisher)
+            ):
+                from .default_human_inventory import (
+                    HumanInventoryStore,
+                    build_human_inventory_context,
+                )
+                from .default_human_reader import (
+                    restore_admitted_result,
+                    transaction_publication_digest,
+                )
+
+                transaction = result.transaction
+                context = build_human_inventory_context(
+                    http=transport,
+                    token=token,
+                    ledger=ledger,
+                    identity=identity,
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                    publication_digest=transaction_publication_digest(transaction),
+                    policy_digest=transaction.policy_digest,
+                    configuration_digest=transaction.configuration_digest,
+                    evidence_digest=transaction.evidence_digest,
+                    budget=budget,
+                )
+                admitted_inventory_store = HumanInventoryStore(
+                    transport, token, ledger, context
+                )
+                if not may_start_human_inventory:
+                    admission_recovery_held = True
+                    result = restore_admitted_result(result, admitted_inventory_store)
+                    admission_recovery_held = False
             prepared_publishable: PublishableReview | None = None
             if (
                 operator_mode
@@ -1141,8 +1226,68 @@ class GitHubApplication:
                 "evidence_confirmed_concerns": evidence_confirmed_concerns,
                 "authorized_dispositions": authorized_dispositions,
             }
+            if (
+                not options.complete_inventory
+                and admitted_inventory_store is not None
+                and isinstance(reviewer, ReviewPublisher)
+            ):
+                # Preserve independently admitted flags even if the legacy
+                # root subsequently refuses its smaller inventory capacity.
+                # Later complete-profile recovery must not guess from raw JSON.
+                from review_sensei.human_assessment import PendingHumanReview
+                from review_sensei.human_inventory import inventory_result_document
+
+                from .publication import finding_index_marker, review_result_digest
+
+                admitted = prepared_publishable or reviewer.prepare(
+                    result=publisher_result,
+                    diff=diff,
+                    head_sha=head_sha,
+                    convergence_policy=convergence_policy,
+                )
+                assembled_admission = reviewer._assemble_review_body(
+                    result=admitted.result,
+                    analysis=reviewer._validate_locations(admitted.result, diff),
+                    convergence_policy=policy,
+                    read_facts=lambda: reviewer._conversation_resolution_facts(
+                        token=token, repository=repository, branch=base_branch
+                    ),
+                    auto_approve=review_policy == "auto-approve",
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                )
+                human = PendingHumanReview.from_result(admitted.result, base_sha)
+                admitted_inventory_store.stage(
+                    {
+                        "human_inventory": inventory_result_document(
+                            human, result_digest=review_result_digest(admitted.result)
+                        )
+                        if human is not None
+                        else None,
+                        "finding_index": finding_index_marker(
+                            repository_id=repository_id,
+                            pull_request=pull_request,
+                            head_sha=head_sha,
+                            base_sha=base_sha,
+                            result_digest=review_result_digest(admitted.result),
+                            entries=assembled_admission.index_entries,
+                            complete_inventory=True,
+                        ),
+                        "visible_prose": [],
+                    },
+                    allow_start=may_start_human_inventory,
+                )
             if options.complete_inventory:
                 publisher_arguments["complete_inventory"] = True
+                if admitted_inventory_store is not None:
+                    publisher_arguments["human_inventory_store"] = (
+                        admitted_inventory_store
+                    )
+                    publisher_arguments["allow_human_inventory_start"] = (
+                        may_start_human_inventory and prepared_publishable is not None
+                    )
             if transaction_record is not None:
                 from review_sensei.rescan import is_rescan_transaction
 
@@ -1178,6 +1323,7 @@ class GitHubApplication:
             )
             if (
                 not publisher_started
+                and not admission_recovery_held
                 and isinstance(reviewer, ReviewPublisher)
                 and not isinstance(publication_error, (KeyboardInterrupt, SystemExit))
             ):
@@ -2487,6 +2633,7 @@ class GitHubApplication:
         run_attempt: str = "1",
         operation_store: object | None = None,
         operation_parts: object | None = None,
+        evidence_budget: EvidenceReadBudget | None = None,
     ) -> ReplyResult:
         """Authorize, generate, validate, and publish one mention reply."""
 
@@ -2504,7 +2651,43 @@ class GitHubApplication:
             raise ReviewInputError(
                 "broader discovery requires trusted full-review policy"
             )
-        prepared = self.replier.prepare_context(
+        replier = self.replier
+        broker = self.broker
+        shared_evidence_budget = evidence_budget or EvidenceReadBudget()
+        if isinstance(replier, ConversationPublisher):
+            from .publication_recovery import publication_http
+
+            replier = copy(replier)
+            replier.http = publication_http(replier.http, shared_evidence_budget)
+            replier.finalizer = copy(replier.finalizer)
+            replier.finalizer.http = replier.http
+            replier.finalizer.evidence_budget = shared_evidence_budget
+            replier.finalizer.human_inventory_read_token = read_token
+            if isinstance(broker, BrokerClient):
+                if (
+                    broker.before_request is not None
+                    and broker.before_request != shared_evidence_budget.consume
+                ):
+                    raise GitHubPublicationError(
+                        "reply broker budget identity mismatches"
+                    )
+                broker = copy(broker)
+                broker.before_request = shared_evidence_budget.consume
+        operation_owner = copy(self)
+        operation_owner.http = (
+            replier.http if isinstance(replier, ConversationPublisher) else self.http
+        )
+        operation_owner.broker = broker
+        operation_owner.replier = replier
+        if isinstance(replier, ConversationPublisher):
+            replier.finalizer.human_inventory_reader_factory = (
+                operation_owner._human_inventory_reader
+            )
+        defer_generic_evidence = (
+            isinstance(replier, ConversationPublisher) and operation_entry == "enabled"
+        )
+        prepared = replier.prepare_context(
+            **({"defer_evidence": True} if defer_generic_evidence else {}),
             token=read_token,
             repository=repository,
             pull_request=pull_request,
@@ -2524,15 +2707,15 @@ class GitHubApplication:
 
         command = parse_maintainer_command(source_body, actor="maintainer")
         if command is not None and len(command.finding_references) > 1:
-            capability_token = self.broker.exchange(
-                oidc_token or self.broker.request_oidc_token(),
+            capability_token = broker.exchange(
+                oidc_token or broker.request_oidc_token(),
                 capability=(
                     "inline_reply"
                     if prepared.source_kind == "inline"
                     else "issue_reply"
                 ),
             )
-            return self.replier.publish(
+            return replier.publish(
                 token=capability_token,
                 repository=repository,
                 pull_request=pull_request,
@@ -2551,33 +2734,74 @@ class GitHubApplication:
                 root_comment_id=prepared.root_comment_id,
                 source_kind=prepared.source_kind,
             )
-        capability_token = self.broker.exchange(
-            oidc_token or self.broker.request_oidc_token(),
+        capability_token = broker.exchange(
+            oidc_token or broker.request_oidc_token(),
             capability=(
                 "inline_reply" if prepared.source_kind == "inline" else "issue_reply"
             ),
         )
-        reaction = self.replier.add_processing_reaction(
-            token=capability_token,
-            repository=repository,
-            source_comment_id=prepared.source_comment_id,
-            source_kind=prepared.source_kind,
+        # Validate human authority before the first visible processing mutation.
+        # A malformed owned root is a held operation, not a generic reply.
+        assessor = None
+        human = None
+        work_tracker = ResourceBudgetTracker(budget or ResourceBudget.create())
+        if isinstance(replier, ConversationPublisher):
+            assessor = HumanAssessmentPublisher(
+                http=replier.http,
+                evidence_budget=shared_evidence_budget,
+                human_inventory_reader_factory=operation_owner._human_inventory_reader,
+                human_inventory_read_token=read_token,
+            )
+            human = assessor.prepare(
+                token=read_token,
+                repository=repository,
+                pull_request=pull_request,
+                prepared=prepared,
+                app_slug=app_slug,
+                work_budgets=work_budgets,
+                work_tracker=work_tracker,
+            )
+        if human is None and defer_generic_evidence:
+            # Generic conversation inference still receives its complete context.
+            # Its fresh authorization checks also fence any change during the
+            # read-only human-inventory lookup.
+            full_context = replier.prepare_context(
+                token=read_token,
+                repository=repository,
+                pull_request=pull_request,
+                source_comment_id=source_comment_id,
+                source_updated_at=source_updated_at,
+                app_slug=app_slug,
+                root_comment_id=root_comment_id,
+                source_kind=source_kind,
+                expected_head_sha=expected_head_sha,
+            )
+            if not isinstance(full_context, PreparedConversation):
+                return full_context
+            prepared = full_context
+        # A large evidence operation prioritizes durable reply/decision work
+        # within the same allowance over a transient processing indicator.
+        reaction = (
+            None
+            if human is not None
+            and (
+                human.eligibility.human_inventory_reference is not None
+                or (
+                    human.eligibility.human_review is not None
+                    and len(human.eligibility.human_review.findings)
+                    > MAX_HUMAN_FINDINGS
+                )
+            )
+            else replier.add_processing_reaction(
+                token=capability_token,
+                repository=repository,
+                source_comment_id=prepared.source_comment_id,
+                source_kind=prepared.source_kind,
+            )
         )
         try:
-            # Adapter test seams may implement only the original conversation
-            # interface. The real GitHub adapter shares one bounded transport.
-            if isinstance(self.replier, ConversationPublisher):
-                work_tracker = ResourceBudgetTracker(budget or ResourceBudget.create())
-                assessor = HumanAssessmentPublisher(http=self.replier.http)
-                human = assessor.prepare(
-                    token=read_token,
-                    repository=repository,
-                    pull_request=pull_request,
-                    prepared=prepared,
-                    app_slug=app_slug,
-                    work_budgets=work_budgets,
-                    work_tracker=work_tracker,
-                )
+            if isinstance(replier, ConversationPublisher):
+                assert assessor is not None
                 if human is not None:
                     assert human.eligibility.human_review is not None
                     inventory = human.eligibility.human_review
@@ -2591,7 +2815,7 @@ class GitHubApplication:
                         inventory.pending or operation_entry == "enabled"
                     ):
                         evidence_bundle = human.evidence_bundle
-                        produced = self._through_operation(
+                        produced = operation_owner._through_operation(
                             operation_entry=operation_entry,
                             operation_store=operation_store,
                             operation_parts=operation_parts,
@@ -2646,7 +2870,7 @@ class GitHubApplication:
                                 "operation entry refused: result_missing"
                             )
                     elif inventory.pending:
-                        produced_reply = self._through_operation(
+                        produced_reply = operation_owner._through_operation(
                             operation_entry=operation_entry,
                             operation_store=operation_store,
                             operation_parts=operation_parts,
@@ -2716,12 +2940,14 @@ class GitHubApplication:
                     review_token = None
                     check_token = None
                     if accepted:
-                        exchange_input = oidc_token or self.broker.request_oidc_token()
-                        review_token = self.broker.exchange(
+                        exchange_input = oidc_token or broker.request_oidc_token()
+                        review_token = broker.exchange(
                             exchange_input,
                             capability="review_publish",
                         )
-                        check_token = self._check_capability_token(exchange_input)
+                        check_token = self._check_capability_token(
+                            exchange_input, broker=broker
+                        )
                     reply_outcome = assessor.publish(
                         token=capability_token,
                         review_token=review_token,
@@ -2829,7 +3055,7 @@ class GitHubApplication:
                             assessment_diagnostic=publication.diagnostic,
                         )
                     return reply_outcome
-            reply = self._through_operation(
+            reply = operation_owner._through_operation(
                 operation_entry=operation_entry,
                 operation_store=operation_store,
                 operation_parts=operation_parts,
@@ -2862,12 +3088,12 @@ class GitHubApplication:
             )
             if not isinstance(reply, ConversationReply):
                 raise ReviewInputError("operation entry refused: result_missing")
-            publish = getattr(self.replier, "publish_current", self.replier.publish)
+            publish = getattr(replier, "publish_current", replier.publish)
             resolution_evidence = None
             diff_context = prepared.context.diff_context
             if (
                 reply.resolve
-                and isinstance(self.replier, ConversationPublisher)
+                and isinstance(replier, ConversationPublisher)
                 and isinstance(diff_context, str)
                 and diff_context
             ):
@@ -2886,8 +3112,8 @@ class GitHubApplication:
                     source_kind=prepared.source_kind,
                 )
             try:
-                resolution_token = self.broker.exchange(
-                    oidc_token or self.broker.request_oidc_token(),
+                resolution_token = broker.exchange(
+                    oidc_token or broker.request_oidc_token(),
                     capability="review_publish",
                 )
             except (GitHubBrokerClientError, GitHubHTTPTransientError, OSError):
@@ -2908,13 +3134,14 @@ class GitHubApplication:
                 resolution_base_sha=prepared.context.base_sha,
             )
         finally:
-            self.replier.remove_processing_reaction(
-                token=capability_token,
-                repository=repository,
-                source_comment_id=prepared.source_comment_id,
-                source_kind=prepared.source_kind,
-                reaction_id=reaction.reaction_id,
-            )
+            if reaction is not None:
+                replier.remove_processing_reaction(
+                    token=capability_token,
+                    repository=repository,
+                    source_comment_id=prepared.source_comment_id,
+                    source_kind=prepared.source_kind,
+                    reaction_id=reaction.reaction_id,
+                )
 
 
 def _provider_identity_from_context(

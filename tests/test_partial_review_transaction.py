@@ -290,6 +290,7 @@ class PartialPublicationTests(unittest.TestCase):
         payload = gates.pr_payload(head_sha=transactions.HEAD_SHA)
         payload["base"]["sha"] = transactions.BASE_SHA
         payload["base"]["repo"]["id"] = transactions.IDENTITY.repository_id
+        payload["base"]["repo"]["full_name"] = transactions.IDENTITY.repository
         retained = []
 
         def retention_matches(request):
@@ -306,7 +307,7 @@ class PartialPublicationTests(unittest.TestCase):
             if request.method == "POST":
                 retained.append(
                     {
-                        "id": 700,
+                        "id": 700 + len(retained),
                         "body": json.loads(request.data)["body"],
                         "user": {"id": 99, "login": gates.APP, "type": "Bot"},
                         "issue_url": "https://api.github.test/repos/owner/repo/issues/146",
@@ -315,17 +316,22 @@ class PartialPublicationTests(unittest.TestCase):
                 return gates.json_response(retained[-1], 201)
             return gates.json_response(retained)
 
+        def publication_matches(request):
+            return "/pulls/146" in request.full_url
+
+        def publication_respond(request):
+            if request.full_url.endswith("/pulls/146"):
+                return gates.json_response(payload)
+            if request.method == "GET":
+                return gates.json_response([])
+            return gates.json_response({"id": 5})
+
         http, calls = gates.make_http(
-            [
-                gates.json_response(payload),
-                gates.json_response(payload),
-                gates.json_response([]),
-                gates.json_response(payload),
-                gates.json_response({"id": 5}),
-            ],
+            [],
             routes=(
                 (checks.matches, checks.respond),
                 (retention_matches, retention_respond),
+                (publication_matches, publication_respond),
             ),
         )
         application = GitHubApplication(
@@ -353,7 +359,8 @@ class PartialPublicationTests(unittest.TestCase):
             evidence_context=transactions.EVIDENCE,
         )
         self.assertEqual(publication.status, "published")
-        self.assertEqual(len(retained), 1)
+        # Canonical result, independent admission intent, complete metadata.
+        self.assertEqual(len(retained), 3)
         published_reviews = [
             json.loads(body)
             for method, url, body in calls

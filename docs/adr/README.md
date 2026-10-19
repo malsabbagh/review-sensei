@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0094](0094-default-human-inventory-reference.md) | Proposed | Complete default human inventory references | #238, #246, #267; PR #316 | Transaction-bound admitted evidence, ordinary approval gates and bounded recovery |
 | [0093](0093-default-publication-retention.md) | Proposed | Bounded default publication and transaction-bound result retention | #238, #246, #267; PR #316 | Reader-first gated emission, existing result-part storage and no inference retry |
 | [0080](0080-explicit-incomplete-review-rescans.md) | Proposed | Explicit incomplete-review rescans | Maintainer-authorized bug fix | Durable request replay protection and unchanged approval gates |
 | [0072](0072-lossless-inline-review-evidence.md) | Proposed | Lossless inline review evidence with lifecycle capacity | User-authorized PR #231 recovery | Complete bounded inventories, reader-first rollout and distinct capacity status |
