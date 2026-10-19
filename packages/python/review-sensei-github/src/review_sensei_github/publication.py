@@ -89,7 +89,7 @@ from .errors import (
 from .http import MAX_PAGINATION_PAGES, GitHubHttp
 
 if TYPE_CHECKING:
-    from .default_human_inventory import HumanInventoryReference
+    from .default_human_inventory import HumanInventoryReference, HumanInventoryStore
     from .eligibility_parts import (
         PartitionedEligibilityContext,
         PartitionReader,
@@ -3294,6 +3294,8 @@ class ReviewPublisher:
         explicit_reanalysis: bool = False,
         source_guard: Callable[[], bool] | None = None,
         complete_inventory: bool = False,
+        human_inventory_store: HumanInventoryStore | None = None,
+        allow_human_inventory_start: bool = False,
     ) -> PublicationResult:
         owns_operation_budget = (
             self.finalizer.evidence_budget is None
@@ -3337,6 +3339,8 @@ class ReviewPublisher:
                 explicit_reanalysis=explicit_reanalysis,
                 source_guard=source_guard,
                 complete_inventory=complete_inventory,
+                human_inventory_store=human_inventory_store,
+                allow_human_inventory_start=allow_human_inventory_start,
             )
         finally:
             if owns_operation_budget:
@@ -3379,9 +3383,13 @@ class ReviewPublisher:
         explicit_reanalysis: bool = False,
         source_guard: Callable[[], bool] | None = None,
         complete_inventory: bool = False,
+        human_inventory_store: HumanInventoryStore | None = None,
+        allow_human_inventory_start: bool = False,
     ) -> PublicationResult:
         if not isinstance(complete_inventory, bool):
             raise GitHubPublicationError("complete inventory writer gate is invalid")
+        if not isinstance(allow_human_inventory_start, bool):
+            raise GitHubPublicationError("human inventory start authority is invalid")
         if not isinstance(auto_approve, bool):
             raise GitHubPublicationError("review auto_approve must be a boolean")
         if (
@@ -3514,10 +3522,53 @@ class ReviewPublisher:
             qualification=qualification,
             retained_eligibility=retained_eligibility,
         )
-        # Until partition writers are enabled through the reviewed reader
-        # contract, refuse inventories outside legacy capacity before any
-        # remote check/review mutation. Domain admission alone is not durable
-        # publication support.
+        # Only legacy single-piece capacity may select the new default store.
+        # A fixed-width placeholder qualifies every authority/body allocation
+        # before the first inventory, check, or review write. No reference or
+        # caller-supplied hash can authorize a new staging attempt.
+        needs_human_inventory = False
+        human_inventory = prospective_eligibility.human_review
+        if human_inventory is not None:
+            try:
+                human_inventory.to_dict()
+            except ReviewInputError:
+                if not complete_inventory or human_inventory_store is None:
+                    raise
+                from .default_human_inventory import (
+                    HumanInventoryReference,
+                    HumanInventoryStore,
+                )
+
+                if not isinstance(human_inventory_store, HumanInventoryStore):
+                    raise GitHubPublicationError("human inventory store is invalid")
+                context = human_inventory_store.context
+                if (
+                    context.repository != repository
+                    or context.repository_id != repository_id
+                    or context.pull_request != pull_request
+                    or context.base_sha != base_sha
+                    or context.head_sha != head_sha
+                    or context.app_slug.casefold() != app_slug.casefold()
+                    or context.original_content_digest != result.content_digest()
+                    or context.publication_digest != review_result_digest(result)
+                    or context.budget
+                    is not (
+                        self.finalizer.evidence_budget
+                        or self.finalizer._operation_budget
+                    )
+                    or result.transaction is None
+                    or context.transaction_id != result.transaction.transaction_id
+                ):
+                    raise GitHubPublicationError(
+                        "human inventory store authority mismatches publication"
+                    )
+                prospective_eligibility = replace(
+                    prospective_eligibility,
+                    human_inventory_reference=HumanInventoryReference(
+                        context.event_key, "0" * 64
+                    ),
+                )
+                needs_human_inventory = True
         prospective_eligibility.to_dict()
         # Automatic approval also requires an eligible review: a partial or
         # failed analysis, a pending human assessment, or incomplete coverage
@@ -3602,6 +3653,41 @@ class ReviewPublisher:
                 ),
                 complete_inventory=True,
             )
+            if needs_human_inventory:
+                assert human_inventory is not None
+                future_eligibility = replace(
+                    prospective_eligibility,
+                    human_review=replace(
+                        human_inventory,
+                        resolved=tuple(
+                            item.fingerprint for item in human_inventory.findings
+                        ),
+                    ),
+                    facts=replace(
+                        prospective_eligibility.facts,
+                        check_published=False,
+                        has_blocking_findings=body_blocking,
+                        has_human_adjudication_findings=False,
+                    ),
+                )
+                fit_assembled_review(
+                    complete_review,
+                    review_marker=marker,
+                    eligibility_marker=approval_eligibility_marker(future_eligibility),
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    result_digest=review_result_digest(result),
+                    summary_limit=_published_summary_byte_limit(result),
+                    suffix=(
+                        "Earlier findings remain in their assessment inventory; all "
+                        "approval requirements still apply."
+                        if retained_eligibility is not None
+                        else ""
+                    ),
+                    complete_inventory=True,
+                )
         preflight = self._preflight_pr(
             token=token,
             repository=repository,
@@ -3839,6 +3925,48 @@ class ReviewPublisher:
                 raise GitHubPublicationError(
                     "complete inline publication requires reconciliation of retained explanations"
                 )
+        if needs_human_inventory:
+            from review_sensei.human_inventory import inventory_result_document
+
+            assert human_inventory_store is not None
+            assert human_inventory is not None
+            assert complete_review is not None
+            reference = human_inventory_store.stage(
+                {
+                    "human_inventory": inventory_result_document(
+                        human_inventory, result_digest=review_result_digest(result)
+                    ),
+                    "finding_index": finding_index_marker(
+                        repository_id=repository_id,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        base_sha=base_sha,
+                        result_digest=review_result_digest(result),
+                        entries=complete_review.index_entries,
+                        complete_inventory=True,
+                    ),
+                    "visible_prose": [],
+                },
+                allow_start=allow_human_inventory_start,
+            )
+            prospective_eligibility = replace(
+                prospective_eligibility, human_inventory_reference=reference
+            )
+            # Staging is nonauthoritative and may span multiple requests. Fence
+            # the actual PR again before check/root mutations; retained parts
+            # remain evidence if that original head changed during staging.
+            write_preflight = self._preflight_pr(
+                token=token,
+                repository=repository,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_branch=base_branch,
+                base_sha=base_sha,
+                app_slug=app_slug,
+            )
+            if write_preflight.result is not None:
+                return write_preflight.result
         # An old success on this head must not stand in for the review that is
         # about to be published, so the pending gate state is written first and
         # concluded before the review body is composed. The persisted
@@ -3882,6 +4010,11 @@ class ReviewPublisher:
             check_published=check_diagnostic is None,
             retained_eligibility=retained_eligibility,
         )
+        if needs_human_inventory:
+            eligibility = replace(
+                eligibility,
+                human_inventory_reference=prospective_eligibility.human_inventory_reference,
+            )
         try:
             assembled = (
                 continuation_review
@@ -4936,7 +5069,13 @@ class ReviewPublisher:
                             result_digest=result_digest,
                         )
         eligibility = self.finalizer._eligibility_from_reviews(
-            payload, head_sha=head_sha, app_slug=app_slug, require_valid=True
+            payload,
+            head_sha=head_sha,
+            app_slug=app_slug,
+            require_valid=True,
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
         )
         if repository_id is not None:
             # A complete-inventory replay must validate the retained inventory
