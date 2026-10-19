@@ -345,3 +345,158 @@ class DefaultHumanConsumerTests(unittest.TestCase):
             )
         self.assertFalse(any(method != "GET" for method, _, _ in state.calls))
         self.assertEqual(state.events(), [])
+
+    def test_scope_factory_is_lazy_for_legacy_and_shares_original_budget(self):
+        from review_sensei_github.publication import ReviewApprovalFinalizer
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+        from tests.test_human_assessment import APP, HEAD, State, prior
+
+        legacy = State(prior())
+        calls = []
+
+        def forbidden_factory(**scope):
+            calls.append(scope)
+            raise AssertionError("legacy inventory must not invoke the new reader")
+
+        legacy_finalizer = ReviewApprovalFinalizer(
+            http=legacy.http, human_inventory_reader_factory=forbidden_factory
+        )
+        self.assertEqual(
+            legacy_finalizer.load_eligibility(
+                token="read",
+                repository="owner/repo",
+                pull_request=1,
+                head_sha=HEAD,
+                app_slug=APP,
+            ),
+            legacy.eligibility,
+        )
+        self.assertFalse(calls)
+        state, reader, _ = self.state()
+        budget = EvidenceReadBudget()
+        roots = []
+
+        class Reader:
+            def __call__(self, reference):
+                return reader(reference)
+
+            def validate_root(self, review, reviews):
+                roots.append(review["id"])
+                self_outer.assertIn(review, reviews)
+
+        self_outer = self
+
+        def factory(**scope):
+            calls.append(scope)
+            return Reader()
+
+        finalizer = ReviewApprovalFinalizer(
+            http=state.http,
+            human_inventory_reader_factory=factory,
+            evidence_budget=budget,
+        )
+        for _ in range(2):
+            finalizer.load_eligibility(
+                token="read",
+                repository="owner/repo",
+                pull_request=1,
+                head_sha=HEAD,
+                app_slug=APP,
+            )
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0]["budget"], budget)
+        self.assertEqual(calls[0]["repository"], "owner/repo")
+        self.assertEqual(calls[0]["head_sha"], HEAD)
+        self.assertEqual(roots, [20, 20])
+        self.assertEqual(budget.calls, 2)
+
+    def test_scope_factory_root_validation_and_latest_malformed_fail_closed(self):
+        from review_sensei_github.errors import GitHubPublicationError
+        from review_sensei_github.publication import ReviewApprovalFinalizer
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+        from tests.test_human_assessment import APP, HEAD
+
+        state, reader, seen = self.state()
+
+        class Reader:
+            def __call__(self, reference):
+                return reader(reference)
+
+            def validate_root(self, review, reviews):
+                raise ReviewInputError("wrong numeric owner or full visible prose")
+
+        finalizer = ReviewApprovalFinalizer(
+            http=state.http,
+            human_inventory_reader_factory=lambda **_: Reader(),
+            evidence_budget=EvidenceReadBudget(),
+        )
+        self.assertIsNone(
+            finalizer.load_eligibility(
+                token="read",
+                repository="owner/repo",
+                pull_request=1,
+                head_sha=HEAD,
+                app_slug=APP,
+            )
+        )
+        with self.assertRaises(GitHubPublicationError):
+            finalizer.load_eligibility(
+                token="read",
+                repository="owner/repo",
+                pull_request=1,
+                head_sha=HEAD,
+                app_slug=APP,
+                require_valid=True,
+            )
+        # A malformed newer owned record cannot expose the older valid one.
+        state.reviews.append(
+            {
+                **state.reviews[0],
+                "id": 21,
+                "body": "<!-- reviewsensei:eligibility:v1 broken -->",
+            }
+        )
+        before = len(seen)
+        self.assertIsNone(
+            finalizer.load_eligibility(
+                token="read",
+                repository="owner/repo",
+                pull_request=1,
+                head_sha=HEAD,
+                app_slug=APP,
+            )
+        )
+        self.assertEqual(len(seen), before)
+        self.assertEqual(state.events(), [])
+
+    def test_detached_reference_finalization_requires_persisted_readback(self):
+        from review_sensei_github.publication import ReviewApprovalFinalizer
+
+        from tests.test_human_assessment import APP, HEAD
+
+        state, _, _ = self.state(extra_human=False)
+        complete = replace(
+            state.eligibility,
+            human_review=replace(
+                state.eligibility.human_review,
+                resolved=tuple(
+                    item.fingerprint for item in state.eligibility.human_review.findings
+                ),
+            ),
+            facts=replace(
+                state.eligibility.facts, has_human_adjudication_findings=False
+            ),
+        )
+        state.reviews = [state.review(complete, 20)]
+        result = ReviewApprovalFinalizer(http=state.http).finalize(
+            token="review",
+            repository="owner/repo",
+            pull_request=1,
+            head_sha=HEAD,
+            app_slug=APP,
+            eligibility=complete,
+        )
+        self.assertEqual(result.status, "approval_withheld")
+        self.assertEqual(state.events(), [])

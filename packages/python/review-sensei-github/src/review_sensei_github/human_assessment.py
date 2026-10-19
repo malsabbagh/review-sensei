@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
+from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.budgets import ReviewWorkBudgets
 from review_sensei.errors import ReviewInputError
 from review_sensei.evidence import EvidenceBundle, EvidenceGroup, evidence_digest
@@ -236,6 +237,11 @@ class HumanAssessmentPublisher:
         before_read: Callable[[], float] | None = None,
         human_inventory_reader: Callable[[HumanInventoryReference], PendingHumanReview]
         | None = None,
+        human_inventory_reader_factory: Callable[
+            ..., Callable[[HumanInventoryReference], PendingHumanReview]
+        ]
+        | None = None,
+        evidence_budget: EvidenceReadBudget | None = None,
     ) -> None:
         if before_read is not None:
             http = FeedbackBudgetHttp(http=http, before_read=before_read)
@@ -245,7 +251,10 @@ class HumanAssessmentPublisher:
         self.http = http
         self.human_inventory_reader = human_inventory_reader
         self.conversation = ConversationPublisher(
-            http=http, human_inventory_reader=human_inventory_reader
+            http=http,
+            human_inventory_reader=human_inventory_reader,
+            human_inventory_reader_factory=human_inventory_reader_factory,
+            evidence_budget=evidence_budget,
         )
         # Reply publication, pending fences and delayed resolution must use the
         # same configured finalizer rather than drop its independent reader.

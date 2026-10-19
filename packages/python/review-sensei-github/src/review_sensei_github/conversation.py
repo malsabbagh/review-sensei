@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Sequence
 from urllib.parse import quote
 
+from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import LearningLoadError, ReviewInputError
 from review_sensei.human_assessment import PendingHumanReview
 from review_sensei.learnings import (
@@ -277,15 +278,19 @@ class ConversationPublisher:
         http: GitHubHttp,
         human_inventory_reader: Callable[[HumanInventoryReference], PendingHumanReview]
         | None = None,
+        human_inventory_reader_factory: Callable[
+            ..., Callable[[HumanInventoryReference], PendingHumanReview]
+        ]
+        | None = None,
+        evidence_budget: EvidenceReadBudget | None = None,
     ) -> None:
         self.http = http
         self.human_inventory_reader = human_inventory_reader
-        self.finalizer = (
-            ReviewApprovalFinalizer(
-                http=http, human_inventory_reader=human_inventory_reader
-            )
-            if human_inventory_reader is not None
-            else ReviewApprovalFinalizer(http=http)
+        self.finalizer = ReviewApprovalFinalizer(
+            http=http,
+            human_inventory_reader=human_inventory_reader,
+            human_inventory_reader_factory=human_inventory_reader_factory,
+            evidence_budget=evidence_budget,
         )
 
     @staticmethod
@@ -1838,7 +1843,13 @@ class ConversationPublisher:
                 token=token, repository=repository, pull_request=pull_request
             )
             eligibility = self.finalizer._eligibility_from_reviews(
-                reviews, head_sha=head_sha, app_slug=app_slug, require_valid=True
+                reviews,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                require_valid=True,
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
             )
             if eligibility is None:
                 return result
