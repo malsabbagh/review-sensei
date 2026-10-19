@@ -913,10 +913,21 @@ class PublicationRecoveryTests(unittest.TestCase):
                 if outcome == "crash-after":
                     restored = recover(app, fresh)
                     self.assertEqual(restored.content_digest(), result.content_digest())
+                    before = len(state.calls)
                     with self.assertRaisesRegex(
                         ReviewInputError, "admission evidence is missing"
                     ):
                         publish(app, restored, key)
+                    # Raw retention alone must not reach either gate or review
+                    # mutation; admission absence is its own recovery refusal.
+                    self.assertEqual(
+                        [
+                            (method, path)
+                            for method, path, _ in state.calls[before:]
+                            if method not in {"GET", "HEAD"}
+                        ],
+                        [],
+                    )
                 else:
                     with self.assertRaisesRegex(
                         GitHubPublicationError, "do not recreate"
@@ -938,9 +949,34 @@ class PublicationRecoveryTests(unittest.TestCase):
                 ledger = LocalSessionLedger(Path(directory))
                 result, key = checkpoint(ledger)
                 state = RetentionState()
-                state.fail_part = "crash-after"
+                state.reviews = []
+                options = GitHubWriteOptions(
+                    auto_review=True, github_writes=True, complete_inventory=True
+                )
+
+                def interrupt_after_admission(_state, method, path, body):
+                    if method == "POST" and path.endswith("/pulls/1/reviews"):
+                        # This fault is after original runtime admission, not
+                        # the separate raw-result crash/missing-admission case.
+                        self.assertTrue(
+                            any(
+                                "<!-- reviewsensei:default-human-inventory-intent:v1 -->"
+                                in part["body"]
+                                for part in state.parts
+                            )
+                        )
+                        raise KeyboardInterrupt()
+
+                state.hook = interrupt_after_admission
                 with self.assertRaises(KeyboardInterrupt):
-                    publish(application(state, ledger), result, key)
+                    publish(application(state, ledger), result, key, options=options)
+                state.hook = None
+                self.assertEqual(state.reviews, [])
+                self.assertEqual(state.part_requests.count("POST"), 3)
+                fresh = LocalSessionLedger(Path(directory))
+                app = application(state, fresh)
+                restored = recover(app, fresh)
+                self.assertEqual(restored.content_digest(), result.content_digest())
 
                 def mutate(current):
                     if kind == "reservation":
@@ -960,12 +996,23 @@ class PublicationRecoveryTests(unittest.TestCase):
 
                 if kind == "reservation":
                     with self.assertRaisesRegex(Exception, "reservation"):
-                        ledger.replace(IDENTITY, mutate)
+                        fresh.replace(IDENTITY, mutate)
                     continue
-                ledger.replace(IDENTITY, mutate)
-                state.fail_part = None
+                fresh.replace(IDENTITY, mutate)
+                before_checks = len(state.check_runs)
                 with self.assertRaisesRegex(
-                    Exception, "progress|admission evidence is missing"
+                    ReviewInputError,
+                    "^durable convergence progress does not match transaction$",
                 ):
-                    publish(application(state, ledger), result, key)
-                self.assertEqual(state.part_requests.count("POST"), 1)
+                    publish(app, restored, key, options=options)
+                self.assertEqual(state.part_requests.count("POST"), 3)
+                self.assertEqual(state.reviews, [])
+                self.assertEqual(
+                    state.check_runs[-1].get("conclusion"), "action_required"
+                )
+                self.assertTrue(
+                    all(
+                        check.get("conclusion") == "action_required"
+                        for check in state.check_runs[before_checks:]
+                    )
+                )
