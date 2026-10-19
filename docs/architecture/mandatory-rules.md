@@ -681,11 +681,10 @@ Replay never reexecutes; unknown work never publishes. Time/generation bounds,
 expiry/rollback hold. No CLI/grant activation or broker funding. See proposed
 ADR 0086.
 
-Broker control funds isolated fetch/JWKS work under original bounds and v2 binding;
-redirects/bad receipts refuse, without refunds or new authority/durability (ADR 0088).
+Broker control enforces original fetch/JWKS bounds/v2 binding; redirects/bad receipts
+refuse. No refunds or added authority/durability (ADR 0088).
 
 Partitioned publication binds independent result/snapshot/policy/configuration/producer,
-original budget, conditional generation and owned numeric root readback. Fresh complete
-review scans validate all full prose; pending-only roots retain historical prose links,
-resolution allocation and full-ID status under a conditional trusted host. Finite local
-publication/replay differs from all-resolved approval; defaults are unchanged (ADR 0089).
+budget, conditional generation and owned numeric readback. Fresh scans validate all
+prose; partial roots retain its links/capacity and full-ID status. Local replay only;
+default routes/all-resolved approval unqualified (ADR 0089).

@@ -39,3 +39,4 @@ include tests/test_github_broker_client.py
 include tests/test_evidence_capacity.py
 include tests/test_review_transaction.py
 include tests/test_rich250_public_writer.py
+include tests/test_rich250_late_feedback.py
