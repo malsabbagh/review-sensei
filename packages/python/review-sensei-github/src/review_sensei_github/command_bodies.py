@@ -1046,6 +1046,18 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         else:
             convergence_policy = resolve_review_convergence_policy(mode=explicit_mode)
         if args.recover_from:
+            if any(
+                value is not None
+                for value in (
+                    args.config,
+                    args.publication_inventory,
+                    args.operation_entry,
+                )
+            ):
+                raise ReviewInputError(
+                    "legacy --recover-from does not accept publication profile settings; "
+                    "use --result or identity-bound --recover-retained"
+                )
             try:
                 artifact = load_recovery_artifact(args.recover_from)
                 artifact.validate(

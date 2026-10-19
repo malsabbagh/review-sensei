@@ -4,7 +4,7 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,7 +16,9 @@ from review_sensei.models import ReviewResult
 
 
 class PublicationCliRecoveryTests(unittest.TestCase):
-    def invoke(self, *, retained=False, policy="complete", operation="enabled"):
+    def invoke(
+        self, *, retained=False, artifact=False, policy="complete", operation="enabled"
+    ):
         import review_sensei_github as github
 
         calls = []
@@ -51,6 +53,8 @@ class PublicationCliRecoveryTests(unittest.TestCase):
                 if retained
                 else ["--result", str(root / "result.json")]
             )
+            if artifact:
+                source = ["--recover-from", str(root / "result.json")]
             arguments = [
                 "github",
                 "review",
@@ -80,6 +84,7 @@ class PublicationCliRecoveryTests(unittest.TestCase):
                 "--allow-write",
                 "--enable-review",
             ]
+            stderr = StringIO()
             with (
                 patch.dict(
                     os.environ, {"GITHUB_TOKEN": "fixture-metadata"}, clear=True
@@ -98,8 +103,10 @@ class PublicationCliRecoveryTests(unittest.TestCase):
                     side_effect=AssertionError("network forbidden"),
                 ),
                 redirect_stdout(StringIO()),
+                redirect_stderr(stderr),
             ):
                 code = main(arguments)
+            self.stderr = stderr.getvalue()
         return code, calls
 
     def test_trusted_config_reaches_actual_publication_options(self):
@@ -117,6 +124,12 @@ class PublicationCliRecoveryTests(unittest.TestCase):
         self.assertIs(calls[0][1]["budget"], calls[1][1]["publication_budget"])
         self.assertIsNotNone(calls[0][1]["ledger"])
         self.assertEqual(calls[0][1]["token"], "fixture-metadata")
+
+    def test_legacy_artifact_does_not_silently_ignore_publication_profile(self):
+        code, calls = self.invoke(artifact=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, [])
+        self.assertIn("does not accept publication profile settings", self.stderr)
 
 
 if __name__ == "__main__":

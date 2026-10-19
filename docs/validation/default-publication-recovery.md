@@ -65,6 +65,11 @@ writers remain an unqualified condition. Large feedback histories can still exha
 the shared 60-second, 60 ordinary / 64 total dispatch budget and remain blocked.
 No silent truncation, cap raise or older clean-review fallback is permitted.
 
+The older `--recover-from` diagnostics-artifact route retains its existing legacy
+contract. It rejects the new publication-profile settings instead of silently
+ignoring them. Use `--result` with the exact original result or
+`--recover-retained` with independent transaction context for the complete profile.
+
 ## PR #316 incident boundary
 
 At head `f59edcc89d54a72ca12d97300e69463417646bfd`, the provider run completed but
