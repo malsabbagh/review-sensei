@@ -9,6 +9,7 @@ from pathlib import Path
 
 from review_sensei_github.errors import GitHubPublicationError
 
+from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.context import finding_lifecycle_for_comment
 from review_sensei.errors import ReviewInputError
 from review_sensei.human_assessment import (
@@ -19,6 +20,7 @@ from review_sensei.session import LocalSessionLedger
 from tests.default_human_inventory_contract import (
     APP,
     BASE,
+    DEFAULT_INVENTORY_INTENT_MARKER,
     HEAD,
     IDENTITY,
     DefaultHumanState,
@@ -29,10 +31,42 @@ from tests.default_human_inventory_contract import (
     publish_human,
     reply_human,
 )
+from tests.test_publication_recovery import recover
 from tests.test_review_work import AssessingProvider
 
 
 class DefaultHumanInventoryTests(unittest.TestCase):
+    def crash_before_root(self, state, path, result, key, *, before_intent=False):
+        def interrupt(_state, method, target, body):
+            if method != "POST" or not isinstance(body, dict):
+                return
+            if before_intent:
+                selected = target.endswith(
+                    "/issues/1/comments"
+                ) and DEFAULT_INVENTORY_INTENT_MARKER in body.get("body", "")
+            else:
+                selected = target.endswith(
+                    "/pulls/1/reviews"
+                ) and "<!-- reviewsensei:eligibility:v1" in body.get("body", "")
+            if selected:
+                if not before_intent:
+                    self.assertTrue(human_inventory_parts(state))
+                raise KeyboardInterrupt(
+                    "synthetic process interruption before root POST"
+                )
+
+        state.hook = interrupt
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                publish_human(state, LocalSessionLedger(path), result, key)
+        finally:
+            state.hook = None
+        self.assertEqual(state.reviews, [])
+        self.assertEqual(
+            LocalSessionLedger(path).load(IDENTITY).record.transaction.phase,
+            "publication_failed",
+        )
+
     def load_current(self, state, path):
         reader = application(state, LocalSessionLedger(path)).reviewer.finalizer
         eligibility = reader.load_eligibility(
@@ -257,6 +291,96 @@ class DefaultHumanInventoryTests(unittest.TestCase):
         for gate in ("partial", "blocker", "qualification"):
             with self.subTest(gate=gate):
                 self.assert_lifecycle(count=77, detail=3, gate=gate)
+
+    def test_raw_retained_result_recovers_original_admission_before_publishing_all_human_findings(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger"
+            result, key = human_checkpoint(
+                LocalSessionLedger(path, enable_partition_writes=True)
+            )
+            state = DefaultHumanState(result.comments)
+            self.crash_before_root(state, path, result, key)
+            parts_before = tuple(item["body"] for item in human_inventory_parts(state))
+            budget = EvidenceReadBudget()
+            fresh = LocalSessionLedger(path)
+            raw = recover(application(state, fresh), fresh, budget=budget)
+            self.assertEqual(raw.content_digest(), result.content_digest())
+            self.assertEqual(
+                tuple(c.body for c in raw.comments),
+                tuple(c.body for c in result.comments),
+            )
+            # Wire ReviewResult intentionally drops runtime admission flags.
+            # Publication must restore them from the actual retained envelope.
+            self.assertTrue(all(not c.needs_human for c in raw.comments))
+            outcome = publish_human(state, fresh, raw, key, publication_budget=budget)
+            self.assertEqual(outcome.status, "published")
+            eligibility = self.load_current(state, path)
+            self.assertEqual(len(eligibility.human_review.pending), 77)
+            self.assertTrue(eligibility.facts.has_human_adjudication_findings)
+            self.assertEqual(
+                eligibility.human_review.inventory_document(),
+                PendingHumanReview.from_result(result, BASE).inventory_document(),
+            )
+            self.assertEqual(
+                tuple(item["body"] for item in human_inventory_parts(state)),
+                parts_before,
+            )
+            self.assert_visible_inventory(state, result, eligibility, path)
+            self.assertEqual(state.check_runs[-1]["conclusion"], "action_required")
+            self.assertNotIn("APPROVE", state.events())
+            self.assertLessEqual(budget.calls, 64)
+
+    def test_raw_recovery_without_original_inventory_intent_cannot_infer_clean_obligations_or_write_gates(
+        self,
+    ):
+        for complete_parts in (False, True):
+            with (
+                self.subTest(complete_parts=complete_parts),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                path = Path(directory) / "ledger"
+                result, key = human_checkpoint(
+                    LocalSessionLedger(path, enable_partition_writes=True)
+                )
+                state = DefaultHumanState(result.comments)
+                self.crash_before_root(
+                    state, path, result, key, before_intent=not complete_parts
+                )
+                if complete_parts:
+                    self.assertTrue(human_inventory_parts(state))
+                    state.parts[:] = [
+                        item
+                        for item in state.parts
+                        if DEFAULT_INVENTORY_INTENT_MARKER not in item["body"]
+                    ]
+                self.assertFalse(
+                    any(
+                        DEFAULT_INVENTORY_INTENT_MARKER in item["body"]
+                        for item in state.parts
+                    )
+                )
+                budget = EvidenceReadBudget()
+                fresh = LocalSessionLedger(path)
+                raw = recover(application(state, fresh), fresh, budget=budget)
+                self.assertTrue(all(not c.needs_human for c in raw.comments))
+                before = len(state.calls)
+                with self.assertRaisesRegex(
+                    (GitHubPublicationError, ReviewInputError),
+                    "admission.*missing|intent|original staging",
+                ):
+                    publish_human(state, fresh, raw, key, publication_budget=budget)
+                self.assertEqual(
+                    [
+                        (method, target)
+                        for method, target, _ in state.calls[before:]
+                        if method not in {"GET", "HEAD"}
+                    ],
+                    [],
+                )
+                self.assertEqual(state.reviews, [])
+                self.assertNotIn("APPROVE", state.events())
 
     def test_changed_missing_or_foreign_authority_and_prose_refuse_before_inference_or_mutation(
         self,

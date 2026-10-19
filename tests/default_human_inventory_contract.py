@@ -39,6 +39,10 @@ from tests.test_publication_recovery import (
     _Noop,
 )
 
+DEFAULT_INVENTORY_INTENT_MARKER = (
+    "<!-- reviewsensei:default-human-inventory-intent:v1 -->"
+)
+
 
 def human_checkpoint(ledger, *, count=77, detail=3, gate=None):
     """Checkpoint the original varied bodies and exact identities publicly."""
@@ -201,6 +205,12 @@ class DefaultHumanState(RetentionState):
         path = parsed.path
         body = json.loads(request.data) if request.data else None
         values = None
+        if (
+            request.method == "POST"
+            and path.endswith("/issues/1/comments")
+            and self.hook
+        ):
+            self.hook(self, request.method, path, body)
         if request.method == "GET" and path == "/user":
             self.calls.append((request.method, path, body))
             return json_response(self.app_user)
@@ -287,7 +297,7 @@ def application(state, ledger):
     )
 
 
-def publish_human(state, ledger, result, key, *, gate=None):
+def publish_human(state, ledger, result, key, *, gate=None, **kwargs):
     candidates = None
     if gate == "blocker":
         # Independent synthetic code evidence: the separate added file above
@@ -323,6 +333,7 @@ def publish_human(state, ledger, result, key, *, gate=None):
         configuration_context=trusted_configuration(gate),
         evidence_context=EVIDENCE,
         blocker_candidates=candidates,
+        **kwargs,
     )
 
 
@@ -370,7 +381,12 @@ def human_inventory_parts(state):
         ordered = sorted(group, key=lambda item: item[1]["index"])
         raw = b"".join(base64.b64decode(item[1]["data"]) for item in ordered)
         document = json.loads(raw)
-        if document.get("kind") == "human-inventory":
+        if (
+            document.get("purpose") == "default-human-inventory"
+            and isinstance(document.get("document"), dict)
+            and isinstance(document["document"].get("human_inventory"), dict)
+            and document["document"]["human_inventory"].get("kind") == "human-inventory"
+        ):
             return [item[0] for item in ordered]
     raise AssertionError(
         "default publication did not retain a human-inventory envelope"
