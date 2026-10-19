@@ -11,6 +11,7 @@ inference:
 
 # GitHub publication and conversation policy.
 github:
+  publication_inventory: complete
   # Review eligible pull requests automatically
   automatic_reviews: true
   # Publish the validated result to GitHub
