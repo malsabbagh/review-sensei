@@ -28,7 +28,12 @@ from .default_human_inventory import (
     build_human_inventory_context,
 )
 from .http import GitHubHttp
-from .publication import FindingIndex, finding_instance_from_body, parse_finding_index
+from .publication import (
+    FindingIndex,
+    approval_eligibility_from_body,
+    finding_instance_from_body,
+    parse_finding_index,
+)
 from .publication_recovery import publication_http, publication_session_ledger
 
 
@@ -230,9 +235,24 @@ class DefaultHumanInventoryReader:
         if self.store is None or self.document is None or self.inventory is None:
             raise ReviewInputError("default human inventory was not authenticated")
         self.store.revalidate_snapshot()
-        if not self._owned_review(review):
+        if not isinstance(review, dict) or not self._owned_review(review):
             raise ReviewInputError("default human inventory root ownership conflicts")
         context = self.store.context
+        inventory = self.inventory
+        # The selected root must name this authenticated publication, not merely
+        # carry a valid reference to its parts. Decode locally against the
+        # already authenticated inventory; never recurse through the reader or
+        # perform another remote scan while checking the envelope.
+        eligibility = approval_eligibility_from_body(
+            review["body"], human_inventory_reader=lambda _reference: inventory
+        )
+        if (
+            eligibility is None
+            or eligibility.head_sha != context.head_sha
+            or eligibility.result_digest != context.publication_digest
+            or eligibility.human_inventory_reference != self.reference
+        ):
+            raise ReviewInputError("default human inventory root identity conflicts")
         expected = parse_finding_index(
             self.document["finding_index"],
             repository_id=context.repository_id,
