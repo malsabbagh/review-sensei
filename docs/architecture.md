@@ -1120,3 +1120,10 @@ Restored handles bind operation/inventory/source and original clock/charges.
 Replay never reexecutes; unknown work never publishes. Time/generation bounds,
 expiry/rollback hold. No CLI/grant activation or broker funding. See proposed
 ADR 0086.
+
+The explicit `ConversationPublisher.prepare_selected_assessment_context` API
+routes selectors into the existing complete finding/evidence/source composition
+instead of loading unused generic discussion context. Its compact report path
+uses exact owned POST-ID readback followed by the complete report scan; the
+ordinary conversation route remains available. See
+[Proposed ADR 0087](adr/0087-selected-assessment-context-and-owned-page-readback.md).
