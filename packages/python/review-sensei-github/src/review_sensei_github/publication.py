@@ -54,6 +54,7 @@ from review_sensei.presentation import (
     render_body_findings,
     render_check_permission_warning,
     render_finding,
+    render_finding_reference,
     render_review_summary,
 )
 from review_sensei.validation import validate_bounded_text
@@ -717,6 +718,7 @@ class AssembledReview:
     body_explanations: tuple[BodyExplanation, ...]
     inline_blocker_instances: tuple[str, ...]
     requests_changes: bool
+    compact_references: bool = False
 
 
 def _render_assembled_summary(
@@ -731,6 +733,22 @@ def _render_assembled_summary(
             return replace(view, explanation_omitted=True)
         return view
 
+    limitations = assembled.limitations
+    if assembled.compact_references:
+        repeated_human_guidance = {
+            f"Required human assessment: {view.identifier} "
+            "is labeled for human assessment rather than asserted as a proven defect."
+            for view in (*assembled.required_views, *assembled.optional_views)
+            if view.needs_human
+        }
+        limitations = tuple(
+            item for item in limitations if item not in repeated_human_guidance
+        )
+        if repeated_human_guidance:
+            limitations += (
+                "Every required decision listed above needs human assessment; "
+                "these findings are not asserted as proven defects.",
+            )
     summary = render_review_summary(
         build_review_summary_view(
             state=assembled.state,
@@ -739,12 +757,19 @@ def _render_assembled_summary(
             coverage_line=assembled.coverage_line,
             required=tuple(marked(view) for view in assembled.required_views),
             optional=tuple(marked(view) for view in assembled.optional_views),
-            limitations=assembled.limitations,
+            limitations=limitations,
             placement_note=assembled.placement_note,
             reason=assembled.reason,
             omitted_explanations=len(omitted_identifiers),
         )
     )
+    if assembled.compact_references:
+        # Full explanations remain in their exact body/inline placements. The
+        # root retains every command identifier without repeating excerpts.
+        for view in (*assembled.required_views, *assembled.optional_views):
+            summary = summary.replace(
+                render_finding_reference(marked(view)), f"- **{view.identifier}**"
+            )
     prose = tuple(
         item.view
         for item in kept_explanations
@@ -3619,6 +3644,8 @@ class ReviewPublisher:
                 head_sha=head_sha,
                 base_sha=base_sha,
             )
+            if needs_human_inventory:
+                complete_review = replace(complete_review, compact_references=True)
             body_blocking = any(
                 entry.blocking and entry.body_placed
                 for entry in complete_review.index_entries

@@ -107,7 +107,21 @@ def pending_reply_pages(
         )
     ):
         raise ReviewInputError("pending decision reasons are invalid")
+    compact_inventory = (
+        eligibility is not None and eligibility.human_inventory_reference is not None
+    )
     if inventory is not None:
+        if compact_inventory and inventory.pending:
+            lines.append(
+                "All IDs listed below remain pending human assessment. "
+                + (
+                    "Current evidence is insufficient. "
+                    if diagnostic is not None
+                    else ""
+                )
+                + "Next: provide current-head code and human evidence for selected IDs "
+                "in a new authorized mention. Full explanations remain in the original review."
+            )
         identities = tuple(item.fingerprint for item in inventory.findings)
         try:
             identifiers = assign_finding_identifiers(identities)
@@ -127,12 +141,20 @@ def pending_reply_pages(
                 reason = "Validated reassessment reason: " + _display(
                     reasons[item.fingerprint], 192
                 )
-            lines.append(
-                f"- **{identifier}** (`{item.fingerprint}`), "
-                f"{_display(item.path)}: {reason} "
-                "Next: provide current-head code and human evidence for this ID "
-                "in a new authorized mention."
-            )
+            if compact_inventory:
+                line = (
+                    f"- **{identifier}** (`{item.fingerprint}`), {_display(item.path)}"
+                )
+                if reasons.get(item.fingerprint):
+                    line += f": {reason}"
+                lines.append(line)
+            else:
+                lines.append(
+                    f"- **{identifier}** (`{item.fingerprint}`), "
+                    f"{_display(item.path)}: {reason} "
+                    "Next: provide current-head code and human evidence for this ID "
+                    "in a new authorized mention."
+                )
         if not inventory.pending:
             lines.append("- No pending human-assessment findings in this inventory.")
     elif eligibility is None or eligibility.facts.has_human_adjudication_findings:

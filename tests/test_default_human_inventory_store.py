@@ -204,6 +204,52 @@ class DefaultHumanInventoryStoreTests(unittest.TestCase):
     def posts(self):
         return sum(method == "POST" for method, *_ in self.http.requests)
 
+    def test_discovery_requires_original_complete_intent_and_never_authorizes_absence(
+        self,
+    ):
+        self.assertIsNone(self.store.read_available())
+        self.assertEqual(self.posts(), 0)
+        reference = self.store.stage(self.document, allow_start=True)
+        posts = self.posts()
+        fresh = HumanInventoryStore(self.http, "synthetic", self.ledger, self.context)
+        self.assertEqual(fresh.read_available(), (reference, self.document))
+        self.assertEqual(self.posts(), posts)
+        self.http.comments = [
+            item for item in self.http.comments if INTENT_MARKER not in item["body"]
+        ]
+        self.assertIsNone(fresh.read_available())
+        self.assertEqual(self.posts(), posts)
+
+    def test_explicit_empty_human_inventory_requires_a_complete_nonhuman_index(self):
+        clean = {
+            **self.document,
+            "human_inventory": None,
+            "finding_index": finding_index_marker(
+                repository_id=9,
+                pull_request=7,
+                base_sha=BASE,
+                head_sha=HEAD,
+                result_digest=PUBLICATION,
+                complete_inventory=True,
+                entries=tuple(
+                    IndexedFinding(
+                        finding_instance_fingerprint(comment),
+                        "f" * 64,
+                        index == 0,
+                        False,
+                        True,
+                    )
+                    for index, comment in enumerate(self.result.comments)
+                ),
+            ),
+        }
+        with self.assertRaisesRegex(ReviewInputError, "admitted identities"):
+            self.store.stage(
+                {**self.document, "human_inventory": None}, allow_start=True
+            )
+        reference = self.store.stage(clean, allow_start=True)
+        self.assertEqual(self.store.read(reference), clean)
+
     def test_fresh_recovery_cannot_authorize_initial_storage(self):
         with self.assertRaisesRegex(ReviewInputError, "fresh recovery cannot start"):
             self.store.stage(self.document)

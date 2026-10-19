@@ -34,3 +34,8 @@ include tests/test_checkpoint_publication_acceptance.py
 include tests/test_publication_cli_recovery.py
 include tests/test_default_publication_cli_journey.py
 include tests/test_override_metadata_integration.py
+include tests/default_human_inventory_contract.py
+include tests/test_default_human_inventory.py
+include tests/test_default_human_inventory_store.py
+include tests/test_default_human_consumers.py
+include tests/test_evidence_capacity.py

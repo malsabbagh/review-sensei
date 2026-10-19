@@ -1,3 +1,20 @@
+## Default human inventory references
+
+Complete publication may use closed eligibility schema 5 when the admitted human
+inventory exceeds legacy future-assessment capacity. Purpose-bound owned parts
+preserve every admitted instance, metadata and original index. Independent durable
+transaction and live repository/PR/base/head/numeric Bot authority are required;
+references alone grant none. Fresh readers verify the original visible prose and
+index. Ordinary approval facts, provider qualification and all other blockers
+remain authoritative through partial and final resolution. Preflight the largest
+future resolution receipt and existing prose/frame limits before mutation.
+
+Only original live admission may start writes. Durable intent precedes data;
+unknown or incomplete writes hold without blind recreation. Publication and reply
+operations share their original finite evidence budget through broker, storage,
+readers and mutable fences. Missing or conflicting evidence withholds decisions.
+Reader-first rollout and trusted complete emission remain required. See ADR 0094.
+
 ## Bounded default publication and retained recovery
 
 Default writers emit at most 64 indexed findings. Updated readers accept 250;

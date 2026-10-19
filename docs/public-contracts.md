@@ -1373,3 +1373,30 @@ interrupted initial retention write enters an unconfirmed publication phase;
 fresh owners reconcile complete owned parts and cannot blindly recreate missing
 parts. This is conservative serial recovery, not distributed atomic compare-and-swap
 for comment-ledger concurrent writers. See [the rollout and recovery runbook](validation/default-publication-recovery.md).
+
+
+## Default human inventory reference eligibility (schema 5)
+
+The closed document contains `schema_version: "5"`, `head_sha`, `result_digest`,
+ordinary `facts`, `human_inventory_reference` and `human_resolution`. The reference
+has closed fields `schema_version: "1.0"`, `purpose: "default-human-inventory"`,
+`event_key` and `payload_digest`. The event key is two lowercase 64-hex digests
+separated by one tab; the payload digest is lowercase 64-hex. References never
+supply trusted transaction or repository authority. Resolution contains the
+immutable inventory digest and the complete sorted resolved-ID subset; pending
+IDs and ordinary human-pending facts must agree. Unknown fields, unresolved
+references and mismatched digests fail closed without falling back to an older
+clean root. Legacy human documents keep their original 24 KiB bound.
+
+The complete profile may select this format after initial and largest-future
+framing preflight. Owned parts preserve the closed admitted human inventory,
+canonical original index and bounded visible-prose receipt list. The store binds
+purpose, repository identity, PR, base/head, configured numeric Bot, original
+transaction/content/publication and policy/configuration/evidence digests.
+Initial-write authorization is explicit and comes from live admission. A durable
+purpose-specific intent precedes data writes. Fresh recovery reconciles a complete
+owned set; missing, conflicting or uncertain incomplete storage remains held.
+Fresh consumer operations share one budget and revalidate mutable authority and
+the original complete visible explanation before applying decisions. Standard
+approval gates, including legitimately `not-required` provider qualification,
+remain unchanged. See [ADR 0094](adr/0094-default-human-inventory-reference.md).

@@ -224,6 +224,10 @@ def _live(http: GitHubHttp, token: str, context: HumanInventoryContext) -> None:
         or user["login"].casefold() != context.app_slug.casefold()
     ):
         raise ReviewInputError("default human inventory Bot identity conflicts")
+    _live_pr(http, token, context)
+
+
+def _live_pr(http: GitHubHttp, token: str, context: HumanInventoryContext) -> None:
     status, pr = _get(
         http,
         token,
@@ -288,7 +292,15 @@ def build_human_inventory_context(
     transport = publication_http(http, budget)
     # Authenticate the producer before placing its numeric identity in context.
     status, user = _get(transport, token, "/users/" + quote(app_slug, safe=""))
-    if status != 200 or not isinstance(user, dict) or type(user.get("id")) is not int:
+    if (
+        status != 200
+        or not isinstance(user, dict)
+        or type(user.get("id")) is not int
+        or user["id"] <= 0
+        or user.get("type") != "Bot"
+        or not isinstance(user.get("login"), str)
+        or user["login"].casefold() != app_slug.casefold()
+    ):
         raise ReviewInputError("default human inventory Bot identity unavailable")
     context = HumanInventoryContext(
         identity.repository,
@@ -307,7 +319,7 @@ def build_human_inventory_context(
         budget,
     )
     _transaction(ledger, context)
-    _live(transport, token, context)
+    _live_pr(transport, token, context)
     return context
 
 
@@ -374,6 +386,20 @@ class HumanInventoryStore:
         _transaction(self.ledger, self.context)
         _live(self.http, self.token, self.context)
 
+    def revalidate_authority(self) -> None:
+        """Freshly fence mutable transaction, configured Bot and live PR scope."""
+        self._authority()
+
+    def revalidate_snapshot(self) -> None:
+        """Fence mutable scope after this operation authenticated its producer.
+
+        Readers compare every root/inline numeric producer against the original
+        authenticated identity. The configured Bot lookup need not be repeated
+        before every read-only scan within the same finite operation.
+        """
+        _transaction(self.ledger, self.context)
+        _live_pr(self.http, self.token, self.context)
+
     def _document(self, document: object) -> dict[str, object]:
         context = self.context
         if not isinstance(document, dict) or set(document) != {
@@ -384,10 +410,14 @@ class HumanInventoryStore:
             raise ReviewInputError(
                 "default human inventory document fields are invalid"
             )
-        inventory = inventory_from_result_document(
-            document["human_inventory"],
-            result_digest=context.publication_digest,
-            base_sha=context.base_sha,
+        inventory = (
+            inventory_from_result_document(
+                document["human_inventory"],
+                result_digest=context.publication_digest,
+                base_sha=context.base_sha,
+            )
+            if document["human_inventory"] is not None
+            else None
         )
         index = parse_finding_index(
             document["finding_index"],
@@ -411,7 +441,11 @@ class HumanInventoryStore:
             != document["finding_index"]
         ):
             raise ReviewInputError("default human inventory finding index conflicts")
-        human_ids = {finding.fingerprint for finding in inventory.findings}
+        human_ids = (
+            {finding.fingerprint for finding in inventory.findings}
+            if inventory is not None
+            else set()
+        )
         indexed_humans = {
             entry.instance for entry in index.entries if entry.needs_human
         }
@@ -596,6 +630,41 @@ class HumanInventoryStore:
                 ) from None
         self.read(reference)
         return reference
+
+    def read_available(
+        self,
+    ) -> tuple[HumanInventoryReference, dict[str, object]] | None:
+        """Discover evidence only under independently authenticated transaction scope.
+
+        Absence is not a clean admitted result. Recovery callers must explicitly
+        hold when this returns None; an intent with incomplete parts raises.
+        """
+        try:
+            return self._read_available()
+        except ReviewInputError:
+            raise
+        except Exception:
+            raise ReviewInputError(
+                "default human inventory read unavailable; retain original intent and parts"
+            ) from None
+
+    def _read_available(
+        self,
+    ) -> tuple[HumanInventoryReference, dict[str, object]] | None:
+        self._authority()
+        comments = self.port.list_comments()
+        intent = self._intent(comments)
+        if intent is None:
+            return None
+        reference = HumanInventoryReference(
+            self.context.event_key, str(intent["payload_digest"])
+        )
+        payload = self._parts(comments).read(
+            event_key=reference.event_key, payload_digest=reference.payload_digest
+        )
+        if ensure_result_part_capacity(len(payload)) != intent["part_count"]:
+            raise ReviewInputError("default human inventory part count conflicts")
+        return reference, self._restore(payload)
 
     def read(self, reference: HumanInventoryReference) -> dict[str, object]:
         try:
