@@ -1632,12 +1632,16 @@ class ConversationPublisher:
             decision_reasons=decision_reasons,
             assessment_digest=assessment_digest,
         )
-        if (
+        reference_inventory = (
             isinstance(eligibility, ReviewApprovalEligibility)
             and eligibility.human_inventory_reference is not None
-        ):
+        )
+        if reference_inventory or len(pages) > 1:
             return self._stage_pending_report(
-                pages=pages, fence=fence, arguments=arguments
+                pages=pages,
+                fence=fence,
+                arguments=arguments,
+                require_association=reference_inventory,
             )
         # Receipt enumeration is read-only. Fence after that scan, immediately
         # before reusing a completed report or writing each missing page; an
@@ -1701,8 +1705,9 @@ class ConversationPublisher:
         pages: tuple[PendingReplyPage, ...],
         fence: Callable[[], str | None],
         arguments: dict[str, Any],
+        require_association: bool,
     ) -> ReplyResult:
-        """Stage v5 pages between two complete, strict receipt scans.
+        """Stage multipage or v5 reports between two strict receipt scans.
 
         An uncertain write stops staging. Only a complete final remote proof
         can reconcile it; the next invocation may resume a validated subset.
@@ -1724,7 +1729,8 @@ class ConversationPublisher:
             source_kind=arguments.get("source_kind", "inline"),
             report_digest=pages[0].report_digest,
             pages=pages,
-            strict_association=True,
+            strict_association=require_association,
+            validate_present_association=True,
         )
         known = self._pending_report_parts(**scan_arguments)
         if len(known) == len(pages):
@@ -1836,6 +1842,7 @@ class ConversationPublisher:
         pages: tuple[PendingReplyPage, ...],
         app_slug: str,
         strict_association: bool = False,
+        validate_present_association: bool = False,
     ) -> dict[int, int]:
         """Validate every matching owned receipt, including incomplete subsets."""
         marker = (
@@ -1880,7 +1887,12 @@ class ConversationPublisher:
                 or comment["id"] < 1
             ):
                 raise GitHubConversationError("pending reply receipt conflicts")
-            if strict_association:
+            association_field = (
+                "pull_request_url" if source_kind == "inline" else "issue_url"
+            )
+            if strict_association or (
+                validate_present_association and association_field in comment
+            ):
                 self._require_comment_association(
                     comment=comment,
                     repository=repository,
