@@ -219,19 +219,41 @@ class LocalPublicationHost:
                     raise ReviewInputError("owned publication generation changed")
                 if self.before_activation:
                     self.before_activation()
+                # Hold the original attempt before a possibly committed remote write.
+                # Only exact owned readback and a successful local CAS may clear it.
+                self.unknown = True
                 value = self.request(
                     "POST",
                     "/repos/owner/repo/pulls/1/reviews",
                     {"body": request.body, "event": "COMMENT", "commit_id": HEAD},
                 )
-                actual_id = value["id"]
-                if self.unknown:
-                    raise ReviewInputError(
-                        "publication outcome is unknown; reconcile original attempt"
-                    )
+                actual_id = value.get("id") if isinstance(value, dict) else None
+                if type(actual_id) is not int or not 0 < actual_id <= 2**63 - 1:
+                    raise GitHubPublicationError("owned root readback ID is invalid")
+                root = self.request(
+                    "GET", f"/repos/owner/repo/pulls/1/reviews/{actual_id}"
+                )
+                user = root.get("user") if isinstance(root, dict) else None
+                if (
+                    not isinstance(root, dict)
+                    or type(root.get("id")) is not int
+                    or root.get("id") != actual_id
+                    or root.get("body") != request.body
+                    or root.get("commit_id") != HEAD
+                    or root.get("state") != "COMMENTED"
+                    or root.get("pull_request_url")
+                    != self.state.http.api_url + "/repos/owner/repo/pulls/1"
+                    or not isinstance(user, dict)
+                    or type(user.get("id")) is not int
+                    or user.get("id") != PRODUCER
+                    or user.get("type") != "Bot"
+                    or user.get("login") != APP
+                ):
+                    raise GitHubPublicationError("owned root readback failed")
                 return record.evolve(generation=record.generation + 1)
 
             accepted = self.ledger.replace(self.identity, mutate)
+            self.unknown = False
             self.owned_context = PartitionedEligibilityContext(
                 binding=self.plan.binding,
                 result_digest=self.plan.result_digest,
@@ -247,13 +269,15 @@ class LocalPublicationHost:
 
 
 class Rich250PublicWriterTests(unittest.TestCase):
-    def fixture(self, directory, detail=1):
+    def fixture(self, directory, detail=1, *, budget=None):
         state = RichState()
         comments = varied_comments(250, detail=detail, unique_paths=250)
         result = human_result(comments)
         policy = ReviewConvergencePolicy(enforcement="publication")
         configuration = dict(CONFIGURATION, publication_mode=policy.mode)
-        host = LocalPublicationHost(directory, state, result, policy, configuration)
+        host = LocalPublicationHost(
+            directory, state, result, policy, configuration, budget=budget
+        )
         return state, comments, result, policy, configuration, host
 
     def publish(self, values, **overrides):
@@ -283,7 +307,7 @@ class Rich250PublicWriterTests(unittest.TestCase):
             self.assertEqual(receipt.eligibility.facts.provider, "fixture")
             self.assertEqual(receipt.eligibility.facts.qualification, "not-required")
             self.assertLessEqual(host.budget.calls, 60)
-            self.assertEqual(host.budget.calls, 48)
+            self.assertEqual(host.budget.calls, 49)
             self.assertEqual(host.budget.calls, len(state.calls) + 13)
             self.assertNotIn("APPROVE", state.events())
             self.assertTrue(receipt.eligibility.facts.check_published)
@@ -309,6 +333,76 @@ class Rich250PublicWriterTests(unittest.TestCase):
                 len(complete.to_dict()["human_resolution"]["resolved"]), 250
             )
             self.assertEqual(len(complete.human_review.findings), 250)
+
+    def test_every_live_pr_dispatch_receives_original_remaining_timeout(self):
+        clock = [0.0]
+        with tempfile.TemporaryDirectory() as directory:
+            values = self.fixture(
+                directory, budget=EvidenceReadBudget(clock=lambda: clock[0])
+            )
+            state, _, _, _, _, host = values
+            fence = host.fence
+
+            def late_fence():
+                fence()
+                clock[0] = 59.0
+
+            host.fence = late_fence
+            opener = state.http.opener
+            timeouts = []
+
+            def capture(request, timeout):
+                if request.method == "GET" and urlparse(request.full_url).path.endswith(
+                    "/pulls/1"
+                ):
+                    timeouts.append(timeout)
+                return opener(request, timeout)
+
+            state.http.opener = capture
+            self.publish(values)
+            self.assertEqual(len(timeouts), 3)
+            self.assertTrue(all(0 < value <= 1 for value in timeouts), timeouts)
+
+    def test_actual_lost_root_post_or_readback_never_retries_the_original_activation(
+        self,
+    ):
+        for phase in ("POST", "GET"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                values = self.fixture(directory)
+                state, _, _, _, _, host = values
+                original = host.request
+
+                def lost(method, path, body=None):
+                    value = original(method, path, body)
+                    if method == phase and (
+                        path.endswith("/pulls/1/reviews")
+                        if phase == "POST"
+                        else "/pulls/1/reviews/" in path
+                    ):
+                        raise GitHubPublicationError("synthetic lost root response")
+                    return value
+
+                host.request = lost
+                with self.assertRaisesRegex(
+                    GitHubPublicationError, "lost root response"
+                ):
+                    self.publish(values)
+                self.assertTrue(host.unknown)
+                self.assertEqual(
+                    LocalSessionLedger(Path(directory))
+                    .load(host.identity)
+                    .record.generation,
+                    1,
+                )
+                self.assertFalse(hasattr(host, "owned_context"))
+                roots = len(state.reviews)
+                calls = len(state.calls)
+                with self.assertRaisesRegex(
+                    ReviewInputError, "original operation changed"
+                ):
+                    host.activate(host.last_request)
+                self.assertEqual((len(state.reviews), len(state.calls)), (roots, calls))
+                self.assertNotIn("APPROVE", state.events())
 
     def test_operator_optouts_remain_persisted_without_qualification_promotion(self):
         for policy in ({"auto_approve": False}, {"reviews_policy": "advisory"}):
@@ -444,9 +538,17 @@ class Rich250PublicWriterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             values = self.fixture(directory)
             state, _, _, _, _, host = values
-            host.before_activation = lambda: setattr(host, "unknown", True)
+            original = host.request
+
+            def lost(method, path, body=None):
+                value = original(method, path, body)
+                if method == "POST" and path.endswith("/pulls/1/reviews"):
+                    raise GitHubPublicationError("synthetic lost root response")
+                return value
+
+            host.request = lost
             deadline = host.budget.wall_deadline_ms
-            with self.assertRaisesRegex(ReviewInputError, "outcome is unknown"):
+            with self.assertRaisesRegex(GitHubPublicationError, "lost root response"):
                 self.publish(values)
             observer = LocalSessionLedger(Path(directory)).load(host.identity).record
             self.assertEqual(observer.generation, 1)

@@ -113,7 +113,9 @@ class PartitionedPublicationHost(Protocol):
 
         Bind every expected field to independent retained host/result inputs.
         Only the actual authenticated numeric POST/readback ID supplies root ID.
-        Preserve unknown writes/charges; never mint another attempt on retry.
+        Hold the attempt before dispatch; clear it only after owned readback
+        and successful generation commit. Preserve unknown writes/charges;
+        never mint another attempt on retry.
         """
         ...
 
@@ -346,9 +348,13 @@ def publish_partitioned(
         budget=budget,
     )
 
+    checked_publisher = ReviewPublisher(
+        http=FeedbackBudgetHttp(http=publisher.http, before_read=budget.consume),
+        qualification_authority=authority,
+    )
+
     def live_pr():
-        budget.consume()
-        preflight = publisher._preflight_pr(
+        preflight = checked_publisher._preflight_pr(
             token=token,
             repository=binding["repository"],
             repository_id=binding["repository_id"],
@@ -364,10 +370,6 @@ def publish_partitioned(
 
     host.fence()
     live_pr()
-    checked_publisher = ReviewPublisher(
-        http=FeedbackBudgetHttp(http=publisher.http, before_read=budget.consume),
-        qualification_authority=authority,
-    )
     check_arguments = dict(
         check_token=check_token,
         repository=binding["repository"],

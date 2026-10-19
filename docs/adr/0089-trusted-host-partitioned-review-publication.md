@@ -36,7 +36,11 @@ separate allocation-only value. Maximum-width projected storage/review IDs are
 only sizing values; they never become reader authority or retained root identity.
 
 The explicit host conditionally activates and readbacks an owned root, returning
-actual authenticated numeric root identity and generation. The publisher GETs
+actual authenticated numeric root identity and generation. Before root dispatch,
+the host holds the original attempt; only exact owned readback and successful
+local generation commit clear that hold. Lost POST/readback responses retain
+the hold and original reservation, so retry cannot issue a fresh root. Every
+PR fence dispatch receives the original budget's remaining timeout. The publisher GETs
 that exact object independently, checks exact body/head/PR/Bot numeric ownership,
 then scans the latest authority with all required explicit v4 readers and fresh
 complete prose readbacks. A changed newest root never falls back to older clean
@@ -79,14 +83,15 @@ concurrency and unknown outcomes appear safer than its contract supports.
 `Rich250PublicWriterTests.test_complete_rich250_public_write_readback` exercises
 250 independently varied full IDs, 250 distinct paths and every original concern
 body with detail=1. Actual local persistence plus captured synthetic GitHub HTTP
-finishes at 48 charged calls: 35 HTTP dispatches and 13 local control dispatches.
+finishes at 49 charged calls: 36 HTTP dispatches and 13 local control dispatches.
 Four complete prose reviews, four immutable evidence objects and one authority
 root retain all 250 pending findings. The check is `action_required`; provider
 facts remain fixture/not-required; no APPROVE occurs. All 250 future full-ID
 resolutions still fit the original root allocation and preserve original prose.
 
 Other tests exercise wrong independent policy/configuration/result/visible set,
-too-small future allocation before HTTP, unknown activation held without retry,
+too-small future allocation before HTTP, actual lost activation POST/readback
+responses held without retry, remaining-deadline PR fences,
 actual competing local generation, two serialized original writers with exactly
 one root, changed head, missing evidence and changed complete prose. Operator
 opt-outs remain persisted. Existing v4 reader/staging tests retain their bounds.
