@@ -2662,6 +2662,7 @@ class GitHubApplication:
             replier.finalizer = copy(replier.finalizer)
             replier.finalizer.http = replier.http
             replier.finalizer.evidence_budget = shared_evidence_budget
+            replier.finalizer.human_inventory_read_token = read_token
             if isinstance(broker, BrokerClient):
                 if (
                     broker.before_request is not None
@@ -2749,6 +2750,7 @@ class GitHubApplication:
                 http=replier.http,
                 evidence_budget=shared_evidence_budget,
                 human_inventory_reader_factory=operation_owner._human_inventory_reader,
+                human_inventory_read_token=read_token,
             )
             human = assessor.prepare(
                 token=read_token,

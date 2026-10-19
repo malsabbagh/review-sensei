@@ -434,6 +434,179 @@ class DefaultHumanConsumerTests(unittest.TestCase):
         self.assertEqual(roots, [20, 20])
         self.assertEqual(budget.calls, 2)
 
+    def credential_scoped_finalizer(self, budget, *, read_token=None):
+        from urllib.parse import urlparse
+
+        from review_sensei_github.publication import ReviewApprovalFinalizer
+        from review_sensei_github.publication_recovery import publication_http
+
+        state, reader, _ = self.state()
+        http = publication_http(state.http, budget)
+        original_open = state.http.opener
+        credentials = []
+        scopes = []
+
+        def observed_open(request, timeout):
+            if urlparse(request.full_url).path.endswith("/pulls/1"):
+                credentials.append(request.get_header("Authorization"))
+            return original_open(request, timeout)
+
+        state.http.opener = observed_open
+
+        def factory(**scope):
+            scopes.append(scope)
+
+            class Reader:
+                def __call__(self, reference):
+                    return reader(reference)
+
+                def validate_root(self, review, reviews):
+                    # A real HTTP read proves which credential the cached
+                    # reader uses, not merely that its factory was called.
+                    http.request(
+                        "GET", "/repos/owner/repo/pulls/1", token=scope["token"]
+                    )
+
+            return Reader()
+
+        return (
+            state,
+            ReviewApprovalFinalizer(
+                http=http,
+                evidence_budget=budget,
+                human_inventory_reader_factory=factory,
+                human_inventory_read_token=read_token,
+            ),
+            scopes,
+            credentials,
+        )
+
+    def test_scope_factory_uses_current_credential_without_refilling_shared_budget(
+        self,
+    ):
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+        from tests.test_human_assessment import APP, HEAD
+
+        budget = EvidenceReadBudget()
+        deadline = budget.deadline
+        state, finalizer, scopes, credentials = self.credential_scoped_finalizer(budget)
+        for token in (
+            "synthetic-first",
+            "synthetic-first",
+            "synthetic-second",
+            "synthetic-second",
+        ):
+            self.assertEqual(
+                finalizer.load_eligibility(
+                    token=token,
+                    repository="owner/repo",
+                    pull_request=1,
+                    head_sha=HEAD,
+                    app_slug=APP,
+                    require_valid=True,
+                ),
+                state.eligibility,
+            )
+        self.assertEqual(
+            [scope["token"] for scope in scopes],
+            ["synthetic-first", "synthetic-second"],
+        )
+        self.assertTrue(all(scope["budget"] is budget for scope in scopes))
+        self.assertEqual(
+            credentials,
+            [
+                "Bearer synthetic-first",
+                "Bearer synthetic-first",
+                "Bearer synthetic-second",
+                "Bearer synthetic-second",
+            ],
+        )
+        self.assertEqual(budget.calls, len(state.calls))
+        self.assertEqual(budget.calls, 8)
+        self.assertEqual(budget.deadline, deadline)
+        self.assertEqual(state.events(), [])
+
+    def test_explicit_metadata_credential_preserves_read_context_across_write_tokens(
+        self,
+    ):
+        from urllib.parse import urlparse
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+        from tests.test_human_assessment import APP, HEAD
+
+        budget = EvidenceReadBudget()
+        deadline = budget.deadline
+        state, finalizer, scopes, credentials = self.credential_scoped_finalizer(
+            budget, read_token="synthetic-metadata"
+        )
+        original_open = state.http.opener
+        review_credentials = []
+
+        def observed_open(request, timeout):
+            if urlparse(request.full_url).path.endswith("/reviews"):
+                review_credentials.append(request.get_header("Authorization"))
+            return original_open(request, timeout)
+
+        state.http.opener = observed_open
+        for token in ("synthetic-issue", "synthetic-review"):
+            self.assertEqual(
+                finalizer.load_eligibility(
+                    token=token,
+                    repository="owner/repo",
+                    pull_request=1,
+                    head_sha=HEAD,
+                    app_slug=APP,
+                    require_valid=True,
+                ),
+                state.eligibility,
+            )
+        self.assertEqual([scope["token"] for scope in scopes], ["synthetic-metadata"])
+        self.assertIs(scopes[0]["budget"], budget)
+        self.assertEqual(credentials, ["Bearer synthetic-metadata"] * 2)
+        self.assertEqual(
+            review_credentials, ["Bearer synthetic-issue", "Bearer synthetic-review"]
+        )
+        self.assertEqual(budget.calls, len(state.calls))
+        self.assertEqual(budget.calls, 4)
+        self.assertEqual(budget.deadline, deadline)
+        self.assertEqual(state.events(), [])
+
+    def test_changed_credential_cannot_recreate_expired_reader_allowance(self):
+        from review_sensei_github.errors import GitHubPublicationError
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+        from tests.test_human_assessment import APP, HEAD
+
+        clock = [0.0]
+        budget = EvidenceReadBudget(clock=lambda: clock[0])
+        state, finalizer, scopes, _ = self.credential_scoped_finalizer(budget)
+        arguments = dict(
+            repository="owner/repo",
+            pull_request=1,
+            head_sha=HEAD,
+            app_slug=APP,
+            require_valid=True,
+        )
+        self.assertEqual(
+            finalizer.load_eligibility(token="synthetic-first", **arguments),
+            state.eligibility,
+        )
+        calls = len(state.calls)
+        charged = budget.calls
+        clock[0] = 61.0
+        with self.assertRaises(GitHubPublicationError) as caught:
+            finalizer.load_eligibility(token="synthetic-second", **arguments)
+        causes = []
+        cause = caught.exception
+        while cause is not None:
+            causes.append(str(cause))
+            cause = cause.__cause__
+        self.assertRegex(" ".join(causes), "budget|deadline")
+        self.assertEqual(len(state.calls), calls)
+        self.assertEqual(budget.calls, charged)
+        self.assertEqual(len(scopes), 1)
+        self.assertEqual(state.events(), [])
+
     def test_scope_factory_root_validation_and_latest_malformed_fail_closed(self):
         from review_sensei_github.errors import GitHubPublicationError
         from review_sensei_github.publication import ReviewApprovalFinalizer

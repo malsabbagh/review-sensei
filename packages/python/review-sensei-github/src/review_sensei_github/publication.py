@@ -1461,6 +1461,7 @@ class ReviewApprovalFinalizer:
             ..., Callable[[HumanInventoryReference], PendingHumanReview]
         ]
         | None = None,
+        human_inventory_read_token: str | None = None,
     ) -> None:
         if (
             human_inventory_reader is not None
@@ -1469,12 +1470,20 @@ class ReviewApprovalFinalizer:
             raise GitHubPublicationError(
                 "human inventory reader configuration is ambiguous"
             )
+        if human_inventory_read_token is not None and (
+            not isinstance(human_inventory_read_token, str)
+            or not human_inventory_read_token.strip()
+        ):
+            raise GitHubPublicationError("human inventory read credential is invalid")
         self.http = http
         self.evidence_budget = evidence_budget
         self.human_inventory_reader = human_inventory_reader
         self.human_inventory_reader_factory = human_inventory_reader_factory
+        # An explicitly supplied metadata credential is independent of the
+        # capability used for review/check mutations. Never persist this value.
+        self.human_inventory_read_token = human_inventory_read_token
         self._operation_budget: EvidenceReadBudget | None = None
-        self._human_inventory_scope: tuple[str, int, str, str] | None = None
+        self._human_inventory_scope: tuple[str, int, str, str, str] | None = None
         self._scoped_human_inventory_reader: _ScopedHumanInventoryReader | None = None
 
     @contextmanager
@@ -1502,7 +1511,21 @@ class ReviewApprovalFinalizer:
         factory = self.human_inventory_reader_factory
         if factory is None:
             return None
-        scope = (repository, pull_request, head_sha, app_slug.casefold())
+        reader_token = (
+            token
+            if self.human_inventory_read_token is None
+            else self.human_inventory_read_token
+        )
+        # A scoped reader retains its transport credential. Reuse only within
+        # that credential context; keep the cache discriminator opaque and
+        # process-local rather than retaining another raw token in its key.
+        scope = (
+            repository,
+            pull_request,
+            head_sha,
+            app_slug.casefold(),
+            hashlib.sha256(reader_token.encode("utf-8")).hexdigest(),
+        )
         budget = self.evidence_budget or self._operation_budget
         cached = self._scoped_human_inventory_reader
         if (
@@ -1513,7 +1536,7 @@ class ReviewApprovalFinalizer:
             return cached
         reader = _ScopedHumanInventoryReader(
             factory,
-            token=token,
+            token=reader_token,
             repository=repository,
             pull_request=pull_request,
             head_sha=head_sha,

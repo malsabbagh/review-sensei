@@ -242,6 +242,7 @@ class HumanAssessmentPublisher:
         ]
         | None = None,
         evidence_budget: EvidenceReadBudget | None = None,
+        human_inventory_read_token: str | None = None,
     ) -> None:
         if before_read is not None:
             http = FeedbackBudgetHttp(http=http, before_read=before_read)
@@ -255,6 +256,7 @@ class HumanAssessmentPublisher:
             human_inventory_reader=human_inventory_reader,
             human_inventory_reader_factory=human_inventory_reader_factory,
             evidence_budget=evidence_budget,
+            human_inventory_read_token=human_inventory_read_token,
         )
         # Reply publication, pending fences and delayed resolution must use the
         # same configured finalizer rather than drop its independent reader.

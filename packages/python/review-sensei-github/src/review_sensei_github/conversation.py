@@ -298,6 +298,7 @@ class ConversationPublisher:
         ]
         | None = None,
         evidence_budget: EvidenceReadBudget | None = None,
+        human_inventory_read_token: str | None = None,
     ) -> None:
         self.http = http
         self.human_inventory_reader = human_inventory_reader
@@ -306,6 +307,7 @@ class ConversationPublisher:
             human_inventory_reader=human_inventory_reader,
             human_inventory_reader_factory=human_inventory_reader_factory,
             evidence_budget=evidence_budget,
+            human_inventory_read_token=human_inventory_read_token,
         )
 
     @staticmethod
