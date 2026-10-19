@@ -315,8 +315,8 @@ class LocalFeedbackHost:
 
 
 class PublicFeedbackContinuationTests(unittest.TestCase):
-    def prepare(self, count=40, *, targets=None):
-        state = PagedState(count, history_count=0)
+    def prepare(self, count=40, *, targets=None, history_count=0, cold_context=False):
+        state = PagedState(count, history_count=history_count)
         state.source["user"]["id"] = 42
         publisher = HumanAssessmentPublisher(
             http=state.http, before_read=EvidenceReadBudget().consume
@@ -334,11 +334,26 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
             (FeedbackReference("issue", 10, "updated"),),
             (ids[-1],) if targets is None else targets,
         )
+        conversation = (
+            publisher.conversation.prepare_context(
+                token="synthetic",
+                repository="owner/repo",
+                pull_request=1,
+                source_comment_id=10,
+                source_updated_at="updated",
+                app_slug=APP,
+                root_comment_id=10,
+                source_kind="issue",
+                expected_head_sha=state.head,
+            )
+            if cold_context
+            else state.prepared()
+        )
         prepared = publisher.prepare_feedback(
             token="synthetic",
             repository="owner/repo",
             pull_request=1,
-            prepared=state.prepared(),
+            prepared=conversation,
             app_slug=APP,
             selector=selector,
             work_budgets=ReviewWorkBudgets(mode="unified"),
@@ -725,6 +740,61 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
             self.assertEqual(state.latest_inventory().inventory_document(), original)
             for item in state.latest_inventory().pending:
                 self.assertIn(item.fingerprint, state.replies[0]["body"])
+
+    def test_cold_100_with_0_100_250_history_refuses_without_advancing_authority(self):
+        # Unlike the prepared-context positive control, ordinary conversation
+        # preparation consumes this SAME original physical-work allowance.
+        for history_count, accepted_reads in ((0, 38), (100, 39), (250, 40)):
+            with self.subTest(history_count=history_count):
+                state, publisher, prepared = self.prepare(
+                    100, history_count=history_count, cold_context=True
+                )
+                original = prepared.eligibility.human_review.inventory_document()
+                with tempfile.TemporaryDirectory() as directory:
+                    host = LocalFeedbackHost(
+                        directory, publisher, prepared, referenced=True
+                    )
+                    provider = AssessingProvider()
+                    work = host.run(provider)
+                    self.assertEqual(len(provider.calls), 1)
+                    self.assertEqual(host.read_budget.calls, accepted_reads)
+                    self.assertEqual(host.mutations, ["admission-dispatch", "accepted"])
+                    accepted = copy.deepcopy(host.last_envelope)
+                    counters = host.tracker.provider_calls
+                    deadline = host.read_budget.wall_deadline_ms
+                    with self.assertRaises((ReviewInputError, GitHubPublicationError)):
+                        publisher.publish(
+                            token="synthetic",
+                            review_token="synthetic",
+                            repository="owner/repo",
+                            pull_request=1,
+                            prepared=prepared,
+                            reply=work,
+                            app_slug=APP,
+                            pending_report_layout="shared-guidance-v1",
+                        )
+                    self.assertEqual(host.read_budget.calls, 60)
+                    self.assertEqual(host.read_budget.wall_deadline_ms, deadline)
+                    self.assertEqual(host.tracker.provider_calls, counters)
+                    observer = LocalSessionLedger(Path(directory))
+                    root = observer.load(host.identity).record
+                    retained = unpack_queue_state(
+                        read_session_assessment_queue(observer, root), queue=host.queue
+                    )
+                    self.assertEqual(retained, accepted)
+                    receipt = FactoredAssessmentJournal.from_document(
+                        retained["journal"]
+                    ).receipt(source_digest=host.source, operation_id=host.operation_id)
+                    self.assertEqual(len(receipt["completed"]), 1)
+                    self.assertEqual(receipt["counters"]["provider_calls"], 1)
+                    self.assertEqual(state.latest_inventory().resolved, ())
+                    self.assertEqual(len(state.latest_inventory().pending), 100)
+                    self.assertEqual(
+                        state.latest_inventory().inventory_document(), original
+                    )
+                    # A provisional report is not a refreshed authority receipt.
+                    self.assertEqual(state.reply_count, 1)
+                    self.assertEqual(state.events(), [])
 
     def test_referenced_fresh_reader_reconstructs_inventory_but_not_attempt_witness(
         self,

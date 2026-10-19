@@ -70,7 +70,7 @@ Independent final review reran the prior counter/time/expiry regressions and
 The bounded 100-finding profile below changes runtime and harness bytes and
 requires new exact-head source, package, CI and hosted-review evidence.
 
-## Explicit bounded 100-finding profile
+## Explicit bounded prepared-context 100-finding profile
 
 ADR [0085](../adr/0085-bounded-complete-selected-feedback-reports.md) adds two
 independent trusted-library opt-ins: an authenticated exact-inventory reference
@@ -78,12 +78,16 @@ for `pack_queue_state`/`unpack_queue_state`, and the `shared-guidance-v1` pendin
 report layout. The unchanged 100-finding fixture retains varied SHA-256 IDs and
 original Unicode concern prose. The receipt is stored by the actual local ledger,
 with original source/authority/attempt binding and every live authority fence.
+The positive control supplies an already prepared conversation; its 57 calls do
+not include ordinary conversation preparation. It is a library composition
+qualification, not cold application/CLI completion.
 The report moves only repeated generic guidance to the heading; every unresolved
 full/display ID, path and supplied per-finding reason is retained.
 
 | Acceptance / exact test method | Evidence |
 | --- | --- |
 | `test_referenced_varied_100_complete_publication_inside_original_budget` | 32 original calls after durable acceptance; 57 after complete public delivery and refreshed authority; one 11,467-byte report page (13,867 bytes including response instructions and its marker); 99 pending, no approval; original immutable inventory unchanged. The final complete-report readback adds one call. |
+| `test_cold_100_with_0_100_250_history_refuses_without_advancing_authority` | Ordinary conversation preparation uses the same original budget. With 0/100/250 historical comments, durable acceptance occurs at 38/39/40 calls. Each then refuses at 60, preserving the accepted receipt and provider charges, original deadline and all 100 pending authority findings. A provisional report is visible; no authority review or approval is published. This negative safety control leaves cold completion unresolved. |
 | `test_referenced_fresh_reader_reconstructs_inventory_but_not_attempt_witness` | Required original inventory is read from the actual retained Bot eligibility, not supplied by an unpersisted fixture queue. A new ledger owner without the genuine original attempt witness still refuses activation; no inference or mutation. |
 | `test_referenced_original_owner_replay_persists_accounting_without_new_publication_allowance` | Zero inference; mandatory replay mutation persists original counters/time at 44 calls. Later publication exhausts the same original allowance; all 100 remain pending in authority. |
 | `test_referenced_fresh_reader_refuses_missing_original_retained_authority` | Missing original inventory refuses before provider or receipt mutation. |
@@ -100,8 +104,8 @@ bounds are independently enforced; an unknown/default reader without the exact
 authenticated inventory refuses v2. It creates neither storage authority nor an
 attempt witness. The legacy layout/default v1 carrier remain unchanged.
 
-No deployed/CLI/Worker writer is activated. Rich 250 eligibility and a combined
-100-finding/long-history profile remain unqualified. The original-owner replay
+No deployed/CLI/Worker writer is activated. Cold 100, rich 250 eligibility and a
+combined 100-finding/long-history profile remain unqualified. The original-owner replay
 still lacks sufficient publication budget; a fresh owner still needs the genuine
 attempt witness. Further deterministic integration can reduce actual owned-ledger
 transaction reads under its existing locking/ownership contract. None of these
