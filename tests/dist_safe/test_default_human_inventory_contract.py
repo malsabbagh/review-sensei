@@ -27,6 +27,7 @@ import test_default_human_inventory_publisher  # noqa: E402
 import test_default_human_inventory_store  # noqa: E402
 import test_default_human_reader_binding  # noqa: E402
 import test_feedback_fence_budget  # noqa: E402
+import test_local_partition_read_cache  # noqa: E402
 
 
 class InstalledDefaultHumanInventoryTests(
@@ -61,6 +62,12 @@ class InstalledDefaultHumanReaderBindingTests(
 
 class InstalledReplyBrokerBudgetTests(
     test_feedback_fence_budget.ReplyBrokerBudgetTests
+):
+    pass
+
+
+class InstalledLocalPartitionReadCacheTests(
+    test_local_partition_read_cache.LocalPartitionReadCacheTests
 ):
     pass
 
