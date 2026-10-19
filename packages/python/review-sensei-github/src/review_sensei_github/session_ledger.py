@@ -1758,11 +1758,14 @@ class GitHubIssueCommentSessionLedger:
                 "original admitted control witness differs"
             )
         attestation = self._session_attestation
+        mutation = (
+            attestation.get("mutation") if isinstance(attestation, Mapping) else None
+        )
         if (
             not isinstance(attestation, Mapping)
             or attestation.get("version") != 2
-            or not isinstance(attestation.get("mutation"), Mapping)
-            or attestation["mutation"].get("reason") != "admission-dispatch"
+            or not isinstance(mutation, Mapping)
+            or mutation.get("reason") != "admission-dispatch"
         ):
             raise ReviewInputError(
                 "initial activation requires exact admission-dispatch grant"
