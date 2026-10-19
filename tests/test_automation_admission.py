@@ -5,7 +5,6 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -34,6 +33,14 @@ from review_sensei.session import (
 )
 
 try:
+    from session_fixture_clock import SESSION_FIXTURE_NOW, SessionFixtureClockMixin
+except ModuleNotFoundError:
+    from tests.session_fixture_clock import (
+        SESSION_FIXTURE_NOW,
+        SessionFixtureClockMixin,
+    )
+
+try:
     from isolated_working_directory import IsolatedWorkingDirectoryMixin
 except ModuleNotFoundError:
     from tests.isolated_working_directory import IsolatedWorkingDirectoryMixin
@@ -46,7 +53,7 @@ DIFF = """diff --git a/src/app.py b/src/app.py
 +change
 """
 
-FIXED_NOW = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
+FIXED_NOW = SESSION_FIXTURE_NOW
 IDENTITY = SessionIdentity("owner/repo", 136, repository_id=99)
 HEAD = "a" * 40
 
@@ -242,7 +249,7 @@ class AutomationAdmissionTests(unittest.TestCase):
         self.assertIsNone(loaded.record.reservation_id)
 
 
-class GitHubHandoffPublicationTests(unittest.TestCase):
+class GitHubHandoffPublicationTests(SessionFixtureClockMixin, unittest.TestCase):
     def test_failed_attempt_handoff_does_not_publish(self):
         ledger = InMemorySessionLedger()
         record = SessionRecord.create(
@@ -446,7 +453,7 @@ class GitHubHandoffPublicationTests(unittest.TestCase):
         self.assertEqual(loaded.record.completed_initial_reviews, 0)
 
 
-class DiagnosticAutomationTests(unittest.TestCase):
+class DiagnosticAutomationTests(SessionFixtureClockMixin, unittest.TestCase):
     def test_doctor_requires_ledger_in_operator_mode(self):
         doctor = run_doctor(review_mode="merge-focused")
         check = next(
@@ -510,7 +517,9 @@ class DiagnosticAutomationTests(unittest.TestCase):
             self.assertIn("verification=20", check["detail"])
 
 
-class CliInferenceSkipTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
+class CliInferenceSkipTests(
+    SessionFixtureClockMixin, IsolatedWorkingDirectoryMixin, unittest.TestCase
+):
     def test_handoff_operator_mode_makes_zero_provider_calls(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

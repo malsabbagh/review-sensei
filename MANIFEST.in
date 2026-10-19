@@ -20,6 +20,7 @@ include tests/test_pr308_ledger_regression.py
 include tests/fixtures/regressions/pr308-session-ledger.json
 include tests/fixtures/regressions/pr308-session-ledger-evidence.json
 include tests/isolated_working_directory.py
+include tests/session_fixture_clock.py
 include tests/openrouter_cli_contract.py
 include tests/baseline_cli_contract.py
 include tests/provider_deadline_contract.py
@@ -47,3 +48,5 @@ include tests/test_schema5_public_contract.py
 include tests/test_feedback_fence_budget.py
 include tests/test_local_partition_read_cache.py
 include tests/test_authenticated_partitions.py
+include tests/test_command_capacity_recovery.py
+include tests/test_publication_future_capacity.py

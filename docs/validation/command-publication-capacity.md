@@ -1,0 +1,123 @@
+# Capacity-safe recorded-decision reconciliation
+
+## Failure and selected repair
+
+On PR #326 at `c8c809ee12c8331584ca1223fa8c58af8a52859f`, all 21 explicitly
+authorized decisions persisted in the session ledger. The original legacy review
+was 64,971 UTF-8 bytes. Its resolved eligibility needed 66,847 bytes even without
+new command provenance, exceeding the unchanged 65,536-byte review bound. Gate
+reconciliation failed after recording; the decisions were not lost.
+
+Reuse the existing compact generated references rather than introduce another
+root, storage protocol, eligibility version or authority source. For an existing
+oversized legacy root, the command finalizer may compact only a complete canonical
+generated Required-decisions section, reconstructed from the original human
+inventory and complete index. It independently verifies every original human
+explanation at its body or same-review owned inline placement. Ambiguous framing,
+missing or changed prose, ownership conflicts and insufficient capacity hold.
+Capacity fitting preserves every byte outside the verified reference rows,
+every full index identity, historical marker and coverage fact. The explicitly
+authorized eligibility receipt and any new command provenance are updated separately. Quoted references in provider
+narrative are not generated rows and must remain unchanged.
+
+For new publication, both legacy and complete human-inventory callers preflight
+the whole future all-resolved frame and reserve one additional maximum ten-ID command marker.
+If needed, the ordinary structured renderer selects compact references before
+the first inventory/check/review write. Reserving room must not cause a human
+inventory to omit optional explanations that previously fit. Complete publication
+continues to preserve every explanation. No review, item, inventory, read or
+deadline bound is raised.
+
+An unbounded history of additional provenance markers is not promised to fit.
+Existing history is retained. An exhausted frame reports
+`command_body_capacity_exceeded`; an unverifiable compaction reports
+`command_body_capacity_unverifiable`. Both preserve decisions and withhold gate
+updates. The command result directs the operator to retain the original review
+and ledger for capacity/evidence repair instead of suggesting an identical retry.
+
+## Compatibility, migration and authority
+
+There is no schema or storage migration. Native same-review comment listings
+omit modern line/side metadata even with the existing pinned GitHub API version.
+Capacity proof therefore reads the bounded whole-PR review-comment endpoint and
+selects only records with the exact numeric review ID. It preserves the strict
+PR/numeric Bot/commit/path/line/side/instance/body checks. Actual incident evidence
+contains 71 native records in one page, including the 13 exact target comments;
+all 13 match independent individual-comment GETs. That native page exceeds the
+unchanged 512 KiB response cap. All capacity proof scans therefore use the
+existing adaptive 100/50/25/5/1 pagination, charging failed and successful reads
+to the original allowance. An indivisible oversized record refuses even at one
+item per page. No placement is inferred.
+
+Native GraphQL identifies the same captured Bot as `reviewsensei`, while REST
+uses `reviewsensei[bot]`; the captured global node IDs agree. Thread discovery,
+duplicate suppression and final blocking scans accept this alternate spelling
+only with GraphQL's explicit `Bot` discriminator. Human and sibling Bot aliases
+cannot substitute. Missing or unreadable type metadata for the expected native
+alias holds discovery/finalization; it cannot silently hide a possible blocker.
+Mutation still rereads the exact REST root and current decision
+and PR. Check reconciliation also recognizes the native App object's unsuffixed
+slug and updates the existing same-name, exact-head check on replay.
+
+The capacity recovery path may skip mutation-free rechecks of threads already
+resolved in its complete fresh discovery snapshot. Its full original prose/root
+proof and final approval fences remain required. Exhaustion retains the exact
+resolved prefix and returns unconfirmed thread recovery with verification guidance.
+Each new verification has its ordinary finite allowance; an invocation never
+refills it. The one-page deterministic eligible control uses 21 requests and
+unchanged replay 19. A public oversized-history/13-unresolved-thread case resolves
+ten threads at 60 calls, then the remaining three and approves at 37 on a fresh
+verification; unchanged replay uses 24 and repeats no body/resolution mutation.
+The partial counterpart uses 60/29/17 and never approves. Faithful installed replay
+of the captured incident independently exercises those 13 unresolved threads and
+oversized pages. This does not qualify arbitrary histories or guarantee all items
+can fit. No record is truncated and no response, item or request cap is raised.
+
+The same owned review and eligibility schema remain authoritative. Existing readers already consume the compact
+reference presentation. The repair requires installing a compatible command
+runtime; publishing a source PR does not repair the deployed runtime.
+
+Use existing independent ledger, numeric App owner, repository/PR/base/head,
+latest-root, complete index, original prose, finite-budget and final readback
+validation. A reference or a copied decision never authorizes a changed head.
+Lost-write acknowledgement can reconcile only exact owned readback. A changed
+root, head, base, PR association or original explanation invalidates the attempt.
+Complete source proof is refreshed before the review update, after readback, and
+at the final approval boundary after intervening thread/finalization reads. A
+later verification of canonical compact rows uses the same proof path. Only
+canonical `honors` decisions participate; expired or foreign-head records cannot
+newly resolve the current inventory. These REST fences do not provide atomic
+compare-and-swap across GitHub resources or distributed writers.
+
+The live PR326 decisions stay bound to c8. This implementation uses a separate
+branch and does not replay them onto its new head. Compatible release/deployment
+and a subsequent exact-c8 verification need their normal authority. No new full
+analysis follows from the 21-decision approval. Hosted coverage remains separately
+partial at 24/51, and no successful reconciliation may turn that into approval.
+
+This is a bounded presentation repair within the proposed ADR 0093/0094 contracts,
+not a new persistence or approval decision. Those ADRs remain Proposed. Writer
+activation, release, merge and deployment are separate operations.
+
+## Acceptance matrix
+
+| Condition | Public seam and executable evidence | Required outcome |
+| --- | --- | --- |
+| Whole future frame, legacy and complete | `test_publication_future_capacity.FutureDispositionFrameTests` | Before: published body grows to 66,031 bytes. After: all decisions and maximum command marker fit, with all original prose/IDs retained. |
+| Existing recorded 10+10+1 union | `test_command_capacity_recovery` | Serialized ledger preserves 21 decisions; finalizer updates the original owned review within the existing cap, with no inference. |
+| Partial and eligible controls | Same public recovery suite | Partial coverage keeps a non-passing check and cannot approve; an eligible control obeys all ordinary gates. |
+| Replay and ambiguous PUT | Same public recovery suite | Exact owned readback is idempotent; uncertain differing bytes or changed prose on compact replay withhold authority. |
+| Native API shape / historical pagination | Same public recovery suite and actual captured PR326 records | Whole-PR listing supplies native location metadata; foreign-review records cannot substitute; extra pages consume the original allowance. |
+| Oversized page or individual native record | Same public recovery suite | Retry bounded smaller pages without losing the item offset; an indivisible record holds with zero writes and all decisions retained. |
+| Native Bot identity and unresolved thread recovery | `test_command_capacity_recovery`, `test_thread_resolution_recovery` | Typed Bot discovery reaches all matching roots; bounded progress survives exhaustion, fresh verification completes and replay repeats no resolution mutation. Human/sibling aliases and real blockers cannot authorize approval. |
+| Native check identity on replay | `test_gate_and_default_approval.CheckPublisherContractTests` and installed incident replay | Reuse the original App-owned exact-head check with PATCH; never adopt a sibling App, different check name or foreign head. |
+| Source, snapshot and ownership changes | Same public recovery suite | Changed head/base/newest root/prose/location/PR association and expired or foreign-head decisions refuse; late mutation withholds approval. |
+| Ambiguous or indivisible body | Same public recovery suite | Preserve original data and durable decisions, return actionable capacity hold. |
+| Persistent failure reporting | `test_github_application.GitHubApplicationTests.test_persistent_command_capacity_failure_does_not_request_identical_retry` | Failure remains visible and does not request an identical verification retry. |
+| Installed distributions | `dist_safe/test_command_capacity_contract.py` | Run public recovery and future-frame cases against installed engine/adapter from extracted sdist, without checkout imports. |
+
+Synthetic external HTTP is used with real codecs, publishers, command handling,
+durable local ledger and finite budgets. This qualifies the deterministic supported
+paths; it does not qualify live rollout, all concurrent interleavings, arbitrary
+history capacity or missing hosted analysis. Relevant tracking: #238, #241, #246,
+#267 and #269. No broad issue is closed solely by these tests.

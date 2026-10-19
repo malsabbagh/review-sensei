@@ -11,6 +11,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from urllib.parse import quote
 
 from review_sensei.baseline import ReviewBaseline
 from review_sensei.bounded_evidence import MAX_PART_READS, EvidenceReadBudget
@@ -87,6 +88,7 @@ from .errors import (
     GitHubPublicationTransientError,
 )
 from .http import MAX_PAGINATION_PAGES, GitHubHttp
+from .thread_resolution import graphql_app_author
 
 if TYPE_CHECKING:
     from .default_human_inventory import HumanInventoryReference, HumanInventoryStore
@@ -134,7 +136,7 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: Stri
               body
               path
               line
-              author { login }
+              author { login __typename }
             }
           }
         }
@@ -788,15 +790,24 @@ def fit_assembled_review(
     summary_limit: int,
     suffix: str = "",
     complete_inventory: bool = False,
+    reserved_bytes: int = 0,
+    preserve_explanations: bool = False,
 ) -> tuple[str, str]:
     """Fit the framed body without dropping obligations or the finding index.
 
     Optional, non-blocking, non-human body prose is removed lowest severity
     first. Blocking and human-assessment explanations stay. The omission count
     is part of the measured body. If the body still cannot fit, publication
-    is refused and the error names the failing check.
+    is refused and the error names the failing check. Human inventory callers
+    preserve every explanation and reserve the future disposition frame.
     """
 
+    if (
+        isinstance(reserved_bytes, bool)
+        or not isinstance(reserved_bytes, int)
+        or not 0 <= reserved_bytes <= MAX_PUBLISHED_REVIEW_BODY_BYTES
+    ):
+        raise GitHubPublicationError("publication capacity reserve is invalid")
     try:
         index_marker = finding_index_marker(
             repository_id=repository_id,
@@ -814,12 +825,12 @@ def fit_assembled_review(
     optional = [
         item
         for item in assembled.body_explanations
-        if not item.obligatory and not complete_inventory
+        if not item.obligatory and not complete_inventory and not preserve_explanations
     ]
     obligatory = [
         item
         for item in assembled.body_explanations
-        if item.obligatory or complete_inventory
+        if item.obligatory or complete_inventory or preserve_explanations
     ]
     optional.sort(
         key=lambda item: (
@@ -844,7 +855,10 @@ def fit_assembled_review(
             index_marker=index_marker,
             eligibility_marker=eligibility_marker,
         )
-        framed_over = len(framed.encode("utf-8")) > MAX_PUBLISHED_REVIEW_BODY_BYTES
+        framed_over = (
+            len(framed.encode("utf-8")) + reserved_bytes
+            > MAX_PUBLISHED_REVIEW_BODY_BYTES
+        )
         if not summary_over and not framed_over:
             return summary, index_marker
         if not optional:
@@ -856,11 +870,67 @@ def fit_assembled_review(
                 index_marker=index_marker,
                 eligibility_marker=eligibility_marker,
             )
-            if len(minimum.encode("utf-8")) > MAX_PUBLISHED_REVIEW_BODY_BYTES:
+            if (
+                len(minimum.encode("utf-8")) + reserved_bytes
+                > MAX_PUBLISHED_REVIEW_BODY_BYTES
+            ):
                 raise PublicationLimitError("finding-index")
             raise PublicationLimitError("framed-review-body")
         dropped = optional.pop(0)
         omitted.append(dropped.view.identifier)
+
+
+def _disposition_frame_reserve(
+    eligibility: ReviewApprovalEligibility,
+    entries: Sequence[IndexedFinding],
+) -> int:
+    """Reserve the full resolution receipt and one additional maximum command marker.
+
+    A legacy inventory's own decoded limit does not bound its complete review
+    frame. Full resolution can grow the eligibility marker after publication.
+    Additional historical provenance remains subject to the ordinary body cap;
+    it is never erased or treated as evidence of a different head.
+    """
+    overridable = tuple(entry for entry in entries if entry.overridable)
+    if not overridable:
+        return 0
+    human = eligibility.human_review
+    future = replace(
+        eligibility,
+        human_review=(
+            replace(
+                human,
+                resolved=tuple(item.fingerprint for item in human.findings),
+            )
+            if human is not None
+            else None
+        ),
+        facts=replace(
+            eligibility.facts,
+            app_authored=False,
+            check_published=False,
+            has_blocking_findings=False,
+            has_human_adjudication_findings=False,
+        ),
+    )
+    identifiers = assign_finding_identifiers(entry.instance for entry in entries)
+    # The command accepts at most ten IDs. Use the longest assigned IDs and
+    # longest valid actor, without inventing a persisted provenance record.
+    command_ids = tuple(
+        sorted(
+            (identifiers[entry.instance] for entry in overridable),
+            key=lambda identifier: (-len(identifier), identifier),
+        )[:10]
+    )
+    provenance = override_provenance_marker(
+        actor="a" * 39, head_sha=eligibility.head_sha, finding_ids=command_ids
+    )
+    growth = max(
+        0,
+        len(approval_eligibility_marker(future).encode("utf-8"))
+        - len(approval_eligibility_marker(eligibility).encode("utf-8")),
+    )
+    return growth + len(provenance.encode("utf-8")) + 2
 
 
 def _published_summary_byte_limit(result: ReviewResult) -> int:
@@ -1577,6 +1647,7 @@ class ReviewApprovalFinalizer:
         assume_inline_unresolved: frozenset[str] | None = None,
         partition_reader: PartitionReader | None = None,
         visible_reader: VisibleReader | None = None,
+        _before_approval: Callable[[list[Any]], PublicationResult | None] | None = None,
     ) -> PublicationResult:
         """Emit at most one exact-head APPROVE from trusted eligibility.
 
@@ -1786,6 +1857,10 @@ class ReviewApprovalFinalizer:
                     return PublicationResult(
                         status="approval_withheld", diagnostic="approval_withheld"
                     )
+            if _before_approval is not None:
+                guarded = _before_approval(reviews)
+                if guarded is not None:
+                    return guarded
             marker = approval_marker(
                 repository_id=preflight.repository_id,
                 pull_request=pull_request,
@@ -1800,6 +1875,24 @@ class ReviewApprovalFinalizer:
                 body=marker,
             ):
                 return PublicationResult(status="already_approved")
+
+            def already_approved():
+                if not self._is_already_approved(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    marker=marker,
+                    app_slug=app_slug,
+                ):
+                    return False
+                if _before_approval is None:
+                    return True
+                fresh = self._load_head_reviews(
+                    token=token, repository=repository, pull_request=pull_request
+                )
+                return _before_approval(fresh) is None
+
             return self._post_head_review(
                 token=token,
                 repository=repository,
@@ -1807,14 +1900,7 @@ class ReviewApprovalFinalizer:
                 head_sha=head_sha,
                 body=marker,
                 event="APPROVE",
-                already=lambda: self._is_already_approved(
-                    token=token,
-                    repository=repository,
-                    pull_request=pull_request,
-                    head_sha=head_sha,
-                    marker=marker,
-                    app_slug=app_slug,
-                ),
+                already=already_approved,
                 success_status="approved",
                 already_status="already_approved",
                 rejected="approval finalization was rejected",
@@ -1851,7 +1937,15 @@ class ReviewApprovalFinalizer:
         if owns_operation_budget:
             self._operation_budget = EvidenceReadBudget()
         try:
-            return self._refinalize_with_dispositions_impl(
+            from copy import copy
+
+            from .publication_recovery import publication_http
+
+            budget = self.evidence_budget or self._operation_budget
+            assert budget is not None
+            operation = copy(self)
+            operation.http = publication_http(self.http, budget)
+            return operation._refinalize_with_dispositions_impl(
                 token=token,
                 check_token=check_token,
                 repository=repository,
@@ -1867,6 +1961,34 @@ class ReviewApprovalFinalizer:
         finally:
             if owns_operation_budget:
                 self._operation_budget = None
+
+    @staticmethod
+    def _command_root_unchanged(
+        reviews, chosen, expected_body, head_sha, app_slug, pull_request_url
+    ):
+        candidates = [
+            review
+            for review in reviews
+            if isinstance(review, dict)
+            and review.get("commit_id") == head_sha
+            and isinstance(review.get("user"), dict)
+            and isinstance(review["user"].get("login"), str)
+            and review["user"]["login"].casefold() == app_slug.casefold()
+            and type(review.get("id")) is int
+            and isinstance(review.get("body"), str)
+            and APPROVAL_ELIGIBILITY_MARKER_PREFIX in review["body"]
+        ]
+        if not candidates:
+            return False
+        current = max(candidates, key=lambda review: review["id"])
+        return (
+            current["id"] == chosen["id"]
+            and current["body"] == expected_body
+            and current.get("user") == chosen.get("user")
+            and current.get("state") == chosen.get("state")
+            and current.get("pull_request_url") == pull_request_url
+            and chosen.get("pull_request_url") == pull_request_url
+        )
 
     def _refinalize_with_dispositions_impl(
         self,
@@ -1951,14 +2073,11 @@ class ReviewApprovalFinalizer:
             )
         active = []
         for item in dispositions:
-            item_head = getattr(item, "head_sha", None)
             fingerprint = getattr(item, "fingerprint", None)
             honors = getattr(item, "honors", None)
             if not isinstance(fingerprint, str) or not callable(honors):
                 continue
             if honors(fingerprint, head_sha=head_sha):
-                active.append(fingerprint)
-            elif item_head == head_sha:
                 active.append(fingerprint)
         honored = tuple(
             entry
@@ -2010,6 +2129,91 @@ class ReviewApprovalFinalizer:
             )
             if provenance not in new_body:
                 new_body = f"{new_body}\n\n{provenance}"
+        compacted = False
+        capacity_producer_id = 0
+        pull_request_url = self.http.api_url + self.http.repository_path(
+            repository, f"/pulls/{pull_request}"
+        )
+        required_section = re.search(
+            r"(?ms)^### Required decisions\n(.*?)(?=^#{1,3} |\Z)", body
+        )
+        compact_rows = required_section is not None and re.search(
+            r"(?m)^- \*\*RS-[A-F0-9]{6,64}\*\*$", required_section[1]
+        )
+        if (
+            len(new_body.encode("utf-8")) > MAX_PUBLISHED_REVIEW_BODY_BYTES
+            or compact_rows
+        ):
+            from .command_capacity import compact_command_references
+            from .publication_recovery import publication_http
+
+            budget = self.evidence_budget or self._operation_budget
+            assert budget is not None
+            capacity_http = publication_http(self.http, budget)
+            try:
+                status, producer = capacity_http.request(
+                    "GET", "/users/" + quote(app_slug, safe=""), token=token
+                )
+                user = chosen.get("user")
+                if (
+                    chosen.get("pull_request_url") != pull_request_url
+                    or chosen.get("state") not in PUBLISHED_REVIEW_STATES
+                    or body.count(FINDING_INDEX_MARKER_PREFIX) != 1
+                    or parse_finding_index(
+                        body,
+                        repository_id=repository_id,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                    )
+                    != index
+                ):
+                    raise ReviewInputError("command capacity original index conflicts")
+                if (
+                    status != 200
+                    or not isinstance(producer, dict)
+                    or type(producer.get("id")) is not int
+                    or producer["id"] <= 0
+                    or producer.get("type") != "Bot"
+                    or not isinstance(producer.get("login"), str)
+                    or producer["login"].casefold() != app_slug.casefold()
+                    or not isinstance(user, dict)
+                    or type(user.get("id")) is not int
+                    or user.get("id") != producer["id"]
+                    or user.get("type") != "Bot"
+                ):
+                    raise ReviewInputError("command capacity root producer conflicts")
+                capacity_producer_id = producer["id"]
+                inline = capacity_http.paginate(
+                    path=capacity_http.repository_path(
+                        repository,
+                        f"/pulls/{pull_request}/comments",
+                    ),
+                    token=token,
+                    page_sizes=(100, 50, 25, 5, 1),
+                )
+                inline = [
+                    item
+                    for item in inline
+                    if isinstance(item, dict)
+                    and type(item.get("pull_request_review_id")) is int
+                    and item["pull_request_review_id"] == chosen["id"]
+                ]
+                new_body = compact_command_references(
+                    new_body,
+                    eligibility=eligibility,
+                    index=index,
+                    inline=inline,
+                    review_id=chosen["id"],
+                    producer_id=capacity_producer_id,
+                    app_slug=app_slug,
+                    pull_request_url=pull_request_url,
+                )
+                compacted = True
+            except (ReviewInputError, GitHubHTTPError, GitHubPublicationError):
+                return PublicationResult(
+                    status="gate_reevaluation_failed",
+                    diagnostic="command_body_capacity_unverifiable",
+                )
         live = self._preflight(
             token=token,
             repository=repository,
@@ -2021,7 +2225,91 @@ class ReviewApprovalFinalizer:
             return live.result
         if live.base_sha != index.base_sha or live.repository_id != repository_id:
             return PublicationResult(status="skipped_stale_base")
-        if (
+
+        def capacity_snapshot_matches(
+            expected_body, expected_eligibility, current_reviews=None
+        ):
+            # One scan supplies both the eligibility and exact owned root proof.
+            # Inline prose is mutable independently of that root, so reacquire
+            # the complete native listing instead of reusing the earlier proof.
+            try:
+                fresh = (
+                    self._load_head_reviews(
+                        token=token, repository=repository, pull_request=pull_request
+                    )
+                    if current_reviews is None
+                    else current_reviews
+                )
+                if (
+                    not self._command_root_unchanged(
+                        fresh,
+                        chosen,
+                        expected_body,
+                        head_sha,
+                        app_slug,
+                        pull_request_url,
+                    )
+                    or self._eligibility_from_reviews(
+                        fresh,
+                        head_sha=head_sha,
+                        app_slug=app_slug,
+                        token=token,
+                        repository=repository,
+                        pull_request=pull_request,
+                    )
+                    != expected_eligibility
+                ):
+                    return False
+                fresh_inline = self.http.paginate(
+                    path=self.http.repository_path(
+                        repository,
+                        f"/pulls/{pull_request}/comments",
+                    ),
+                    token=token,
+                    page_sizes=(100, 50, 25, 5, 1),
+                )
+                fresh_inline = [
+                    item
+                    for item in fresh_inline
+                    if isinstance(item, dict)
+                    and type(item.get("pull_request_review_id")) is int
+                    and item["pull_request_review_id"] == chosen["id"]
+                ]
+                if fresh_inline != inline:
+                    return False
+                compact_command_references(
+                    expected_body,
+                    eligibility=expected_eligibility,
+                    index=index,
+                    inline=fresh_inline,
+                    review_id=chosen["id"],
+                    producer_id=capacity_producer_id,
+                    app_slug=app_slug,
+                    pull_request_url=pull_request_url,
+                )
+                return True
+            except (ReviewInputError, GitHubHTTPError, GitHubPublicationError):
+                return False
+
+        if compacted:
+            if not capacity_snapshot_matches(body, eligibility):
+                return PublicationResult(
+                    status="gate_reevaluation_failed",
+                    diagnostic="command_body_capacity_unverifiable",
+                )
+            # This live PR read follows every intervening report/prose read.
+            live = self._preflight(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            if live.result is not None:
+                return live.result
+            if live.base_sha != index.base_sha or live.repository_id != repository_id:
+                return PublicationResult(status="skipped_stale_base")
+        elif (
             self.load_eligibility(
                 token=token,
                 repository=repository,
@@ -2036,7 +2324,8 @@ class ReviewApprovalFinalizer:
             )
         if len(new_body.encode("utf-8")) > MAX_PUBLISHED_REVIEW_BODY_BYTES:
             return PublicationResult(
-                status="gate_reevaluation_failed", diagnostic="gate_reevaluation_failed"
+                status="gate_reevaluation_failed",
+                diagnostic="command_body_capacity_exceeded",
             )
         if new_body != body:
             try:
@@ -2049,16 +2338,39 @@ class ReviewApprovalFinalizer:
                     body={"body": new_body},
                 )
             except (GitHubHTTPError, GitHubHTTPTransientError):
-                return PublicationResult(
-                    status="gate_reevaluation_failed",
-                    diagnostic="gate_reevaluation_failed",
-                )
+                if not compacted:
+                    return PublicationResult(
+                        status="gate_reevaluation_failed",
+                        diagnostic="gate_reevaluation_failed",
+                    )
+                # Do not reissue an uncertain PUT. The same complete owned
+                # readback below must prove it committed before any gate write.
+                status = 200
             if status != 200:
                 return PublicationResult(
                     status="gate_reevaluation_failed",
                     diagnostic="gate_reevaluation_failed",
                 )
-        if (
+        if compacted:
+            if not capacity_snapshot_matches(new_body, adjusted):
+                return PublicationResult(
+                    status="gate_reevaluation_failed",
+                    diagnostic="command_body_capacity_unverifiable",
+                )
+            # The post-PUT ownership/prose readback may itself take time. Fence
+            # the current PR again before check/thread/approval mutations.
+            live = self._preflight(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            if live.result is not None:
+                return live.result
+            if live.base_sha != index.base_sha or live.repository_id != repository_id:
+                return PublicationResult(status="skipped_stale_base")
+        elif (
             self.load_eligibility(
                 token=token,
                 repository=repository,
@@ -2071,6 +2383,32 @@ class ReviewApprovalFinalizer:
             return PublicationResult(
                 status="gate_reevaluation_failed", diagnostic="gate_reevaluation_failed"
             )
+
+        def final_capacity_guard(current_reviews):
+            # Finalize has already acquired this audited root snapshot after
+            # its thread/persisted checks. Reuse that exact observation; then
+            # reacquire native prose and read the live PR LAST before approval.
+            if not capacity_snapshot_matches(new_body, adjusted, current_reviews):
+                return PublicationResult(
+                    status="gate_reevaluation_failed",
+                    diagnostic="command_body_capacity_unverifiable",
+                )
+            current = self._preflight(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            if current.result is not None:
+                return current.result
+            if (
+                current.base_sha != index.base_sha
+                or current.repository_id != repository_id
+            ):
+                return PublicationResult(status="skipped_stale_base")
+            return None
+
         check_failed = False
         if check_token:
             try:
@@ -2104,6 +2442,7 @@ class ReviewApprovalFinalizer:
             index=index,
             reviews=reviews,
             honored_instances=honored_instances,
+            _skip_resolved=compacted,
         )
         try:
             finalized = self.finalize(
@@ -2115,8 +2454,9 @@ class ReviewApprovalFinalizer:
                 eligibility=adjusted,
                 require_persisted=True,
                 honored_instances=honored_instances,
+                _before_approval=final_capacity_guard if compacted else None,
             )
-        except (GitHubHTTPError, GitHubPublicationError):
+        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
             finalized = PublicationResult(
                 status="approval_withheld", diagnostic="approval_withheld"
             )
@@ -2338,6 +2678,7 @@ class ReviewApprovalFinalizer:
         index: FindingIndex | None,
         reviews: Sequence[Any],
         honored_instances: frozenset[str] = frozenset(),
+        _skip_resolved: bool = False,
     ):
         """Retry durable override, assessment and addressed decisions without AI."""
         from .thread_resolution import (
@@ -2446,6 +2787,7 @@ class ReviewApprovalFinalizer:
                 instances=instances,
                 records=records,
                 fence=fence,
+                skip_resolved=_skip_resolved,
             )
         except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
             return ThreadResolutionResult(unconfirmed=tuple(sorted(instances)))
@@ -2757,7 +3099,7 @@ class ReviewApprovalFinalizer:
                     raise GitHubPublicationError("review thread response was invalid")
                 root = roots[0]
                 author = root.get("author")
-                if not isinstance(author, dict) or author.get("login") != app_slug:
+                if not graphql_app_author(author, app_slug):
                     continue
                 body = root.get("body")
                 instance = finding_instance_from_body(body)
@@ -3668,12 +4010,13 @@ class ReviewPublisher:
             head_sha=head_sha,
         )
         complete_review: AssembledReview | None = None
-        if complete_inventory:
+        preflight_review: AssembledReview | None = None
+        if complete_inventory or human_inventory is not None:
             # Qualify the complete framed representation before reconciliation
             # can update a check or finalize an already published result. False
             # reserves the longer check/author boolean spelling; body placement
             # determines the same blocking fact used by the actual writer.
-            complete_review = self._assemble_review_body(
+            preflight_review = self._assemble_review_body(
                 result=result,
                 analysis=analysis,
                 convergence_policy=convergence_policy,
@@ -3687,77 +4030,61 @@ class ReviewPublisher:
                 base_sha=base_sha,
             )
             if needs_human_inventory:
-                complete_review = replace(complete_review, compact_references=True)
+                preflight_review = replace(preflight_review, compact_references=True)
             body_blocking = any(
                 entry.blocking and entry.body_placed
-                for entry in complete_review.index_entries
+                for entry in preflight_review.index_entries
             ) or bool(
                 retained_eligibility is not None
                 and retained_eligibility.facts.has_blocking_findings
             )
-            preflight_eligibility = approval_eligibility_marker(
-                replace(
-                    prospective_eligibility,
-                    facts=replace(
-                        prospective_eligibility.facts,
-                        check_published=False,
-                        has_blocking_findings=body_blocking,
-                    ),
-                )
-            )
-            fit_assembled_review(
-                complete_review,
-                review_marker=marker,
-                eligibility_marker=preflight_eligibility,
-                repository_id=repository_id,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                base_sha=base_sha,
-                result_digest=review_result_digest(result),
-                summary_limit=_published_summary_byte_limit(result),
-                suffix=(
-                    "Earlier findings remain in their assessment inventory; all "
-                    "approval requirements still apply."
-                    if retained_eligibility is not None
-                    else ""
+            preflight_document = replace(
+                prospective_eligibility,
+                facts=replace(
+                    prospective_eligibility.facts,
+                    app_authored=False,
+                    check_published=False,
+                    has_blocking_findings=body_blocking,
                 ),
-                complete_inventory=True,
             )
-            if needs_human_inventory:
-                assert human_inventory is not None
-                future_eligibility = replace(
-                    prospective_eligibility,
-                    human_review=replace(
-                        human_inventory,
-                        resolved=tuple(
-                            item.fingerprint for item in human_inventory.findings
+            reserve = _disposition_frame_reserve(
+                preflight_document, preflight_review.index_entries
+            )
+            for compact in (False, True):
+                if compact:
+                    preflight_review = replace(
+                        preflight_review, compact_references=True
+                    )
+                try:
+                    fit_assembled_review(
+                        preflight_review,
+                        review_marker=marker,
+                        eligibility_marker=approval_eligibility_marker(
+                            preflight_document
                         ),
-                    ),
-                    facts=replace(
-                        prospective_eligibility.facts,
-                        check_published=False,
-                        has_blocking_findings=body_blocking,
-                        has_human_adjudication_findings=False,
-                    ),
-                )
-                fit_assembled_review(
-                    complete_review,
-                    review_marker=marker,
-                    eligibility_marker=approval_eligibility_marker(future_eligibility),
-                    repository_id=repository_id,
-                    pull_request=pull_request,
-                    head_sha=head_sha,
-                    base_sha=base_sha,
-                    result_digest=review_result_digest(result),
-                    summary_limit=_published_summary_byte_limit(result),
-                    suffix=(
-                        "Earlier findings remain in their assessment inventory; all "
-                        "approval requirements still apply."
-                        if retained_eligibility is not None
-                        else ""
-                    ),
-                    complete_inventory=True,
-                )
+                        repository_id=repository_id,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        base_sha=base_sha,
+                        result_digest=review_result_digest(result),
+                        summary_limit=_published_summary_byte_limit(result),
+                        suffix=(
+                            "Earlier findings remain in their assessment inventory; all "
+                            "approval requirements still apply."
+                            if retained_eligibility is not None
+                            else ""
+                        ),
+                        complete_inventory=complete_inventory,
+                        reserved_bytes=reserve,
+                        preserve_explanations=human_inventory is not None,
+                    )
+                except PublicationLimitError:
+                    if preflight_review.compact_references:
+                        raise
+                else:
+                    break
+            if complete_inventory:
+                complete_review = preflight_review
         preflight = self._preflight_pr(
             token=token,
             repository=repository,
@@ -3927,7 +4254,7 @@ class ReviewPublisher:
             )
             if current != retained_eligibility:
                 return PublicationResult(status="skipped_stale_head")
-            continuation_review = complete_review or self._assemble_review_body(
+            continuation_review = preflight_review or self._assemble_review_body(
                 result=result,
                 analysis=analysis,
                 convergence_policy=convergence_policy,
@@ -3970,6 +4297,10 @@ class ReviewPublisher:
                 summary_limit=_published_summary_byte_limit(result),
                 suffix=continuation_suffix,
                 complete_inventory=complete_inventory,
+                reserved_bytes=_disposition_frame_reserve(
+                    prospective_eligibility, continuation_review.index_entries
+                ),
+                preserve_explanations=human_inventory is not None,
             )
         if complete_review is not None and complete_review.inline_comments:
             complete_suppression = self._published_finding_suppression(
@@ -4093,7 +4424,7 @@ class ReviewPublisher:
         try:
             assembled = (
                 continuation_review
-                or complete_review
+                or preflight_review
                 or self._assemble_review_body(
                     result=result,
                     analysis=analysis,
@@ -4135,6 +4466,10 @@ class ReviewPublisher:
                 summary_limit=_published_summary_byte_limit(result),
                 suffix=continuation_suffix if continuation_review is not None else "",
                 complete_inventory=complete_inventory,
+                reserved_bytes=_disposition_frame_reserve(
+                    eligibility, assembled.index_entries
+                ),
+                preserve_explanations=human_inventory is not None,
             )
             prepared_comments = assembled.inline_comments
 
@@ -4158,9 +4493,10 @@ class ReviewPublisher:
                     ) > _published_summary_byte_limit(result):
                         continue
                     warned_body = body_for_summary(warned_summary)
-                    if (
-                        len(warned_body.encode("utf-8"))
-                        <= MAX_PUBLISHED_REVIEW_BODY_BYTES
+                    if len(
+                        warned_body.encode("utf-8")
+                    ) <= MAX_PUBLISHED_REVIEW_BODY_BYTES - _disposition_frame_reserve(
+                        eligibility, assembled.index_entries
                     ):
                         body = warned_body
                         break
@@ -4715,7 +5051,7 @@ class ReviewPublisher:
                     raise GitHubPublicationError("review thread response was invalid")
                 # GitHub logins are case-insensitive, so a configured slug that
                 # differs only in case must still match its own findings.
-                if login is None or login.casefold() != app_slug.casefold():
+                if not graphql_app_author(author, app_slug):
                     continue
                 resolved = node.get("isResolved")
                 if not isinstance(resolved, bool):

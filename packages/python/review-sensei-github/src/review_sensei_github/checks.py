@@ -467,14 +467,23 @@ class ReviewCheckPublisher:
         if not isinstance(runs, list):
             raise GitHubPublicationError("check lookup response was invalid")
         expected = app_slug.casefold()
+        # Review/comment users expose the App's REST Bot login, whereas a
+        # native check's App object exposes its unsuffixed slug. Both identify
+        # the same producer; never strip a suffix from an arbitrary returned
+        # App or accept a prefix/sibling match.
+        expected_slugs = {expected}
+        if expected.endswith("[bot]") and expected[:-5]:
+            expected_slugs.add(expected[:-5])
         for run in runs:
             if not isinstance(run, Mapping):
                 continue
             if run.get("name") != REVIEW_CHECK_NAME:
                 continue
+            if "head_sha" in run and run["head_sha"] != head_sha:
+                continue
             app = run.get("app")
             slug = app.get("slug") if isinstance(app, Mapping) else None
-            if not isinstance(slug, str) or slug.casefold() != expected:
+            if not isinstance(slug, str) or slug.casefold() not in expected_slugs:
                 continue
             check_run_id = run.get("id")
             if isinstance(check_run_id, int) and not isinstance(check_run_id, bool):

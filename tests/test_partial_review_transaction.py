@@ -34,6 +34,11 @@ from review_sensei.session import (
 )
 
 try:
+    from session_fixture_clock import SessionFixtureClockMixin
+except ModuleNotFoundError:
+    from tests.session_fixture_clock import SessionFixtureClockMixin
+
+try:
     import test_gate_and_default_approval as gates
     import test_review_transaction as transactions
 except ModuleNotFoundError:
@@ -93,7 +98,7 @@ def load(ledger, result, *, head=transactions.HEAD_SHA):
     )
 
 
-class PartialCheckpointTests(unittest.TestCase):
+class PartialCheckpointTests(SessionFixtureClockMixin, unittest.TestCase):
     def test_covered_partial_variants_checkpoint_and_retry_once(self):
         for outcome, reason in (
             ("excluded-by-policy", "generated"),
@@ -230,7 +235,7 @@ class PartialCheckpointTests(unittest.TestCase):
             )
 
 
-class PartialPublicationTests(unittest.TestCase):
+class PartialPublicationTests(SessionFixtureClockMixin, unittest.TestCase):
     def test_application_recovery_publishes_partial_without_complete_progress(self):
         ledger = InMemorySessionLedger()
         result = checkpoint_review_analysis(

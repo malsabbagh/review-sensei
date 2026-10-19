@@ -65,6 +65,12 @@ writers remain an unqualified condition. Large feedback histories can still exha
 the shared 60-second, 60 ordinary / 64 total dispatch budget and remain blocked.
 No silent truncation, cap raise or older clean-review fallback is permitted.
 
+Recorded maintainer decisions can outgrow a legacy review even when its original
+inventory fits. See [capacity-safe command reconciliation](command-publication-capacity.md)
+for whole-frame reservation, guarded generated-reference fitting and persistent
+capacity holds. Durable decisions remain bound to their original exact head;
+source repair does not activate a deployed runtime or authorize fresh analysis.
+
 The older `--recover-from` diagnostics-artifact route retains its existing legacy
 contract. It rejects the new publication-profile settings instead of silently
 ignoring them. Use `--result` with the exact original result or
