@@ -507,7 +507,9 @@ def feedback_request(record, budget, *, reason="admission"):
 
 
 class HostedTailTests(unittest.TestCase):
-    def setup_host(self, *, clock=None, feedback=False, callback=False):
+    def setup_host(
+        self, *, clock=None, feedback=False, callback=False, before_issue=None
+    ):
         from review_sensei_github import GitHubHttp
         from review_sensei_github.session_ledger import (
             GitHubIssueCommentSessionLedger,
@@ -538,6 +540,8 @@ class HostedTailTests(unittest.TestCase):
             broker.client.before_request = budget.consume
         if feedback:
             broker.request = feedback_request(initial, budget)
+        if before_issue is not None:
+            before_issue(initial, budget, broker)
         first = broker.issue(budget)
         ledger = GitHubIssueCommentSessionLedger(
             state.http,
