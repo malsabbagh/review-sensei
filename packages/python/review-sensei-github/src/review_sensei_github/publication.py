@@ -1428,6 +1428,17 @@ class _ScopedHumanInventoryReader:
             validate(review, reviews)
         self.budget.check()
 
+    def validate_metadata(self, review: dict[str, Any], reviews: list[Any]) -> None:
+        """Keep root authority fresh; older readers retain their full validator."""
+        self.budget.check()
+        reader = self._reader()
+        validate = getattr(reader, "validate_metadata", None)
+        if not callable(validate):
+            validate = getattr(reader, "validate_root", None)
+        if callable(validate):
+            validate(review, reviews)
+        self.budget.check()
+
 
 class ReviewApprovalFinalizer:
     """Converge an eligible exact-head PR to one App approval decision.
@@ -2825,6 +2836,7 @@ class ReviewApprovalFinalizer:
         head_sha: str,
         app_slug: str,
         require_valid: bool = False,
+        validate_visible_prose: bool = True,
         partition_reader: PartitionReader | None = None,
         expected_context: PartitionedEligibilityContext | None = None,
         visible_reader: VisibleReader | None = None,
@@ -2837,8 +2849,14 @@ class ReviewApprovalFinalizer:
         head can carry it, and a missing, malformed, or other-head document
         returns ``None`` so the caller withholds instead of trusting a claim it
         cannot verify.
+
+        Non-authoritative receipt paging may explicitly request metadata-only
+        validation for v5. Preparation and all authority/finalization paths
+        retain the default full visible-prose validation.
         """
 
+        if not isinstance(validate_visible_prose, bool):
+            raise GitHubPublicationError("eligibility prose validation mode is invalid")
         with self._read_operation():
             if not GIT_SHA_HEX.fullmatch(head_sha):
                 raise GitHubPublicationError("review head sha is invalid")
@@ -2859,6 +2877,7 @@ class ReviewApprovalFinalizer:
                 head_sha=head_sha,
                 app_slug=app_slug,
                 require_valid=require_valid,
+                validate_visible_prose=validate_visible_prose,
                 partition_reader=partition_reader,
                 expected_context=expected_context,
                 visible_reader=visible_reader,
@@ -2874,6 +2893,7 @@ class ReviewApprovalFinalizer:
         head_sha: str,
         app_slug: str,
         require_valid: bool = False,
+        validate_visible_prose: bool = True,
         partition_reader: PartitionReader | None = None,
         expected_context: PartitionedEligibilityContext | None = None,
         visible_reader: VisibleReader | None = None,
@@ -2929,7 +2949,13 @@ class ReviewApprovalFinalizer:
             )
             if eligibility is not None and eligibility.head_sha == head_sha:
                 if eligibility.human_inventory_reference is not None:
-                    validate = getattr(human_reader, "validate_root", None)
+                    validate = (
+                        getattr(human_reader, "validate_metadata", None)
+                        if not validate_visible_prose
+                        else None
+                    )
+                    if not callable(validate):
+                        validate = getattr(human_reader, "validate_root", None)
                     if callable(validate):
                         try:
                             validate(review, reviews)

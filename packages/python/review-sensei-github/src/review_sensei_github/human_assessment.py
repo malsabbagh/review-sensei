@@ -981,6 +981,8 @@ class HumanAssessmentPublisher:
                 pull_request=pull_request,
                 head_sha=conversation.head_sha,
                 app_slug=app_slug,
+                require_valid=True,
+                validate_visible_prose=False,
             )
             if latest not in (original, refreshed):
                 return "skipped_stale_head"
