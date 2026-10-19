@@ -25,6 +25,7 @@ import test_default_human_inventory  # noqa: E402
 import test_default_human_inventory_cli  # noqa: E402
 import test_default_human_inventory_publisher  # noqa: E402
 import test_default_human_inventory_store  # noqa: E402
+import test_default_human_reader_binding  # noqa: E402
 
 
 class InstalledDefaultHumanInventoryTests(
@@ -47,6 +48,12 @@ class InstalledDefaultHumanPublisherTests(
 
 class InstalledDefaultHumanStorageTests(
     test_default_human_inventory_store.DefaultHumanInventoryStoreTests
+):
+    pass
+
+
+class InstalledDefaultHumanReaderBindingTests(
+    test_default_human_reader_binding.DefaultHumanReaderBindingTests
 ):
     pass
 
