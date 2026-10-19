@@ -52,7 +52,10 @@ class RetentionState(State):
     def open(self, request, timeout):
         parsed = urlparse(request.full_url)
         path = parsed.path
-        if path == "/users/" + APP.replace("[", "%5B").replace("]", "%5D"):
+        if (
+            path.casefold()
+            == ("/users/" + APP.replace("[", "%5B").replace("]", "%5D")).casefold()
+        ):
             self.calls.append((request.method, path, None))
             return json_response(self.app_user)
         if path.endswith("/issues/1/comments"):
@@ -171,7 +174,7 @@ def application(state, ledger):
     )
 
 
-def publish(app, result, key, *, options=None, **kwargs):
+def publish(app, result, key, *, options=None, app_slug=APP, **kwargs):
     return app.publish_review(
         options=options or GitHubWriteOptions(auto_review=True, github_writes=True),
         oidc_token="oidc",
@@ -184,7 +187,7 @@ def publish(app, result, key, *, options=None, **kwargs):
         result=result,
         diff="diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n"
         + DIFF,
-        app_slug=APP,
+        app_slug=app_slug,
         convergence_policy=POLICY,
         current_key=key,
         configuration_context=CONFIGURATION,
@@ -193,7 +196,7 @@ def publish(app, result, key, *, options=None, **kwargs):
     )
 
 
-def recover(app, ledger, **kwargs):
+def recover(app, ledger, *, app_slug=APP, **kwargs):
     return app.recover_retained_review_result(
         token="read-token",
         repository="owner/repo",
@@ -201,7 +204,7 @@ def recover(app, ledger, **kwargs):
         pull_request=1,
         base_sha=BASE,
         head_sha=HEAD,
-        app_slug=APP,
+        app_slug=app_slug,
         ledger=ledger,
         configuration_context=CONFIGURATION,
         evidence_context=EVIDENCE,
@@ -211,6 +214,40 @@ def recover(app, ledger, **kwargs):
 
 
 class PublicationRecoveryTests(unittest.TestCase):
+    def test_configured_bot_login_case_preserves_numeric_owned_publication(self):
+        for configured in (
+            "REVIEW-SENSEI[bot]",
+            "ReViEw-SeNsEi[bot]",
+            APP.upper(),
+            "ReViEw-SeNsEi[BoT]",
+        ):
+            with (
+                self.subTest(configured=configured),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                ledger = LocalSessionLedger(Path(directory))
+                result, key = checkpoint(ledger, 1)
+                state = RetentionState()
+                state.reviews = []
+                self.assertEqual(state.app_user["login"], "review-sensei[bot]")
+                outcome = publish(
+                    application(state, ledger), result, key, app_slug=configured
+                )
+                self.assertEqual(outcome.status, "published")
+                self.assertEqual(len(state.parts), 1)
+                self.assertEqual(state.parts[0]["user"]["id"], 99)
+                self.assertEqual(state.parts[0]["user"]["type"], "Bot")
+                self.assertEqual(
+                    state.parts[0]["issue_url"],
+                    "https://api.github.test/repos/owner/repo/issues/1",
+                )
+                self.assertEqual(
+                    recover(
+                        application(state, ledger), ledger, app_slug=configured
+                    ).content_digest(),
+                    result.content_digest(),
+                )
+
     def test_multipart_fallback_readbacks_are_preflighted_and_charged(self):
         for initial_calls in (0, 20):
             with (

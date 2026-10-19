@@ -172,7 +172,10 @@ def _store(
 ) -> ResultPartStore:
     if (
         not isinstance(app_slug, str)
-        or re.fullmatch(r"[A-Za-z0-9_-]+\[bot\]", app_slug) is None
+        or re.fullmatch(
+            r"[A-Za-z0-9_-]+\[bot\]", app_slug, flags=re.IGNORECASE | re.ASCII
+        )
+        is None
     ):
         raise ReviewInputError("retention requires the configured Bot login")
     status, user = http.request(
@@ -182,7 +185,8 @@ def _store(
     if (
         status != 200
         or not isinstance(user, dict)
-        or user.get("login") != app_slug
+        or not isinstance(user.get("login"), str)
+        or user["login"].casefold() != app_slug.casefold()
         or user.get("type") != "Bot"
         or type(user_id) is not int
         or user_id <= 0
