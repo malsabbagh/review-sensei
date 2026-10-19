@@ -2,7 +2,7 @@
 
 Status: Proposed
 Date: 2026-09-19
-Last amended: 2026-09-26
+Last amended: 2026-10-19
 GitHub Issue: #136
 Pull Request: [#145](https://github.com/malsabbagh/review-sensei/pull/145)
 Owners/Reviewers: Maintainers
@@ -181,6 +181,33 @@ Negative:
   `review_status` capability before it reads any ledger state, so status is
   bound to the same broker-attested actor and association as every
   mutation, and only its broker scope is narrower.
+
+## Amendment 2026-10-19: empty inline discussion review containers
+
+GitHub can create an App-authored `COMMENTED` review with an empty or null body
+when the App replies to an inline thread. Before ignoring that container, read
+its review-specific comments through the existing bounded metadata transport.
+An owned reply is discussion, not replacement authority. A genuine top-level
+legacy finding remains the current inventory; unknown, malformed, duplicate,
+wrong-scope or unreadable roots refuse instead of exposing an older inventory.
+Only a complete empty list or positively owned replies without top-level
+authority permit fallback. Candidate reads share one ten-request/sixty-second
+bound, newest first, and selected inventory is reused without a second fetch.
+Nonempty newer reviews, malformed authority markers and other review states
+keep their existing fail-closed behavior. Never obtain authority from another
+author or head, or recover superseded inventory through a later invalid record.
+
+The public hosted-command regression retains a complete eligibility/index,
+adds empty App discussion containers, records the exact-head decision and then
+verifies it through the real finalizer. Negative cases retain newer blocking,
+partial, malformed, wrong-scope and foreign-head/author refusals, including
+legacy top-level blockers and bounded/unreadable discussion walks. This changes
+neither command authorization nor coverage and approval requirements. Rollback
+restores the previous refusal but can again leave valid displayed IDs
+unaddressable after an inline reply; no schema or persistence migration is needed.
+The complete public command test class also runs through the installed dist-safe
+and post-package lifecycle lanes, with installed-origin and no-live-socket guards.
+Its declared helper closure is checked before source distribution qualification.
 
 ## Alternatives considered
 

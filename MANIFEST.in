@@ -30,3 +30,4 @@ include tests/test_large_public_lifecycle.py
 include tests/test_human_assessment.py
 include tests/test_operation_entry.py
 include tests/test_review_work.py
+include tests/test_override_metadata_integration.py

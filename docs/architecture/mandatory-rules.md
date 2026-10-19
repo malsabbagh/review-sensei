@@ -680,3 +680,8 @@ reports parse but cannot newly authorize support. See proposed ADR 0082.
 Composite controls reject missing live engine/prompt identities with a bounded
 input diagnostic. OpenRouter endpoint metadata passes the adapter's strict
 allowlist before live evaluation dispatch or public report construction.
+
+Only confirmed owned replies or a complete empty comment list permit fallback.
+Genuine top-level legacy findings retain their exact-head inventory authority.
+Unknown, malformed, conflicting or unreadable roots refuse fallback.
+The metadata walk retains one shared ten-request, sixty-second bound.

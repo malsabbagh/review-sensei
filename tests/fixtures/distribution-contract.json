@@ -57,7 +57,8 @@
         "tests/test_large_public_lifecycle.py",
         "tests/test_human_assessment.py",
         "tests/test_operation_entry.py",
-        "tests/test_review_work.py"
+        "tests/test_review_work.py",
+        "tests/test_override_metadata_integration.py"
       ],
       "description": "Runs after pip install dist/*.whl from a directory that cannot import checkout src/. Tests load only packaged or generated assets."
     },

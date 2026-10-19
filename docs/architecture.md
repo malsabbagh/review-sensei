@@ -926,6 +926,16 @@ blocking root, the adapter invokes the shared finalizer on the same exact head;
 this avoids a second provider pass, synthetic commit, or Actions-dispatch
 capability while preserving the normal approval gates.
 
+Maintainer finding lookup distinguishes empty App `COMMENTED` review containers
+from genuine legacy finding authority through bounded review-specific reads.
+Only confirmed owned replies or a complete empty comment list permit fallback.
+Genuine top-level legacy findings retain their exact-head inventory authority.
+Unknown, malformed, conflicting or unreadable roots refuse fallback.
+The metadata walk retains one shared ten-request, sixty-second bound.
+Fetched candidate inventory is reused rather than read twice. Nonempty newer
+records and other review states keep their existing fail-closed behavior; see the
+amendment to [ADR 0050](adr/0050-maintainer-disposition-and-handoff-status.md).
+
 Pending `needs_human` findings follow the separate evidence-backed reassessment
 path in [ADR 0061](adr/0061-human-reply-reassessment.md). A new review records a
 complete bounded inventory in its App eligibility document. An authorized

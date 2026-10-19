@@ -16,6 +16,24 @@
   lowering corpus thresholds. Retain bounded control provenance, reject
   incomplete or contradictory promotion evidence, and count all expected
   findings in recall. Historical unbound reports cannot newly authorize support.
+- Preserve canonical YAML and hosted-plan OpenRouter endpoint routing through
+  the adapter; retired environment settings cannot replace or veto that policy.
+
+- Preserve requested and observed OpenRouter identities independently; never use
+  a returned model alias as the revision. Retain optional bounded token counters
+  and report unknown usage honestly across failed/interrupted attempts.
+- Accept bounded endpoint routing prefixes without relaxing privacy or fallback
+  policy. Make the existing hosted DeepSeek/Morph candidate eligible to collect
+  qualification evidence; it remains unqualified pending authorized live runs.
+- Bind retained live qualification reports to their actual requested routing
+  policy and endpoint; absent or changed bindings cannot authorize support.
+  Permit the evaluator's existing skipped-case status in its report schema.
+  Actual live quality remains independently required for qualification.
+
+## 0.8.2 - 2026-10-19
+
+- Keep current-head finding IDs addressable after App inline discussion replies
+  create empty review containers; preserve newer review authority and refusals.
 
 - Preserve prior concerns and history across every admitted full baseline
   refresh, including changed base/model recovery; omitted findings remain partial.
@@ -30,19 +48,10 @@
   Positive runtime report binding and legacy standalone finalizer qualification
   remain pending. Extend installed/post-package lifecycle acceptance with explicit
   finite capacity and deployment limitations.
-- Preserve canonical YAML and hosted-plan OpenRouter endpoint routing through
-  the adapter; retired environment settings cannot replace or veto that policy.
 
-- Preserve requested and observed OpenRouter identities independently; never use
-  a returned model alias as the revision. Retain optional bounded token counters
-  and report unknown usage honestly across failed/interrupted attempts.
-- Accept bounded endpoint routing prefixes without relaxing privacy or fallback
-  policy. Make the existing hosted DeepSeek/Morph candidate eligible to collect
-  qualification evidence; it remains unqualified pending authorized live runs.
-- Bind retained live qualification reports to their actual requested routing
-  policy and endpoint; absent or changed bindings cannot authorize support.
-  Permit the evaluator's existing skipped-case status in its report schema.
-  Actual live quality remains independently required for qualification.
+## review-sensei-github 0.3.2 - 2026-10-19
+
+- Pin `review-sensei==0.8.2`.
 
 ## 0.8.1 - 2026-10-18
 
