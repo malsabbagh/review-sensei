@@ -12,6 +12,7 @@ Process: `docs/process/adr-process.md`
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
 | [0083](0083-trusted-runtime-openrouter-qualification.md) | Proposed | Bind runtime OpenRouter approval to retained evidence and independent effective identity | #115 | Bounded receipts, versioned provider facts, fail-closed delayed finalization and legacy migration |
+| [0086](0086-original-selected-operation-context.md) | Proposed | Expose original hosted operation context with bounded wall time | #240, #242, #243, #244, #245, #269 | Actual retained handles and complete identity; selected CLI/control accounting remain unqualified |
 | [0085](0085-bounded-complete-selected-feedback-reports.md) | Proposed | Bound complete selected-feedback reports with explicit shared guidance and exact-inventory queue references | #240, #242, #243, #244, #269 | Trusted-library opt-ins, unchanged budgets and no deployed activation |
 | [0081](0081-openrouter-response-metadata-and-routing.md) | Proposed | Separate reported provider metadata and exact routing identifiers | #118–#121 | Optional bounded telemetry, hosted eligibility and unchanged qualification gates |
 | [0082](0082-separate-live-quality-from-deterministic-conformance.md) | Proposed | Separate live quality from exact deterministic fixture conformance | #118, #119, #120, #122 | Preserve thresholds; synthetic evaluator acceptance does not qualify a provider |

@@ -221,7 +221,7 @@ class RootObservation:
     def __post_init__(self) -> None:
         if self.kind not in {"read", "write", "absent", "unknown"}:
             raise ValueError("invalid root observation")
-        _whole(self.observed_at_ms, _MAX_GENERATION, "observed at")
+        _whole(self.observed_at_ms, _MAX_TIMESTAMP_MS, "observed at")
         if self.root_sha is not None:
             _text(self.root_sha, _HEX64, "observed root")
         if self.root_generation is not None:
@@ -229,7 +229,7 @@ class RootObservation:
         if self.attempt_id is not None:
             _text(self.attempt_id, _HEX64, "observed attempt")
         if self.write_started_at_ms is not None:
-            _whole(self.write_started_at_ms, _MAX_GENERATION, "write started at")
+            _whole(self.write_started_at_ms, _MAX_TIMESTAMP_MS, "write started at")
         if self.kind == "absent" and (
             self.root_sha is not None or self.root_generation is not None
         ):

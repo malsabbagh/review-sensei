@@ -21,7 +21,9 @@ clock guard used the 32-bit cursor-generation ceiling. Stored timestamp fields
 already have the separate safe JSON-integer domain. Four executable wall-clock
 oracles failed before correcting that domain. Timestamp arithmetic now retains
 room for the original 60-second deadline, without changing generation bounds,
-expiry, rollback or original allowance semantics.
+expiry, rollback or original allowance semantics. Remote root observations and
+write-start observations use the same timestamp domain, permitting owned Unix-time
+reconciliation and lost-ack recovery without expanding generation bounds.
 
 ## Prerequisite interface
 

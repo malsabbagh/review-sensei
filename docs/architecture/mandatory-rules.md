@@ -683,3 +683,21 @@ reports parse but cannot newly authorize support. See proposed ADR 0082.
 Composite controls reject missing live engine/prompt identities with a bounded
 input diagnostic. OpenRouter endpoint metadata passes the adapter's strict
 allowlist before live evaluation dispatch or public report construction.
+
+## Original hosted operation context (opt-in)
+
+The optional `HostedComputationIdentity` binds the complete operation, immutable
+inventory and selected-source digests independently of the operation store's
+cursor. `HostedOperationExecution` carries the actual `OperationHandle` returned
+by `restore_operation` after durable charged admission; a mapping, nonce or grant
+is not that witness. Accepted replay invokes no execution callback and retains
+its original deadline and declared charges. Handle-aware calls require explicit
+original clock, origin, identity and bootstrap liability. Unknown or unaccepted
+handle-aware results never become fresh publishable work.
+
+Hosted wall timestamps and remote observation/write-start timestamps use the
+existing finite safe JSON-integer millisecond domain. Cursor generations retain
+their 32-bit bounds. Expiry, clock rollback and original admission deadlines
+remain enforced. These component contracts do not qualify selected CLI queue
+activation, physical/broker-internal dispatch accounting or source-grant
+consumption. See [Proposed ADR 0086](adr/0086-original-selected-operation-context.md).
