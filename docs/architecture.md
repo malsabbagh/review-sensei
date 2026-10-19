@@ -1103,15 +1103,12 @@ permit managed upgrades while operator edits fail closed. See
 [ADR 0080](adr/0080-explicit-incomplete-review-rescans.md).
 
 
-Ordinary `ConversationService.reply` uses the existing generic call executor and
-an optional `ResourceBudgetTracker`. Its default public budget remains bounded;
-callers pass their original tracker to retain elapsed time, attempted calls and
-aggregate prompt/output accounting across transport retries and one JSON or
-non-object correction. Semantic reply failures never request correction. The
-GitHub caller creates that tracker before context preparation and retains it
-through operation entry and generation; expiry, exhaustion or cancellation
-cannot publish a generated reply. Provider adapters receive the remaining
-request deadline and their configured output cap without backend-specific policy.
+`ConversationService.reply` uses the generic executor and optional original
+`ResourceBudgetTracker` across preparation, operation entry, generation, retries
+and one JSON/non-object correction. Default bounds, elapsed time, attempted calls
+and aggregate prompt/output accounting hold; semantic failures never correct.
+GitHub starts tracking before preparation. Expiry/exhaustion/cancellation cannot
+publish; every adapter receives the remaining deadline and configured output cap.
 
 Restored handles bind operation/inventory/source and original clock/charges.
 Replay never reexecutes; unknown work never publishes. Time/generation bounds,
@@ -1125,14 +1122,10 @@ uses exact owned POST-ID readback followed by the complete report scan; the
 ordinary conversation route remains available. See
 [Proposed ADR 0087](adr/0087-selected-assessment-context-and-owned-page-readback.md).
 
-Broker control prepays original liability, gates fetches and JWKS waits by its
-deadline, and refuses redirects/bad receipts. V2 scope/deadline match; request
-state is isolated. No refund or new authority/durability; legacy behavior is
-unchanged. See proposed ADR 0088.
+Broker control funds isolated fetch/JWKS work under original bounds and v2 binding;
+redirects/bad receipts refuse, without refunds or new authority/durability (ADR 0088).
 
-The explicit trusted-host partitioned review writer requires independently
-retained result/snapshot/policy/configuration/producer expectations, one original
-budget, conditional generation activation and actual owned numeric root readback.
-It retains every complete finding explanation and future resolution allocation;
-default REST/CLI/hosted writers remain disabled. Initial publication does not
-qualify later resolution/replay or approval. See proposed ADR 0089.
+Opt-in partitioned publication binds independent result/snapshot/policy/configuration/
+producer, original budget, conditional generation and owned numeric root readback.
+Full prose/capacity remain; defaults are unchanged. No late-flow or approval
+qualification (ADR 0089).
