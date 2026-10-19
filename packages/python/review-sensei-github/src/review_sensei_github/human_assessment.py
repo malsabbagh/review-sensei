@@ -1062,6 +1062,32 @@ class HumanAssessmentPublisher:
             return ReplyResult(
                 status="skipped_edited_source", comment_id=outcome.comment_id
             )
+        if resuming:
+            # A previous attempt durably reassessed but failed before approval.
+            # The conversation publisher has now reconciled this source's
+            # reply (or acknowledged a new mention). Re-enter the exact-head
+            # finalizer without another assessment record or model decision.
+            # Its fresh PR/root/full-prose checks precede thread mutations and
+            # approval; repeating them here cannot authorize any new write.
+            finalized = self.finalizer.finalize_recorded_decisions(
+                token=review_token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=conversation.head_sha,
+                app_slug=app_slug,
+                eligibility=refreshed,
+                check_token=check_token,
+                reviews_policy=reviews_policy,
+            )
+            return ReplyResult(
+                status=finalized.status
+                if finalized.status.startswith("skipped_")
+                else outcome.status,
+                comment_id=outcome.comment_id,
+                resolution_status=finalized.thread_resolution,
+                approval_status=finalized.status,
+                approval_diagnostic=finalized.diagnostic,
+            )
         preflight = self.finalizer._preflight(
             token=review_token,
             repository=repository,
@@ -1084,33 +1110,9 @@ class HumanAssessmentPublisher:
             head_sha=conversation.head_sha,
             app_slug=app_slug,
         )
-        if current != (refreshed if resuming else original):
+        if current != original:
             return ReplyResult(
                 status="skipped_stale_head", comment_id=outcome.comment_id
-            )
-        if resuming:
-            # A previous attempt durably reassessed but failed before approval.
-            # The conversation publisher has now reconciled this source's
-            # reply (or acknowledged a new mention). Re-enter the exact-head
-            # finalizer without another assessment record or model decision.
-            finalized = self.finalizer.finalize_recorded_decisions(
-                token=review_token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=conversation.head_sha,
-                app_slug=app_slug,
-                eligibility=refreshed,
-                check_token=check_token,
-                reviews_policy=reviews_policy,
-            )
-            return ReplyResult(
-                status=finalized.status
-                if finalized.status.startswith("skipped_")
-                else outcome.status,
-                comment_id=outcome.comment_id,
-                resolution_status=finalized.thread_resolution,
-                approval_status=finalized.status,
-                approval_diagnostic=finalized.diagnostic,
             )
         evidence_digest = hashlib.sha256(
             json.dumps(
