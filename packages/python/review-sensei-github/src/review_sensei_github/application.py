@@ -2584,6 +2584,21 @@ class GitHubApplication:
             )
         except Exception:
             return replace(result, summary=failed, evaluation_failed=True)
+        if getattr(
+            publication, "status", None
+        ) == "gate_reevaluation_failed" and getattr(
+            publication, "diagnostic", None
+        ) in {"command_body_capacity_exceeded", "command_body_capacity_unverifiable"}:
+            return replace(
+                result,
+                summary=(
+                    result.summary
+                    + f"; gate re-evaluation blocked ({publication.diagnostic}); "
+                    "decisions retained; retain the original review and ledger "
+                    "for operator capacity/evidence repair"
+                ),
+                evaluation_failed=True,
+            )
         thread_status = getattr(publication, "thread_resolution", None)
         if thread_status:
             result = replace(

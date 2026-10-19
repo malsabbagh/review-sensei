@@ -75,7 +75,9 @@
         "tests/test_schema5_public_contract.py",
         "tests/test_feedback_fence_budget.py",
         "tests/test_local_partition_read_cache.py",
-        "tests/test_authenticated_partitions.py"
+        "tests/test_authenticated_partitions.py",
+        "tests/test_command_capacity_recovery.py",
+        "tests/test_publication_future_capacity.py"
       ],
       "description": "Runs after pip install dist/*.whl from a directory that cannot import checkout src/. Tests load only packaged or generated assets."
     },
