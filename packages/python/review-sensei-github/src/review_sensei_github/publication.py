@@ -1646,6 +1646,7 @@ class ReviewApprovalFinalizer:
         assume_inline_unresolved: frozenset[str] | None = None,
         partition_reader: PartitionReader | None = None,
         visible_reader: VisibleReader | None = None,
+        _before_approval: Callable[[list[Any]], PublicationResult | None] | None = None,
     ) -> PublicationResult:
         """Emit at most one exact-head APPROVE from trusted eligibility.
 
@@ -1855,6 +1856,10 @@ class ReviewApprovalFinalizer:
                     return PublicationResult(
                         status="approval_withheld", diagnostic="approval_withheld"
                     )
+            if _before_approval is not None:
+                guarded = _before_approval(reviews)
+                if guarded is not None:
+                    return guarded
             marker = approval_marker(
                 repository_id=preflight.repository_id,
                 pull_request=pull_request,
@@ -1869,6 +1874,24 @@ class ReviewApprovalFinalizer:
                 body=marker,
             ):
                 return PublicationResult(status="already_approved")
+
+            def already_approved():
+                if not self._is_already_approved(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    marker=marker,
+                    app_slug=app_slug,
+                ):
+                    return False
+                if _before_approval is None:
+                    return True
+                fresh = self._load_head_reviews(
+                    token=token, repository=repository, pull_request=pull_request
+                )
+                return _before_approval(fresh) is None
+
             return self._post_head_review(
                 token=token,
                 repository=repository,
@@ -1876,14 +1899,7 @@ class ReviewApprovalFinalizer:
                 head_sha=head_sha,
                 body=marker,
                 event="APPROVE",
-                already=lambda: self._is_already_approved(
-                    token=token,
-                    repository=repository,
-                    pull_request=pull_request,
-                    head_sha=head_sha,
-                    marker=marker,
-                    app_slug=app_slug,
-                ),
+                already=already_approved,
                 success_status="approved",
                 already_status="already_approved",
                 rejected="approval finalization was rejected",
@@ -1946,7 +1962,9 @@ class ReviewApprovalFinalizer:
                 self._operation_budget = None
 
     @staticmethod
-    def _command_root_unchanged(reviews, chosen, expected_body, head_sha, app_slug):
+    def _command_root_unchanged(
+        reviews, chosen, expected_body, head_sha, app_slug, pull_request_url
+    ):
         candidates = [
             review
             for review in reviews
@@ -1967,6 +1985,8 @@ class ReviewApprovalFinalizer:
             and current["body"] == expected_body
             and current.get("user") == chosen.get("user")
             and current.get("state") == chosen.get("state")
+            and current.get("pull_request_url") == pull_request_url
+            and chosen.get("pull_request_url") == pull_request_url
         )
 
     def _refinalize_with_dispositions_impl(
@@ -2052,14 +2072,11 @@ class ReviewApprovalFinalizer:
             )
         active = []
         for item in dispositions:
-            item_head = getattr(item, "head_sha", None)
             fingerprint = getattr(item, "fingerprint", None)
             honors = getattr(item, "honors", None)
             if not isinstance(fingerprint, str) or not callable(honors):
                 continue
             if honors(fingerprint, head_sha=head_sha):
-                active.append(fingerprint)
-            elif item_head == head_sha:
                 active.append(fingerprint)
         honored = tuple(
             entry
@@ -2112,7 +2129,20 @@ class ReviewApprovalFinalizer:
             if provenance not in new_body:
                 new_body = f"{new_body}\n\n{provenance}"
         compacted = False
-        if len(new_body.encode("utf-8")) > MAX_PUBLISHED_REVIEW_BODY_BYTES:
+        capacity_producer_id = 0
+        pull_request_url = self.http.api_url + self.http.repository_path(
+            repository, f"/pulls/{pull_request}"
+        )
+        required_section = re.search(
+            r"(?ms)^### Required decisions\n(.*?)(?=^#{1,3} |\Z)", body
+        )
+        compact_rows = required_section is not None and re.search(
+            r"(?m)^- \*\*RS-[A-F0-9]{6,64}\*\*$", required_section[1]
+        )
+        if (
+            len(new_body.encode("utf-8")) > MAX_PUBLISHED_REVIEW_BODY_BYTES
+            or compact_rows
+        ):
             from .command_capacity import compact_command_references
             from .publication_recovery import publication_http
 
@@ -2125,7 +2155,8 @@ class ReviewApprovalFinalizer:
                 )
                 user = chosen.get("user")
                 if (
-                    chosen.get("state") not in PUBLISHED_REVIEW_STATES
+                    chosen.get("pull_request_url") != pull_request_url
+                    or chosen.get("state") not in PUBLISHED_REVIEW_STATES
                     or body.count(FINDING_INDEX_MARKER_PREFIX) != 1
                     or parse_finding_index(
                         body,
@@ -2150,6 +2181,7 @@ class ReviewApprovalFinalizer:
                     or user.get("type") != "Bot"
                 ):
                     raise ReviewInputError("command capacity root producer conflicts")
+                capacity_producer_id = producer["id"]
                 inline = capacity_http.paginate(
                     path=capacity_http.repository_path(
                         repository,
@@ -2163,12 +2195,9 @@ class ReviewApprovalFinalizer:
                     index=index,
                     inline=inline,
                     review_id=chosen["id"],
-                    producer_id=producer["id"],
+                    producer_id=capacity_producer_id,
                     app_slug=app_slug,
-                    pull_request_url=capacity_http.api_url
-                    + capacity_http.repository_path(
-                        repository, f"/pulls/{pull_request}"
-                    ),
+                    pull_request_url=pull_request_url,
                 )
                 compacted = True
             except (ReviewInputError, GitHubHTTPError, GitHubPublicationError):
@@ -2187,7 +2216,83 @@ class ReviewApprovalFinalizer:
             return live.result
         if live.base_sha != index.base_sha or live.repository_id != repository_id:
             return PublicationResult(status="skipped_stale_base")
-        if (
+
+        def capacity_snapshot_matches(
+            expected_body, expected_eligibility, current_reviews=None
+        ):
+            # One scan supplies both the eligibility and exact owned root proof.
+            # Inline prose is mutable independently of that root, so reacquire
+            # the complete native listing instead of reusing the earlier proof.
+            try:
+                fresh = (
+                    self._load_head_reviews(
+                        token=token, repository=repository, pull_request=pull_request
+                    )
+                    if current_reviews is None
+                    else current_reviews
+                )
+                if (
+                    not self._command_root_unchanged(
+                        fresh,
+                        chosen,
+                        expected_body,
+                        head_sha,
+                        app_slug,
+                        pull_request_url,
+                    )
+                    or self._eligibility_from_reviews(
+                        fresh,
+                        head_sha=head_sha,
+                        app_slug=app_slug,
+                        token=token,
+                        repository=repository,
+                        pull_request=pull_request,
+                    )
+                    != expected_eligibility
+                ):
+                    return False
+                fresh_inline = self.http.paginate(
+                    path=self.http.repository_path(
+                        repository,
+                        f"/pulls/{pull_request}/reviews/{chosen['id']}/comments",
+                    ),
+                    token=token,
+                )
+                if fresh_inline != inline:
+                    return False
+                compact_command_references(
+                    expected_body,
+                    eligibility=expected_eligibility,
+                    index=index,
+                    inline=fresh_inline,
+                    review_id=chosen["id"],
+                    producer_id=capacity_producer_id,
+                    app_slug=app_slug,
+                    pull_request_url=pull_request_url,
+                )
+                return True
+            except (ReviewInputError, GitHubHTTPError, GitHubPublicationError):
+                return False
+
+        if compacted:
+            if not capacity_snapshot_matches(body, eligibility):
+                return PublicationResult(
+                    status="gate_reevaluation_failed",
+                    diagnostic="command_body_capacity_unverifiable",
+                )
+            # This live PR read follows every intervening report/prose read.
+            live = self._preflight(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            if live.result is not None:
+                return live.result
+            if live.base_sha != index.base_sha or live.repository_id != repository_id:
+                return PublicationResult(status="skipped_stale_base")
+        elif (
             self.load_eligibility(
                 token=token,
                 repository=repository,
@@ -2200,16 +2305,6 @@ class ReviewApprovalFinalizer:
             return PublicationResult(
                 status="approval_withheld", diagnostic="approval_withheld"
             )
-        if compacted:
-            fresh = self._load_head_reviews(
-                token=token, repository=repository, pull_request=pull_request
-            )
-            if not self._command_root_unchanged(
-                fresh, chosen, body, head_sha, app_slug
-            ):
-                return PublicationResult(
-                    status="approval_withheld", diagnostic="approval_withheld"
-                )
         if len(new_body.encode("utf-8")) > MAX_PUBLISHED_REVIEW_BODY_BYTES:
             return PublicationResult(
                 status="gate_reevaluation_failed",
@@ -2231,28 +2326,34 @@ class ReviewApprovalFinalizer:
                         status="gate_reevaluation_failed",
                         diagnostic="gate_reevaluation_failed",
                     )
-                # An uncertain PUT is never reissued. Only exact owned readback
-                # of the full intended body permits this operation to continue.
-                try:
-                    observed = self._load_head_reviews(
-                        token=token, repository=repository, pull_request=pull_request
-                    )
-                except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
-                    observed = []
-                if not self._command_root_unchanged(
-                    observed, chosen, new_body, head_sha, app_slug
-                ):
-                    return PublicationResult(
-                        status="gate_reevaluation_failed",
-                        diagnostic="command_body_capacity_unverifiable",
-                    )
+                # Do not reissue an uncertain PUT. The same complete owned
+                # readback below must prove it committed before any gate write.
                 status = 200
             if status != 200:
                 return PublicationResult(
                     status="gate_reevaluation_failed",
                     diagnostic="gate_reevaluation_failed",
                 )
-        if (
+        if compacted:
+            if not capacity_snapshot_matches(new_body, adjusted):
+                return PublicationResult(
+                    status="gate_reevaluation_failed",
+                    diagnostic="command_body_capacity_unverifiable",
+                )
+            # The post-PUT ownership/prose readback may itself take time. Fence
+            # the current PR again before check/thread/approval mutations.
+            live = self._preflight(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            if live.result is not None:
+                return live.result
+            if live.base_sha != index.base_sha or live.repository_id != repository_id:
+                return PublicationResult(status="skipped_stale_base")
+        elif (
             self.load_eligibility(
                 token=token,
                 repository=repository,
@@ -2265,17 +2366,32 @@ class ReviewApprovalFinalizer:
             return PublicationResult(
                 status="gate_reevaluation_failed", diagnostic="gate_reevaluation_failed"
             )
-        if compacted:
-            readback = self._load_head_reviews(
-                token=token, repository=repository, pull_request=pull_request
-            )
-            if not self._command_root_unchanged(
-                readback, chosen, new_body, head_sha, app_slug
-            ):
+
+        def final_capacity_guard(current_reviews):
+            # Finalize has already acquired this audited root snapshot after
+            # its thread/persisted checks. Reuse that exact observation; then
+            # reacquire native prose and read the live PR LAST before approval.
+            if not capacity_snapshot_matches(new_body, adjusted, current_reviews):
                 return PublicationResult(
                     status="gate_reevaluation_failed",
                     diagnostic="command_body_capacity_unverifiable",
                 )
+            current = self._preflight(
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
+            if current.result is not None:
+                return current.result
+            if (
+                current.base_sha != index.base_sha
+                or current.repository_id != repository_id
+            ):
+                return PublicationResult(status="skipped_stale_base")
+            return None
+
         check_failed = False
         if check_token:
             try:
@@ -2320,6 +2436,7 @@ class ReviewApprovalFinalizer:
                 eligibility=adjusted,
                 require_persisted=True,
                 honored_instances=honored_instances,
+                _before_approval=final_capacity_guard if compacted else None,
             )
         except (GitHubHTTPError, GitHubPublicationError):
             finalized = PublicationResult(

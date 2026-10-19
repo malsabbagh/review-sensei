@@ -416,7 +416,18 @@ class CommandCapacityRecoveryTests(unittest.TestCase):
     def test_fully_eligible_control_approves_after_complete_owned_readback(self):
         state = CommandCapacityState(complete=True)
         with tempfile.TemporaryDirectory() as directory:
-            outcome, budget, calls = state.verify(state.record(directory))
+            dispositions = state.record(directory)
+            outcome, budget, calls = state.verify(dispositions)
+            replay, replay_budget, replay_calls = state.verify(dispositions)
+        self.assertEqual(replay.status, "already_approved")
+        self.assertFalse(
+            any(
+                m == "PUT" or (m == "POST" and p.endswith("/reviews"))
+                for m, p, _ in replay_calls
+            )
+        )
+        self.assertEqual(replay_budget.calls, len(replay_calls))
+        self.assertLessEqual(replay_budget.calls, 60)
         self.assertEqual(outcome.status, "approved")
         self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 1)
         self.assertEqual(state.checks[-1]["conclusion"], "success")
@@ -606,6 +617,176 @@ class CommandCapacityRecoveryTests(unittest.TestCase):
                 self.assertFalse(
                     any(method in {"PUT", "POST", "PATCH"} for method, _, _ in calls)
                 )
+                self.assertEqual(budget.calls, len(calls))
+                self.assertLessEqual(budget.calls, 60)
+
+    def test_late_prose_mutation_during_finalization_never_approves(self):
+        for replay in (False, True):
+            with (
+                self.subTest(replay=replay),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                state = CommandCapacityState(complete=True)
+                dispositions = state.record(directory)
+                if replay:
+                    first, _, _ = state.verify(dispositions)
+                    self.assertEqual(first.status, "approved")
+                attempt_start = len(state.calls)
+                reads_after_check = 0
+
+                def race(state, method, path, data):
+                    nonlocal reads_after_check
+                    attempt = state.calls[attempt_start:]
+                    if (
+                        method == "GET"
+                        and path.endswith("/pulls/1")
+                        and any(
+                            m in {"POST", "PATCH"} and "/check-runs" in p
+                            for m, p, _ in attempt
+                        )
+                    ):
+                        reads_after_check += 1
+                        if reads_after_check == 1:
+                            state.inline[0]["body"] = (
+                                "Explanation removed during later thread/finalization reads"
+                            )
+                            state.hook = None
+
+                state.hook = race
+                result, budget, calls = state.verify(dispositions)
+                self.assertEqual(reads_after_check, 1)
+                self.assertNotIn(result.status, {"approved", "already_approved"})
+                self.assertEqual(
+                    result.diagnostic, "command_body_capacity_unverifiable"
+                )
+                self.assertFalse(
+                    any(m == "POST" and p.endswith("/reviews") for m, p, _ in calls)
+                )
+                self.assertEqual(budget.calls, len(calls))
+                self.assertLessEqual(budget.calls, 60)
+
+    def test_compacted_replay_requires_current_full_prose_even_after_approval(self):
+        for already_approved in (False, True):
+            with (
+                self.subTest(already_approved=already_approved),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                state = CommandCapacityState(complete=already_approved)
+                dispositions = state.record(directory)
+                first, _, _ = state.verify(dispositions)
+                self.assertEqual(
+                    first.status,
+                    "approved" if already_approved else "approval_withheld",
+                )
+                state.inline[0]["body"] = (
+                    "Original full explanation removed before replay"
+                )
+                result, budget, calls = state.verify(dispositions)
+                self.assertNotIn(result.status, {"approved", "already_approved"})
+                self.assertFalse(
+                    any(m in {"PUT", "POST", "PATCH"} for m, _, _ in calls)
+                )
+                self.assertEqual(budget.calls, len(calls))
+                self.assertLessEqual(budget.calls, 60)
+
+    def test_expired_or_foreign_head_dispositions_never_resolve_the_current_inventory(
+        self,
+    ):
+        for fault in ("expired", "foreign-head"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                state = CommandCapacityState(complete=True)
+                dispositions = tuple(
+                    replace(item, expires_at="2000-01-01T00:00:00+00:00")
+                    if fault == "expired"
+                    else replace(item, head_sha="c" * 40)
+                    for item in state.record(directory)
+                )
+                result, budget, calls = state.verify(dispositions)
+                self.assertNotEqual(result.status, "approved")
+                current = approval_eligibility_from_body(state.reviews[0]["body"])
+                self.assertEqual(current.human_review.resolved, ())
+                self.assertEqual(len(current.human_review.pending), 21)
+                self.assertFalse(any(m == "PUT" for m, _, _ in calls))
+                self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+                self.assertTrue(state.checks)
+                self.assertEqual(state.checks[-1]["conclusion"], "action_required")
+                self.assertEqual(budget.calls, len(calls))
+                self.assertLessEqual(budget.calls, 60)
+
+    def test_fresh_capacity_authority_races_hold_before_the_next_mutation(self):
+        for fault in (
+            "inline-after-proof",
+            "head-after-preflight",
+            "base-after-preflight",
+            "foreign-root",
+            "foreign-readback",
+            "inline-after-put",
+            "head-after-put",
+            "base-after-put",
+            "producer-after-put",
+        ):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                state = CommandCapacityState(complete=True)
+                if fault == "foreign-root":
+                    state.reviews[0]["pull_request_url"] = (
+                        "https://api.github.test/repos/owner/repo/pulls/999"
+                    )
+                preflight_seen = False
+
+                def race(state, method, path, data):
+                    nonlocal preflight_seen
+                    if method != "GET":
+                        return
+                    committed = any(m == "PUT" for m, _, _ in state.calls)
+                    if path.endswith("/pulls/1") and not committed:
+                        preflight_seen = True
+                        if fault == "inline-after-proof":
+                            state.inline[0]["body"] += " Changed original explanation."
+                            state.hook = None
+                    if path.endswith("/reviews") and preflight_seen and not committed:
+                        if fault in {"head-after-preflight", "base-after-preflight"}:
+                            setattr(
+                                state,
+                                "head" if fault.startswith("head") else "base",
+                                "c" * 40,
+                            )
+                            state.hook = None
+                    if path.endswith("/reviews") and committed:
+                        if fault == "foreign-readback":
+                            state.reviews[0]["pull_request_url"] = (
+                                "https://api.github.test/repos/owner/repo/pulls/999"
+                            )
+                        elif fault == "inline-after-put":
+                            state.inline[0]["body"] += " Changed after PUT."
+                        elif fault in {"head-after-put", "base-after-put"}:
+                            setattr(
+                                state,
+                                "head" if fault.startswith("head") else "base",
+                                "c" * 40,
+                            )
+                        elif fault == "producer-after-put":
+                            state.reviews[0]["user"]["id"] = 100
+                        else:
+                            return
+                        state.hook = None
+
+                state.hook = race
+                result, budget, calls = state.verify(state.record(directory))
+                self.assertNotEqual(result.status, "approved")
+                before_put = fault in {
+                    "inline-after-proof",
+                    "head-after-preflight",
+                    "base-after-preflight",
+                    "foreign-root",
+                }
+                if before_put:
+                    self.assertFalse(
+                        any(m in {"PUT", "POST", "PATCH"} for m, _, _ in calls)
+                    )
+                else:
+                    self.assertEqual(sum(m == "PUT" for m, _, _ in calls), 1)
+                    self.assertFalse(any(m in {"POST", "PATCH"} for m, _, _ in calls))
+                self.assertEqual(state.checks, [])
                 self.assertEqual(budget.calls, len(calls))
                 self.assertLessEqual(budget.calls, 60)
 

@@ -15,8 +15,9 @@ generated Required-decisions section, reconstructed from the original human
 inventory and complete index. It independently verifies every original human
 explanation at its body or same-review owned inline placement. Ambiguous framing,
 missing or changed prose, ownership conflicts and insufficient capacity hold.
-Every byte outside the verified reference rows, every full index identity,
-historical marker and coverage fact remains intact. Quoted references in provider
+Capacity fitting preserves every byte outside the verified reference rows,
+every full index identity, historical marker and coverage fact. The explicitly
+authorized eligibility receipt and any new command provenance are updated separately. Quoted references in provider
 narrative are not generated rows and must remain unchanged.
 
 For new publication, both legacy and complete human-inventory callers preflight
@@ -45,7 +46,13 @@ Use existing independent ledger, numeric App owner, repository/PR/base/head,
 latest-root, complete index, original prose, finite-budget and final readback
 validation. A reference or a copied decision never authorizes a changed head.
 Lost-write acknowledgement can reconcile only exact owned readback. A changed
-root, head, base or original explanation invalidates the attempt.
+root, head, base, PR association or original explanation invalidates the attempt.
+Complete source proof is refreshed before the review update, after readback, and
+at the final approval boundary after intervening thread/finalization reads. A
+later verification of canonical compact rows uses the same proof path. Only
+canonical `honors` decisions participate; expired or foreign-head records cannot
+newly resolve the current inventory. These REST fences do not provide atomic
+compare-and-swap across GitHub resources or distributed writers.
 
 The live PR326 decisions stay bound to c8. This implementation uses a separate
 branch and does not replay them onto its new head. Compatible release/deployment
@@ -64,8 +71,8 @@ activation, release, merge and deployment are separate operations.
 | Whole future frame, legacy and complete | `test_publication_future_capacity.FutureDispositionFrameTests` | Before: published body grows to 66,031 bytes. After: all decisions and maximum command marker fit, with all original prose/IDs retained. |
 | Existing recorded 10+10+1 union | `test_command_capacity_recovery` | Serialized ledger preserves 21 decisions; finalizer updates the original owned review within the existing cap, with no inference. |
 | Partial and eligible controls | Same public recovery suite | Partial coverage keeps a non-passing check and cannot approve; an eligible control obeys all ordinary gates. |
-| Replay and ambiguous PUT | Same public recovery suite | Exact owned readback is idempotent; uncertain differing bytes withhold authority. |
-| Source, snapshot and ownership changes | Same public recovery suite | Changed head/base/newest root/prose and foreign records refuse without stale writes. |
+| Replay and ambiguous PUT | Same public recovery suite | Exact owned readback is idempotent; uncertain differing bytes or changed prose on compact replay withhold authority. |
+| Source, snapshot and ownership changes | Same public recovery suite | Changed head/base/newest root/prose/location/PR association and expired or foreign-head decisions refuse; late mutation withholds approval. |
 | Ambiguous or indivisible body | Same public recovery suite | Preserve original data and durable decisions, return actionable capacity hold. |
 | Persistent failure reporting | `test_github_application.GitHubApplicationTests.test_persistent_command_capacity_failure_does_not_request_identical_retry` | Failure remains visible and does not request an identical verification retry. |
 | Installed distributions | `dist_safe/test_command_capacity_contract.py` | Run public recovery and future-frame cases against installed engine/adapter from extracted sdist, without checkout imports. |
