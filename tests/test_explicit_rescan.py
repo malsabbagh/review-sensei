@@ -1116,6 +1116,44 @@ class RescanHostTests(unittest.TestCase):
 
 
 class RescanPublicationTests(unittest.TestCase):
+    @staticmethod
+    def retention_route(payload):
+        """Owned same-PR result parts, separate from rescan receipt authority."""
+        gates = partial.gates
+        retained = []
+        identity_read = False
+
+        def matches(request):
+            return (
+                "/users/" in request.full_url
+                or "/issues/146/comments" in request.full_url
+                or (identity_read and request.full_url.endswith("/pulls/146"))
+            )
+
+        def respond(request):
+            nonlocal identity_read
+            if "/users/" in request.full_url:
+                identity_read = True
+                return gates.json_response(
+                    {"id": 99, "login": gates.APP, "type": "Bot"}
+                )
+            if request.full_url.endswith("/pulls/146"):
+                identity_read = False
+                return gates.json_response(payload)
+            if request.method == "POST":
+                retained.append(
+                    {
+                        "id": 700,
+                        "body": json.loads(request.data)["body"],
+                        "user": {"id": 99, "login": gates.APP, "type": "Bot"},
+                        "issue_url": "https://api.github.test/repos/owner/repo/issues/146",
+                    }
+                )
+                return gates.json_response(retained[-1], 201)
+            return gates.json_response(retained)
+
+        return retained, (matches, respond)
+
     def test_application_publishes_new_partial_and_retries_without_duplication(self):
         from review_sensei_github import (
             GitHubApplication,
@@ -1137,6 +1175,7 @@ class RescanPublicationTests(unittest.TestCase):
         payload = gates.pr_payload(head_sha=tx.HEAD_SHA)
         payload["base"]["sha"] = tx.BASE_SHA
         payload["base"]["repo"]["id"] = tx.IDENTITY.repository_id
+        retained, retention = self.retention_route(payload)
         http, calls = gates.make_http(
             [
                 gates.json_response(payload),
@@ -1144,7 +1183,7 @@ class RescanPublicationTests(unittest.TestCase):
                 gates.json_response(payload),
                 gates.json_response({"id": 6}),
             ],
-            routes=((checks.matches, checks.respond),),
+            routes=((checks.matches, checks.respond), retention),
         )
         app = GitHubApplication(
             broker=tx._Broker(),
@@ -1172,6 +1211,7 @@ class RescanPublicationTests(unittest.TestCase):
         )
         self.assertEqual(app.publish_review(**kwargs).status, "published")
         self.assertEqual(app.publish_review(**kwargs).status, "already_published")
+        self.assertEqual(len(retained), 1)
         bodies = [
             json.loads(body)
             for method, url, body in calls
@@ -1213,12 +1253,13 @@ class RescanPublicationTests(unittest.TestCase):
                 payload = gates.pr_payload(head_sha=tx.HEAD_SHA)
                 payload["base"]["sha"] = tx.BASE_SHA
                 payload["base"]["repo"]["id"] = 99
+                retained, retention = self.retention_route(payload)
                 http, calls = gates.make_http(
                     [
                         gates.json_response(payload),
                         gates.json_response([AuthorityHTTP(old).review]),
                     ],
-                    routes=((checks.matches, checks.respond),),
+                    routes=((checks.matches, checks.respond), retention),
                 )
                 publisher = ReviewPublisher(http=http)
                 app = GitHubApplication(
@@ -1251,6 +1292,7 @@ class RescanPublicationTests(unittest.TestCase):
                         evidence_context=tx.EVIDENCE,
                     )
                 self.assertEqual(outcome.status, "already_published")
+                self.assertEqual(len(retained), 1)
                 self.assertNotIn("explicit_reanalysis", publish.call_args.kwargs)
                 self.assertFalse(
                     any(

@@ -290,14 +290,43 @@ class PartialPublicationTests(unittest.TestCase):
         payload = gates.pr_payload(head_sha=transactions.HEAD_SHA)
         payload["base"]["sha"] = transactions.BASE_SHA
         payload["base"]["repo"]["id"] = transactions.IDENTITY.repository_id
+        retained = []
+
+        def retention_matches(request):
+            return (
+                "/users/" in request.full_url
+                or "/issues/146/comments" in request.full_url
+            )
+
+        def retention_respond(request):
+            if "/users/" in request.full_url:
+                return gates.json_response(
+                    {"id": 99, "login": gates.APP, "type": "Bot"}
+                )
+            if request.method == "POST":
+                retained.append(
+                    {
+                        "id": 700,
+                        "body": json.loads(request.data)["body"],
+                        "user": {"id": 99, "login": gates.APP, "type": "Bot"},
+                        "issue_url": "https://api.github.test/repos/owner/repo/issues/146",
+                    }
+                )
+                return gates.json_response(retained[-1], 201)
+            return gates.json_response(retained)
+
         http, calls = gates.make_http(
             [
+                gates.json_response(payload),
                 gates.json_response(payload),
                 gates.json_response([]),
                 gates.json_response(payload),
                 gates.json_response({"id": 5}),
             ],
-            routes=((checks.matches, checks.respond),),
+            routes=(
+                (checks.matches, checks.respond),
+                (retention_matches, retention_respond),
+            ),
         )
         application = GitHubApplication(
             broker=transactions._Broker(),
@@ -324,6 +353,7 @@ class PartialPublicationTests(unittest.TestCase):
             evidence_context=transactions.EVIDENCE,
         )
         self.assertEqual(publication.status, "published")
+        self.assertEqual(len(retained), 1)
         published_reviews = [
             json.loads(body)
             for method, url, body in calls

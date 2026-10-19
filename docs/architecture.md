@@ -1,3 +1,20 @@
+## Bounded default publication and retained recovery
+
+Default writers emit at most 64 indexed findings. Updated readers accept 250;
+trusted `github.publication_inventory: complete` activates larger emission only
+after reader-first rollout. Complete publication preserves every identity and
+explanation within existing body, individual-item, path and future-assessment
+bounds; overflow refuses without truncation. Exact replay verifies retained prose.
+
+With `github.operation_entry: enabled`, transaction-bound publication retains
+validated result bytes in owned PR comments before review/check mutations.
+Retention never stores raw diffs, prompts or credentials and does not enable
+diagnostics artifacts. Recovery validates the durable transaction and trusted
+contexts for the current exact snapshot, preserving admission and acceptance.
+One publication-attempt budget covers retention, reads and publication. An
+unconfirmed write requires complete owned readback; missing or conflicting parts
+refuse further creation. Existing opt-outs remain effective. See ADR 0093.
+
 # Architecture
 
 ## Explicit human file review (local, opt-in)
@@ -130,8 +147,8 @@ GitHub publication. An identical retry whose publication is pending or failed
 reports `publication_recovery_required` without another provider call or ledger
 charge. It requires the original validated result and trusted admission contexts;
 the ledger's baseline and digests cannot reconstruct them. Reusable runners
-publish only a newly produced result and retain an explicitly enabled diagnostics
-bundle after publication failure. That bundle includes the reviewed diff and
+publish a newly produced or independently validated retained result and retain
+an explicitly enabled diagnostics bundle after publication failure. That bundle includes the reviewed diff and
 trusted configuration/admission contexts, retains the existing seven-day limit,
 and remains disabled for `artifacts: none`. Local analysis-only sessions retain
 their existing duplicate behavior. See the PR223 amendment to

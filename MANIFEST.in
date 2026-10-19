@@ -27,4 +27,10 @@ include tests/test_large_public_lifecycle.py
 include tests/test_human_assessment.py
 include tests/test_operation_entry.py
 include tests/test_review_work.py
+include tests/test_bounded_v1_publication.py
+include tests/test_publication_recovery.py
+include tests/test_review_transaction.py
+include tests/test_checkpoint_publication_acceptance.py
+include tests/test_publication_cli_recovery.py
+include tests/test_default_publication_cli_journey.py
 include tests/test_override_metadata_integration.py

@@ -49,6 +49,8 @@ class HostedPolicy:
     mentions: bool
     learning: str
     artifacts: str
+    operation_entry: str
+    publication_inventory: str
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -58,6 +60,8 @@ class HostedPolicy:
             "mentions": self.mentions,
             "learning": self.learning,
             "artifacts": self.artifacts,
+            "operation_entry": self.operation_entry,
+            "publication_inventory": self.publication_inventory,
         }
 
 
@@ -150,6 +154,8 @@ def _hosted_policy(configuration: ProductConfiguration) -> HostedPolicy:
         mentions=github.mentions,
         learning=github.learning,
         artifacts=github.artifacts,
+        operation_entry=github.operation_entry,
+        publication_inventory=github.publication_inventory,
     )
 
 
@@ -203,6 +209,8 @@ def hosted_plan_outputs(plan: HostedPlan) -> tuple[tuple[str, str], ...]:
         ("mentions", flag(plan.policy.mentions)),
         ("learning", plan.policy.learning),
         ("artifacts", plan.policy.artifacts),
+        ("operation_entry", plan.policy.operation_entry),
+        ("publication_inventory", plan.policy.publication_inventory),
         ("configuration_source", plan.source or ""),
     )
     return outputs
