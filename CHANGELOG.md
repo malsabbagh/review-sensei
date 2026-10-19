@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Refuse unsafe OpenRouter evaluation endpoint metadata before live calls and
+  report construction. Report missing composite-control identities as bounded
+  input errors while preserving historical reports without controls.
 - Extend reusable installed-provider acceptance through actual GitHub CLI issue
   and inline delivery, durable replay, preflight/refusal, credential isolation,
   learning controls and every hosted-policy projection combination.

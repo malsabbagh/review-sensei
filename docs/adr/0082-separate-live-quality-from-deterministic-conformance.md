@@ -47,6 +47,9 @@ rates and verdicts. Contradictory controls fail closed. Missing historical
 controls remain structurally valid v1 reports but cannot newly mint or validate
 supported promotion. Three independent live invocations remain required.
 Passing fixture checks, including a later rerun, cannot repair bad live evidence.
+Composite controls require matching live engine and prompt identities. A
+missing optional historical identity raises a bounded `ReviewInputError` when
+a control is present; historical reports without a control still load.
 
 This is a consistency contract for operator-retained reports, not a signature
 or independent attestation that a report producer was truthful. OpenRouter's

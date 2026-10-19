@@ -35,6 +35,7 @@ from .models import (
     ReviewResult,
 )
 from .providers.base import ReviewProvider
+from .providers.openrouter import is_allowlisted_openrouter_endpoint
 from .providers.profiles import ProviderProfile, get_provider_profile
 from .schemas import validate_public_document
 from .service import ReviewService
@@ -1483,6 +1484,20 @@ def compare_learning_effect(
     }
 
 
+def _require_safe_openrouter_report_endpoint(provider: str, base_url: object) -> None:
+    """Keep optional requested endpoint metadata within the adapter's public host."""
+    if provider != "openrouter" or base_url is None:
+        return
+    try:
+        allowed = isinstance(base_url, str) and is_allowlisted_openrouter_endpoint(
+            base_url
+        )
+    except ValueError:
+        allowed = False
+    if not allowed:
+        raise ReviewInputError("OpenRouter evaluation endpoint is not allowlisted")
+
+
 def evaluate_live(
     corpus: Corpus,
     provider: ReviewProvider,
@@ -1491,6 +1506,8 @@ def evaluate_live(
     model: str | None,
     endpoint_scope: str,
 ) -> dict[str, Any]:
+    openrouter_base_url = getattr(provider, "base_url", None)
+    _require_safe_openrouter_report_endpoint(provider.name, openrouter_base_url)
     control = fixture_control(evaluate_fixture(corpus), corpus.document)
     measured = MeasuredProvider(provider)
     cases: list[dict[str, Any]] = []
@@ -1530,7 +1547,7 @@ def evaluate_live(
         model=model,
         endpoint_scope=endpoint_scope,
         openrouter_policy=openrouter_policy,
-        openrouter_base_url=getattr(provider, "base_url", None),
+        openrouter_base_url=openrouter_base_url,
         evaluation_control=control,
     )
 
@@ -1549,6 +1566,7 @@ def build_report(
     openrouter_base_url: str | None = None,
     evaluation_control: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    _require_safe_openrouter_report_endpoint(provider, openrouter_base_url)
     deterministic, quality_metrics = summarize_cases(cases)
     if evaluation_control is not None:
         deterministic = dict(evaluation_control["fixture"]["deterministic"])

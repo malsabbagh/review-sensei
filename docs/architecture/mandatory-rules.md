@@ -680,3 +680,6 @@ inventory and identity plus unchanged thresholds; promotion readers verify the
 conjunction and complete attempted live inventory. Fixture work never enters
 live usage, and expected recall includes missed findings. Historical unbound
 reports parse but cannot newly authorize support. See proposed ADR 0082.
+Composite controls reject missing live engine/prompt identities with a bounded
+input diagnostic. OpenRouter endpoint metadata passes the adapter's strict
+allowlist before live evaluation dispatch or public report construction.
