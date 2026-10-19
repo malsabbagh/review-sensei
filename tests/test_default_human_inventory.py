@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
+from review_sensei_github.errors import GitHubPublicationError
+
 from review_sensei.context import finding_lifecycle_for_comment
+from review_sensei.errors import ReviewInputError
 from review_sensei.human_assessment import (
     PendingHumanReview,
     finding_instance_fingerprint,
@@ -20,11 +24,53 @@ from tests.default_human_inventory_contract import (
     DefaultHumanState,
     application,
     human_checkpoint,
+    human_inventory_parts,
+    next_mention,
     publish_human,
+    reply_human,
 )
+from tests.test_review_work import AssessingProvider
 
 
 class DefaultHumanInventoryTests(unittest.TestCase):
+    def load_current(self, state, path):
+        reader = application(state, LocalSessionLedger(path)).reviewer.finalizer
+        eligibility = reader.load_eligibility(
+            token="synthetic-read",
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            head_sha=HEAD,
+            app_slug=APP,
+            require_valid=True,
+        )
+        self.assertIsNotNone(eligibility)
+        return eligibility
+
+    def assert_visible_inventory(self, state, result, eligibility, path):
+        reader = application(state, LocalSessionLedger(path)).reviewer.finalizer
+        index = reader.finding_index_from_reviews(
+            state.reviews,
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            head_sha=HEAD,
+            app_slug=APP,
+            eligibility=eligibility,
+        )
+        self.assertIsNotNone(index)
+        self.assertEqual(
+            {item.instance: item.lifecycle for item in index.entries},
+            {
+                finding_instance_fingerprint(comment): finding_lifecycle_for_comment(
+                    comment
+                ).fingerprint
+                for comment in result.comments
+            },
+        )
+        visible = "\n".join(item["body"] for item in [*state.reviews, *state.inline])
+        for comment in result.comments:
+            self.assertIn(comment.body, visible)
+        self.assertNotIn("omitted for size", visible)
+
     def assert_complete_pending_publication(
         self, *, count, detail, complete_metadata=True
     ):
@@ -107,6 +153,176 @@ class DefaultHumanInventoryTests(unittest.TestCase):
         self,
     ):
         self.assert_complete_pending_publication(count=77, detail=3)
+
+    def assert_lifecycle(self, *, count, detail, gate=None):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger"
+            result, key = human_checkpoint(
+                LocalSessionLedger(path, enable_partition_writes=True),
+                count=count,
+                detail=detail,
+                gate=gate,
+            )
+            state = DefaultHumanState(result.comments)
+            outcome = publish_human(
+                state, LocalSessionLedger(path), result, key, gate=gate
+            )
+            self.assertEqual(outcome.status, "published")
+            original = self.load_current(state, path)
+            self.assertEqual(len(original.human_review.pending), count)
+            self.assert_visible_inventory(state, result, original, path)
+            self.assertNotIn("APPROVE", state.events())
+            remaining = count
+            revision = 0
+            while remaining:
+                revision += 1
+                self.assertLessEqual(revision, count)
+                next_mention(state, revision)
+                provider = AssessingProvider()
+                outcome = reply_human(state, LocalSessionLedger(path), provider)
+                self.assertEqual(outcome.status, "replied")
+                self.assertGreater(len(provider.calls), 0)
+                self.assertLessEqual(len(provider.calls), 8)
+                current = self.load_current(state, path)
+                self.assertEqual(current.result_digest, original.result_digest)
+                self.assertEqual(
+                    current.human_review.findings, original.human_review.findings
+                )
+                self.assertEqual(
+                    replace(current.facts, has_human_adjudication_findings=True),
+                    original.facts,
+                )
+                pending = len(current.human_review.pending)
+                self.assertLess(pending, remaining)
+                self.assertEqual(len(current.human_review.resolved), count - pending)
+                if revision == 1:
+                    self.assertGreater(
+                        pending,
+                        0,
+                        "first bounded source must leave a durable partial result",
+                    )
+                if pending or gate:
+                    self.assertEqual(outcome.approval_status, "approval_withheld")
+                    self.assertNotIn("APPROVE", state.events())
+                else:
+                    self.assertEqual(outcome.approval_status, "approved")
+                # Reconstruct all application/store objects for exact-source
+                # replay. It cannot infer again or append another authority.
+                reviews_before = len(state.reviews)
+                replay_provider = AssessingProvider()
+                replay = reply_human(state, LocalSessionLedger(path), replay_provider)
+                self.assertEqual(replay.status, "already_replied")
+                self.assertEqual(replay_provider.calls, [])
+                self.assertEqual(len(state.reviews), reviews_before)
+                replayed = self.load_current(state, path)
+                self.assertEqual(
+                    replayed.human_review.resolved, current.human_review.resolved
+                )
+                remaining = pending
+            self.assert_visible_inventory(state, result, current, path)
+            self.assertEqual(len(current.human_review.resolved), count)
+            self.assertFalse(current.facts.has_human_adjudication_findings)
+            self.assertEqual(state.events().count("APPROVE"), 0 if gate else 1)
+            if gate == "partial":
+                self.assertEqual(current.facts.coverage_blocker, "partial")
+                self.assertEqual(current.facts.review_status, "partial")
+            elif gate == "blocker":
+                self.assertTrue(current.facts.has_blocking_findings)
+            elif gate == "qualification":
+                self.assertEqual(current.facts.qualification, "unverified")
+            else:
+                self.assertEqual(current.facts.qualification, "not-required")
+                self.assertEqual(state.check_runs[-1]["conclusion"], "success")
+
+    def test_control_distinct_authorized_mentions_complete_real_default_40_finding_journey(
+        self,
+    ):
+        self.assert_lifecycle(count=40, detail=1)
+
+    def test_control_all_resolved_default_authority_preserves_other_real_gates(self):
+        for gate in ("partial", "blocker", "qualification"):
+            with self.subTest(gate=gate):
+                self.assert_lifecycle(count=40, detail=1, gate=gate)
+
+    def test_77_100_250_original_rich_inventories_complete_across_fresh_default_applications(
+        self,
+    ):
+        for count, detail in ((77, 3), (100, 2), (250, 1)):
+            with self.subTest(count=count, detail=detail):
+                self.assert_lifecycle(count=count, detail=detail)
+
+    def test_resolving_every_rich_human_finding_preserves_other_real_approval_blockers(
+        self,
+    ):
+        for gate in ("partial", "blocker", "qualification"):
+            with self.subTest(gate=gate):
+                self.assert_lifecycle(count=77, detail=3, gate=gate)
+
+    def test_changed_missing_or_foreign_authority_and_prose_refuse_before_inference_or_mutation(
+        self,
+    ):
+        for fault in (
+            "missing-part",
+            "changed-part",
+            "wrong-part-author",
+            "missing-prose",
+            "changed-prose",
+            "wrong-root-author",
+            "stale-head",
+        ):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "ledger"
+                result, key = human_checkpoint(
+                    LocalSessionLedger(path, enable_partition_writes=True)
+                )
+                state = DefaultHumanState(result.comments)
+                publish_human(state, LocalSessionLedger(path), result, key)
+                if fault.endswith("part") or fault == "wrong-part-author":
+                    parts = human_inventory_parts(state)
+                    if fault == "missing-part":
+                        state.parts.remove(parts[0])
+                    elif fault == "changed-part":
+                        original_body = parts[0]["body"]
+                        parts[0]["body"] = original_body.replace(
+                            '"data":"', '"data":"eA', 1
+                        )
+                        self.assertNotEqual(parts[0]["body"], original_body)
+                    else:
+                        parts[0]["user"] = {**state.app_user, "id": 999}
+                elif fault == "missing-prose":
+                    state.inline.pop(0)
+                elif fault == "changed-prose":
+                    original_body = state.inline[0]["body"]
+                    state.inline[0]["body"] = original_body.replace(
+                        result.comments[0].body, "Changed visible explanation.", 1
+                    )
+                    self.assertNotEqual(state.inline[0]["body"], original_body)
+                elif fault == "wrong-root-author":
+                    state.reviews[-1]["user"] = {**state.app_user, "id": 999}
+                else:
+                    state.head = "c" * 40
+                next_mention(state, 1)
+                before = len(state.calls)
+                provider = AssessingProvider()
+                try:
+                    reply_human(state, LocalSessionLedger(path), provider)
+                except (GitHubPublicationError, ReviewInputError):
+                    pass
+                self.assertEqual(provider.calls, [])
+                self.assertEqual(
+                    [
+                        (method, target)
+                        for method, target, body in state.calls[before:]
+                        if method not in {"GET", "HEAD"}
+                        and not (
+                            target == "/graphql"
+                            and isinstance(body, dict)
+                            and "mutation" not in body.get("query", "")
+                        )
+                    ],
+                    [],
+                )
+                self.assertNotIn("APPROVE", state.events())
 
 
 if __name__ == "__main__":
