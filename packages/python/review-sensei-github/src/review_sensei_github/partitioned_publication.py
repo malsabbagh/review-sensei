@@ -11,7 +11,7 @@ import base64
 import hashlib
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import Mapping, Protocol
+from typing import Mapping, Protocol, TypedDict, cast
 
 from review_sensei.bounded_evidence import (
     EvidenceReadBudget,
@@ -39,6 +39,13 @@ from .eligibility_parts import (
 from .errors import GitHubPublicationError
 from .prose_publication import CommentReviewProseStore, VisibleProseReceipt
 from .publication_parts import prepare_finding_prose_parts
+
+
+class _CheckArguments(TypedDict):
+    check_token: str | None
+    repository: str
+    head_sha: str
+    app_slug: str
 
 
 @dataclass(frozen=True)
@@ -201,6 +208,12 @@ def publish_partitioned(
         else "advisory"
     )
     binding, budget = dict(plan.binding), plan.budget
+    # Plan construction validates the closed binding schema before freezing it.
+    repository = cast(str, binding["repository"])
+    repository_id = cast(int, binding["repository_id"])
+    pull_request = cast(int, binding["pull_request"])
+    base_sha = cast(str, binding["base_sha"])
+    head_sha = cast(str, binding["head_sha"])
     if binding["policy_digest"] != convergence_policy.digest() or binding[
         "configuration_digest"
     ] != ReviewTransaction.compute_configuration_digest(configuration_context):
@@ -208,7 +221,7 @@ def publish_partitioned(
     prepared = publisher.prepare(
         result=result,
         diff=diff,
-        head_sha=binding["head_sha"],
+        head_sha=head_sha,
         convergence_policy=convergence_policy,
     )
     result = prepared.result
@@ -230,10 +243,10 @@ def publish_partitioned(
             result=result,
             configuration_context=configuration_context,
             publication_mode=convergence_policy.mode,
-            repository=binding["repository"],
-            pull_request=binding["pull_request"],
-            base_sha=binding["base_sha"],
-            head_sha=binding["head_sha"],
+            repository=repository,
+            pull_request=pull_request,
+            base_sha=base_sha,
+            head_sha=head_sha,
         )
         if type(authority) is TrustedOpenRouterQualification
         else None
@@ -243,8 +256,8 @@ def publish_partitioned(
     eligibility = publisher._bind_qualification(
         approval_eligibility_from_result(
             result,
-            head_sha=binding["head_sha"],
-            base_sha=binding["base_sha"],
+            head_sha=head_sha,
+            base_sha=base_sha,
             enabled=auto_approve
             and convergence_policy.automatic_github_review_events
             and effective_policy == "auto-approve",
@@ -265,7 +278,7 @@ def publish_partitioned(
         raise ReviewInputError(
             "partition writer blocking-finding capability is unsupported"
         )
-    prose = prepare_finding_prose_parts(result.comments, head_sha=binding["head_sha"])
+    prose = prepare_finding_prose_parts(result.comments, head_sha=head_sha)
     producer_id = int(str(binding["producer"]).split(":", 1)[1])
     inventory_document = inventory_result_document(
         inventory, result_digest=plan.result_digest
@@ -274,7 +287,7 @@ def publish_partitioned(
         VisibleProseReceipt(
             item.index,
             2**63 - 1 - item.index,
-            binding["head_sha"],
+            head_sha,
             producer_id,
             item.sha256,
             item.byte_length,
@@ -291,7 +304,7 @@ def publish_partitioned(
     )
     projected = dict(
         schema_version="4",
-        head_sha=binding["head_sha"],
+        head_sha=head_sha,
         result_digest=plan.result_digest,
         facts=eligibility.facts.to_dict(),
         immutable_generation=binding["generation"],
@@ -341,8 +354,8 @@ def publish_partitioned(
     store = CommentReviewProseStore(
         http=publisher.http,
         token=token,
-        repository=binding["repository"],
-        pull_request=binding["pull_request"],
+        repository=repository,
+        pull_request=pull_request,
         producer_id=producer_id,
         app_slug=app_slug,
         budget=budget,
@@ -356,12 +369,12 @@ def publish_partitioned(
     def live_pr():
         preflight = checked_publisher._preflight_pr(
             token=token,
-            repository=binding["repository"],
-            repository_id=binding["repository_id"],
-            pull_request=binding["pull_request"],
-            head_sha=binding["head_sha"],
+            repository=repository,
+            repository_id=repository_id,
+            pull_request=pull_request,
+            head_sha=head_sha,
             base_branch=base_branch,
-            base_sha=binding["base_sha"],
+            base_sha=base_sha,
             app_slug=app_slug,
         )
         budget.check()
@@ -370,10 +383,10 @@ def publish_partitioned(
 
     host.fence()
     live_pr()
-    check_arguments = dict(
+    check_arguments: _CheckArguments = dict(
         check_token=check_token,
-        repository=binding["repository"],
-        head_sha=binding["head_sha"],
+        repository=repository,
+        head_sha=head_sha,
         app_slug=app_slug,
     )
     check_diagnostic = checked_publisher._check_state_or_diagnostic(
@@ -398,7 +411,7 @@ def publish_partitioned(
         binding=binding,
         item_count=len(inventory.findings),
     )
-    receipts = store.stage(prose, head_sha=binding["head_sha"])
+    receipts = store.stage(prose, head_sha=head_sha)
     visible_document = visible_result_document(
         receipts,
         result_digest=plan.result_digest,
@@ -433,7 +446,7 @@ def publish_partitioned(
     # Static full-growth sizing requires no fabricated numeric root identity.
     document = dict(
         schema_version="4",
-        head_sha=binding["head_sha"],
+        head_sha=head_sha,
         result_digest=plan.result_digest,
         facts=eligibility.facts.to_dict(),
         immutable_generation=binding["generation"],
@@ -488,7 +501,7 @@ def publish_partitioned(
     # The publisher independently GETs the actual owned root; POST response or
     # caller metadata alone cannot activate the reader context.
     path = publisher.http.repository_path(
-        binding["repository"],
+        repository,
         f"/pulls/{binding['pull_request']}/reviews/{context.owned_root_id}",
     )
     status, root = publisher.http.request(
@@ -502,7 +515,7 @@ def publish_partitioned(
         or type(root.get("id")) is not int
         or root.get("id") != context.owned_root_id
         or root.get("body") != body
-        or root.get("commit_id") != binding["head_sha"]
+        or root.get("commit_id") != head_sha
         or root.get("state") != "COMMENTED"
         or root.get("pull_request_url") != store.pull_request_url
         or not isinstance(user, dict)
@@ -517,9 +530,9 @@ def publish_partitioned(
     )
     latest = finalizer.load_eligibility(
         token=token,
-        repository=binding["repository"],
-        pull_request=binding["pull_request"],
-        head_sha=binding["head_sha"],
+        repository=repository,
+        pull_request=pull_request,
+        head_sha=head_sha,
         app_slug=app_slug,
         require_valid=True,
         partition_reader=host.read,
