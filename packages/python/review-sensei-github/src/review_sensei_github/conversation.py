@@ -9,10 +9,11 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 from urllib.parse import quote
 
 from review_sensei.errors import LearningLoadError, ReviewInputError
+from review_sensei.human_assessment import PendingHumanReview
 from review_sensei.learnings import (
     MAX_LEARNING_FILE_BYTES,
     MAX_LEARNING_FILES,
@@ -44,6 +45,10 @@ from .publication import (
     finding_publication_scope,
 )
 from .reply_budget import bounded_reply_publication
+
+if TYPE_CHECKING:
+    from .default_human_inventory import HumanInventoryReference
+
 
 MAX_THREAD_MESSAGES = 20
 MAX_REPLY_BYTES = 16 * 1024
@@ -266,9 +271,22 @@ class ProcessingReaction:
 class ConversationPublisher:
     """Publish an App reply to an authorized explicit @reviewsensei or @sensei mention."""
 
-    def __init__(self, *, http: GitHubHttp) -> None:
+    def __init__(
+        self,
+        *,
+        http: GitHubHttp,
+        human_inventory_reader: Callable[[HumanInventoryReference], PendingHumanReview]
+        | None = None,
+    ) -> None:
         self.http = http
-        self.finalizer = ReviewApprovalFinalizer(http=http)
+        self.human_inventory_reader = human_inventory_reader
+        self.finalizer = (
+            ReviewApprovalFinalizer(
+                http=http, human_inventory_reader=human_inventory_reader
+            )
+            if human_inventory_reader is not None
+            else ReviewApprovalFinalizer(http=http)
+        )
 
     @staticmethod
     def _reaction_path(*, source_kind: str, source_comment_id: int) -> str:
