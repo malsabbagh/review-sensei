@@ -406,8 +406,8 @@ class _CommonFlows:
 
         with tempfile.TemporaryDirectory() as tmp:
             _, config, environment = self._github_cli_fixture(tmp)
-            # This is the complete policy projection cross-product, not a claim
-            # that every corresponding external event has been delivered.
+            # Cross these six controls while omitted policy fields retain their
+            # published defaults. This does not claim every external event ran.
             combinations = itertools.product(
                 (False, True),
                 (False, True),
@@ -453,7 +453,14 @@ class _CommonFlows:
                         )
                     self.assertEqual(code, 0, stderr.getvalue())
                     plan = json.loads(stdout.getvalue())
-                    self.assertEqual(plan["policy"], policy)
+                    self.assertEqual(
+                        plan["policy"],
+                        {
+                            **policy,
+                            "operation_entry": "enabled",
+                            "publication_inventory": "legacy",
+                        },
+                    )
                     self.assertEqual(plan["backend"], self.case.cli_backend)
                     self.assertEqual(plan["model"], self.case.settings.model)
                     self.assertEqual(plan["base_url"], self.case.settings.base_url)

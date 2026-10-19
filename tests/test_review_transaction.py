@@ -5,7 +5,7 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -61,11 +61,19 @@ from review_sensei.session import (
 )
 
 try:
+    from session_fixture_clock import SESSION_FIXTURE_NOW, SessionFixtureClockMixin
+except ModuleNotFoundError:
+    from tests.session_fixture_clock import (
+        SESSION_FIXTURE_NOW,
+        SessionFixtureClockMixin,
+    )
+
+try:
     from fake_github_http import json_response, make_http
 except ImportError:
     from tests.fake_github_http import json_response, make_http
 
-NOW = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
+NOW = SESSION_FIXTURE_NOW
 IDENTITY = SessionIdentity("owner/repo", 146, repository_id=99)
 BASE_SHA = "b" * 40
 HEAD_SHA = "a" * 40
@@ -171,7 +179,7 @@ def _checkpoint_with_baseline(ledger: InMemorySessionLedger) -> ReviewResult:
     )
 
 
-class ReviewTransactionTests(unittest.TestCase):
+class ReviewTransactionTests(SessionFixtureClockMixin, unittest.TestCase):
     def test_checkpoint_persists_completed_baseline_for_a_fresh_ledger(self):
         reservation = session_reservation_id(
             repository=IDENTITY.repository,
@@ -2456,7 +2464,7 @@ class _Noop:
     pass
 
 
-class PublicationTransactionTests(unittest.TestCase):
+class PublicationTransactionTests(SessionFixtureClockMixin, unittest.TestCase):
     def test_application_suppresses_repeated_or_oscillating_blockers_before_publish(
         self,
     ):

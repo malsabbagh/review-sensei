@@ -34,6 +34,11 @@ from review_sensei.session import (
 )
 
 try:
+    from session_fixture_clock import SessionFixtureClockMixin
+except ModuleNotFoundError:
+    from tests.session_fixture_clock import SessionFixtureClockMixin
+
+try:
     import test_gate_and_default_approval as gates
     import test_review_transaction as transactions
 except ModuleNotFoundError:
@@ -93,7 +98,7 @@ def load(ledger, result, *, head=transactions.HEAD_SHA):
     )
 
 
-class PartialCheckpointTests(unittest.TestCase):
+class PartialCheckpointTests(SessionFixtureClockMixin, unittest.TestCase):
     def test_covered_partial_variants_checkpoint_and_retry_once(self):
         for outcome, reason in (
             ("excluded-by-policy", "generated"),
@@ -230,7 +235,7 @@ class PartialCheckpointTests(unittest.TestCase):
             )
 
 
-class PartialPublicationTests(unittest.TestCase):
+class PartialPublicationTests(SessionFixtureClockMixin, unittest.TestCase):
     def test_application_recovery_publishes_partial_without_complete_progress(self):
         ledger = InMemorySessionLedger()
         result = checkpoint_review_analysis(
@@ -290,14 +295,49 @@ class PartialPublicationTests(unittest.TestCase):
         payload = gates.pr_payload(head_sha=transactions.HEAD_SHA)
         payload["base"]["sha"] = transactions.BASE_SHA
         payload["base"]["repo"]["id"] = transactions.IDENTITY.repository_id
+        payload["base"]["repo"]["full_name"] = transactions.IDENTITY.repository
+        retained = []
+
+        def retention_matches(request):
+            return (
+                "/users/" in request.full_url
+                or "/issues/146/comments" in request.full_url
+            )
+
+        def retention_respond(request):
+            if "/users/" in request.full_url:
+                return gates.json_response(
+                    {"id": 99, "login": gates.APP, "type": "Bot"}
+                )
+            if request.method == "POST":
+                retained.append(
+                    {
+                        "id": 700 + len(retained),
+                        "body": json.loads(request.data)["body"],
+                        "user": {"id": 99, "login": gates.APP, "type": "Bot"},
+                        "issue_url": "https://api.github.test/repos/owner/repo/issues/146",
+                    }
+                )
+                return gates.json_response(retained[-1], 201)
+            return gates.json_response(retained)
+
+        def publication_matches(request):
+            return "/pulls/146" in request.full_url
+
+        def publication_respond(request):
+            if request.full_url.endswith("/pulls/146"):
+                return gates.json_response(payload)
+            if request.method == "GET":
+                return gates.json_response([])
+            return gates.json_response({"id": 5})
+
         http, calls = gates.make_http(
-            [
-                gates.json_response(payload),
-                gates.json_response([]),
-                gates.json_response(payload),
-                gates.json_response({"id": 5}),
-            ],
-            routes=((checks.matches, checks.respond),),
+            [],
+            routes=(
+                (checks.matches, checks.respond),
+                (retention_matches, retention_respond),
+                (publication_matches, publication_respond),
+            ),
         )
         application = GitHubApplication(
             broker=transactions._Broker(),
@@ -324,6 +364,8 @@ class PartialPublicationTests(unittest.TestCase):
             evidence_context=transactions.EVIDENCE,
         )
         self.assertEqual(publication.status, "published")
+        # Canonical result, independent admission intent, complete metadata.
+        self.assertEqual(len(retained), 3)
         published_reviews = [
             json.loads(body)
             for method, url, body in calls

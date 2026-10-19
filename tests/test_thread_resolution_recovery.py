@@ -6,7 +6,7 @@ from dataclasses import replace
 
 from review_sensei_github.approval import approval_eligibility_from_result
 from review_sensei_github.conversation import ConversationPublisher
-from review_sensei_github.errors import GitHubHTTPTransientError
+from review_sensei_github.errors import GitHubHTTPTransientError, GitHubPublicationError
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.publication import (
     IndexedFinding,
@@ -115,6 +115,7 @@ class ResolutionHost(GitHubHttp):
         self.comments = [self.root, self.source]
         self.pr = pr_payload(head_sha=HEAD)
         self.resolved = False
+        self.graphql_author = None
         self.fail_mutation = self.fail_approval = self.fail_record = False
         self.lookup_failure = None
         self.before_resolution = None
@@ -170,7 +171,8 @@ class ResolutionHost(GitHubHttp):
                         {
                             "databaseId": 10,
                             "body": self.root["body"],
-                            "author": {"login": self.root["user"]["login"]},
+                            "author": self.graphql_author
+                            or {"login": self.root["user"]["login"]},
                         }
                     ]
                 },
@@ -295,6 +297,134 @@ class ThreadResolutionRecoveryTests(unittest.TestCase):
         outcome = host.verify()
         self.assertTrue(host.resolved)
         self.assertEqual(outcome.status, "approved")
+
+    def test_typed_native_bot_alias_resolves_but_user_and_sibling_aliases_never_do(
+        self,
+    ):
+        for actor, accepted in (
+            ({"login": "reviewsensei", "__typename": "Bot"}, True),
+            ({"login": "reviewsensei", "__typename": "User"}, False),
+            ({"login": "other-app", "__typename": "Bot"}, False),
+            ({"login": APP, "__typename": "User"}, False),
+        ):
+            with self.subTest(actor=actor):
+                host = ResolutionHost()
+                host.graphql_author = actor
+                disposition = FindingDisposition(
+                    host.instance,
+                    "accept-risk",
+                    "acceptable risk",
+                    "alice",
+                    head_sha=HEAD,
+                )
+                host.verify((disposition,))
+                self.assertEqual(host.resolved, accepted)
+                self.assertEqual(
+                    any(
+                        body and body.get("operationName") == "ResolveReviewThread"
+                        for _, _, body in host.calls
+                    ),
+                    accepted,
+                )
+                if accepted:
+                    queries = [
+                        body["query"]
+                        for _, _, body in host.calls
+                        if body
+                        and body.get("operationName")
+                        in {"FindingResolutionThreads", "ReviewThreads"}
+                    ]
+                    self.assertTrue(queries)
+                    self.assertTrue(all("__typename" in query for query in queries))
+
+    def test_native_bot_duplicate_suppression_uses_the_same_typed_identity(self):
+        from tests import test_github_publication as fixtures
+        from tests.fake_github_http import json_response
+
+        current = fixtures.result()
+        existing = (
+            finding_marker(
+                repository_id=1,
+                pull_request=2,
+                head_sha=HEAD,
+                base_sha=BASE,
+                result=current,
+                blocking=True,
+                fingerprint=finding_lifecycle_for_comment(
+                    current.comments[0]
+                ).fingerprint,
+            )
+            + "\n\n"
+            + finding_instance_marker(current.comments[0])
+        )
+        outcome, calls = fixtures.ReviewPublisherTests().publish(
+            [
+                json_response(pr_payload(head_sha=HEAD)),
+                json_response([]),
+                json_response(pr_payload(head_sha=HEAD)),
+                fixtures.graphql_review_threads_response(
+                    nodes=(
+                        {
+                            "isResolved": False,
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "body": existing,
+                                        "author": {
+                                            "login": "reviewsensei",
+                                            "__typename": "Bot",
+                                        },
+                                    }
+                                ]
+                            },
+                        },
+                    )
+                ),
+                json_response({"id": 5}, 200),
+            ]
+        )
+        self.assertEqual(outcome.status, "published")
+        self.assertEqual(fixtures.review_payloads(calls)[0]["comments"], [])
+
+    def test_native_bot_unresolved_blocker_withholds_legacy_unindexed_approval(self):
+        host = ResolutionHost()
+        host.graphql_author = {"login": "reviewsensei", "__typename": "Bot"}
+        host.reviews[0]["body"] = approval_eligibility_marker(host.eligibility)
+        outcome = ReviewApprovalFinalizer(http=host).finalize(
+            token="token",
+            repository="owner/repo",
+            pull_request=2,
+            head_sha=HEAD,
+            app_slug=APP,
+            eligibility=host.eligibility,
+        )
+        self.assertEqual(outcome.status, "approval_withheld")
+        self.assertEqual(outcome.diagnostic, "required_fixes_open")
+        self.assertFalse(any(r["state"] == "APPROVED" for r in host.reviews))
+
+    def test_ambiguous_expected_native_actor_refuses_instead_of_skipping_blocker(self):
+        for discriminator in (
+            {},
+            {"__typename": None},
+            {"__typename": ""},
+            {"__typename": False},
+            {"__typename": []},
+        ):
+            with self.subTest(discriminator=discriminator):
+                host = ResolutionHost()
+                host.graphql_author = {"login": "reviewsensei", **discriminator}
+                host.reviews[0]["body"] = approval_eligibility_marker(host.eligibility)
+                with self.assertRaises(GitHubPublicationError):
+                    ReviewApprovalFinalizer(http=host).finalize(
+                        token="token",
+                        repository="owner/repo",
+                        pull_request=2,
+                        head_sha=HEAD,
+                        app_slug=APP,
+                        eligibility=host.eligibility,
+                    )
+                self.assertFalse(any(r["state"] == "APPROVED" for r in host.reviews))
+                self.assertFalse(host.resolved)
 
     def test_record_failure_never_mutates(self):
         host = ResolutionHost()

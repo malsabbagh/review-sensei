@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import json
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -229,7 +230,12 @@ class HistoryAssociationTests(unittest.TestCase):
             requested = [call.args[1] for call in fetch.call_args_list]
             self.assertNotIn(first, requested)
             self.assertEqual(len(requested), 4)  # current x3 and selected child x1
-            self.assertEqual(ledger.evidence_budget.calls, 15)
+            # Two authenticated immutable-part reuses each need one fresh
+            # containment/metadata observation on POSIX, preserving the same
+            # bytes and sparse selection. Windows still rehashes full parts.
+            self.assertEqual(
+                ledger.evidence_budget.calls, 15 if sys.platform == "win32" else 11
+            )
             self.assertEqual(proof.host_state().item_count, 8)
             self.assertEqual(
                 proof.inventory_sha256,

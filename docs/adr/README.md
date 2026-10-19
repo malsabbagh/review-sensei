@@ -11,6 +11,8 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0094](0094-default-human-inventory-reference.md) | Proposed | Complete default human inventory references | #238, #246, #267; PR #316 | Transaction-bound admitted evidence, ordinary approval gates and bounded recovery |
+| [0093](0093-default-publication-retention.md) | Proposed | Bounded default publication and transaction-bound result retention | #238, #246, #267; PR #316 | Reader-first gated emission, existing result-part storage and no inference retry |
 | [0081](0081-openrouter-response-metadata-and-routing.md) | Proposed | Separate reported provider metadata and exact routing identifiers | #118–#121 | Optional bounded telemetry, hosted eligibility and unchanged qualification gates |
 | [0082](0082-separate-live-quality-from-deterministic-conformance.md) | Proposed | Separate live quality from exact deterministic fixture conformance | #118, #119, #120, #122 | Preserve thresholds; synthetic evaluator acceptance does not qualify a provider |
 | [0080](0080-explicit-incomplete-review-rescans.md) | Proposed | Explicit incomplete-review rescans | Maintainer-authorized bug fix | Durable request replay protection and unchanged approval gates |

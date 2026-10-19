@@ -116,6 +116,14 @@ class ClockedHttp(GitHubHttp):
         return super().paginate(**kwargs)
 
 
+class InjectedHttp(ClockedHttp):
+    """Keep the transport a real class for installed adapter subclasses."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.update(api_url="https://github.synthetic.invalid", opener=opener)
+        super().__init__(*args, **kwargs)
+
+
 http = ClockedHttp(api_url="https://github.synthetic.invalid", opener=opener)
 
 
@@ -168,7 +176,7 @@ argv = [
 with (
     patch.object(github, "GitHubHttp", lambda: http),
     patch.object(github.GitHubApplication, "publish_review", publish),
-    patch("review_sensei_github.http.GitHubHttp", lambda: http),
+    patch("review_sensei_github.http.GitHubHttp", InjectedHttp),
     patch.object(socket.socket, "connect", deny),
     redirect_stdout(stdout),
     redirect_stderr(stderr),

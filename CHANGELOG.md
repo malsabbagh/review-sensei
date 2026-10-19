@@ -30,6 +30,21 @@
   Permit the evaluator's existing skipped-case status in its report schema.
   Actual live quality remains independently required for qualification.
 
+## 0.8.3 - 2026-10-19
+
+Changes since [v0.8.2](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.2), from [279b5f76992eb84e297e8bfc1063da6f1145a371](https://github.com/malsabbagh/review-sensei/commit/279b5f76992eb84e297e8bfc1063da6f1145a371) through [8059defabed5396ca9ecc25fcbb3981c98338f97](https://github.com/malsabbagh/review-sensei/commit/8059defabed5396ca9ecc25fcbb3981c98338f97).
+
+Previous annotated tag object: `0dd963666f1295dfab40f0a717b2c84d086378de`.
+
+- docs: record released v0.8.2 ([083f5ddd917d086aebc893c83fb8bb968b6aa4d7](https://github.com/malsabbagh/review-sensei/commit/083f5ddd917d086aebc893c83fb8bb968b6aa4d7)).
+- Merge pull request \#325 from malsabbagh/fix/default-publication-recovery ([6ad262d32da7ce105f625a0cf29790b9cd4de01c](https://github.com/malsabbagh/review-sensei/commit/6ad262d32da7ce105f625a0cf29790b9cd4de01c)).
+- Merge pull request \#326 from malsabbagh/fix/default-human-inventory ([3c67941f7b45ae529f7ce5a817c1899675c2a58e](https://github.com/malsabbagh/review-sensei/commit/3c67941f7b45ae529f7ce5a817c1899675c2a58e)).
+- Recover recorded decisions when review bodies reach capacity \(\#327\) ([8059defabed5396ca9ecc25fcbb3981c98338f97](https://github.com/malsabbagh/review-sensei/commit/8059defabed5396ca9ecc25fcbb3981c98338f97)).
+
+## review-sensei-github 0.3.3 - 2026-10-19
+
+- Pin `review-sensei==0.8.3`.
+
 ## 0.8.2 - 2026-10-19
 
 - Keep current-head finding IDs addressable after App inline discussion replies

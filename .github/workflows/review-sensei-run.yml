@@ -153,6 +153,8 @@ jobs:
       mentions: ${{ steps.plan.outputs.mentions }}
       learning: ${{ steps.plan.outputs.learning }}
       artifacts: ${{ steps.plan.outputs.artifacts }}
+      operation_entry: ${{ steps.plan.outputs.operation_entry || 'enabled' }}
+      publication_inventory: ${{ steps.plan.outputs.publication_inventory || 'legacy' }}
       configuration_source: ${{ steps.plan.outputs.configuration_source }}
       package_version: ${{ steps.release-identity.outputs.package_version }}
       github_package_version: ${{ steps.release-identity.outputs.github_package_version }}
@@ -1250,9 +1252,11 @@ jobs:
           BASE_REF: ${{ inputs.base_ref }}
           BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
           REVIEWS: ${{ needs.bootstrap.outputs.reviews }}
+          OPERATION_ENTRY: ${{ needs.bootstrap.outputs.operation_entry }}
+          PUBLICATION_INVENTORY: ${{ needs.bootstrap.outputs.publication_inventory }}
           LEARNING: ${{ needs.bootstrap.outputs.learning }}
         run: |
-          publish_args=(--enable-review)
+          publish_args=(--enable-review --operation-entry "$OPERATION_ENTRY" --publication-inventory "$PUBLICATION_INVENTORY")
           if [[ "$REVIEWS" == "auto-approve" ]]; then
             publish_args+=(--enable-auto-approve)
           else
@@ -1802,9 +1806,11 @@ jobs:
           BASE_REF: ${{ inputs.base_ref }}
           BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
           REVIEWS: ${{ needs.bootstrap.outputs.reviews }}
+          OPERATION_ENTRY: ${{ needs.bootstrap.outputs.operation_entry }}
+          PUBLICATION_INVENTORY: ${{ needs.bootstrap.outputs.publication_inventory }}
           LEARNING: ${{ needs.bootstrap.outputs.learning }}
         run: |
-          publish_args=(--enable-review)
+          publish_args=(--enable-review --operation-entry "$OPERATION_ENTRY" --publication-inventory "$PUBLICATION_INVENTORY")
           if [[ "$REVIEWS" == "auto-approve" ]]; then
             publish_args+=(--enable-auto-approve)
           else

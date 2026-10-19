@@ -19,6 +19,8 @@ CONTRACTS = (
     "test_openrouter_cli_contract",
     "test_large_public_lifecycle_contract",
     "test_openrouter_metadata_contract",
+    "test_default_publication_recovery_contract",
+    "test_default_human_inventory_contract",
     "test_override_metadata_contract",
 )
 

@@ -210,6 +210,45 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertFalse(updated.evaluation_failed)
         self.assertIn("approval withheld (human_adjudication_open)", updated.summary)
 
+    def test_persistent_command_capacity_failure_does_not_request_identical_retry(self):
+        from review_sensei.disposition import MaintainerCommandResult
+
+        record = SessionRecord.create(
+            SessionIdentity("owner/repo", 1, repository_id=1),
+            now=datetime(2026, 9, 19, tzinfo=timezone.utc),
+        )
+        for diagnostic in (
+            "command_body_capacity_exceeded",
+            "command_body_capacity_unverifiable",
+        ):
+            with self.subTest(diagnostic=diagnostic):
+                self.reviewer.finalizer = SimpleNamespace(
+                    refinalize_with_dispositions=lambda **kwargs: PublicationResult(
+                        status="gate_reevaluation_failed", diagnostic=diagnostic
+                    )
+                )
+                updated = self.application._refinalize_command(
+                    MaintainerCommandResult(
+                        action="verify",
+                        applied=True,
+                        operator_paused=False,
+                        summary="overrides for this commit are loaded",
+                    ),
+                    oidc_token="oidc",
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha="a" * 40,
+                    app_slug="review-sensei[bot]",
+                    actor="alice",
+                    record=record,
+                )
+                self.assertTrue(updated.evaluation_failed)
+                self.assertIn("decisions retained", updated.summary)
+                self.assertIn(diagnostic, updated.summary)
+                self.assertNotIn("@reviewsensei verify", updated.summary)
+                self.assertEqual(record.dispositions, ())
+
     def test_refinalize_exception_is_an_evaluation_failure(self):
         from review_sensei.disposition import MaintainerCommandResult
 

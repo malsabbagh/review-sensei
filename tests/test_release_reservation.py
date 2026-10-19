@@ -1,5 +1,4 @@
 import unittest
-from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from review_sensei_github.release_reservation import release_own_reservation
@@ -8,11 +7,19 @@ from review_sensei_github.session_ledger import render_session_comment
 from review_sensei.session import SessionIdentity, SessionRecord
 
 try:
+    from session_fixture_clock import SESSION_FIXTURE_NOW, SessionFixtureClockMixin
+except ModuleNotFoundError:
+    from tests.session_fixture_clock import (
+        SESSION_FIXTURE_NOW,
+        SessionFixtureClockMixin,
+    )
+
+try:
     from fake_github_http import json_response, make_http
 except ImportError:
     from tests.fake_github_http import json_response, make_http
 
-FIXED_NOW = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
+FIXED_NOW = SESSION_FIXTURE_NOW
 IDENTITY = SessionIdentity("owner/repo", 136, repository_id=99)
 RUN_ID = "10000000001"
 
@@ -50,7 +57,7 @@ def _body(record):
     return render_session_comment(repository_id=99, pull_request=136, record=record)
 
 
-class ReleaseReservationTests(unittest.TestCase):
+class ReleaseReservationTests(SessionFixtureClockMixin, unittest.TestCase):
     def _release(self, http, **overrides):
         kwargs = {
             "broker": _Broker(),

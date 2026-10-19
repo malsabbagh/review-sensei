@@ -1,3 +1,39 @@
+## Default human inventory references
+
+Complete publication may use closed eligibility schema 5 when the admitted human
+inventory exceeds legacy future-assessment capacity. Purpose-bound owned parts
+preserve every admitted instance, metadata and original index. Independent durable
+transaction and live repository/PR/base/head/numeric Bot authority are required;
+references alone grant none. Inference, decisions and approval require fresh
+complete original prose and index verification. Nonauthoritative receipt pages
+may use fresh metadata fences; these never authorize a decision. Ordinary
+approval facts, provider qualification and all other blockers
+remain authoritative through partial and final resolution. Preflight the largest
+future resolution receipt and existing prose/frame limits before mutation.
+
+Only original live admission may start writes. Durable intent precedes data;
+unknown or incomplete writes hold without blind recreation. Publication and reply
+operations share their original finite evidence budget through broker, storage,
+readers and mutable fences. Missing or conflicting evidence withholds decisions.
+Reader-first rollout and trusted complete emission remain required. See ADR 0094.
+
+## Bounded default publication and retained recovery
+
+Default writers emit at most 64 indexed findings. Updated readers accept 250;
+trusted `github.publication_inventory: complete` activates larger emission only
+after reader-first rollout. Complete publication preserves every identity and
+explanation within existing body, individual-item, path and future-assessment
+bounds; overflow refuses without truncation. Exact replay verifies retained prose.
+
+With `github.operation_entry: enabled`, transaction-bound publication retains
+validated result bytes in owned PR comments before review/check mutations.
+Retention never stores raw diffs, prompts or credentials and does not enable
+diagnostics artifacts. Recovery validates the durable transaction and trusted
+contexts for the current exact snapshot, preserving admission and acceptance.
+One publication-attempt budget covers retention, reads and publication. An
+unconfirmed write requires complete owned readback; missing or conflicting parts
+refuse further creation. Existing opt-outs remain effective. See ADR 0093.
+
 <!--
 supplemental-ledger
 These docs/architecture.md parts stay supplemental. They are historical narrative
@@ -68,8 +104,8 @@ model or rewriting trusted learnings or configuration. See
 [ADR 0043](adr/0043-structured-run-outcomes-budgets-and-publication-recovery.md).
 
 the ledger's baseline and digests cannot reconstruct them. Reusable runners
-publish only a newly produced result and retain an explicitly enabled diagnostics
-bundle after publication failure. That bundle includes the reviewed diff and
+publish a newly produced or independently validated retained result and retain
+an explicitly enabled diagnostics bundle after publication failure. That bundle includes the reviewed diff and
 trusted configuration/admission contexts, retains the existing seven-day limit,
 and remains disabled for `artifacts: none`. Local analysis-only sessions retain
 their existing duplicate behavior. See the PR223 amendment to

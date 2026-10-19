@@ -9,14 +9,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
+from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
 from review_sensei.rescan import AuthorizedRescan, rescan_source
 from review_sensei.session import SessionIdentity
+from review_sensei_github.default_human_reader import DefaultHumanInventoryReader
 from review_sensei_github.errors import GitHubHTTPTransientError
 from review_sensei_github.publication import (
     PUBLISHED_REVIEW_STATES,
     approval_eligibility_from_body,
     review_identity_marker,
+)
+from review_sensei_github.publication_recovery import (
+    PublicationBudgetHttp,
+    publication_http,
+    publication_session_ledger,
 )
 from review_sensei_github.trigger import (
     choose_head_sha,
@@ -119,7 +126,22 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
         or triggering_actor != actor
     ):
         raise ReviewInputError("explicit rescan event identity is unauthorized")
-    http, token = ledger.http, ledger.token
+    # The command may precede ordinary review admission. Establish its allowance
+    # once here only when the caller has none; never refill an existing command
+    # or ledger budget at the referenced-inventory read boundary. A new command
+    # allowance is not installed on the caller ledger: later inference and its
+    # publication phase retain their own existing lifecycle.
+    budget = getattr(ledger, "evidence_budget", None)
+    if budget is None:
+        budget = (
+            ledger.http.publication_budget
+            if type(ledger.http) is PublicationBudgetHttp
+            else EvidenceReadBudget()
+        )
+    if not isinstance(budget, EvidenceReadBudget):
+        raise ReviewInputError("explicit rescan read budget is invalid")
+    http, token = publication_http(ledger.http, budget), ledger.token
+    ledger = publication_session_ledger(ledger, budget)
 
     def get(suffix, *, read_token=token):
         status, payload = http.request(
@@ -261,9 +283,23 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
         return (
             None  # Old queued events and original-run retries are ordinary duplicates.
         )
-    eligibility = approval_eligibility_from_body(latest["body"])
+    reader = DefaultHumanInventoryReader(
+        http=http,
+        ledger=ledger,
+        token=token,
+        repository=args.repository,
+        pull_request=args.pull_request,
+        head_sha=args.head_sha,
+        app_slug=args.app_slug,
+        budget=budget,
+    )
+    eligibility = approval_eligibility_from_body(
+        latest["body"], human_inventory_reader=reader
+    )
     if eligibility is None or eligibility.head_sha != args.head_sha:
         raise ReviewInputError("explicit rescan published coverage is unverifiable")
+    if eligibility.human_inventory_reference is not None:
+        reader.validate_root(latest, reviews)
     if (
         eligibility.facts.review_status == "complete"
         and eligibility.facts.coverage_blocker is None
