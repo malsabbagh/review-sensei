@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import random
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
@@ -17,10 +19,134 @@ from review_sensei.session import (
     read_session_baseline,
 )
 from tests import test_review_transaction as fixture
-from tests.test_authenticated_partitions import checkpoint
+from tests.test_authenticated_partitions import binding, checkpoint
+
+
+def descriptor_stat_shape(value, *, ctime_delta=1):
+    """CPython 3.12 Windows fd ctime is change time, path ctime is birth time.
+
+    See CPython v3.12.10 Python/fileutils.c (_Py_attribute_data_to_stat)
+    and Modules/posixmodule.c (win32_xstat). Keep all common fields exact.
+    """
+    return SimpleNamespace(
+        st_dev=value.st_dev,
+        st_ino=value.st_ino,
+        st_mode=value.st_mode,
+        st_size=value.st_size,
+        st_mtime_ns=value.st_mtime_ns,
+        st_ctime_ns=value.st_ctime_ns + ctime_delta,
+    )
 
 
 class LocalPartitionReadCacheTests(unittest.TestCase):
+    def stage_public_document(self, root):
+        ledger = LocalSessionLedger(root, enable_partition_writes=True)
+        document = {"text": random.Random(941).randbytes(8_000).hex()}
+        manifest = ledger.stage_evidence(
+            fixture.IDENTITY,
+            binding=binding(),
+            document=document,
+            item_count=1,
+            max_manifest_bytes=4096,
+        )
+        return ledger, document, manifest
+
+    def test_windows_descriptor_and_path_ctime_difference_preserves_public_roundtrip(
+        self,
+    ):
+        original_fstat = os.fstat
+        original_open = Path.open
+        reads = []
+
+        def observed_open(path, *args, **kwargs):
+            if ".evidence" in path.parts and args == ("rb",):
+                reads.append(path)
+            return original_open(path, *args, **kwargs)
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("review_sensei.session.sys.platform", "win32"),
+            patch(
+                "review_sensei.session.os.fstat",
+                side_effect=lambda fd: descriptor_stat_shape(original_fstat(fd)),
+            ),
+            patch.object(Path, "open", observed_open),
+        ):
+            ledger, document, manifest = self.stage_public_document(Path(directory))
+            part_count = len(manifest["parts"])
+            self.assertGreater(part_count, 0)
+            self.assertEqual(len(reads), part_count)
+            for _ in range(2):
+                before = ledger.evidence_budget.calls
+                self.assertEqual(
+                    ledger.read_evidence(
+                        fixture.IDENTITY, manifest, expected_binding=binding()
+                    ),
+                    document,
+                )
+                self.assertEqual(ledger.evidence_budget.calls - before, 3 * part_count)
+            self.assertEqual(len(reads), 3 * part_count)
+            self.assertLessEqual(ledger.evidence_budget.calls, 60)
+
+    def test_windows_descriptor_change_during_public_staging_refuses(self):
+        original_fstat = os.fstat
+        calls = []
+
+        def changing_descriptor(fd):
+            calls.append(fd)
+            return descriptor_stat_shape(original_fstat(fd), ctime_delta=len(calls))
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("review_sensei.session.sys.platform", "win32"),
+            patch("review_sensei.session.os.fstat", side_effect=changing_descriptor),
+        ):
+            with self.assertRaisesRegex(
+                ReviewInputError, "partition is missing or invalid"
+            ):
+                self.stage_public_document(Path(directory))
+            self.assertEqual(len(calls), 2)
+
+    def test_windows_path_replacement_during_public_staging_refuses(self):
+        original_fstat = os.fstat
+        original_stat = Path.stat
+        for fault in ("identity", "path-ctime"):
+            calls = []
+
+            def stable_descriptor(fd):
+                calls.append(fd)
+                return descriptor_stat_shape(original_fstat(fd))
+
+            def replaced_path(path, *args, **kwargs):
+                value = original_stat(path, *args, **kwargs)
+                if (
+                    ".evidence" in path.parts
+                    and len(path.name) == 64
+                    and len(calls) >= 2
+                ):
+                    result = descriptor_stat_shape(value, ctime_delta=0)
+                    if fault == "identity":
+                        result.st_ino += 1
+                    else:
+                        # Cross-API ctime is incomparable; a changed pathname
+                        # observation must nevertheless hold independently.
+                        result.st_ctime_ns += 100
+                    return result
+                return value
+
+            with (
+                self.subTest(fault=fault),
+                tempfile.TemporaryDirectory() as directory,
+                patch("review_sensei.session.sys.platform", "win32"),
+                patch("review_sensei.session.os.fstat", side_effect=stable_descriptor),
+                patch.object(Path, "stat", replaced_path),
+            ):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "partition is missing or invalid"
+                ):
+                    self.stage_public_document(Path(directory))
+                self.assertEqual(len(calls), 2)
+
     def test_repeated_public_authority_reads_leave_original_budget_for_completion(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

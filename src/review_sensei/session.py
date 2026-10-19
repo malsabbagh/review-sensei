@@ -3628,14 +3628,26 @@ class LocalSessionLedger:
         if path.is_symlink():
             raise ReviewInputError("local partition must not be a symlink")
         try:
+            named_before = self._part_observation(path.stat(follow_symlinks=False))
             with path.open("rb") as handle:
                 before = self._part_observation(os.fstat(handle.fileno()))
                 raw = handle.read(MAX_PART_BYTES + 1)
                 after = self._part_observation(os.fstat(handle.fileno()))
-            current = self._part_observation(path.stat(follow_symlinks=False))
+                current = self._part_observation(path.stat(follow_symlinks=False))
+            # CPython 3.12 Windows fstat exposes change time, while pathname
+            # stat preserves creation time in st_ctime. Compare complete
+            # observations within each API; bridge them through common file
+            # identity/mode/size/mtime fields. This never permits a cache hit
+            # on Windows: every read still authenticates the complete bytes.
+            same_file = (
+                after[:-1] == current[:-1]
+                if sys.platform == "win32"
+                else after == current
+            )
             if (
                 before != after
-                or after != current
+                or named_before != current
+                or not same_file
                 or len(raw) > MAX_PART_BYTES
                 or hashlib.sha256(raw).hexdigest() != storage_id
             ):
