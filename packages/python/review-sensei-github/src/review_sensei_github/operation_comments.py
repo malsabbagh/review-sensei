@@ -93,8 +93,11 @@ class GitHubIssueCommentOperationPort:
         )
         self._repository = repository
         self._app_user_id = app_user_id
-        self._issue_url = http.api_url.rstrip("/") + http.repository_path(
-            repository, f"/issues/{pull_request}"
+        self._issue_url = (
+            http.api_url.rstrip("/")
+            + http.repository_path(repository, f"/issues/{pull_request}")
+            if strict_association
+            else None
         )
         self._strict_association = strict_association
         self.requests = 0
