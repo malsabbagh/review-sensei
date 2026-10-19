@@ -30,4 +30,7 @@ include tests/test_large_public_lifecycle.py
 include tests/test_public_feedback_continuation.py
 include tests/test_human_assessment.py
 include tests/test_operation_entry.py
+include tests/test_operation_host.py
+include tests/test_operation_wall_clock.py
+include tests/test_handle_aware_operation_entry.py
 include tests/test_review_work.py
