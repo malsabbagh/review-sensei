@@ -106,8 +106,9 @@ function positiveId(value: unknown): number {
 async function fetchJwks(issuer: string, control?: BrokerDispatchControl): Promise<Record<string, unknown>> {
   const response = await fetch(`${issuer}/.well-known/jwks`, {
     headers: { accept: "application/json" },
-    ...(control === undefined ? {} : { signal: control.beforeDispatch() }),
+    ...(control === undefined ? {} : { signal: control.beforeDispatch(), redirect: "manual" }),
   });
+  await control?.checkResponse(response);
   if (!response.ok) {
     throw new Error("oidc_jwks_unavailable");
   }

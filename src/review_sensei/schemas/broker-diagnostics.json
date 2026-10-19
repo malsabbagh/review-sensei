@@ -438,5 +438,10 @@
     "stage": "request_validation",
     "action": "check_request",
     "hint": "The original operation control allowance was refused. Preserve its retained charges and pending obligations; inspect the original receipt before retrying, and do not renew this attempt."
+  },
+  "broker_control_redirect_refused": {
+    "stage": "request_validation",
+    "action": "check_request",
+    "hint": "The controlled broker endpoint redirected. Preserve original charges and pending obligations; inspect the configured endpoint before retrying. Redirects cannot spend another dispatch or renew this attempt."
   }
 }

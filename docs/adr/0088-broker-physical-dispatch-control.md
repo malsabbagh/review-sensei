@@ -35,6 +35,14 @@ complete the request. The existing public JWKS cache remains; a wait on another
 request's in-flight JWKS fetch is independently deadline-bounded without
 canceling that request's I/O or charging a nonexistent extra fetch.
 
+Controlled fetches use Cloudflare's supported `redirect: "manual"` and refuse
+all 3xx responses with a closed `broker_control_redirect_refused` diagnostic.
+Automatic redirect hops would otherwise hide physical dispatches and potentially
+forward authentication headers. A refused Git advertisement never falls through
+to another resolver. Legacy uncontrolled fetch behavior remains unchanged.
+Cloudflare explicitly does not implement `redirect: "error"`; see its
+[Request redirect documentation](https://developers.cloudflare.com/workers/runtime-apis/request/#parameters).
+
 Success includes a closed `control_receipt` echoing the original scope and
 observed internal dispatch count. The HTTPS broker transport is the existing
 trust boundary; the receipt confers no source, root, admission or grant authority.
@@ -69,6 +77,11 @@ component receipt nor a refused CLI closes those remaining engineering gaps.
 and external transport fixtures. It proves exact counts, pre-dispatch refusal,
 absolute deadline, blocked-fetch cancellation, exact mutation binding, concurrent
 request isolation, shared-JWKS wait bounds, clock rollback and closed bounds.
+The explicit bridge also executes all three production fetch sites through real
+loopback HTTP redirect handling: each 302 is refused after exactly one HTTP
+request, with no destination request or REST fallback. A real blocked HTTP fetch
+is canceled at the original deadline. These use Node's real transport with the
+Worker-supported manual redirect API; no deployed Cloudflare claim is made.
 `BrokerDispatchControlTests` covers prepaid caller liability, unchanged deadline,
 no unused/uncertain refund, missing/altered receipts, refusal before unfunded
 transport, and exact original callback ownership.

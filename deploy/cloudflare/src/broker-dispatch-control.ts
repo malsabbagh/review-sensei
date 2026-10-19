@@ -57,6 +57,16 @@ export class BrokerDispatchControl {
     return AbortSignal.timeout(remaining);
   }
 
+  async checkResponse(response: Response): Promise<void> {
+    this.check();
+    if (response.status >= 300 && response.status < 400) {
+      // Cloudflare supports manual redirects, not redirect: "error". Never
+      // follow an uncharged hop or forward credentials to its destination.
+      try { await response.body?.cancel(); } catch { /* Refuse either way. */ }
+      throw new Error("broker_control_redirect_refused");
+    }
+  }
+
   async waitFor<T>(pending: Promise<T>): Promise<T> {
     // A shared JWKS fetch belongs to its original request. Bound this wait
     // without canceling somebody else's I/O or charging a nonexistent fetch.

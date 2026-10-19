@@ -11,6 +11,15 @@ const control = (maximum = 20) => ({
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); resetOidcJwksCacheForTesting(); });
 
 describe("opt-in broker physical dispatch control", () => {
+  it("refuses every redirect status without spending another dispatch", async () => {
+    for (const status of [300, 301, 302, 303, 304, 307, 308, 399]) {
+      const budget = new BrokerDispatchControl(control(1));
+      budget.beforeDispatch();
+      const response = new Response(null, { status });
+      await expect(budget.checkResponse(response)).rejects.toThrow("broker_control_redirect_refused");
+      expect(budget.receipt().dispatched).toBe(1);
+    }
+  });
   it("counts actual production OIDC/GitHub dispatches and returns the original scoped receipt", async () => {
     const fixture = await consumingBroker();
     const request = fixture.configureFeedback();

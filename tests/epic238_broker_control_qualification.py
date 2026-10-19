@@ -83,6 +83,18 @@ class BrokerControlQualification(unittest.TestCase):
             self.budget.wall_deadline_ms,
         )
 
+    def test_real_http_redirects_cannot_hide_an_unfunded_second_dispatch(self):
+        for site in ("rest", "git", "jwks"):
+            with self.subTest(site=site):
+                result = self.bridge.call("redirect_probe", site=site)["result"]
+                self.assertEqual(result["requests"], ["/redirect"])
+                self.assertEqual(result["category"], "broker_control_redirect_refused")
+
+    def test_real_http_wait_is_cancelled_at_original_control_deadline(self):
+        result = self.bridge.call("redirect_probe", site="rest", blocked=True)["result"]
+        self.assertEqual(result["category"], "transport_refused")
+        self.assertEqual(result["requests"], ["/redirect"])
+
     def test_exhausted_server_subrequest_ceiling_refuses_before_an_unfunded_fetch(self):
         client = self.client(1)
         token = self.oidc(client)

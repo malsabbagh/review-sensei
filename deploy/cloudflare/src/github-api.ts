@@ -448,7 +448,7 @@ export class GitHubApi {
     }
     const response = await fetch(`${this.apiUrl}${path}`, {
       method,
-      ...(this.dispatchControl === undefined ? {} : { signal: this.dispatchControl.beforeDispatch() }),
+      ...(this.dispatchControl === undefined ? {} : { signal: this.dispatchControl.beforeDispatch(), redirect: "manual" }),
       headers: {
         accept: "application/vnd.github+json",
         ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
@@ -458,6 +458,7 @@ export class GitHubApi {
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
+    await this.dispatchControl?.checkResponse(response);
     const data = await boundedJson(response);
     this.dispatchControl?.check();
     return { status: response.status, data };
@@ -637,7 +638,8 @@ export class GitHubApi {
     if (this.apiUrl === "https://api.github.com") {
       try {
         return await this.publicWorkflowRuntimeShasFromGit(validatedTag);
-      } catch {
+      } catch (error) {
+        if (this.dispatchControl !== undefined && error instanceof Error && error.message.startsWith("broker_control_")) throw error;
         // Fall back to the bounded REST resolver below when the public Git
         // endpoint is unavailable or returns an unsupported advertisement.
       }
@@ -695,16 +697,18 @@ export class GitHubApi {
       response = await fetch(
         `${PUBLIC_WORKFLOW_GIT_URL}/info/refs?service=git-upload-pack`,
         {
-          ...(this.dispatchControl === undefined ? {} : { signal: this.dispatchControl.beforeDispatch() }),
+          ...(this.dispatchControl === undefined ? {} : { signal: this.dispatchControl.beforeDispatch(), redirect: "manual" }),
           headers: {
             accept: "application/x-git-upload-pack-advertisement",
             "user-agent": "ReviewSensei-GitHub-App/1.0 (+https://reviewsensei.dev)",
           },
         },
       );
-    } catch {
+    } catch (error) {
+      if (this.dispatchControl !== undefined && error instanceof Error && error.message.startsWith("broker_control_")) throw error;
       throw new Error("github_workflow_tag_unavailable");
     }
+    await this.dispatchControl?.checkResponse(response);
     if (!response.ok) {
       throw new Error(`github_workflow_tag_unavailable_${response.status}`);
     }
