@@ -74,3 +74,24 @@ explanations, and cannot reconstruct the result. This repair prevents subsequent
 loss; it cannot recover that old payload. Do not rerun its provider merely to test
 publication. Verify the repaired installed path first and request any separate
 future inference authorization afterward.
+
+## Acceptance matrix
+
+| Issue / condition | Default code seam | Executable evidence | Scope / remaining limit |
+| --- | --- | --- | --- |
+| #238, #246: 65/77/100/250 findings | ReviewPublisher gated v1 writer and index reader | `test_bounded_v1_publication.CompleteInventoryPublicationTests` | Full identities/prose for compact inventories; byte/path/future-assessment limits remain. |
+| #238: oversized individual/prose inventory | Complete-profile preflight | Same contract: maximum individual prose, overflow and no-mutation cases | Invalid individual values remain invalid; no truncation. |
+| #246, PR #316: publication failure loses result | GitHubApplication plus existing ResultPartStore | `test_publication_recovery.PublicationRecoveryTests`; `test_default_publication_cli_journey` | Actual default 77-result checkpoint, serialized ledger and fresh caller. Larger operator baseline persistence is a separate prerequisite. |
+| #240, #246: interruption or unknown write | Durable unconfirmed phase before first part POST; complete-owned readback | Recovery crash-before/crash-after and lost-POST methods | Missing uncertain parts hold; no blind POST retry. Distributed atomic writer exclusion remains unqualified. |
+| #246: idempotent review replay | Exact transaction/content marker plus authenticated full prose readback | Bounded publisher lost-ack, body/inline replay and unrelated-root cases | Old transaction-hash or omitted-prose roots cannot be silently adopted. |
+| #267: read/deadline bounds | Shared publication transport and EvidenceReadBudget | Publication recovery budget/deadline methods and public finalizer charge test | No budget refill; long histories can remain blocked. This does not qualify the earlier whole-provider P1 dispatch profile. |
+| #246: accepted decisions / stale authority | Existing acceptance guard plus independent transaction validation | `test_checkpoint_publication_acceptance` | Original accepted content survives checkpoint-envelope changes; changed content/context/scope still refuses. |
+| Caller/configuration compatibility | Configuration parser, hosted plan, both workflow publication lanes, actual CLI | `test_hosted_plan`, `test_publication_cli_recovery`, `test_default_publication_cli_journey` | Default emission stays 64 pending separately authorized reader-first rollout. |
+| Installed / post-package workflows | Extracted sdist contract against installed engine and adapter | `dist_safe/test_default_publication_recovery_contract.py`; published CLI `lifecycle.py` | Runtime imports must match installed artifacts; no checkout source fallback. |
+| #313, #314, provider/configuration #115–123/#146 | Separate baseline, provider-deadline and provider-contract changes | Separate PR acceptance matrices | This focused repair does not claim deployment or live-provider qualification. |
+
+These tests use synthetic GitHub transport and an actual local durable ledger.
+They prove the supported deterministic path, not an authorized production GitHub
+mutation, deployed reader rollout, real-provider coverage, or all concurrency
+interleavings. None of the broader issues is closed merely because this table or
+component code exists.
