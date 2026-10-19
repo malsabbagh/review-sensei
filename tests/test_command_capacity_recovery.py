@@ -229,6 +229,7 @@ class CommandCapacityState:
                 "pull_request_url": "https://api.github.test/repos/owner/repo/pulls/1",
             }
         ]
+        self.resolved_threads = {item["id"] for item in self.inline}
         self.inline_history = []
         self.comment_pages = []
         self.head, self.base = HEAD, BASE
@@ -308,6 +309,31 @@ class CommandCapacityState:
             self.checks.append(check)
             return json_response(check, 201 if request.method == "POST" else 200)
         if path == "/graphql":
+            if data.get("operationName") == "ResolveReviewThread":
+                thread = data["variables"]["input"]["threadId"]
+                self.resolved_threads.add(int(thread.removeprefix("PRRT_")))
+                return json_response(
+                    {
+                        "data": {
+                            "resolveReviewThread": {
+                                "thread": {"id": thread, "isResolved": True}
+                            }
+                        }
+                    }
+                )
+            if data.get("operationName") == "ResolutionReadback":
+                thread = data["variables"]["id"]
+                return json_response(
+                    {
+                        "data": {
+                            "node": {
+                                "id": thread,
+                                "isResolved": int(thread.removeprefix("PRRT_"))
+                                in self.resolved_threads,
+                            }
+                        }
+                    }
+                )
             return json_response(
                 {
                     "data": {
@@ -317,7 +343,8 @@ class CommandCapacityState:
                                     "nodes": [
                                         {
                                             "id": f"PRRT_{item['id']}",
-                                            "isResolved": True,
+                                            "isResolved": item["id"]
+                                            in self.resolved_threads,
                                             "comments": {
                                                 "nodes": [
                                                     {
@@ -640,6 +667,70 @@ class CommandCapacityRecoveryTests(unittest.TestCase):
                 self.assertEqual(budget.calls, len(calls))
                 self.assertLessEqual(budget.calls, 60)
 
+    def test_fresh_bounded_verifies_resume_native_thread_progress_without_repeating_mutations(
+        self,
+    ):
+        state = CommandCapacityState(complete=True)
+        state.resolved_threads.clear()
+        state.inline_history = [
+            {
+                **copy.deepcopy(state.inline[0]),
+                "id": 900 + n,
+                "pull_request_review_id": 39,
+                "body": "z" * 9000,
+            }
+            for n in range(61)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            dispositions = state.record(directory)
+            progress = []
+            mutations = []
+            for attempt in range(3):
+                result, budget, calls = state.verify(dispositions)
+                self.assertEqual(budget.calls, len(calls))
+                self.assertLessEqual(budget.calls, 60)
+                progress.append(len(state.resolved_threads))
+                mutations.extend(
+                    data["variables"]["input"]["threadId"]
+                    for m, p, data in calls
+                    if p == "/graphql"
+                    and data.get("operationName") == "ResolveReviewThread"
+                )
+                if result.status == "approved":
+                    break
+                self.assertEqual(result.thread_resolution, "unconfirmed")
+                self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+            self.assertGreater(progress[0], 0)
+            self.assertLess(progress[0], 13)
+            self.assertEqual(progress[-1], 13)
+            self.assertEqual(result.status, "approved")
+            self.assertEqual(len(mutations), 13)
+            self.assertEqual(len(set(mutations)), 13)
+            self.assertEqual(
+                len(
+                    session_dispositions(
+                        LocalSessionLedger(Path(directory) / "ledger")
+                        .load(IDENTITY)
+                        .record
+                    )
+                ),
+                21,
+            )
+            replay, budget, calls = state.verify(dispositions)
+        self.assertEqual(replay.status, "already_approved")
+        self.assertFalse(
+            any(
+                m == "PUT"
+                or (
+                    p == "/graphql"
+                    and data.get("operationName") == "ResolveReviewThread"
+                )
+                for m, p, data in calls
+            )
+        )
+        self.assertEqual(budget.calls, len(calls))
+        self.assertLessEqual(budget.calls, 60)
+
     def test_native_whole_pr_location_shape_recovers_without_individual_hydration(self):
         state = CommandCapacityState(complete=True)
         state.inline_history = [
@@ -664,6 +755,63 @@ class CommandCapacityRecoveryTests(unittest.TestCase):
         self.assertFalse(any(m in {"PUT", "POST", "PATCH"} for m, _, _ in calls))
         self.assertEqual(budget.calls, len(calls))
 
+    def test_oversized_whole_pr_page_retries_smaller_pages_in_the_same_allowance(self):
+        state = CommandCapacityState()
+        state.inline_history = [
+            {
+                **copy.deepcopy(state.inline[0]),
+                "id": 900 + n,
+                "pull_request_review_id": 39,
+                "body": "Unrelated retained history. " + "z" * 9000,
+            }
+            for n in range(61)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            result, budget, calls = state.verify(state.record(directory))
+        self.assertEqual(result.status, "approval_withheld")
+        self.assertEqual(state.comment_pages[0], (1, 100))
+        self.assertIn((1, 50), state.comment_pages)
+        self.assertIn((2, 50), state.comment_pages)
+        self.assertEqual(
+            len(
+                approval_eligibility_from_body(
+                    state.reviews[0]["body"]
+                ).human_review.resolved
+            ),
+            21,
+        )
+        self.assertEqual(budget.calls, len(calls))
+        self.assertLessEqual(budget.calls, 60)
+        self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+
+    def test_indivisible_native_item_over_response_limit_refuses_without_losing_decisions(
+        self,
+    ):
+        state = CommandCapacityState()
+        state.inline_history = [
+            {
+                **copy.deepcopy(state.inline[0]),
+                "id": 900,
+                "pull_request_review_id": 39,
+                "body": "z" * (512 * 1024 + 1),
+            }
+        ]
+        original = state.reviews[0]["body"]
+        with tempfile.TemporaryDirectory() as directory:
+            result, budget, calls = state.verify(state.record(directory))
+            retained = session_dispositions(
+                LocalSessionLedger(Path(directory) / "ledger").load(IDENTITY).record
+            )
+        self.assertEqual(result.diagnostic, "command_body_capacity_unverifiable")
+        self.assertEqual(
+            state.comment_pages, [(1, size) for size in (100, 50, 25, 5, 1)]
+        )
+        self.assertEqual(state.reviews[0]["body"], original)
+        self.assertEqual(len(retained), 21)
+        self.assertFalse(any(m in {"PUT", "POST", "PATCH"} for m, _, _ in calls))
+        self.assertEqual(budget.calls, len(calls))
+        self.assertLessEqual(budget.calls, 60)
+
     def test_whole_pr_history_paginates_and_never_refills_the_allowance(self):
         for complete in (False, True):
             with (
@@ -683,14 +831,18 @@ class CommandCapacityRecoveryTests(unittest.TestCase):
                 self.assertIn((2, 100), state.comment_pages)
                 self.assertEqual(budget.calls, len(calls))
                 self.assertLessEqual(budget.calls, 60)
-                self.assertNotIn(outcome.status, {"approved", "already_approved"})
-                self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
                 if not complete:
+                    self.assertFalse(
+                        any(r["state"] == "APPROVED" for r in state.reviews)
+                    )
                     self.assertEqual(outcome.status, "approval_withheld")
                     current = approval_eligibility_from_body(state.reviews[0]["body"])
                     self.assertEqual(len(current.human_review.resolved), 21)
                 else:
-                    self.assertEqual(budget.calls, 60)
+                    self.assertEqual(outcome.status, "approved")
+                    self.assertEqual(
+                        sum(r["state"] == "APPROVED" for r in state.reviews), 1
+                    )
 
     def test_late_prose_mutation_during_finalization_never_approves(self):
         for replay in (False, True):
@@ -804,19 +956,22 @@ class CommandCapacityRecoveryTests(unittest.TestCase):
                         "https://api.github.test/repos/owner/repo/pulls/999"
                     )
                 preflight_seen = False
+                mutated = fault == "foreign-root"
 
                 def race(state, method, path, data):
-                    nonlocal preflight_seen
+                    nonlocal preflight_seen, mutated
                     if method != "GET":
                         return
                     committed = any(m == "PUT" for m, _, _ in state.calls)
                     if path.endswith("/pulls/1") and not committed:
                         preflight_seen = True
                         if fault == "inline-after-proof":
+                            mutated = True
                             state.inline[0]["body"] += " Changed original explanation."
                             state.hook = None
                     if path.endswith("/reviews") and preflight_seen and not committed:
                         if fault in {"head-after-preflight", "base-after-preflight"}:
+                            mutated = True
                             setattr(
                                 state,
                                 "head" if fault.startswith("head") else "base",
@@ -840,10 +995,12 @@ class CommandCapacityRecoveryTests(unittest.TestCase):
                             state.reviews[0]["user"]["id"] = 100
                         else:
                             return
+                        mutated = True
                         state.hook = None
 
                 state.hook = race
                 result, budget, calls = state.verify(state.record(directory))
+                self.assertTrue(mutated)
                 self.assertNotEqual(result.status, "approved")
                 before_put = fault in {
                     "inline-after-proof",

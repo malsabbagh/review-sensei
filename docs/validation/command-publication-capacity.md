@@ -43,13 +43,33 @@ Capacity proof therefore reads the bounded whole-PR review-comment endpoint and
 selects only records with the exact numeric review ID. It preserves the strict
 PR/numeric Bot/commit/path/line/side/instance/body checks. Actual incident evidence
 contains 71 native records in one page, including the 13 exact target comments;
-all 13 match independent individual-comment GETs. No placement is inferred.
+all 13 match independent individual-comment GETs. That native page exceeds the
+unchanged 512 KiB response cap. All capacity proof scans therefore use the
+existing adaptive 100/50/25/5/1 pagination, charging failed and successful reads
+to the original allowance. An indivisible oversized record refuses even at one
+item per page. No placement is inferred.
 
-The one-page deterministic eligible control consumes 60/60 requests; its unchanged
-replay consumes 58. With 101 unrelated historical comments, pagination is exercised
-and partial reconciliation completes at 56 requests, while the eligible operation
-holds at 60 without approval. This does not qualify arbitrary complete histories.
-No record is truncated and the allowance is never replenished.
+Native GraphQL identifies the same captured Bot as `reviewsensei`, while REST
+uses `reviewsensei[bot]`; the captured global node IDs agree. Thread discovery,
+duplicate suppression and final blocking scans accept this alternate spelling
+only with GraphQL's explicit `Bot` discriminator. Human and sibling Bot aliases
+cannot substitute. Mutation still rereads the exact REST root and current decision
+and PR. Check reconciliation also recognizes the native App object's unsuffixed
+slug and updates the existing same-name, exact-head check on replay.
+
+The capacity recovery path may skip mutation-free rechecks of threads already
+resolved in its complete fresh discovery snapshot. Its full original prose/root
+proof and final approval fences remain required. Exhaustion retains the exact
+resolved prefix and returns unconfirmed thread recovery with verification guidance.
+Each new verification has its ordinary finite allowance; an invocation never
+refills it. The one-page deterministic eligible control uses 21 requests and
+unchanged replay 19. A public oversized-history/13-unresolved-thread case resolves
+ten threads at 60 calls, then the remaining three and approves at 37 on a fresh
+verification; unchanged replay uses 24 and repeats no body/resolution mutation.
+The partial counterpart uses 60/29/17 and never approves. Faithful installed replay
+of the captured incident independently exercises those 13 unresolved threads and
+oversized pages. This does not qualify arbitrary histories or guarantee all items
+can fit. No record is truncated and no response, item or request cap is raised.
 
 The same owned review and eligibility schema remain authoritative. Existing readers already consume the compact
 reference presentation. The repair requires installing a compatible command
@@ -86,6 +106,9 @@ activation, release, merge and deployment are separate operations.
 | Partial and eligible controls | Same public recovery suite | Partial coverage keeps a non-passing check and cannot approve; an eligible control obeys all ordinary gates. |
 | Replay and ambiguous PUT | Same public recovery suite | Exact owned readback is idempotent; uncertain differing bytes or changed prose on compact replay withhold authority. |
 | Native API shape / historical pagination | Same public recovery suite and actual captured PR326 records | Whole-PR listing supplies native location metadata; foreign-review records cannot substitute; extra pages consume the original allowance. |
+| Oversized page or individual native record | Same public recovery suite | Retry bounded smaller pages without losing the item offset; an indivisible record holds with zero writes and all decisions retained. |
+| Native Bot identity and unresolved thread recovery | `test_command_capacity_recovery`, `test_thread_resolution_recovery` | Typed Bot discovery reaches all matching roots; bounded progress survives exhaustion, fresh verification completes and replay repeats no resolution mutation. Human/sibling aliases and real blockers cannot authorize approval. |
+| Native check identity on replay | `test_gate_and_default_approval.CheckPublisherContractTests` and installed incident replay | Reuse the original App-owned exact-head check with PATCH; never adopt a sibling App, different check name or foreign head. |
 | Source, snapshot and ownership changes | Same public recovery suite | Changed head/base/newest root/prose/location/PR association and expired or foreign-head decisions refuse; late mutation withholds approval. |
 | Ambiguous or indivisible body | Same public recovery suite | Preserve original data and durable decisions, return actionable capacity hold. |
 | Persistent failure reporting | `test_github_application.GitHubApplicationTests.test_persistent_command_capacity_failure_does_not_request_identical_retry` | Failure remains visible and does not request an identical verification retry. |

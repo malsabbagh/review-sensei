@@ -9,6 +9,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
+from review_sensei.errors import ReviewInputError
+
 from .errors import GitHubHTTPError, GitHubPublicationError
 from .http import GitHubHttp
 
@@ -17,10 +19,27 @@ _RESOLUTION_RE = re.compile(re.escape(RESOLUTION_PREFIX) + r"([A-Za-z0-9_-]+) --
 _QUERY = """query FindingResolutionThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
  repository(owner: $owner, name: $name) { pullRequest(number: $number) {
  reviewThreads(first: 100, after: $after) { nodes { id isResolved comments(first: 1) {
- nodes { databaseId body author { login } } } } pageInfo { hasNextPage endCursor } }
+ nodes { databaseId body author { login __typename } } } } pageInfo { hasNextPage endCursor } }
  } } }"""
 _MUTATION = """mutation ResolveReviewThread($input: ResolveReviewThreadInput!) {
  resolveReviewThread(input: $input) { thread { id isResolved } } }"""
+
+
+def graphql_app_author(author: object, app_slug: str) -> bool:
+    """Match one configured App across REST and native GraphQL Bot spelling.
+
+    Unsuffixed aliases require GraphQL's Bot discriminator. Existing exact
+    REST-login fixtures can omit it; an explicit different actor type refuses.
+    Native REST root ownership is independently rechecked before mutations.
+    """
+    if not isinstance(author, dict) or not isinstance(author.get("login"), str):
+        return False
+    login = author["login"].casefold()
+    slug = app_slug.casefold()
+    kind = author.get("__typename")
+    if login == slug:
+        return kind in (None, "Bot")
+    return kind == "Bot" and slug.endswith("[bot]") and login == slug[:-5]
 
 
 def digest(value: str) -> str:
@@ -209,6 +228,7 @@ class FindingThreadResolver:
         fence: Callable[[], bool],
         records: Sequence[Mapping[str, Any]] = (),
         supersede: Mapping[str, str] | None = None,
+        skip_resolved: bool = False,
     ) -> ThreadResolutionResult:
         from .publication import (
             finding_fingerprint_from_body,
@@ -263,7 +283,7 @@ class FindingThreadResolver:
                     author = root.get("author")
                     if not isinstance(author, dict):
                         raise ValueError
-                    if str(author.get("login", "")).casefold() != app_slug.casefold():
+                    if not graphql_app_author(author, app_slug):
                         continue
                     scope = finding_publication_scope(root.get("body"))
                     instance = finding_instance_from_body(root.get("body"))
@@ -307,6 +327,12 @@ class FindingThreadResolver:
         for node, root, instance, old in candidates:
             identity = node["id"] if old else instance
             assert isinstance(identity, str)
+            if skip_resolved and node["isResolved"]:
+                # No write is needed. The opted-in caller has independently
+                # proven the complete native report and owns final approval
+                # fences; this is an observation, never a new decision grant.
+                resolved.append(identity)
+                continue
             try:
                 # Re-read the root, decision, and PR immediately before each mutation.
                 status, live_root = self.http.request(
@@ -348,6 +374,12 @@ class FindingThreadResolver:
                         "thread resolution mutation is unconfirmed"
                     )
                 resolved.append(identity)
-            except (GitHubHTTPError, GitHubPublicationError, AttributeError, TypeError):
+            except (
+                GitHubHTTPError,
+                GitHubPublicationError,
+                ReviewInputError,
+                AttributeError,
+                TypeError,
+            ):
                 unconfirmed.append(identity)
         return ThreadResolutionResult(tuple(resolved), tuple(unconfirmed))

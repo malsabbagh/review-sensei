@@ -88,6 +88,7 @@ from .errors import (
     GitHubPublicationTransientError,
 )
 from .http import MAX_PAGINATION_PAGES, GitHubHttp
+from .thread_resolution import graphql_app_author
 
 if TYPE_CHECKING:
     from .default_human_inventory import HumanInventoryReference, HumanInventoryStore
@@ -135,7 +136,7 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: Stri
               body
               path
               line
-              author { login }
+              author { login __typename }
             }
           }
         }
@@ -2188,6 +2189,7 @@ class ReviewApprovalFinalizer:
                         f"/pulls/{pull_request}/comments",
                     ),
                     token=token,
+                    page_sizes=(100, 50, 25, 5, 1),
                 )
                 inline = [
                     item
@@ -2264,6 +2266,7 @@ class ReviewApprovalFinalizer:
                         f"/pulls/{pull_request}/comments",
                     ),
                     token=token,
+                    page_sizes=(100, 50, 25, 5, 1),
                 )
                 fresh_inline = [
                     item
@@ -2439,6 +2442,7 @@ class ReviewApprovalFinalizer:
             index=index,
             reviews=reviews,
             honored_instances=honored_instances,
+            _skip_resolved=compacted,
         )
         try:
             finalized = self.finalize(
@@ -2452,7 +2456,7 @@ class ReviewApprovalFinalizer:
                 honored_instances=honored_instances,
                 _before_approval=final_capacity_guard if compacted else None,
             )
-        except (GitHubHTTPError, GitHubPublicationError):
+        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
             finalized = PublicationResult(
                 status="approval_withheld", diagnostic="approval_withheld"
             )
@@ -2674,6 +2678,7 @@ class ReviewApprovalFinalizer:
         index: FindingIndex | None,
         reviews: Sequence[Any],
         honored_instances: frozenset[str] = frozenset(),
+        _skip_resolved: bool = False,
     ):
         """Retry durable override, assessment and addressed decisions without AI."""
         from .thread_resolution import (
@@ -2782,6 +2787,7 @@ class ReviewApprovalFinalizer:
                 instances=instances,
                 records=records,
                 fence=fence,
+                skip_resolved=_skip_resolved,
             )
         except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
             return ThreadResolutionResult(unconfirmed=tuple(sorted(instances)))
@@ -3093,7 +3099,7 @@ class ReviewApprovalFinalizer:
                     raise GitHubPublicationError("review thread response was invalid")
                 root = roots[0]
                 author = root.get("author")
-                if not isinstance(author, dict) or author.get("login") != app_slug:
+                if not graphql_app_author(author, app_slug):
                     continue
                 body = root.get("body")
                 instance = finding_instance_from_body(body)
@@ -5045,7 +5051,7 @@ class ReviewPublisher:
                     raise GitHubPublicationError("review thread response was invalid")
                 # GitHub logins are case-insensitive, so a configured slug that
                 # differs only in case must still match its own findings.
-                if login is None or login.casefold() != app_slug.casefold():
+                if not graphql_app_author(author, app_slug):
                     continue
                 resolved = node.get("isResolved")
                 if not isinstance(resolved, bool):
