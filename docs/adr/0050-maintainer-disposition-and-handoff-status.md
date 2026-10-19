@@ -201,6 +201,9 @@ partial, malformed, wrong-scope and foreign-head/author refusals. This changes
 neither command authorization nor coverage and approval requirements. Rollback
 restores the previous refusal but can again leave valid displayed IDs
 unaddressable after an inline reply; no schema or persistence migration is needed.
+The complete public command test class also runs through the installed dist-safe
+and post-package lifecycle lanes, with installed-origin and no-live-socket guards.
+Its declared helper closure is checked before source distribution qualification.
 
 ## Alternatives considered
 

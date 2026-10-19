@@ -168,12 +168,21 @@ class HostedOverrideMetadataTests(unittest.TestCase):
                     review_page.append(review)
                     return 200, review
                 if url == "/graphql":
-                    from tests.test_github_publication import (
-                        graphql_review_threads_response,
-                    )
-
-                    response = graphql_review_threads_response()
-                    return 200, json.loads(response.body)
+                    return 200, {
+                        "data": {
+                            "repository": {
+                                "pullRequest": {
+                                    "reviewThreads": {
+                                        "nodes": [],
+                                        "pageInfo": {
+                                            "hasNextPage": False,
+                                            "endCursor": None,
+                                        },
+                                    }
+                                }
+                            }
+                        }
+                    }
                 if url.split("?", 1)[0].endswith("/check-runs"):
                     return (
                         (200, {"check_runs": []})
