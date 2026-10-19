@@ -53,7 +53,9 @@ Native GraphQL identifies the same captured Bot as `reviewsensei`, while REST
 uses `reviewsensei[bot]`; the captured global node IDs agree. Thread discovery,
 duplicate suppression and final blocking scans accept this alternate spelling
 only with GraphQL's explicit `Bot` discriminator. Human and sibling Bot aliases
-cannot substitute. Mutation still rereads the exact REST root and current decision
+cannot substitute. Missing or unreadable type metadata for the expected native
+alias holds discovery/finalization; it cannot silently hide a possible blocker.
+Mutation still rereads the exact REST root and current decision
 and PR. Check reconciliation also recognizes the native App object's unsuffixed
 slug and updates the existing same-name, exact-head check on replay.
 

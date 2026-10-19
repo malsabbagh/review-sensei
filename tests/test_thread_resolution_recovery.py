@@ -6,7 +6,7 @@ from dataclasses import replace
 
 from review_sensei_github.approval import approval_eligibility_from_result
 from review_sensei_github.conversation import ConversationPublisher
-from review_sensei_github.errors import GitHubHTTPTransientError
+from review_sensei_github.errors import GitHubHTTPTransientError, GitHubPublicationError
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.publication import (
     IndexedFinding,
@@ -401,6 +401,30 @@ class ThreadResolutionRecoveryTests(unittest.TestCase):
         self.assertEqual(outcome.status, "approval_withheld")
         self.assertEqual(outcome.diagnostic, "required_fixes_open")
         self.assertFalse(any(r["state"] == "APPROVED" for r in host.reviews))
+
+    def test_ambiguous_expected_native_actor_refuses_instead_of_skipping_blocker(self):
+        for discriminator in (
+            {},
+            {"__typename": None},
+            {"__typename": ""},
+            {"__typename": False},
+            {"__typename": []},
+        ):
+            with self.subTest(discriminator=discriminator):
+                host = ResolutionHost()
+                host.graphql_author = {"login": "reviewsensei", **discriminator}
+                host.reviews[0]["body"] = approval_eligibility_marker(host.eligibility)
+                with self.assertRaises(GitHubPublicationError):
+                    ReviewApprovalFinalizer(http=host).finalize(
+                        token="token",
+                        repository="owner/repo",
+                        pull_request=2,
+                        head_sha=HEAD,
+                        app_slug=APP,
+                        eligibility=host.eligibility,
+                    )
+                self.assertFalse(any(r["state"] == "APPROVED" for r in host.reviews))
+                self.assertFalse(host.resolved)
 
     def test_record_failure_never_mutates(self):
         host = ResolutionHost()

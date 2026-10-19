@@ -230,6 +230,7 @@ class CommandCapacityState:
             }
         ]
         self.resolved_threads = {item["id"] for item in self.inline}
+        self.graphql_author = {"login": APP}
         self.inline_history = []
         self.comment_pages = []
         self.head, self.base = HEAD, BASE
@@ -350,7 +351,7 @@ class CommandCapacityState:
                                                     {
                                                         "databaseId": item["id"],
                                                         "body": item["body"],
-                                                        "author": {"login": APP},
+                                                        "author": self.graphql_author,
                                                     }
                                                 ]
                                             },
@@ -428,6 +429,23 @@ class CommandCapacityState:
 
 
 class CommandCapacityRecoveryTests(unittest.TestCase):
+    def test_unreadable_expected_native_actor_holds_installed_recovery(self):
+        for discriminator in ({}, {"__typename": None}, {"__typename": False}):
+            with (
+                self.subTest(discriminator=discriminator),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                state = CommandCapacityState(complete=True)
+                state.resolved_threads.clear()
+                state.graphql_author = {"login": "reviewsensei", **discriminator}
+                result, budget, calls = state.verify(state.record(directory))
+                self.assertEqual(result.status, "approval_withheld")
+                self.assertEqual(result.thread_resolution, "unconfirmed")
+                self.assertFalse(state.resolved_threads)
+                self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+                self.assertEqual(budget.calls, len(calls))
+                self.assertLessEqual(budget.calls, 60)
+
     def test_durable_all21_verify_fits_without_losing_original_prose_or_coverage(self):
         state = CommandCapacityState()
         with tempfile.TemporaryDirectory() as directory:

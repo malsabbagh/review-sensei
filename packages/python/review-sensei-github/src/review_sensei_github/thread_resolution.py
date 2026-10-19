@@ -37,9 +37,17 @@ def graphql_app_author(author: object, app_slug: str) -> bool:
     login = author["login"].casefold()
     slug = app_slug.casefold()
     kind = author.get("__typename")
-    if login == slug:
-        return kind in (None, "Bot")
-    return kind == "Bot" and slug.endswith("[bot]") and login == slug[:-5]
+    exact = login == slug
+    native_alias = slug.endswith("[bot]") and login == slug[:-5]
+    if not exact and not native_alias:
+        return False
+    if exact and kind is None:
+        return True
+    if not isinstance(kind, str) or not kind:
+        # A possibly owned root with unreadable requested actor metadata must
+        # hold discovery/finalization, rather than disappear as a foreign root.
+        raise GitHubPublicationError("review thread App actor identity is unreadable")
+    return kind == "Bot"
 
 
 def digest(value: str) -> str:
