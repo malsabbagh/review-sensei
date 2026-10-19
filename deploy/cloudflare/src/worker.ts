@@ -1,3 +1,4 @@
+import { BrokerDispatchControl } from "./broker-dispatch-control";
 import type { WorkerEnv, WorkerExecution } from "./env";
 import { TokenBroker } from "./token-broker";
 import { brokerDiagnostic } from "./broker-diagnostics";
@@ -234,17 +235,18 @@ async function sessionGrant(request: Request, env: WorkerEnv): Promise<Response>
     const values = body as Record<string, unknown>;
     const bodyKeys = Object.keys(values);
     if (
-      bodyKeys.length !== 2 ||
+      bodyKeys.length !== (Object.hasOwn(values, "control_budget") ? 3 : 2) ||
       !Object.hasOwn(values, "session_grant") ||
       !Object.hasOwn(values, "session_attestation")
     ) {
       return response({ error: "invalid_request", diagnostic: brokerDiagnostic(new Error("broker_invalid_request"), brokerRayId(request)) }, 400, true);
     }
-    const attestation = await new TokenBroker(env).verifySessionGrant(
-      values.session_grant,
-      values.session_attestation,
-    );
-    return response({ session_attestation: attestation }, 200, true);
+    const control = values.control_budget === undefined ? undefined : new BrokerDispatchControl(values.control_budget);
+    const broker = new TokenBroker(env);
+    const attestation = control === undefined
+      ? await broker.verifySessionGrant(values.session_grant, values.session_attestation)
+      : await broker.verifySessionGrant(values.session_grant, values.session_attestation, control);
+    return response({ session_attestation: attestation, ...(control === undefined ? {} : { control_receipt: control.receipt() }) }, 200, true);
   } catch (error) {
     const rayId = brokerRayId(request);
     const diagnostic = brokerDiagnostic(error, rayId);

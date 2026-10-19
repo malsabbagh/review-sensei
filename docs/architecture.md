@@ -1127,3 +1127,8 @@ instead of loading unused generic discussion context. Its compact report path
 uses exact owned POST-ID readback followed by the complete report scan; the
 ordinary conversation route remains available. See
 [Proposed ADR 0087](adr/0087-selected-assessment-context-and-owned-page-readback.md).
+
+Broker control prepays original liability, gates fetches and JWKS waits by its
+deadline, and refuses redirects/bad receipts. V2 scope/deadline match; request
+state is isolated. No refund or new authority/durability; legacy behavior is
+unchanged. See proposed ADR 0088.

@@ -686,3 +686,8 @@ Restored handles bind operation/inventory/source and original clock/charges.
 Replay never reexecutes; unknown work never publishes. Time/generation bounds,
 expiry/rollback hold. No CLI/grant activation or broker funding. See proposed
 ADR 0086.
+
+Broker control prepays original liability, gates fetches and JWKS waits by its
+deadline, and refuses redirects/bad receipts. V2 scope/deadline match; request
+state is isolated. No refund or new authority/durability; legacy behavior is
+unchanged. See proposed ADR 0088.

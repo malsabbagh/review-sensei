@@ -19,6 +19,9 @@ registerHooks({
     return nextResolve(specifier, context);
   },
   load(url, context, nextLoad) {
+    if (url.endsWith(".json")) {
+      return { format: "module", shortCircuit: true, source: `export default ${JSON.stringify(JSON.parse(readFileSync(fileURLToPath(url), "utf8")))};` };
+    }
     if (url.endsWith(".yml")) {
       return { format: "module", shortCircuit: true, source: `export default ${JSON.stringify(readFileSync(fileURLToPath(url), "utf8"))};` };
     }
@@ -33,6 +36,8 @@ registerHooks({
   },
 });
 
+const { brokerDiagnostic } = await import("../deploy/cloudflare/src/broker-diagnostics.ts");
+const { BrokerDispatchControl } = await import("../deploy/cloudflare/src/broker-dispatch-control.ts");
 const { consumingBroker } = await import("../deploy/cloudflare/test/epic238-consuming-broker-fixture.ts");
 const fixture = await consumingBroker(process.argv[2], process.argv[3]);
 globalThis.fetch = async (input, init) => {
@@ -60,7 +65,10 @@ for await (const line of lines) {
     switch (request.action) {
       case "oidc": result = await fixture.oidcToken(request.overrides ?? {}); break;
       case "exchange": result = await fixture.broker.exchange(request.body); break;
-      case "verify": result = { session_attestation: await fixture.broker.verifySessionGrant(request.body.session_grant, request.body.session_attestation) }; break;
+      case "verify": {
+        const control = request.body.control_budget === undefined ? undefined : new BrokerDispatchControl(request.body.control_budget);
+        result = { session_attestation: await fixture.broker.verifySessionGrant(request.body.session_grant, request.body.session_attestation, control), ...(control === undefined ? {} : { control_receipt: control.receipt() }) }; break;
+      }
       case "grant_count": result = fixture.grantCount(); break;
       case "request_log": result = { transport: fixture.transportRequests, ledger: fixture.ledgerRequests }; break;
       case "set_source": Object.assign(fixture.githubInputs.source, request.source); result = null; break;
@@ -81,7 +89,7 @@ for await (const line of lines) {
     // arbitrary exception details or request/credential text.
     const category = error instanceof Error && /^(broker|github|oidc)_[a-z0-9_]+$/.test(error.message)
       ? error.message : "fixture_rejected";
-    result = { error: category };
+    result = { error: category, ...(request.body?.control_budget === undefined ? {} : { diagnostic: brokerDiagnostic(error) }) };
   }
   if (request.action === "verify" && status === 200 && request.pause_after_consume === true) {
     // Signal only: this is deliberately not the verified HTTP response. The
