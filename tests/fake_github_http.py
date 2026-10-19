@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import parse_qs, urlsplit
 
 from review_sensei_github import GitHubHttp
 
@@ -56,7 +57,8 @@ def make_http(responses, routes=(), *, review_readback=False, initial_reviews=()
     where ``matches`` receives the request and returns whether the route owns
     it and ``respond`` returns that route's response. A route lets a test answer
     URL-shaped infrastructure (such as the check-run gate) without threading its
-    responses through every ordered list it drives.
+    responses through every ordered list it drives. Seeded rows prefix only
+    the first review-list page; later scripted pages remain authoritative.
     """
 
     calls = []
@@ -77,7 +79,9 @@ def make_http(responses, routes=(), *, review_readback=False, initial_reviews=()
         # to later empty review-list reads, as on GitHub. Explicit nonempty
         # scripted pages and errors remain authoritative; default stays off
         # for tests of missing, stale or conflicting readback.
-        is_reviews = request.full_url.split("?", 1)[0].endswith("/reviews")
+        target = urlsplit(request.full_url)
+        is_reviews = target.path.endswith("/reviews")
+        first_review_page = parse_qs(target.query).get("page", ["1"]) == ["1"]
         if review_readback and is_reviews and isinstance(response, FakeHTTPResponse):
             if request.method == "POST" and 200 <= response.status < 300:
                 payload = json.loads(request.data)
@@ -93,13 +97,19 @@ def make_http(responses, routes=(), *, review_readback=False, initial_reviews=()
                         "user": {"login": "reviewsensei[bot]"},
                     }
                 )
-            elif request.method == "GET" and response.status == 200 and initial_reviews:
+            elif (
+                request.method == "GET"
+                and response.status == 200
+                and first_review_page
+                and initial_reviews
+            ):
                 payload = json.loads(response.body)
                 if isinstance(payload, list):
                     response = json_response(initial_reviews + payload)
             elif (
                 request.method == "GET"
                 and response.status == 200
+                and first_review_page
                 and response.body == b"[]"
             ):
                 response = json_response(stored_reviews)
