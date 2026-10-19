@@ -42,6 +42,8 @@ include tests/test_evidence_capacity.py
 include tests/test_default_human_inventory_cli.py
 include tests/test_default_human_inventory_publisher.py
 include tests/test_default_human_reader_binding.py
+include tests/test_default_human_rescan.py
+include tests/test_schema5_public_contract.py
 include tests/test_feedback_fence_budget.py
 include tests/test_local_partition_read_cache.py
 include tests/test_authenticated_partitions.py

@@ -67,3 +67,22 @@ normal discovery, disjoint coverage workers and the 80% threshold. Installed
 validation must use a clean frozen source archive, engine and adapter wheels,
 extracted-sdist contracts and all post-package CLI lanes. Passing component tests
 alone is not issue-closure evidence.
+
+## Explicit rescan and packaged schema
+
+`test_default_human_rescan.DefaultHumanRescanTests` publishes actual rich
+77/100/250 partial roots, reloads the serialized independent ledger, and resolves
+authorized explicit rescan through the public command. POSIX totals are 12/13/17
+charges respectively, exactly matching the full physical HTTP trace, under the same original 60 ordinary/64 total and 60-second ceilings.
+Corrupt/missing parts, changed prose, wrong numeric Bot, and an exhausted original
+allowance refuse without authority writes. Existing explicit-rescan tests retain
+head, permission, request-time and completed-review fences and prove a new
+command-local allowance does not mutate an unbudgeted caller ledger. Windows
+rich publication proves its documented bounded hold before this positive slice.
+No long-history or universal rescan capacity is claimed.
+
+`test_schema5_public_contract.Schema5PublicContractTests` validates actual codec
+output against the packaged closed structural schema; malformed structures fail
+before inventory access. Structural validity still requires the trusted reader.
+Both new classes run in the installed default-human contract wrapper; the schema
+is explicitly required by the sdist contract.

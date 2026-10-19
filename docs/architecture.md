@@ -16,6 +16,8 @@ unknown or incomplete writes hold without blind recreation. Publication and repl
 operations share their original finite evidence budget through broker, storage,
 readers and mutable fences. Missing or conflicting evidence withholds decisions.
 Reader-first rollout and trusted complete emission remain required. See ADR 0094.
+The packaged v5 schema validates structure; explicit rescan uses the trusted reader
+and one original command read allowance.
 
 ## Bounded default publication and retained recovery
 

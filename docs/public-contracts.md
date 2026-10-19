@@ -1407,3 +1407,27 @@ may use fresh transaction/head/owned-root/index metadata fences between those
 full proofs. A metadata fence never permits a decision or approval. Pending
 reports retain every full ID and path; repeated common guidance is stated once.
 The original explanations remain in their verified body/inline placements.
+
+The packaged `eligibility-v5.schema.json` validates this closed public structure.
+The adapter validates schema 5 before calling its trusted inventory reader and
+validates generated documents too. Structural validity does not authenticate a
+reference, resolution subset, ledger, root, visible prose, or approval facts.
+Those semantic and live-authority checks remain mandatory.
+
+Reader cache scope includes effective credential identity and the original read
+budget. The default finalizer follows each call's token; optional
+`human_inventory_read_token` binds an existing operation's metadata credential
+separately from mutation tokens. No credential or credential digest is serialized,
+and changing credentials does not refill the original allowance.
+
+Explicit rescan verifies schema 5 through the independent session ledger and
+complete current root/prose proof before authorizing incomplete-review reanalysis.
+It reuses a supplied ledger allowance across all command reads. If no operation
+allowance exists yet, command entry creates one bounded read allowance and binds
+only a command-local ledger copy; it does not install a deadline on the caller's
+later inference/checkpoint lifecycle. This is not an approval grant. Default
+finalization, conversation, maintainer decisions and explicit rescan use schema 5
+readers. Maintainer legacy-inventory fallback applies only when the complete
+finding index is absent; a default schema 5 publication retains that index.
+The separately proposed local opt-in human-file-review adapter remains legacy
+inline-root only and does not gain schema 5 support from this change.

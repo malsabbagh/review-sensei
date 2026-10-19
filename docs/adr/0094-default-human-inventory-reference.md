@@ -59,7 +59,11 @@ The original explanations remain in their verified body/inline placements.
 ## Scope and limits
 
 Wire the ordinary application/publisher, fresh readers, conversation assessment,
-maintainer decisions and finalization. Keep the separately proposed partitioned
+maintainer decisions, explicit rescan and finalization. The packaged eligibility-v5
+structural schema complements, but cannot replace, independently authenticated
+reference, resolution, root and visible-prose checks. Explicit rescan shares the
+caller allowance when supplied; otherwise one command-local allowance covers all
+its reads without attaching a new deadline to later inference/checkpoint work. Keep the separately proposed partitioned
 hosts opt-in. POSIX local ledgers may reuse bounded immutable part bytes after
 fresh containment and inode/size/mtime/ctime checks; mutable roots remain fresh.
 Windows retains full rehashing and may hold this richer repeated-read profile

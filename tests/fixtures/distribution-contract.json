@@ -21,7 +21,8 @@
       "src/review_sensei/schemas/human-file-review.schema.json",
       "src/review_sensei/schemas/human-file-receipt.schema.json",
       "src/review_sensei/schemas/review-transaction.schema.json",
-      "src/review_sensei/schemas/rescan-state.schema.json"
+      "src/review_sensei/schemas/rescan-state.schema.json",
+      "src/review_sensei/schemas/eligibility-v5.schema.json"
     ],
     "description": "Required entries are these paths plus lanes.dist_safe.helpers and every module under lanes.dist_safe.discover. Forbidden entries are lanes.checkout_only.modules. The verifier reads this contract so MANIFEST.in and this file are the only places a lane asset is declared."
   },
@@ -70,6 +71,8 @@
         "tests/test_default_human_inventory_cli.py",
         "tests/test_default_human_inventory_publisher.py",
         "tests/test_default_human_reader_binding.py",
+        "tests/test_default_human_rescan.py",
+        "tests/test_schema5_public_contract.py",
         "tests/test_feedback_fence_budget.py",
         "tests/test_local_partition_read_cache.py",
         "tests/test_authenticated_partitions.py"

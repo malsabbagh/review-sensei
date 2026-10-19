@@ -12,6 +12,7 @@ from review_sensei.coverage import coverage_approval_state
 from review_sensei.errors import ReviewInputError
 from review_sensei.human_assessment import HumanInventoryResolution, PendingHumanReview
 from review_sensei.models import ReviewResult
+from review_sensei.schemas import validate_public_document
 
 if TYPE_CHECKING:
     from .default_human_inventory import HumanInventoryReference
@@ -223,6 +224,7 @@ class ReviewApprovalEligibility:
                 inventory
             ).to_dict(),
         }
+        validate_public_document(value, "eligibility-v5")
         # The initial marker must support every future resolved full ID. This
         # bounds the complete marker; the publisher also reserves surrounding
         # visible prose, finding index and lifecycle framing before any write.
@@ -359,6 +361,7 @@ class ReviewApprovalEligibility:
         )
         resolution = HumanInventoryResolution.from_dict(value["human_resolution"])
         facts = ApprovalFacts.from_dict(value["facts"])
+        validate_public_document(value, "eligibility-v5")
         inventory = human_inventory_reader(reference)
         if not isinstance(inventory, PendingHumanReview):
             raise ReviewInputError("human inventory reader returned invalid inventory")

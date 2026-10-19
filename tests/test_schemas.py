@@ -31,6 +31,7 @@ from review_sensei.session import (
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_NAMES = (
+    "eligibility-v5",
     "conversation-reply",
     "review-result",
     "human-file-review",
