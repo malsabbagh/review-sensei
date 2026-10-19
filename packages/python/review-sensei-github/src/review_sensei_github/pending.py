@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from review_sensei.errors import ReviewInputError
+from review_sensei.human_assessment import MAX_HUMAN_FINDINGS
 from review_sensei.presentation import assign_finding_identifiers, finding_identifier
 
 from .approval import ReviewApprovalEligibility, evaluate_approval_facts
@@ -109,7 +110,7 @@ def pending_reply_pages(
         raise ReviewInputError("pending decision reasons are invalid")
     compact_inventory = (
         eligibility is not None and eligibility.human_inventory_reference is not None
-    )
+    ) or (inventory is not None and len(inventory.findings) > MAX_HUMAN_FINDINGS)
     if inventory is not None:
         if compact_inventory and inventory.pending:
             lines.append(

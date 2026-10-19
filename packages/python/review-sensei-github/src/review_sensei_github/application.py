@@ -27,6 +27,7 @@ from review_sensei.diff import analyze_diff
 from review_sensei.disposition import MaintainerCommand
 from review_sensei.errors import ReviewInputError
 from review_sensei.human_assessment import (
+    MAX_HUMAN_FINDINGS,
     HumanAssessmentDecision,
     HumanAssessmentReply,
     HumanAssessmentService,
@@ -2781,7 +2782,14 @@ class GitHubApplication:
         reaction = (
             None
             if human is not None
-            and human.eligibility.human_inventory_reference is not None
+            and (
+                human.eligibility.human_inventory_reference is not None
+                or (
+                    human.eligibility.human_review is not None
+                    and len(human.eligibility.human_review.findings)
+                    > MAX_HUMAN_FINDINGS
+                )
+            )
             else replier.add_processing_reaction(
                 token=capability_token,
                 repository=repository,

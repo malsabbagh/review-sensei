@@ -207,22 +207,20 @@ class PendingReceiptMetadataFenceTests(unittest.TestCase):
             reply=reply,
             app_slug=APP,
         )
-        if metadata_changes:
+        if metadata_changes or prose_changes:
             with self.assertRaisesRegex(GitHubPublicationError, "root conflicts"):
                 publisher.publish(**arguments)
             self.assertEqual(state.events(), [])
             self.assertGreater(state.reply_count, 0)
+            if prose_changes:
+                self.assertEqual(validations[-1], "full")
             return
         result = publisher.publish(**arguments)
         self.assertIn("metadata", validations)
         self.assertEqual(validations[-1], "full")
         self.assertGreater(state.reply_count, 0)
-        if prose_changes:
-            self.assertNotEqual(result.approval_status, "approved")
-            self.assertEqual(state.events(), [])
-        else:
-            self.assertEqual(result.approval_status, "approved")
-            self.assertEqual(publications, [("COMMENT", "full"), ("APPROVE", "full")])
+        self.assertEqual(result.approval_status, "approved")
+        self.assertEqual(publications, [("COMMENT", "full"), ("APPROVE", "full")])
 
     def test_legacy_read_is_unchanged_and_invalid_mode_refuses_before_io(self):
         state = State(prior())
