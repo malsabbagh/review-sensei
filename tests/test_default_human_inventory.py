@@ -38,6 +38,85 @@ from tests.test_review_work import AssessingProvider
 
 
 class DefaultHumanInventoryTests(unittest.TestCase):
+    def finish_same_source(self, state, path, *, previous_pending, gate):
+        """Bound delivery retries; accepted computation cannot infer again."""
+        total_provider_calls = 0
+        for attempt in range(3):
+            provider = AssessingProvider()
+            budget = EvidenceReadBudget()
+            before = len(state.calls)
+            error = None
+            outcome = None
+            try:
+                outcome = reply_human(
+                    state,
+                    LocalSessionLedger(path),
+                    provider,
+                    evidence_budget=budget,
+                )
+            except (GitHubPublicationError, ReviewInputError) as exc:
+                error = exc
+            physical_http = len(state.calls) - before
+            self.assertEqual(physical_http, budget.calls)
+            self.assertLessEqual(physical_http, 60)
+            if attempt == 0:
+                self.assertGreater(len(provider.calls), 0)
+            else:
+                self.assertEqual(
+                    provider.calls, [], "same-source recovery re-executed inference"
+                )
+            total_provider_calls += len(provider.calls)
+            self.assertLessEqual(total_provider_calls, 8)
+            current = self.load_current(state, path)
+            pending = len(current.human_review.pending)
+            expected_check = (
+                "action_required"
+                if pending or gate in {"partial", "blocker"}
+                else "success"
+            )
+            approvals = state.events().count("APPROVE")
+            final_approval = not pending and gate is None
+            approval_ready = outcome is not None and (
+                outcome.approval_status in {"approved", "already_approved"}
+                if final_approval
+                else outcome.approval_status == "approval_withheld"
+            )
+            if (
+                error is None
+                and outcome.status in {"replied", "already_replied"}
+                and pending < previous_pending
+                and state.check_runs[-1]["conclusion"] == expected_check
+                and approval_ready
+                and approvals == (1 if final_approval else 0)
+            ):
+                return outcome, current
+            # A new read/delivery invocation may resume the same durable source,
+            # but only a demonstrated exhausted original allowance explains it.
+            self.assertEqual(budget.calls, 60, (attempt, error, outcome))
+            if error is not None:
+                reasons = []
+                cause = error
+                while cause is not None:
+                    reasons.append(str(cause))
+                    cause = cause.__cause__
+                self.assertIn("budget", " ".join(reasons).lower())
+            else:
+                self.assertIn(
+                    outcome.approval_diagnostic,
+                    {"check_reconciliation_failed", "approval_withheld"},
+                )
+            self.assertLess(
+                attempt,
+                2,
+                (
+                    "same-source delivery did not complete within three bounded invocations",
+                    pending,
+                    outcome,
+                    str(error),
+                ),
+            )
+        self.fail("same-source delivery exhausted its finite recovery attempts")
+
     def assert_windows_rich_publication_hold(self, *, count=77, detail=3):
         """Windows has no safe local content witness; qualify its finite hold."""
         with tempfile.TemporaryDirectory() as directory:
@@ -251,12 +330,9 @@ class DefaultHumanInventoryTests(unittest.TestCase):
                 revision += 1
                 self.assertLessEqual(revision, count)
                 next_mention(state, revision)
-                provider = AssessingProvider()
-                outcome = reply_human(state, LocalSessionLedger(path), provider)
-                self.assertEqual(outcome.status, "replied")
-                self.assertGreater(len(provider.calls), 0)
-                self.assertLessEqual(len(provider.calls), 8)
-                current = self.load_current(state, path)
+                outcome, current = self.finish_same_source(
+                    state, path, previous_pending=remaining, gate=gate
+                )
                 self.assertEqual(current.result_digest, original.result_digest)
                 self.assertEqual(
                     current.human_review.findings, original.human_review.findings
@@ -278,12 +354,23 @@ class DefaultHumanInventoryTests(unittest.TestCase):
                     self.assertEqual(outcome.approval_status, "approval_withheld")
                     self.assertNotIn("APPROVE", state.events())
                 else:
-                    self.assertEqual(outcome.approval_status, "approved")
+                    self.assertIn(
+                        outcome.approval_status, {"approved", "already_approved"}
+                    )
                 # Reconstruct all application/store objects for exact-source
                 # replay. It cannot infer again or append another authority.
                 reviews_before = len(state.reviews)
                 replay_provider = AssessingProvider()
-                replay = reply_human(state, LocalSessionLedger(path), replay_provider)
+                replay_budget = EvidenceReadBudget()
+                before = len(state.calls)
+                replay = reply_human(
+                    state,
+                    LocalSessionLedger(path),
+                    replay_provider,
+                    evidence_budget=replay_budget,
+                )
+                self.assertEqual(len(state.calls) - before, replay_budget.calls)
+                self.assertLessEqual(replay_budget.calls, 60)
                 self.assertEqual(replay.status, "already_replied")
                 self.assertEqual(replay_provider.calls, [])
                 self.assertEqual(len(state.reviews), reviews_before)

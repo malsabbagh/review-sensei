@@ -337,7 +337,7 @@ def publish_human(state, ledger, result, key, *, gate=None, **kwargs):
     )
 
 
-def reply_human(state, ledger, provider):
+def reply_human(state, ledger, provider, *, evidence_budget=None):
     """Fresh real application; its actual default comment store owns replay."""
     return application(state, ledger).generate_and_publish_reply(
         options=GitHubWriteOptions(github_writes=True, mention_replies=True),
@@ -358,6 +358,7 @@ def reply_human(state, ledger, provider):
         repository_id=IDENTITY.repository_id,
         app_id=7,
         run_id="synthetic-source:" + state.source["updated_at"],
+        **({"evidence_budget": evidence_budget} if evidence_budget is not None else {}),
     )
 
 
