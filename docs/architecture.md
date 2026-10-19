@@ -1129,3 +1129,10 @@ Broker control prepays original liability, gates fetches and JWKS waits by its
 deadline, and refuses redirects/bad receipts. V2 scope/deadline match; request
 state is isolated. No refund or new authority/durability; legacy behavior is
 unchanged. See proposed ADR 0088.
+
+The explicit trusted-host partitioned review writer requires independently
+retained result/snapshot/policy/configuration/producer expectations, one original
+budget, conditional generation activation and actual owned numeric root readback.
+It retains every complete finding explanation and future resolution allocation;
+default REST/CLI/hosted writers remain disabled. Initial publication does not
+qualify later resolution/replay or approval. See proposed ADR 0089.

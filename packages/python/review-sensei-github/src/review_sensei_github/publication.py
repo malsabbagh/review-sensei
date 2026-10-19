@@ -91,6 +91,10 @@ if TYPE_CHECKING:
         PartitionReader,
         VisibleReader,
     )
+    from .partitioned_publication import (
+        PartitionedPublicationHost,
+        PartitionedPublicationReceipt,
+    )
 
 REVIEW_MARKER_PREFIX = "<!-- reviewsensei:review:v1"
 FINDING_MARKER_PREFIX = "<!-- reviewsensei:finding:v1"
@@ -2825,6 +2829,48 @@ class ReviewPublisher:
             http=http, qualification_authority=qualification_authority
         )
         self.checks = ReviewCheckPublisher(http=http)
+
+    def publish_partitioned(
+        self,
+        *,
+        token: str,
+        host: PartitionedPublicationHost,
+        result: ReviewResult,
+        diff: str,
+        configuration_context: Mapping[str, object],
+        convergence_policy: ReviewConvergencePolicy,
+        app_slug: str,
+        base_branch: str = "main",
+        check_token: str | None = None,
+        auto_approve: bool = True,
+        reviews_policy: str = "auto-approve",
+    ) -> PartitionedPublicationReceipt:
+        """Explicit trusted-host v4 writer; the default REST route is unchanged.
+
+        Requires independently retained host/result expectations and conditional
+        activation/readback callbacks. No CLI, broker or deployed writer opts in.
+        """
+        from .partitioned_publication import publish_partitioned
+
+        try:
+            return publish_partitioned(
+                self,
+                token=token,
+                host=host,
+                result=result,
+                diff=diff,
+                configuration_context=configuration_context,
+                convergence_policy=convergence_policy,
+                app_slug=app_slug,
+                base_branch=base_branch,
+                check_token=check_token,
+                auto_approve=auto_approve,
+                reviews_policy=reviews_policy,
+            )
+        except GitHubHTTPError as exc:
+            raise GitHubPublicationError(
+                "partition publication transport or readback failed"
+            ) from exc
 
     @staticmethod
     def _bind_qualification(
