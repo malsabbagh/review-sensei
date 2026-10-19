@@ -422,9 +422,19 @@ class ConversationPublisher:
         root_comment_id: int | None = None,
         source_kind: str = "inline",
         expected_head_sha: str | None = None,
+        defer_evidence: bool = False,
     ) -> PreparedConversation | ReplyResult:
-        """Authorize and bound a mention before any provider invocation."""
+        """Authorize a mention, optionally deferring generic context evidence.
 
+        The trusted caller must independently prepare human evidence or call
+        this method again without deferral before ordinary provider inference.
+        Source, live PR and inline-root association checks always run.
+        """
+
+        if not isinstance(defer_evidence, bool):
+            raise GitHubConversationError(
+                "deferred conversation evidence gate is invalid"
+            )
         if source_kind not in {"inline", "issue"}:
             raise GitHubConversationError("reply source kind is invalid")
         if (
@@ -546,63 +556,77 @@ class ConversationPublisher:
                     source_kind="inline",
                 )
 
-        try:
-            thread_candidates = self._load_comments(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                source_kind=source_kind,
-            )
+        base_sha = base.get("sha")
+        if not isinstance(base_sha, str) or not GIT_SHA_HEX.fullmatch(base_sha):
+            raise GitHubConversationError("reply preflight base was invalid")
+        if defer_evidence:
             messages = self._select_thread_messages(
-                candidates=thread_candidates,
+                candidates=[source],
                 source=source,
                 source_comment_id=source_comment_id,
                 root_comment_id=resolved_root,
                 source_kind=source_kind,
             )
-            review_comments = (
-                thread_candidates
-                if source_kind == "inline"
-                else self._load_comments(
+            prior_findings: tuple[ConversationFinding, ...] = ()
+            diff_context: str | None = None
+            learnings: tuple[LearningEntry, ...] = ()
+        else:
+            try:
+                thread_candidates = self._load_comments(
                     token=token,
                     repository=repository,
                     pull_request=pull_request,
-                    source_kind="inline",
+                    source_kind=source_kind,
                 )
-            )
-            prior_findings = self._prior_findings(
-                comments=review_comments,
-                app_slug=app_slug,
-                head_sha=head_sha,
-            )
-            priority_hunks = (
-                self._prioritized_finding_hunks(
+                messages = self._select_thread_messages(
+                    candidates=thread_candidates,
+                    source=source,
+                    source_comment_id=source_comment_id,
+                    root_comment_id=resolved_root,
+                    source_kind=source_kind,
+                )
+                review_comments = (
+                    thread_candidates
+                    if source_kind == "inline"
+                    else self._load_comments(
+                        token=token,
+                        repository=repository,
+                        pull_request=pull_request,
+                        source_kind="inline",
+                    )
+                )
+                prior_findings = self._prior_findings(
                     comments=review_comments,
                     app_slug=app_slug,
                     head_sha=head_sha,
                 )
-                if source_kind == "issue"
-                else ()
-            )
-            diff_context, changed_paths = self._load_diff_context(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                source=source,
-                source_kind=source_kind,
-                priority_hunks=priority_hunks,
-            )
-            base_sha = base.get("sha")
-            if not isinstance(base_sha, str) or not GIT_SHA_HEX.fullmatch(base_sha):
-                raise GitHubConversationError("reply preflight base was invalid")
-            learnings = self._load_base_learnings(
-                token=token,
-                repository=repository,
-                base_sha=base_sha,
-                changed_paths=changed_paths,
-            )
-        except (LearningLoadError, ReviewInputError, UnicodeError) as exc:
-            raise GitHubConversationError("conversation context was invalid") from exc
+                priority_hunks = (
+                    self._prioritized_finding_hunks(
+                        comments=review_comments,
+                        app_slug=app_slug,
+                        head_sha=head_sha,
+                    )
+                    if source_kind == "issue"
+                    else ()
+                )
+                diff_context, changed_paths = self._load_diff_context(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    source=source,
+                    source_kind=source_kind,
+                    priority_hunks=priority_hunks,
+                )
+                learnings = self._load_base_learnings(
+                    token=token,
+                    repository=repository,
+                    base_sha=base_sha,
+                    changed_paths=changed_paths,
+                )
+            except (LearningLoadError, ReviewInputError, UnicodeError) as exc:
+                raise GitHubConversationError(
+                    "conversation context was invalid"
+                ) from exc
         try:
             context = ConversationContext(
                 messages=tuple(messages),
