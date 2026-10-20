@@ -684,3 +684,7 @@ Only confirmed owned replies or a complete empty comment list permit fallback.
 Genuine top-level legacy findings retain their exact-head inventory authority.
 Unknown, malformed, conflicting or unreadable roots refuse fallback.
 The metadata walk retains one shared ten-request, sixty-second bound.
+
+Publisher aliases must match the original run/source/ref, runner and complete
+step identity; missing or ambiguous execution facts block qualification.
+A re-exposed success must never mask a newer distinct publisher execution.

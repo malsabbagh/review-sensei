@@ -1,0 +1,735 @@
+{
+  "capture": {
+    "run_url": "https://github.com/malsabbagh/review-sensei/actions/runs/39405656742/attempts/3",
+    "observed_attempt": 3,
+    "description": "Actual authenticated API records projected to consumed fields. New executions in mutation tests are synthetic; the positive publisher alias3 is observed.",
+    "raw_run_sha256": "1fb013d99812c0808c9cc6f3821e591960b3811465785d6f9a8b19720eba2d5e",
+    "raw_jobs_sha256": "cbfb62e22b4f7351dd6e779f7270f89585edcc0dc9169428641a8031d1636c5b",
+    "original_job_id": 118574049405,
+    "reexposed_job_id": 118585795321,
+    "identical_publisher_log_sha256": "503db9265cd7ecc11642d706da8355729bd73d141244f700aa1e765fba7e6b56"
+  },
+  "run": {
+    "id": 39405656742,
+    "name": "Release",
+    "head_sha": "c2c1e20d8adf4972872cae11f8d646eaecfa9ae0",
+    "head_branch": "v0.8.6",
+    "path": ".github/workflows/release.yml",
+    "event": "push",
+    "run_attempt": 3,
+    "pull_requests": [],
+    "status": "completed",
+    "conclusion": "failure",
+    "repository": {
+      "full_name": "malsabbagh/review-sensei"
+    },
+    "head_repository": {
+      "full_name": "malsabbagh/review-sensei"
+    }
+  },
+  "previous_run": {
+    "id": 39405656742,
+    "name": "Release",
+    "head_sha": "c2c1e20d8adf4972872cae11f8d646eaecfa9ae0",
+    "head_branch": "v0.8.6",
+    "path": ".github/workflows/release.yml",
+    "event": "push",
+    "run_attempt": 2,
+    "pull_requests": [],
+    "status": "in_progress",
+    "conclusion": null,
+    "repository": {
+      "full_name": "malsabbagh/review-sensei"
+    },
+    "head_repository": {
+      "full_name": "malsabbagh/review-sensei"
+    }
+  },
+  "jobs": [
+    {
+      "id": 118570822775,
+      "name": "Qualify signed prepared source and exact-head CI",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 118570950003,
+      "name": "Build and attest release bundle",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success",
+      "run_id": 39405656742,
+      "head_sha": "c2c1e20d8adf4972872cae11f8d646eaecfa9ae0",
+      "head_branch": "v0.8.6",
+      "workflow_name": "Release",
+      "created_at": "2026-10-20T10:07:39Z",
+      "started_at": "2026-10-20T10:07:41Z",
+      "completed_at": "2026-10-20T10:08:06Z",
+      "runner_id": 1000046942,
+      "runner_name": "GitHub Actions 1000046942",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions",
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-10-20T10:07:42Z",
+          "completed_at": "2026-10-20T10:07:43Z"
+        },
+        {
+          "name": "Check out tagged source",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-10-20T10:07:43Z",
+          "completed_at": "2026-10-20T10:07:44Z"
+        },
+        {
+          "name": "Set up Python",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-10-20T10:07:44Z",
+          "completed_at": "2026-10-20T10:07:45Z"
+        },
+        {
+          "name": "Check tag and version consistency",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-10-20T10:07:45Z",
+          "completed_at": "2026-10-20T10:07:45Z"
+        },
+        {
+          "name": "Install build frontend",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-10-20T10:07:45Z",
+          "completed_at": "2026-10-20T10:07:46Z"
+        },
+        {
+          "name": "Build source distribution and wheel",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-10-20T10:07:46Z",
+          "completed_at": "2026-10-20T10:07:52Z"
+        },
+        {
+          "name": "Validate release artifacts",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-10-20T10:07:52Z",
+          "completed_at": "2026-10-20T10:07:52Z"
+        },
+        {
+          "name": "Smoke test the wheel outside the checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-10-20T10:07:52Z",
+          "completed_at": "2026-10-20T10:07:58Z"
+        },
+        {
+          "name": "Prepare release metadata directory",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-10-20T10:07:58Z",
+          "completed_at": "2026-10-20T10:07:58Z"
+        },
+        {
+          "name": "Generate SPDX SBOM",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-10-20T10:07:58Z",
+          "completed_at": "2026-10-20T10:08:01Z"
+        },
+        {
+          "name": "Create release checksums",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11,
+          "started_at": "2026-10-20T10:08:01Z",
+          "completed_at": "2026-10-20T10:08:01Z"
+        },
+        {
+          "name": "Attest package checksums",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 12,
+          "started_at": "2026-10-20T10:08:01Z",
+          "completed_at": "2026-10-20T10:08:03Z"
+        },
+        {
+          "name": "Upload validated release bundle",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 13,
+          "started_at": "2026-10-20T10:08:03Z",
+          "completed_at": "2026-10-20T10:08:04Z"
+        },
+        {
+          "name": "Post Set up Python",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 25,
+          "started_at": "2026-10-20T10:08:04Z",
+          "completed_at": "2026-10-20T10:08:04Z"
+        },
+        {
+          "name": "Post Check out tagged source",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 26,
+          "started_at": "2026-10-20T10:08:04Z",
+          "completed_at": "2026-10-20T10:08:04Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 27,
+          "started_at": "2026-10-20T10:08:04Z",
+          "completed_at": "2026-10-20T10:08:04Z"
+        }
+      ]
+    },
+    {
+      "id": 118570950063,
+      "name": "Build release documentation",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 118571134603,
+      "name": "Prepare draft GitHub release",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "failure"
+    },
+    {
+      "id": 118571359382,
+      "name": "Publish to PyPI with Trusted Publishing",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "skipped",
+      "run_id": 39405656742,
+      "head_sha": "c2c1e20d8adf4972872cae11f8d646eaecfa9ae0",
+      "head_branch": "v0.8.6",
+      "workflow_name": "Release",
+      "created_at": "2026-10-20T10:08:39Z",
+      "started_at": "2026-10-20T10:08:39Z",
+      "completed_at": "2026-10-20T10:08:39Z",
+      "runner_id": null,
+      "runner_name": null,
+      "runner_group_id": null,
+      "runner_group_name": null,
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "steps": []
+    },
+    {
+      "id": 118571360024,
+      "name": "Create GitHub release assets",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "skipped"
+    },
+    {
+      "id": 118573674079,
+      "name": "Prepare draft GitHub release",
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 118573674257,
+      "name": "Qualify signed prepared source and exact-head CI",
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 118573675758,
+      "name": "Build and attest release bundle",
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "success",
+      "run_id": 39405656742,
+      "head_sha": "c2c1e20d8adf4972872cae11f8d646eaecfa9ae0",
+      "head_branch": "v0.8.6",
+      "workflow_name": "Release",
+      "created_at": "2026-10-20T10:14:28Z",
+      "started_at": "2026-10-20T10:07:41Z",
+      "completed_at": "2026-10-20T10:08:06Z",
+      "runner_id": 1000046942,
+      "runner_name": "GitHub Actions 1000046942",
+      "runner_group_id": null,
+      "runner_group_name": "GitHub Actions",
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-10-20T10:07:42Z",
+          "completed_at": "2026-10-20T10:07:43Z"
+        },
+        {
+          "name": "Check out tagged source",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-10-20T10:07:43Z",
+          "completed_at": "2026-10-20T10:07:44Z"
+        },
+        {
+          "name": "Set up Python",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-10-20T10:07:44Z",
+          "completed_at": "2026-10-20T10:07:45Z"
+        },
+        {
+          "name": "Check tag and version consistency",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-10-20T10:07:45Z",
+          "completed_at": "2026-10-20T10:07:45Z"
+        },
+        {
+          "name": "Install build frontend",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-10-20T10:07:45Z",
+          "completed_at": "2026-10-20T10:07:46Z"
+        },
+        {
+          "name": "Build source distribution and wheel",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-10-20T10:07:46Z",
+          "completed_at": "2026-10-20T10:07:52Z"
+        },
+        {
+          "name": "Validate release artifacts",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-10-20T10:07:52Z",
+          "completed_at": "2026-10-20T10:07:52Z"
+        },
+        {
+          "name": "Smoke test the wheel outside the checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-10-20T10:07:52Z",
+          "completed_at": "2026-10-20T10:07:58Z"
+        },
+        {
+          "name": "Prepare release metadata directory",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-10-20T10:07:58Z",
+          "completed_at": "2026-10-20T10:07:58Z"
+        },
+        {
+          "name": "Generate SPDX SBOM",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-10-20T10:07:58Z",
+          "completed_at": "2026-10-20T10:08:01Z"
+        },
+        {
+          "name": "Create release checksums",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11,
+          "started_at": "2026-10-20T10:08:01Z",
+          "completed_at": "2026-10-20T10:08:01Z"
+        },
+        {
+          "name": "Attest package checksums",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 12,
+          "started_at": "2026-10-20T10:08:01Z",
+          "completed_at": "2026-10-20T10:08:03Z"
+        },
+        {
+          "name": "Upload validated release bundle",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 13,
+          "started_at": "2026-10-20T10:08:03Z",
+          "completed_at": "2026-10-20T10:08:04Z"
+        },
+        {
+          "name": "Post Set up Python",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 25,
+          "started_at": "2026-10-20T10:08:04Z",
+          "completed_at": "2026-10-20T10:08:04Z"
+        },
+        {
+          "name": "Post Check out tagged source",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 26,
+          "started_at": "2026-10-20T10:08:04Z",
+          "completed_at": "2026-10-20T10:08:04Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 27,
+          "started_at": "2026-10-20T10:08:04Z",
+          "completed_at": "2026-10-20T10:08:04Z"
+        }
+      ]
+    },
+    {
+      "id": 118573714779,
+      "name": "Build release documentation",
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 118574049405,
+      "name": "Publish to PyPI with Trusted Publishing",
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "success",
+      "run_id": 39405656742,
+      "head_sha": "c2c1e20d8adf4972872cae11f8d646eaecfa9ae0",
+      "head_branch": "v0.8.6",
+      "workflow_name": "Release",
+      "created_at": "2026-10-20T10:15:25Z",
+      "started_at": "2026-10-20T10:21:21Z",
+      "completed_at": "2026-10-20T10:21:47Z",
+      "runner_id": 1000046954,
+      "runner_name": "GitHub Actions 1000046954",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions",
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-10-20T10:21:22Z",
+          "completed_at": "2026-10-20T10:21:24Z"
+        },
+        {
+          "name": "Download validated release bundle",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-10-20T10:21:24Z",
+          "completed_at": "2026-10-20T10:21:25Z"
+        },
+        {
+          "name": "Publish wheel and source distribution",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-10-20T10:21:25Z",
+          "completed_at": "2026-10-20T10:21:45Z"
+        },
+        {
+          "name": "Post Publish wheel and source distribution",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-10-20T10:21:45Z",
+          "completed_at": "2026-10-20T10:21:45Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-10-20T10:21:45Z",
+          "completed_at": "2026-10-20T10:21:45Z"
+        }
+      ]
+    },
+    {
+      "id": 118576539264,
+      "name": "Create GitHub release assets",
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "failure"
+    },
+    {
+      "id": 118585792965,
+      "name": "Qualify signed prepared source and exact-head CI",
+      "run_attempt": 3,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 118585793553,
+      "name": "Build and attest release bundle",
+      "run_attempt": 3,
+      "status": "completed",
+      "conclusion": "success",
+      "run_id": 39405656742,
+      "head_sha": "c2c1e20d8adf4972872cae11f8d646eaecfa9ae0",
+      "head_branch": "v0.8.6",
+      "workflow_name": "Release",
+      "created_at": "2026-10-20T10:45:36Z",
+      "started_at": "2026-10-20T10:07:41Z",
+      "completed_at": "2026-10-20T10:08:06Z",
+      "runner_id": 1000046942,
+      "runner_name": "GitHub Actions 1000046942",
+      "runner_group_id": null,
+      "runner_group_name": "GitHub Actions",
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-10-20T10:07:42Z",
+          "completed_at": "2026-10-20T10:07:43Z"
+        },
+        {
+          "name": "Check out tagged source",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-10-20T10:07:43Z",
+          "completed_at": "2026-10-20T10:07:44Z"
+        },
+        {
+          "name": "Set up Python",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-10-20T10:07:44Z",
+          "completed_at": "2026-10-20T10:07:45Z"
+        },
+        {
+          "name": "Check tag and version consistency",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-10-20T10:07:45Z",
+          "completed_at": "2026-10-20T10:07:45Z"
+        },
+        {
+          "name": "Install build frontend",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-10-20T10:07:45Z",
+          "completed_at": "2026-10-20T10:07:46Z"
+        },
+        {
+          "name": "Build source distribution and wheel",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-10-20T10:07:46Z",
+          "completed_at": "2026-10-20T10:07:52Z"
+        },
+        {
+          "name": "Validate release artifacts",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-10-20T10:07:52Z",
+          "completed_at": "2026-10-20T10:07:52Z"
+        },
+        {
+          "name": "Smoke test the wheel outside the checkout",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-10-20T10:07:52Z",
+          "completed_at": "2026-10-20T10:07:58Z"
+        },
+        {
+          "name": "Prepare release metadata directory",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-10-20T10:07:58Z",
+          "completed_at": "2026-10-20T10:07:58Z"
+        },
+        {
+          "name": "Generate SPDX SBOM",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-10-20T10:07:58Z",
+          "completed_at": "2026-10-20T10:08:01Z"
+        },
+        {
+          "name": "Create release checksums",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11,
+          "started_at": "2026-10-20T10:08:01Z",
+          "completed_at": "2026-10-20T10:08:01Z"
+        },
+        {
+          "name": "Attest package checksums",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 12,
+          "started_at": "2026-10-20T10:08:01Z",
+          "completed_at": "2026-10-20T10:08:03Z"
+        },
+        {
+          "name": "Upload validated release bundle",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 13,
+          "started_at": "2026-10-20T10:08:03Z",
+          "completed_at": "2026-10-20T10:08:04Z"
+        },
+        {
+          "name": "Post Set up Python",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 25,
+          "started_at": "2026-10-20T10:08:04Z",
+          "completed_at": "2026-10-20T10:08:04Z"
+        },
+        {
+          "name": "Post Check out tagged source",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 26,
+          "started_at": "2026-10-20T10:08:04Z",
+          "completed_at": "2026-10-20T10:08:04Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 27,
+          "started_at": "2026-10-20T10:08:04Z",
+          "completed_at": "2026-10-20T10:08:04Z"
+        }
+      ]
+    },
+    {
+      "id": 118585794034,
+      "name": "Build release documentation",
+      "run_attempt": 3,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 118585795321,
+      "name": "Publish to PyPI with Trusted Publishing",
+      "run_attempt": 3,
+      "status": "completed",
+      "conclusion": "success",
+      "run_id": 39405656742,
+      "head_sha": "c2c1e20d8adf4972872cae11f8d646eaecfa9ae0",
+      "head_branch": "v0.8.6",
+      "workflow_name": "Release",
+      "created_at": "2026-10-20T10:45:36Z",
+      "started_at": "2026-10-20T10:21:21Z",
+      "completed_at": "2026-10-20T10:21:47Z",
+      "runner_id": 1000046954,
+      "runner_name": "GitHub Actions 1000046954",
+      "runner_group_id": null,
+      "runner_group_name": "GitHub Actions",
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-10-20T10:21:22Z",
+          "completed_at": "2026-10-20T10:21:24Z"
+        },
+        {
+          "name": "Download validated release bundle",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-10-20T10:21:24Z",
+          "completed_at": "2026-10-20T10:21:25Z"
+        },
+        {
+          "name": "Publish wheel and source distribution",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-10-20T10:21:25Z",
+          "completed_at": "2026-10-20T10:21:45Z"
+        },
+        {
+          "name": "Post Publish wheel and source distribution",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-10-20T10:21:45Z",
+          "completed_at": "2026-10-20T10:21:45Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-10-20T10:21:45Z",
+          "completed_at": "2026-10-20T10:21:45Z"
+        }
+      ]
+    },
+    {
+      "id": 118585795428,
+      "name": "Prepare draft GitHub release",
+      "run_attempt": 3,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 118585795492,
+      "name": "Create GitHub release assets",
+      "run_attempt": 3,
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ]
+}
