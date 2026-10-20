@@ -51,6 +51,7 @@ from review_sensei.history_association import (
     associate_history,
     read_associated_history,
 )
+from review_sensei.operation_witness import OperationHandle
 from review_sensei.rescan import AuthorizedRescan
 from review_sensei.session import (
     MAX_SESSION_COMMENT_BYTES,
@@ -1713,6 +1714,80 @@ class GitHubIssueCommentSessionLedger:
             self._tail_authorizing, self._tail_scan_pages = False, None
             self._reuse_listed_parts = False
 
+    def admit_with_tail(
+        self,
+        identity: SessionIdentity,
+        prepare: Callable[[SessionRecord], SessionRecord],
+        *,
+        slot: str,
+        expected_generation: int,
+        operation_binding: Mapping[str, object],
+        attempt_reservation_id: str,
+        seal_accounting: Callable[[SessionRecord, Mapping[str, int]], SessionRecord],
+        max_scan_pages: int,
+        now: datetime | None = None,
+        witness: object = None,
+    ) -> SessionRecord:
+        """Write reservation plus complete admission in one owned mutation.
+
+        ``prepare`` receives an uncommitted reservation candidate. It adds the
+        complete checkpoint without another generation increment. The caller
+        must source/PR/base/head/latest-inventory fence this preparation and
+        cannot dispatch inference until this method's owned readback succeeds.
+        """
+        budget = self.evidence_budget
+        if (
+            not isinstance(witness, OperationHandle)
+            or not isinstance(operation_binding, Mapping)
+            or not _operation_witness_matches(witness, attempt_reservation_id)
+            or budget is None
+            or witness.scope_digest
+            != hashlib.sha256(
+                f"{identity.repository_id}:{identity.pull_request}".encode()
+            ).hexdigest()
+            or witness.operation_id != operation_binding.get("operation_id")
+            or witness.control_deadline_ms != budget.wall_deadline_ms
+            or witness.created_at_ms + 60_000 != witness.control_deadline_ms
+            or type(witness.calls) is not int
+            or not budget.calls <= witness.calls <= 64
+            or type(expected_generation) is not int
+            or not 0 <= expected_generation < 2_147_483_647
+            or slot != "verification"
+        ):
+            raise NonResumableActivationError(
+                "original admitted control witness differs"
+            )
+        attestation = self._session_attestation
+        mutation = (
+            attestation.get("mutation") if isinstance(attestation, Mapping) else None
+        )
+        if (
+            not isinstance(attestation, Mapping)
+            or attestation.get("version") != 2
+            or not isinstance(mutation, Mapping)
+            or mutation.get("reason") != "admission-dispatch"
+        ):
+            raise ReviewInputError(
+                "initial activation requires exact admission-dispatch grant"
+            )
+        scope = _tail_attempt_scope(identity, attempt_reservation_id, operation_binding)
+        if scope in budget._live_attempts or scope in budget._failed_attempts:
+            raise NonResumableActivationError(
+                "original initial admission is already owned; inspect its retained checkpoint"
+            )
+        return self._replace_with_tail(
+            identity,
+            prepare,
+            operation_binding=operation_binding,
+            attempt_reservation_id=attempt_reservation_id,
+            seal_accounting=seal_accounting,
+            max_scan_pages=max_scan_pages,
+            now=now,
+            witness=witness,
+            initial_slot=slot,
+            initial_generation=expected_generation,
+        )
+
     def replace_with_tail(
         self,
         identity: SessionIdentity,
@@ -1724,6 +1799,32 @@ class GitHubIssueCommentSessionLedger:
         max_scan_pages: int,
         now: datetime | None = None,
         witness: object = None,
+    ) -> SessionRecord:
+        """Each checkpoint consumes a fresh grant; prepay all sealed root work."""
+        return self._replace_with_tail(
+            identity,
+            prepare,
+            operation_binding=operation_binding,
+            attempt_reservation_id=attempt_reservation_id,
+            seal_accounting=seal_accounting,
+            max_scan_pages=max_scan_pages,
+            now=now,
+            witness=witness,
+        )
+
+    def _replace_with_tail(
+        self,
+        identity: SessionIdentity,
+        prepare: Callable[[SessionRecord], SessionRecord],
+        *,
+        operation_binding: Mapping[str, object],
+        attempt_reservation_id: str,
+        seal_accounting: Callable[[SessionRecord, Mapping[str, int]], SessionRecord],
+        max_scan_pages: int,
+        now: datetime | None = None,
+        witness: object = None,
+        initial_slot: str | None = None,
+        initial_generation: int | None = None,
     ) -> SessionRecord:
         """Each checkpoint consumes a fresh grant; prepay all sealed root work."""
         if not self.enable_partition_writes or self.evidence_budget is None:
@@ -1759,6 +1860,30 @@ class GitHubIssueCommentSessionLedger:
                 raise ReviewInputError(
                     "prepaid activation current authority is unavailable"
                 )
+            reserved = None
+            if initial_slot is not None:
+                if (
+                    before.reservation_id is not None
+                    or before.generation != initial_generation
+                ):
+                    raise ReviewInputError(
+                        "initial activation reservation or generation differs"
+                    )
+                reserved = mutate_reserved(
+                    before,
+                    slot=initial_slot,
+                    reservation_id=attempt_reservation_id,
+                    expected_generation=before.generation,
+                    head_sha=self._head_sha,
+                    now=now,
+                )
+                budget._remember_live_attempt(
+                    scope,
+                    before.record_sha256,
+                    owner=self,
+                    witness=witness,
+                    reservation_id=attempt_reservation_id,
+                )
             budget._require_live_attempt(
                 scope,
                 before.record_sha256,
@@ -1781,7 +1906,7 @@ class GitHubIssueCommentSessionLedger:
             ):
                 raise ReviewInputError("session generation conflict before preparation")
             self._mutation_active = self._tail_preparing = True
-            draft = prepare(before)
+            draft = prepare(reserved if reserved is not None else before)
             self._mutation_active = self._tail_preparing = False
             _validate_tail_draft(
                 before,
@@ -1789,6 +1914,7 @@ class GitHubIssueCommentSessionLedger:
                 operation=operation,
                 reservation_id=attempt_reservation_id,
                 budget=budget,
+                initial_slot=initial_slot,
             )
             if self.enable_history_graph:
                 read_session_assessment_queue(self, draft)
@@ -1878,6 +2004,10 @@ class GitHubIssueCommentSessionLedger:
                     plan, witness=witness, reservation_id=attempt_reservation_id
                 )
             )
+            if initial_slot is not None and (
+                not isinstance(witness, OperationHandle) or budget.calls > witness.calls
+            ):
+                raise ReviewInputError("activation exceeds original prepaid liability")
             sealed = _seal_tail_accounting(draft, seal_accounting, budget)
             _validate_queue_retention(before, sealed)
             patch_body: dict[str, object] = {
@@ -1908,25 +2038,37 @@ class GitHubIssueCommentSessionLedger:
                 )
             self._tail_phase = "activate"
             self._verify_live_head(identity)
-            status, payload = self._request("PATCH", path, body=patch_body)
-            if status != 200 or not isinstance(payload, dict):
-                raise GitHubPublicationTransientError(
-                    "prepaid root update is ambiguous"
-                )
-            self._part_owner(payload, identity)
-            verified = parse_session_comment(payload.get("body"), identity=identity)
-            if (
-                payload.get("id") != comment_id
-                or verified is None
-                or verified.record_sha256 != sealed.record_sha256
-            ):
-                raise ReviewInputError("prepaid root update lost")
+            try:
+                status, payload = self._request("PATCH", path, body=patch_body)
+            except GitHubPublicationError:
+                if initial_slot is None:
+                    raise
+                # The pre-admitted mandatory owned scan resolves uncertainty;
+                # never repeat PATCH or consume another grant after an effect.
+                status, payload = 0, None
+            if initial_slot is None:
+                if status != 200 or not isinstance(payload, dict):
+                    raise GitHubPublicationTransientError(
+                        "prepaid root update is ambiguous"
+                    )
+                self._part_owner(payload, identity)
+                verified = parse_session_comment(payload.get("body"), identity=identity)
+                if (
+                    payload.get("id") != comment_id
+                    or verified is None
+                    or verified.record_sha256 != sealed.record_sha256
+                ):
+                    raise ReviewInputError("prepaid root update lost")
             self._tail_phase = "readback"
             readback_id, readback = self._discover(identity, now=now)
             if (
                 readback_id != comment_id
                 or readback is None
                 or readback.record_sha256 != sealed.record_sha256
+                or (
+                    initial_slot is not None
+                    and grant_digest not in self._observed_consumed_grants
+                )
             ):
                 raise ReviewInputError(
                     "prepaid activation readback is ambiguous or conflicting"

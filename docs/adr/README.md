@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0090](0090-coalesced-initial-assessment-tail.md) | Proposed | Coalesce owned reservation and complete admission under one consumed grant | #240, #242, #243, #244, #245, #269 | Original handle/deadline/liability and owned readback; no CLI activation |
 | [0088](0088-broker-physical-dispatch-control.md) | Proposed | Enforce caller-funded broker internal liability and original deadline | #240, #242, #243, #244, #245, #269 | Explicit opt-in receipt; unchanged legacy protocol; no CLI activation or deployment |
 | [0087](0087-selected-assessment-context-and-owned-page-readback.md) | Proposed | Explicit selected assessment preparation and exact owned page readback before complete report confirmation | #240, #242, #244, #269 | Cold local-library 100 findings with 0/100/250 discussion comments; original budgets and all final fences |
 | [0086](0086-original-selected-operation-context.md) | Proposed | Expose original hosted operation context with bounded wall time | #240, #242, #243, #244, #245, #269 | Actual retained handles and complete identity; selected CLI/control accounting remain unqualified |

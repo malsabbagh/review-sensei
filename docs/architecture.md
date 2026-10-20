@@ -1125,7 +1125,7 @@ uses exact owned POST-ID readback followed by the complete report scan; the
 ordinary conversation route remains available. See
 [Proposed ADR 0087](adr/0087-selected-assessment-context-and-owned-page-readback.md).
 
-Broker control prepays original liability, gates fetches and JWKS waits by its
-deadline, and refuses redirects/bad receipts. V2 scope/deadline match; request
-state is isolated. No refund or new authority/durability; legacy behavior is
-unchanged. See proposed ADR 0088.
+Broker control funds isolated fetch/JWKS work under original bounds and v2 binding;
+redirects/bad receipts refuse, without refunds or new authority/durability (ADR 0088).
+`admit_with_tail` joins reservation/admission; owned readback precedes inference
+(ADR 0090).
