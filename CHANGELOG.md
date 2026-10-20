@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.7 - 2026-10-20
+
 - Refuse missing native reviews on terminal retries in either entry mode; when
   native replay is admitted, record a non-passing authority check without a
   terminal ledger rewrite.
@@ -50,6 +52,10 @@
   one publication budget, retaining fresh ownership, storage and prose fences.
 - Use one clock sample for recovery-artifact creation and expiry so the minimum
   supported lifetime remains valid across a wall-clock second boundary.
+
+## review-sensei-github 0.3.7 - 2026-10-20
+
+- Pin `review-sensei==0.8.7`.
 
 ## 0.8.6 - 2026-10-20
 
