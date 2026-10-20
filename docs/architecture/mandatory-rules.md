@@ -397,6 +397,8 @@ payload validation, then a single named SQLite-backed Durable Object stores
 only delivery identity, digest, state, and a short lease. The same Worker uses
 
 
+Retain signed engine provenance, installed-CLI/downstream tests and workflow drain.
+
 provider-neutral review engine. `pyproject.toml` is the single package metadata
 source; `setup.py` is retained only as a metadata-free compatibility shim for
 legacy tooling. `MANIFEST.in` controls source-distribution documentation and

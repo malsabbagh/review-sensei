@@ -38,7 +38,7 @@ from .errors import (
     GitHubHTTPTransientError,
     GitHubPublicationError,
 )
-from .http import GitHubHttp
+from .http import HISTORY_PAGE_SIZES, GitHubHttp
 from .pending import PendingReplyPage, pending_reply_pages
 from .publication import (
     ReviewApprovalFinalizer,
@@ -62,7 +62,7 @@ MAX_CONTEXT_PR_BODY_BYTES = 4 * 1024
 MAX_CONTEXT_DIFF_BYTES = 12 * 1024
 MAX_CONTEXT_FINDING_BYTES = 512
 MAX_CONTEXT_LEARNINGS_BYTES = 6 * 1024
-CONVERSATION_COMMENT_PAGE_SIZES = (100, 50, 25, 5, 1)
+CONVERSATION_COMMENT_PAGE_SIZES = HISTORY_PAGE_SIZES
 MAX_REVIEW_THREAD_PAGES = 10
 # Preserve Unicode whitespace as a conversation boundary for both handles.
 # Only canonical letter matching is ASCII-scoped; commands use ASCII separators.

@@ -659,6 +659,17 @@ auditable. A temporary environment-scoped token can bootstrap an entirely new
 package set; after the first release, npm Trusted Publishing binds each package
 to each authorized workflow, repository, and environment, eliminating the token.
 
+For the next release, Python/docs builds produce the verified GitHub draft
+without waiting for native/npm assembly; PyPI approval and publication release
+that draft independently of npm. Major-channel admission verifies both engine
+and hosted PyPI wheel/sdist publication attestations against signed immutable
+source, publisher run/attempt and protected environments.
+Retain signed engine provenance, installed-CLI/downstream tests and workflow drain.
+npm remains an independently attested native-binary
+distribution with its own protected approval and integrity readback. Overall
+Release/npm success remains a Pages condition, outside v5 admission. See
+[ADR 0095](adr/0095-pypi-qualified-major-channel.md).
+
 Release operations, PyPI registration, signed-tag ownership, verification,
 rollback/yank, and compromised-release response are documented in
 `docs/releasing.md`. The workflow cannot reserve the PyPI project or decide
@@ -1143,3 +1154,11 @@ Semantic failures never request correction. GitHub creates the tracker before co
 preparation, retaining it through operation entry/generation; expiry/exhaustion/
 cancellation cannot publish replies. Adapters receive remaining deadline and configured
 output cap without backend-specific policy.
+
+## Bounded hosted history readers
+
+Hosted REST lists and review-thread GraphQL queries use adaptive page sizes
+within their existing read, item and response-byte limits. Prepaid ledger plans
+fix the selected fence size before activation. The retry rules and finite
+qualification matrix are in [ADR 0096](adr/0096-bounded-hosted-history-readers.md)
+and [hosted history acceptance](validation/hosted-history-readers.md).

@@ -19,6 +19,19 @@ are not a capacity guarantee for later heads. Rebuild the exact required patches
 and factual reply through that runtime's work planner and measure the UTF-8
 request before using this admission result for a different source identity.
 
+## Next-release publication policy
+
+For the next release, [ADR 0095](adr/0095-pypi-qualified-major-channel.md) and
+[the PyPI promotion runbook](releasing.md#pypi-publication-and-v5-promotion)
+replace this dated plan's npm-completion and aggregate Release/Pages
+prerequisites for v5. Both engine and hosted Python wheel/sdist pairs require
+verified PyPI publication and signed source binding. npm remains an independent
+native-binary distribution; its incomplete publication keeps its actual status.
+The five-lane compatibility manifest remains a complete-distribution record,
+not v5's admission receipt. Source CI, workflow/reader drain, downstream tests,
+canary evidence and exact signed old-object lease still apply. The active
+0.8.4 / 0.3.4 promotion follows its separately authorized existing process.
+
 ## Candidate and prerequisites
 
 Prepared against the identities verified on 2026-10-09:

@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0096](0096-bounded-hosted-history-readers.md) | Proposed | Recover oversized hosted histories within original read envelopes | #238, #240, #246, #267, #269; PR #316 | Complete lossless readers and presealed fence sizing |
 | [0094](0094-default-human-inventory-reference.md) | Proposed | Complete default human inventory references | #238, #246, #267; PR #316 | Transaction-bound admitted evidence, ordinary approval gates and bounded recovery |
 | [0093](0093-default-publication-retention.md) | Proposed | Bounded default publication and transaction-bound result retention | #238, #246, #267; PR #316 | Reader-first gated emission, existing result-part storage and no inference retry |
 | [0081](0081-openrouter-response-metadata-and-routing.md) | Proposed | Separate reported provider metadata and exact routing identifiers | #118–#121 | Optional bounded telemetry, hosted eligibility and unchanged qualification gates |
@@ -93,6 +94,7 @@ Process: `docs/process/adr-process.md`
 | [0077](0077-explicit-human-file-review.md) | Proposed | Record explicit human review of unsupported binary files without treating AI coverage as complete | #253 | Confirmation is audit; mixed APPROVE waives only the binary blocker |
 | [0078](0078-review-sensei-github-split.md) | Proposed | Ship the GitHub Actions runtime as review-sensei-github | User-authorized split | Engine must not import the host; v5 moves only after the hosted package is published |
 | [0079](0079-reservation-leak-prevention-and-admission-self-heal.md) | Proposed | Prevent reservation leaks and self-heal at admission | Pending triage | Supersedes ADR 0063's explicit-continue rule; pause is never auto-cleared |
+| [0095](0095-pypi-qualified-major-channel.md) | Proposed | Qualify v5 from verified engine and hosted PyPI publication independently of npm | User-requested next-release policy | Preserve signed engine source, provenance, approvals and downstream gates |
 
 ## Policy
 

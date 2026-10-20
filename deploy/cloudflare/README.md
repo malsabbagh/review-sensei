@@ -133,6 +133,36 @@ https://<worker-subdomain>.workers.dev/github/webhook
 The endpoint accepts `POST` only. `GET /healthz` is a liveness check and does
 not verify GitHub App configuration.
 
+Broker review/comment witnesses and installation inventory reads retain a
+512 KiB limit per response and at most ten physical requests per inventory.
+An oversized page retries with sizes 100, 50, 25, 5 and 1, restarting the
+inventory at page one after each size change. Failed reads consume the same
+request allowance; no partial inventory becomes authority. Invalid responses,
+an oversized individual item and exhausted budgets still fail closed. App
+identity and exact-head review checks remain required.
+
+This pagination behavior is Worker code and needs no Python/npm publication or
+public-tag movement. It does not change the installed hosted caller's separate
+reservation-cleanup reader. A cleanup warning after an oversized history must
+be investigated against the durable ledger; it does not prove that a
+reservation was released. Do not delete history or reset the ledger to bypass
+the failure.
+
+The acceptance cases in `test/github-history.test.ts` exercise the production
+HTTP decoder and all three affected readers:
+
+| Requirement | Test evidence |
+| --- | --- |
+| Large history, full-object retention | Synthetic 27-comment / 620,839-byte captured shape; 100 and 250 metadata-heavy objects; later-page overflow |
+| Original read limits | Header and streamed overflow cancellation; oversized individual object; ten-request exhaustion; unterminated 1,000-item inventory |
+| Fail-closed authority | Invalid status/shape/page length; interrupted walk; foreign App marker; stale and current-head submitted reviews |
+| Installation reconciliation | Adaptive complete inventory and invalid repository name; only the existing token-creation request is non-GET |
+| Cleanup capability isolation | `test/token-broker.test.ts` proves current/moved-head release-only exchange skips history and issues no mutation grant |
+
+These local cases do not establish a successful deployed review or qualify the
+installed caller's cleanup reader. A production retry must separately check
+the current head, active reservation, publication readback and actual coverage.
+
 ## Local development
 
 Create a local-only `deploy/cloudflare/.dev.vars` file (it is ignored) with:

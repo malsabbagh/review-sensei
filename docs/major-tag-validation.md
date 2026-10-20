@@ -16,7 +16,8 @@ The gate uses the existing `release_docs.py` GitHub-verified annotated-signature
 policy. Lightweight and nested tags fail. The major object's peeled source
 must match the event. Its exact stable immutable release tag, package/site/npm
 manifests, published GitHub release, authoritative release binding, asset
-digests and successful source-bound Release run must agree. Channel numbers
+digests and successful source-bound Python release jobs must agree. Overall
+Release success and npm assembly/publication are not admission requirements. Channel numbers
 are independent of package versions: `v5` can select `0.6.21`.
 
 The asset inventory is an exact four-item set: one bounded five-item API page
@@ -32,6 +33,18 @@ workflow, immutable tag ref, source digest and GitHub-hosted runner. The later
 PyPI wheel must match that digest **before installation**. The gate also reads
 one internal `METADATA` entry (at most 64 KiB, at most 4,096 ZIP entries) and requires the package name/version
 before advertising eligibility; it never imports or executes the wheel.
+
+Both engine and hosted wheel/sdist pairs must also exist on public PyPI and be
+unyanked. Bounded HTTPS reads hash the exact bytes; a credential-free verifier
+checks PyPI publication signatures/transparency and binds the repository,
+workflow, immutable ref, source digest, publishing run/attempt, GitHub-hosted
+runner and protected `pypi` / `pypi-github` environment. The hosted wheel metadata
+must pin the exact engine version. GitHub and PyPI engine wheel hashes must
+agree; both verified wheel hashes are passed into the installed CLI lanes.
+Missing Python artifacts, invalid provenance, a failed latest required Python
+job, or a source mismatch refuses eligibility even if npm succeeds. A pending
+or failed npm job remains independent, with its original status unchanged.
+See [ADR 0095](adr/0095-pypi-qualified-major-channel.md) for next-release rollout.
 
 Tagged workflow files are parsed as bounded data and never executed by this
 validator. Selected checks cover caller/reusable inputs, explicit optional
@@ -59,7 +72,7 @@ directory is rejected before reads and its receipt is left unchanged.
 All lanes freeze validation code to one protected default-branch checkout SHA.
 Same-channel concurrency cancels older runs. The final job requires every CLI
 lane to pass and rechecks the exact major object/source, immutable release and
-asset inventory. Green evidence names an exact object/source; the tag can move
+asset inventory, both signed Python tags and exact PyPI artifact identities. Green evidence names an exact object/source; the tag can move
 again after the last read. A later head is never silently substituted.
 
 ## Actual promotion mechanism

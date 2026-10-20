@@ -89,7 +89,7 @@ from .errors import (
 )
 from .http import MAX_PAGINATION_ITEMS, GitHubHttp
 
-_COMMENT_PAGE_SIZES = (100, 20, 5)
+_COMMENT_PAGE_SIZES = (100, 20, 5, 1)
 _FENCE_PAGE_SIZE = 100
 _SINCE_MARGIN = timedelta(seconds=2)
 _UPDATED_AT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -350,6 +350,7 @@ class GitHubIssueCommentSessionLedger:
         self._list_refresh = True
         self._list_anchor: str | None = None
         self._fence_anchor: str | None = None
+        self._fence_page_size = _FENCE_PAGE_SIZE
         self._verified_parts: dict[str, AuthenticatedPart] = {}
         self._part_digests: dict[str, str] = {}
         self._reuse_listed_parts = False
@@ -752,9 +753,7 @@ class GitHubIssueCommentSessionLedger:
         return shared
 
     def _fence_path(self, identity: SessionIdentity, page: int) -> str:
-        path = (
-            f"{self._comments_path(identity)}?per_page={_FENCE_PAGE_SIZE}&page={page}"
-        )
+        path = f"{self._comments_path(identity)}?per_page={self._fence_page_size}&page={page}"
         anchor = self._fence_anchor
         if isinstance(anchor, str) and anchor:
             path += f"&since={quote(anchor, safe='')}"
@@ -796,6 +795,10 @@ class GitHubIssueCommentSessionLedger:
                 or len(payload) > page_size
             ):
                 raise ReviewInputError("partition metadata enumeration is unavailable")
+            # Select a safe size before sealing the tail's exact request URLs.
+            # A sealed fence never changes size or adds replacement requests.
+            if self._activation_ticket is None:
+                self._fence_page_size = min(self._fence_page_size, page_size)
             collected.extend(payload)
             if len(payload) < page_size:
                 return collected
@@ -818,11 +821,11 @@ class GitHubIssueCommentSessionLedger:
             if (
                 status != 200
                 or not isinstance(payload, list)
-                or len(payload) > _FENCE_PAGE_SIZE
+                or len(payload) > self._fence_page_size
             ):
                 raise ReviewInputError("partition metadata enumeration is unavailable")
             collected.extend(payload)
-            if len(payload) < _FENCE_PAGE_SIZE:
+            if len(payload) < self._fence_page_size:
                 self._merge_comments(collected)
                 self._note_anchor(collected)
                 return self._cached_comments()
