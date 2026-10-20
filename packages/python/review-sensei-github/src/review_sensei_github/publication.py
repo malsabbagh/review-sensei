@@ -80,6 +80,7 @@ from .checks import (
     check_outcome_for_result,
     review_check_outcome_for_publication_failure,
 )
+from .eligibility_parts import BoundPartitionedEligibilityReader
 from .errors import (
     GitHubHTTPError,
     GitHubHTTPPaginationLimitError,
@@ -93,6 +94,7 @@ from .http import (
     BoundedGraphQLPages,
     GitHubHttp,
 )
+from .qualification import TrustedOpenRouterQualification
 from .thread_resolution import graphql_app_author
 
 if TYPE_CHECKING:
@@ -101,6 +103,10 @@ if TYPE_CHECKING:
         PartitionedEligibilityContext,
         PartitionReader,
         VisibleReader,
+    )
+    from .partitioned_publication import (
+        PartitionedPublicationHost,
+        PartitionedPublicationReceipt,
     )
 
 REVIEW_MARKER_PREFIX = "<!-- reviewsensei:review:v1"
@@ -1409,6 +1415,7 @@ class _BudgetedReviewPagination(GitHubHttp):
     def __init__(self, http: GitHubHttp, budget: EvidenceReadBudget) -> None:
         self.transport = http
         self.budget = budget
+        self.last_page_size = 100
 
     def request(
         self,
@@ -1420,6 +1427,9 @@ class _BudgetedReviewPagination(GitHubHttp):
         timeout_seconds: float | None = None,
     ) -> tuple[int, dict[str, Any] | list[Any] | None]:
         try:
+            page_size = re.search(r"[?&]per_page=(\d+)", path)
+            if page_size is not None:
+                self.last_page_size = int(page_size.group(1))
             if getattr(self.transport, "publication_budget", None) is self.budget:
                 result = self.transport.request(
                     method,
@@ -1430,7 +1440,17 @@ class _BudgetedReviewPagination(GitHubHttp):
                 )
                 self.budget.check()
                 return result
-            remaining = self.budget.consume()
+            # The explicit assessment transport already charges this exact
+            # budget on every physical dispatch; do not charge it twice.
+            from .human_assessment import FeedbackBudgetHttp
+
+            shared = (
+                isinstance(self.transport, FeedbackBudgetHttp)
+                and self.transport.before_read == self.budget.consume
+            )
+            remaining = (
+                self.budget._remaining_seconds() if shared else self.budget.consume()
+            )
             result = self.transport.request(
                 method,
                 path,
@@ -1543,6 +1563,7 @@ class ReviewApprovalFinalizer:
         *,
         http: GitHubHttp,
         evidence_budget: EvidenceReadBudget | None = None,
+        qualification_authority: TrustedOpenRouterQualification | None = None,
         human_inventory_reader: Callable[[HumanInventoryReference], PendingHumanReview]
         | None = None,
         human_inventory_reader_factory: Callable[
@@ -1550,6 +1571,7 @@ class ReviewApprovalFinalizer:
         ]
         | None = None,
         human_inventory_read_token: str | None = None,
+        partitioned_reader: BoundPartitionedEligibilityReader | None = None,
     ) -> None:
         if (
             human_inventory_reader is not None
@@ -1563,6 +1585,12 @@ class ReviewApprovalFinalizer:
             or not human_inventory_read_token.strip()
         ):
             raise GitHubPublicationError("human inventory read credential is invalid")
+        if partitioned_reader is not None and (
+            type(partitioned_reader) is not BoundPartitionedEligibilityReader
+            or partitioned_reader.context.budget is not evidence_budget
+        ):
+            raise ReviewInputError("partition finalizer original budget changed")
+        self.partitioned_reader = partitioned_reader
         self.http = http
         self.evidence_budget = evidence_budget
         self.human_inventory_reader = human_inventory_reader
@@ -1570,7 +1598,14 @@ class ReviewApprovalFinalizer:
         # An explicitly supplied metadata credential is independent of the
         # capability used for review/check mutations. Never persist this value.
         self.human_inventory_read_token = human_inventory_read_token
+        if (
+            qualification_authority is not None
+            and type(qualification_authority) is not TrustedOpenRouterQualification
+        ):
+            raise ReviewInputError("approval qualification authority is invalid")
+        self.qualification_authority = qualification_authority
         self._operation_budget: EvidenceReadBudget | None = None
+        self._last_review_scan: tuple[int, int, int] | None = None
         self._human_inventory_scope: tuple[str, int, str, str, str] | None = None
         self._scoped_human_inventory_reader: _ScopedHumanInventoryReader | None = None
 
@@ -1664,7 +1699,10 @@ class ReviewApprovalFinalizer:
         # Legacy scans acquire one finite read budget. Partition consumers must
         # supply the same object used for parts/readback/fences; no phase reset.
         budget = self.evidence_budget or self._operation_budget or EvidenceReadBudget()
-        return _BudgetedReviewPagination(self.http, budget).paginate(
+        self._last_review_scan = None
+        before_calls = budget.calls
+        pager = _BudgetedReviewPagination(self.http, budget)
+        items = pager.paginate(
             path=self.http.repository_path(
                 repository, f"/pulls/{pull_request}/reviews"
             ),
@@ -1673,6 +1711,12 @@ class ReviewApprovalFinalizer:
             max_requests=64,
             timeout_seconds=60,
         )
+        self._last_review_scan = (
+            budget.calls - before_calls,
+            len(items),
+            pager.last_page_size,
+        )
+        return items
 
     def finalize(
         self,
@@ -1683,7 +1727,7 @@ class ReviewApprovalFinalizer:
         head_sha: str,
         app_slug: str,
         eligibility: ReviewApprovalEligibility,
-        require_persisted: bool = False,
+        require_persisted: bool = True,
         honored_instances: frozenset[str] | None = None,
         assume_inline_unresolved: frozenset[str] | None = None,
         partition_reader: PartitionReader | None = None,
@@ -1691,6 +1735,10 @@ class ReviewApprovalFinalizer:
         _before_approval: Callable[[list[Any]], PublicationResult | None] | None = None,
     ) -> PublicationResult:
         """Emit at most one exact-head APPROVE from trusted eligibility.
+
+        ``require_persisted`` remains a compatibility argument; False cannot
+        relax App-owned exact-head readback. Provider exemption as well as
+        qualification requires that independent persisted provenance.
 
         The eligibility document is the only source of approval facts. A
         document for another head, or one whose static facts already withhold,
@@ -1735,6 +1783,17 @@ class ReviewApprovalFinalizer:
                 return PublicationResult(
                     status="approval_withheld",
                     diagnostic=approval_withheld_diagnostic(static),
+                )
+            if eligibility.facts.provider is None or (
+                eligibility.facts.provider == "openrouter"
+                and (
+                    eligibility.facts.qualification != "qualified"
+                    or eligibility.facts.qualification_binding is None
+                    or self.qualification_authority is None
+                )
+            ):
+                return PublicationResult(
+                    status="approval_withheld", diagnostic="qualification_unverified"
                 )
             if unresolved_inline:
                 return PublicationResult(
@@ -1794,6 +1853,15 @@ class ReviewApprovalFinalizer:
                 and eligibility.human_review.base_sha != preflight.base_sha
             ):
                 return PublicationResult(status="skipped_stale_base")
+            if not self._qualification_authorizes(
+                eligibility,
+                repository=repository,
+                pull_request=pull_request,
+                base_sha=preflight.base_sha,
+            ):
+                return PublicationResult(
+                    status="approval_withheld", diagnostic="qualification_unverified"
+                )
             open_blocking, resolved_instances = self._scan_blocking_threads(
                 token=token,
                 repository=repository,
@@ -1890,11 +1958,7 @@ class ReviewApprovalFinalizer:
                     repository=repository,
                     pull_request=pull_request,
                 )
-                if persisted != eligibility and (
-                    require_persisted
-                    or eligibility.human_inventory_reference is not None
-                    or persisted is not None
-                ):
+                if persisted != eligibility:
                     return PublicationResult(
                         status="approval_withheld", diagnostic="approval_withheld"
                     )
@@ -1902,6 +1966,15 @@ class ReviewApprovalFinalizer:
                 guarded = _before_approval(reviews)
                 if guarded is not None:
                     return guarded
+            if not self._qualification_authorizes(
+                eligibility,
+                repository=repository,
+                pull_request=pull_request,
+                base_sha=preflight.base_sha,
+            ):
+                return PublicationResult(
+                    status="approval_withheld", diagnostic="qualification_unverified"
+                )
             marker = approval_marker(
                 repository_id=preflight.repository_id,
                 pull_request=pull_request,
@@ -1917,6 +1990,8 @@ class ReviewApprovalFinalizer:
             ):
                 return PublicationResult(status="already_approved")
 
+            approved_base_sha = preflight.base_sha
+
             def already_approved():
                 if not self._is_already_approved(
                     token=token,
@@ -1927,12 +2002,18 @@ class ReviewApprovalFinalizer:
                     app_slug=app_slug,
                 ):
                     return False
-                if _before_approval is None:
-                    return True
-                fresh = self._load_head_reviews(
-                    token=token, repository=repository, pull_request=pull_request
+                if _before_approval is not None:
+                    fresh = self._load_head_reviews(
+                        token=token, repository=repository, pull_request=pull_request
+                    )
+                    if _before_approval(fresh) is not None:
+                        return False
+                return self._qualification_authorizes(
+                    eligibility,
+                    repository=repository,
+                    pull_request=pull_request,
+                    base_sha=approved_base_sha,
                 )
-                return _before_approval(fresh) is None
 
             return self._post_head_review(
                 token=token,
@@ -1951,6 +2032,30 @@ class ReviewApprovalFinalizer:
         finally:
             if owns_operation_budget:
                 self._operation_budget = None
+
+    def _qualification_authorizes(
+        self,
+        eligibility: ReviewApprovalEligibility,
+        *,
+        repository: str,
+        pull_request: int,
+        base_sha: str,
+    ) -> bool:
+        if eligibility.facts.provider is None:
+            return False
+        if eligibility.facts.provider != "openrouter":
+            return eligibility.facts.qualification in {"not-required", "qualified"}
+        authority = self.qualification_authority
+        if type(authority) is not TrustedOpenRouterQualification:
+            return False
+        return authority.authorizes(
+            eligibility.facts.qualification_binding,
+            repository=repository,
+            pull_request=pull_request,
+            base_sha=base_sha,
+            head_sha=eligibility.head_sha,
+            result_digest=eligibility.result_digest,
+        )
 
     def refinalize_with_dispositions(
         self,
@@ -3244,6 +3349,7 @@ class ReviewApprovalFinalizer:
         partition_reader: PartitionReader | None = None,
         expected_context: PartitionedEligibilityContext | None = None,
         visible_reader: VisibleReader | None = None,
+        expected_root_body: str | None = None,
     ) -> ReviewApprovalEligibility | None:
         """Read the persisted eligibility document for one reviewed head.
 
@@ -3262,6 +3368,26 @@ class ReviewApprovalFinalizer:
         if not isinstance(validate_visible_prose, bool):
             raise GitHubPublicationError("eligibility prose validation mode is invalid")
         with self._read_operation():
+            if self.partitioned_reader is not None:
+                if any(
+                    value is not None
+                    for value in (partition_reader, expected_context, visible_reader)
+                ):
+                    raise GitHubPublicationError(
+                        "partition reader composition conflicts"
+                    )
+                partition_reader = self.partitioned_reader.read
+                expected_context = self.partitioned_reader.context
+                if (
+                    self.partitioned_reader.context.binding["repository"] != repository
+                    or self.partitioned_reader.context.binding["pull_request"]
+                    != pull_request
+                    or self.partitioned_reader.context.binding["head_sha"] != head_sha
+                    or self.partitioned_reader.prose_store.app_slug != app_slug
+                ):
+                    raise GitHubPublicationError(
+                        "bound partition reader scope conflicts"
+                    )
             if not GIT_SHA_HEX.fullmatch(head_sha):
                 raise GitHubPublicationError("review head sha is invalid")
             if not isinstance(app_slug, str) or not app_slug.strip():
@@ -3276,6 +3402,43 @@ class ReviewApprovalFinalizer:
             reviews = self._load_head_reviews(
                 token=token, repository=repository, pull_request=pull_request
             )
+            if self.partitioned_reader is not None:
+                owned = next(
+                    (
+                        item
+                        for item in reviews
+                        if isinstance(item, dict)
+                        and item.get("id")
+                        == self.partitioned_reader.context.owned_root_id
+                    ),
+                    None,
+                )
+                if (
+                    not isinstance(owned, dict)
+                    or owned.get("pull_request_url")
+                    != self.http.api_url
+                    + self.http.repository_path(repository, f"/pulls/{pull_request}")
+                    or owned.get("body") != self.partitioned_reader.expected_root_body
+                    or (
+                        expected_root_body is not None
+                        and owned.get("body") != expected_root_body
+                    )
+                ):
+                    raise GitHubPublicationError(
+                        "bound partition owned root readback conflicts"
+                    )
+            elif expected_root_body is not None:
+                raise GitHubPublicationError(
+                    "exact root readback requires a bound reader"
+                )
+            bound_reader = self.partitioned_reader
+            if bound_reader is not None:
+
+                def visible_reader(receipts, *, budget):
+                    return bound_reader._visible_from_fresh_listing(
+                        receipts, records=reviews, budget=budget
+                    )
+
             return self._eligibility_from_reviews(
                 reviews,
                 head_sha=head_sha,
@@ -3490,9 +3653,16 @@ def prepare_publication_review(
 class ReviewPublisher:
     """Publish one validated review as App-authored inline comments and summary."""
 
-    def __init__(self, *, http: GitHubHttp) -> None:
+    def __init__(
+        self,
+        *,
+        http: GitHubHttp,
+        qualification_authority: TrustedOpenRouterQualification | None = None,
+    ) -> None:
         self.http = http
-        self.finalizer = ReviewApprovalFinalizer(http=http)
+        self.finalizer = ReviewApprovalFinalizer(
+            http=http, qualification_authority=qualification_authority
+        )
         self.checks = ReviewCheckPublisher(http=http)
         self._defer_thread_cleanup = False
         self._confirmed_publication_only = False
@@ -3562,6 +3732,64 @@ class ReviewPublisher:
                 return "thread_resolution_unconfirmed"
 
         self._pending_thread_cleanup = cleanup
+
+    def publish_partitioned(
+        self,
+        *,
+        token: str,
+        host: PartitionedPublicationHost,
+        result: ReviewResult,
+        diff: str,
+        configuration_context: Mapping[str, object],
+        convergence_policy: ReviewConvergencePolicy,
+        app_slug: str,
+        base_branch: str = "main",
+        check_token: str | None = None,
+        auto_approve: bool = True,
+        reviews_policy: str = "auto-approve",
+    ) -> PartitionedPublicationReceipt:
+        """Explicit trusted-host v4 writer; the default REST route is unchanged.
+
+        Requires independently retained host/result expectations and conditional
+        activation/readback callbacks. No CLI, broker or deployed writer opts in.
+        """
+        from .partitioned_publication import publish_partitioned
+
+        try:
+            return publish_partitioned(
+                self,
+                token=token,
+                host=host,
+                result=result,
+                diff=diff,
+                configuration_context=configuration_context,
+                convergence_policy=convergence_policy,
+                app_slug=app_slug,
+                base_branch=base_branch,
+                check_token=check_token,
+                auto_approve=auto_approve,
+                reviews_policy=reviews_policy,
+            )
+        except GitHubHTTPError as exc:
+            raise GitHubPublicationError(
+                "partition publication transport or readback failed"
+            ) from exc
+
+    @staticmethod
+    def _bind_qualification(
+        eligibility: ReviewApprovalEligibility,
+        binding: str | None,
+    ) -> ReviewApprovalEligibility:
+        if binding is None:
+            return eligibility
+        return replace(
+            eligibility,
+            facts=replace(
+                eligibility.facts,
+                qualification="qualified",
+                qualification_binding=binding,
+            ),
+        )
 
     def prepare(
         self,
@@ -3712,6 +3940,7 @@ class ReviewPublisher:
         policy: str,
         approval_enabled: bool,
         qualification: str,
+        qualification_binding: str | None = None,
         retained_eligibility: ReviewApprovalEligibility | None = None,
         persisted_eligibility: ReviewApprovalEligibility | None = None,
     ) -> PublicationResult:
@@ -3741,6 +3970,10 @@ class ReviewPublisher:
             qualification=qualification,
             retained_eligibility=retained_eligibility,
         )
+        if persisted is None:
+            replay_eligibility = self._bind_qualification(
+                replay_eligibility, qualification_binding
+            )
         replay_eligibility = replace(
             replay_eligibility,
             facts=replace(
@@ -3773,7 +4006,7 @@ class ReviewPublisher:
             head_sha=head_sha,
             app_slug=app_slug,
             eligibility=replay_eligibility,
-            require_persisted=persisted is not None,
+            require_persisted=True,
         )
         diagnostic = check_diagnostic
         if diagnostic is None and finalized.status == "approval_withheld":
@@ -3797,6 +4030,7 @@ class ReviewPublisher:
         reviews_policy: str = "auto-approve",
         check_token: str | None = None,
         qualification: str = "not-required",
+        configuration_context: Mapping[str, object] | None = None,
         candidates: Sequence[CandidateFinding] | None = None,
         snapshot: Mapping[str, str] | None = None,
         snapshot_sha256: str | None = None,
@@ -3844,6 +4078,7 @@ class ReviewPublisher:
                 reviews_policy=reviews_policy,
                 check_token=check_token,
                 qualification=qualification,
+                configuration_context=configuration_context,
                 candidates=candidates,
                 snapshot=snapshot,
                 snapshot_sha256=snapshot_sha256,
@@ -3893,6 +4128,7 @@ class ReviewPublisher:
         reviews_policy: str = "auto-approve",
         check_token: str | None = None,
         qualification: str = "not-required",
+        configuration_context: Mapping[str, object] | None = None,
         candidates: Sequence[CandidateFinding] | None = None,
         snapshot: Mapping[str, str] | None = None,
         snapshot_sha256: str | None = None,
@@ -4041,6 +4277,22 @@ class ReviewPublisher:
                 authorized_dispositions=authorized_dispositions,
             )
         result = prepared.result
+        authority = self.finalizer.qualification_authority
+        qualification_binding = (
+            authority.issue_binding(
+                result=result,
+                configuration_context=configuration_context,
+                publication_mode=convergence_policy.mode,
+                repository=repository,
+                pull_request=pull_request,
+                base_sha=base_sha,
+                head_sha=head_sha,
+            )
+            if type(authority) is TrustedOpenRouterQualification
+            else None
+        )
+        if qualification_binding is not None:
+            qualification = "qualified"
         # Validate the complete inventory before checks or review mutations.
         # Failure must not publish an unreassessable human-review record.
         prospective_eligibility = approval_eligibility_from_result(
@@ -4051,6 +4303,9 @@ class ReviewPublisher:
             app_authored=False,
             qualification=qualification,
             retained_eligibility=retained_eligibility,
+        )
+        prospective_eligibility = self._bind_qualification(
+            prospective_eligibility, qualification_binding
         )
         # Legacy inventory or complete framed-body capacity may select the store.
         # A fixed-width placeholder qualifies every authority/body allocation
@@ -4356,6 +4611,7 @@ class ReviewPublisher:
                         policy=effective_policy,
                         approval_enabled=approval_enabled,
                         qualification=qualification,
+                        qualification_binding=qualification_binding,
                         retained_eligibility=retained_eligibility,
                         persisted_eligibility=persisted_eligibility,
                     )
@@ -4374,6 +4630,7 @@ class ReviewPublisher:
                             policy=effective_policy,
                             approval_enabled=approval_enabled,
                             qualification=qualification,
+                            qualification_binding=qualification_binding,
                             persisted_eligibility=persisted_eligibility,
                         )
                     return PublicationResult(status="already_published")
@@ -4394,6 +4651,7 @@ class ReviewPublisher:
                             policy=effective_policy,
                             approval_enabled=approval_enabled,
                             qualification=qualification,
+                            qualification_binding=qualification_binding,
                             persisted_eligibility=persisted_eligibility,
                         )
                     return PublicationResult(status="already_published")
@@ -4625,6 +4883,7 @@ class ReviewPublisher:
                 eligibility,
                 human_inventory_reference=prospective_eligibility.human_inventory_reference,
             )
+        eligibility = self._bind_qualification(eligibility, qualification_binding)
         try:
             assembled = (
                 continuation_review
@@ -4846,7 +5105,7 @@ class ReviewPublisher:
                     head_sha=head_sha,
                     app_slug=app_slug,
                     eligibility=eligibility,
-                    require_persisted=retained_eligibility is not None,
+                    require_persisted=True,
                     check_diagnostic=check_diagnostic,
                     status="already_published",
                 )
@@ -4884,7 +5143,7 @@ class ReviewPublisher:
                     head_sha=head_sha,
                     app_slug=app_slug,
                     eligibility=eligibility,
-                    require_persisted=retained_eligibility is not None,
+                    require_persisted=True,
                     check_diagnostic=check_diagnostic,
                     status="published",
                     review_id=review_id,
@@ -4965,7 +5224,7 @@ class ReviewPublisher:
                 head_sha=head_sha,
                 app_slug=app_slug,
                 eligibility=eligibility,
-                require_persisted=retained_eligibility is not None,
+                require_persisted=True,
                 check_diagnostic=check_diagnostic,
                 status="already_published",
             )
@@ -4993,7 +5252,7 @@ class ReviewPublisher:
                     head_sha=head_sha,
                     app_slug=app_slug,
                     eligibility=eligibility,
-                    require_persisted=retained_eligibility is not None,
+                    require_persisted=True,
                     check_diagnostic=check_diagnostic,
                     status="already_published",
                 )
@@ -5030,7 +5289,7 @@ class ReviewPublisher:
         check_diagnostic: str | None,
         status: str,
         review_id: int | None = None,
-        require_persisted: bool = False,
+        require_persisted: bool = True,
         assume_inline_unresolved: frozenset[str] | None = None,
     ) -> PublicationResult:
         """Finalize approval for one published head and report its withholding.

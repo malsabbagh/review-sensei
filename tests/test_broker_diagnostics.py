@@ -56,6 +56,24 @@ def http_error(body, status=403, ray=RAY):
 
 
 class BrokerDiagnosticTests(unittest.TestCase):
+    def test_control_refusals_keep_original_accounting_actionable_without_remote_text(
+        self,
+    ):
+        for code in (
+            "broker_control_invalid",
+            "broker_control_binding_invalid",
+            "broker_control_budget_exhausted",
+            "broker_control_deadline_exhausted",
+            "broker_control_clock_regressed",
+        ):
+            with self.subTest(code=code):
+                result = parse_broker_diagnostic(
+                    http_error(json.dumps(payload(code)).encode())
+                )
+                self.assertEqual(result.code, code)
+                self.assertIn("do not renew this attempt", result.hint)
+                self.assertNotIn(SECRET, result.message())
+
     def test_known_reason_uses_only_local_hint_and_validated_facts(self):
         result = parse_broker_diagnostic(http_error(json.dumps(payload()).encode()))
         self.assertEqual(result.code, "broker_workflow_rejected")

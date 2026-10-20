@@ -80,6 +80,7 @@ from .oidc import (
     verify_oidc_token,
 )
 from .publication import PublicationResult, ReviewPublisher
+from .qualification import TrustedOpenRouterQualification
 from .session_ledger import GitHubIssueCommentSessionLedger
 from .setup import (
     GitHubSetupClient,
@@ -166,6 +167,7 @@ __all__ = [
     "RequestedPermissions",
     "ReplyResult",
     "ReviewPublisher",
+    "TrustedOpenRouterQualification",
     "GitHubWriteOptions",
     "HttpJwksFetcher",
     "JwksFetcher",

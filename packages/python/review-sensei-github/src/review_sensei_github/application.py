@@ -1246,6 +1246,7 @@ class GitHubApplication:
                         configuration_context
                     ),
                 ),
+                "configuration_context": configuration_context,
                 "candidates": candidates,
                 "snapshot": snapshot,
                 "snapshot_sha256": snapshot_sha256,
@@ -2299,6 +2300,7 @@ class GitHubApplication:
         app_slug: str,
         now=None,
         convergence_policy: ReviewConvergencePolicy | None = None,
+        configuration_context: Mapping[str, object] | None = None,
     ) -> PublicationResult:
         """Publish a retained result without invoking a model or writing learnings."""
 
@@ -2356,6 +2358,7 @@ class GitHubApplication:
                 model=result.model,
             ),
             convergence_policy=convergence_policy,
+            configuration_context=configuration_context,
         )
 
     def publish_learning(
@@ -2823,6 +2826,7 @@ class GitHubApplication:
         if isinstance(replier, ConversationPublisher):
             assessor = HumanAssessmentPublisher(
                 http=replier.http,
+                qualification_authority=replier.finalizer.qualification_authority,
                 evidence_budget=shared_evidence_budget,
                 human_inventory_reader_factory=operation_owner._human_inventory_reader,
                 human_inventory_read_token=read_token,

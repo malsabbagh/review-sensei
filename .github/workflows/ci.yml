@@ -552,6 +552,10 @@ jobs:
         env:
           EPIC238_F_MEASUREMENTS: ${{ runner.temp }}/feedback-broker-ipc-metrics.json
         run: python -W error::ResourceWarning -m tests.epic238_feedback_broker_qualification -v
+      - name: Qualify original broker physical dispatch accounting
+        run: python -W error::ResourceWarning -m tests.epic238_broker_control_qualification -v
+      - name: Qualify coalesced original assessment admission
+        run: python -W error::ResourceWarning -m tests.epic238_initial_tail_qualification -v
       - name: Run Worker tests
         working-directory: deploy/cloudflare
         run: npm test

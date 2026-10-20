@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import LearningLoadError, ReviewInputError
+from review_sensei.feedback import FeedbackSelector
 from review_sensei.human_assessment import PendingHumanReview
 from review_sensei.learnings import (
     MAX_LEARNING_FILE_BYTES,
@@ -46,6 +47,7 @@ from .publication import (
     finding_instance_from_body,
     finding_publication_scope,
 )
+from .qualification import TrustedOpenRouterQualification
 from .reply_budget import bounded_reply_publication
 
 if TYPE_CHECKING:
@@ -291,6 +293,7 @@ class ConversationPublisher:
         self,
         *,
         http: GitHubHttp,
+        qualification_authority: TrustedOpenRouterQualification | None = None,
         human_inventory_reader: Callable[[HumanInventoryReference], PendingHumanReview]
         | None = None,
         human_inventory_reader_factory: Callable[
@@ -304,6 +307,7 @@ class ConversationPublisher:
         self.human_inventory_reader = human_inventory_reader
         self.finalizer = ReviewApprovalFinalizer(
             http=http,
+            qualification_authority=qualification_authority,
             human_inventory_reader=human_inventory_reader,
             human_inventory_reader_factory=human_inventory_reader_factory,
             evidence_budget=evidence_budget,
@@ -441,6 +445,67 @@ class ConversationPublisher:
         expected_head_sha: str | None = None,
         defer_evidence: bool = False,
     ) -> PreparedConversation | ReplyResult:
+        """Authorize and bound a mention before any provider invocation."""
+        return self._prepare_context(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            source_comment_id=source_comment_id,
+            source_updated_at=source_updated_at,
+            app_slug=app_slug,
+            root_comment_id=root_comment_id,
+            source_kind=source_kind,
+            expected_head_sha=expected_head_sha,
+            defer_evidence=defer_evidence,
+        )
+
+    def prepare_selected_assessment_context(
+        self,
+        *,
+        token: str,
+        selector: FeedbackSelector,
+        app_slug: str,
+        root_comment_id: int | None = None,
+    ) -> PreparedConversation | ReplyResult:
+        """Authorize the trigger for explicit selected-feedback preparation.
+
+        This is not ordinary discussion context. The caller must subsequently
+        use ``prepare_feedback`` with this exact selector: it obtains the full
+        retained concern inventory, complete selected-source closure and current
+        required review evidence. None of those are inferred from chat history.
+        Generic conversation diff/learnings/history are not assessment inputs.
+        Every request uses this publisher's original transport/budget.
+        """
+        if not isinstance(selector, FeedbackSelector) or not selector.target_ids:
+            raise GitHubConversationError("selected assessment selector is required")
+        return self._prepare_context(
+            token=token,
+            repository=selector.repository,
+            pull_request=selector.pull_request,
+            source_comment_id=selector.trigger.comment_id,
+            source_updated_at=selector.trigger.updated_at,
+            app_slug=app_slug,
+            root_comment_id=root_comment_id,
+            source_kind=selector.trigger.kind,
+            expected_head_sha=selector.head_sha,
+            assessment_selector=selector,
+        )
+
+    def _prepare_context(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        source_comment_id: int,
+        source_updated_at: str,
+        app_slug: str,
+        root_comment_id: int | None = None,
+        source_kind: str = "inline",
+        expected_head_sha: str | None = None,
+        assessment_selector: FeedbackSelector | None = None,
+        defer_evidence: bool = False,
+    ) -> PreparedConversation | ReplyResult:
         """Authorize a mention, optionally deferring generic context evidence.
 
         The trusted caller must independently prepare human evidence or call
@@ -484,6 +549,10 @@ class ConversationPublisher:
             return ReplyResult(status="skipped_source_gone")
         if status < 200 or status >= 300 or not isinstance(source, dict):
             raise GitHubConversationError("reply source lookup failed")
+        if assessment_selector is not None and (
+            type(source.get("id")) is not int or source["id"] != source_comment_id
+        ):
+            raise GitHubConversationError("selected assessment source identity changed")
         self._require_comment_association(
             comment=source,
             repository=repository,
@@ -576,7 +645,9 @@ class ConversationPublisher:
         base_sha = base.get("sha")
         if not isinstance(base_sha, str) or not GIT_SHA_HEX.fullmatch(base_sha):
             raise GitHubConversationError("reply preflight base was invalid")
-        if defer_evidence:
+        if assessment_selector is not None and base_sha != assessment_selector.base_sha:
+            return ReplyResult(status="skipped_stale_base")
+        if defer_evidence or assessment_selector is not None:
             messages = self._select_thread_messages(
                 candidates=[source],
                 source=source,
@@ -1255,6 +1326,44 @@ class ConversationPublisher:
         resolution_token: str | None = None,
         _pending_stage: _PendingPageStage | None = None,
     ) -> ReplyResult:
+        return self._publish(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            source_comment_id=source_comment_id,
+            source_updated_at=source_updated_at,
+            head_sha=head_sha,
+            reply=reply,
+            app_slug=app_slug,
+            root_comment_id=root_comment_id,
+            source_kind=source_kind,
+            pending_page=pending_page,
+            resolution_evidence=resolution_evidence,
+            resolution_base_sha=resolution_base_sha,
+            resolution_token=resolution_token,
+            _pending_stage=_pending_stage,
+        )
+
+    def _publish(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        source_comment_id: int,
+        source_updated_at: str,
+        head_sha: str,
+        reply: ConversationReply,
+        app_slug: str,
+        root_comment_id: int,
+        source_kind: str = "inline",
+        pending_page: PendingReplyPage | None = None,
+        resolution_evidence: str | None = None,
+        resolution_base_sha: str | None = None,
+        resolution_token: str | None = None,
+        complete_report_readback: bool = False,
+        _pending_stage: _PendingPageStage | None = None,
+    ) -> ReplyResult:
         if not GIT_SHA_HEX.fullmatch(head_sha):
             raise GitHubConversationError("reply head sha is invalid")
         if not isinstance(reply, ConversationReply):
@@ -1496,14 +1605,26 @@ class ConversationPublisher:
                         status="pending_page_staged", comment_id=comment_id
                     )
                 if pending_page is not None:
-                    confirmed = self._find_existing(
-                        token=token,
-                        repository=repository,
-                        pull_request=pull_request,
-                        marker=marker,
-                        app_slug=app_slug,
-                        source_kind=source_kind,
-                        expected_body=body,
+                    confirmed = (
+                        self._owned_pending_page(
+                            token=token,
+                            repository=repository,
+                            pull_request=pull_request,
+                            comment_id=comment_id,
+                            app_slug=app_slug,
+                            source_kind=source_kind,
+                            expected_body=body,
+                        )
+                        if complete_report_readback
+                        else self._find_existing(
+                            token=token,
+                            repository=repository,
+                            pull_request=pull_request,
+                            marker=marker,
+                            app_slug=app_slug,
+                            source_kind=source_kind,
+                            expected_body=body,
+                        )
                     )
                     if confirmed != comment_id:
                         raise GitHubConversationTransientError(
@@ -1611,6 +1732,7 @@ class ConversationPublisher:
         diagnostic: str | None = None,
         decision_reasons=None,
         assessment_digest: str = "",
+        layout: str = "legacy",
         **arguments,
     ) -> ReplyResult:
         """Confirm every bounded page before allowing caller authority updates.
@@ -1633,12 +1755,16 @@ class ConversationPublisher:
             diagnostic=diagnostic,
             decision_reasons=decision_reasons,
             assessment_digest=assessment_digest,
+            layout=layout,
         )
         reference_inventory = (
             isinstance(eligibility, ReviewApprovalEligibility)
             and eligibility.human_inventory_reference is not None
         )
-        if reference_inventory or len(pages) > 1:
+        # Referenced/default reports retain their staged transaction. The
+        # selected shared-guidance opt-in keeps its exact owned-page readback
+        # plus final complete report scan under the original allowance.
+        if reference_inventory or (len(pages) > 1 and layout != "shared-guidance-v1"):
             return self._stage_pending_report(
                 pages=pages,
                 fence=fence,
@@ -1681,7 +1807,13 @@ class ConversationPublisher:
                     comment_id=last.comment_id,
                     assessment_status="pending_delivery_incomplete",
                 )
-            last = self.publish(**page_arguments, pending_page=page)
+            last = (
+                self._publish(
+                    **page_arguments, pending_page=page, complete_report_readback=True
+                )
+                if layout == "shared-guidance-v1"
+                else self.publish(**page_arguments, pending_page=page)
+            )
             if last.status not in {"replied", "already_replied"}:
                 return ReplyResult(
                     status=last.status,
@@ -1689,6 +1821,24 @@ class ConversationPublisher:
                     assessment_status="pending_delivery_incomplete",
                 )
             created = created or last.status == "replied"
+        if layout == "shared-guidance-v1":
+            # The compact opt-in report is accepted only as a complete owned
+            # report. A later page POST cannot hide edits/removal of an earlier
+            # page that already passed its individual readback.
+            complete = self._completed_pending_report(
+                token=arguments["token"],
+                repository=arguments["repository"],
+                pull_request=arguments["pull_request"],
+                source_kind=arguments.get("source_kind", "inline"),
+                source_comment_id=arguments["source_comment_id"],
+                source_updated_at=arguments["source_updated_at"],
+                head_sha=arguments["head_sha"],
+                report_digest=pages[0].report_digest,
+                pages=pages,
+                app_slug=arguments["app_slug"],
+            )
+            if complete is None:
+                raise GitHubConversationError("pending report readback is incomplete")
         failure = fence()
         if failure is not None:
             return ReplyResult(
@@ -1800,6 +1950,50 @@ class ConversationPublisher:
             comment_id=confirmed[len(pages)],
             assessment_status="pending_delivery_incomplete" if failure else None,
         )
+
+    def _owned_pending_page(
+        self,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        comment_id: int,
+        app_slug: str,
+        source_kind: str,
+        expected_body: str,
+    ) -> int | None:
+        """Read the known successful POST id before the final whole-report scan.
+
+        This private path never replaces negative lookup or ambiguous-POST
+        reconciliation. Only the enclosing compact report transaction uses it;
+        that transaction still scans every report page/duplicate/conflict before
+        its last live source/PR/latest-authority fence.
+        """
+        suffix = "pulls" if source_kind == "inline" else "issues"
+        status, comment = self.http.request(
+            "GET",
+            self.http.repository_path(repository, f"/{suffix}/comments/{comment_id}"),
+            token=token,
+        )
+        if status != 200 or not isinstance(comment, dict):
+            raise GitHubConversationError("pending reply page readback unavailable")
+        self._require_comment_association(
+            comment=comment,
+            repository=repository,
+            pull_request=pull_request,
+            source_kind=source_kind,
+        )
+        user = comment.get("user")
+        if (
+            type(comment.get("id")) is not int
+            or comment["id"] != comment_id
+            or comment.get("body") != expected_body
+            or not isinstance(user, dict)
+            or user.get("login") != app_slug
+            or user.get("type") != "Bot"
+        ):
+            raise GitHubConversationError("pending reply page readback conflicts")
+        return comment_id
 
     def _completed_pending_report(
         self,

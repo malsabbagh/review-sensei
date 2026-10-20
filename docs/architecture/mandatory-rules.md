@@ -15,7 +15,6 @@ writes hold without blind recreation. One original finite evidence budget covers
 publication/reply broker/storage/readers/mutable fences. Missing/conflicting evidence withholds
 decisions. Require reader-first rollout and trusted complete emission. See ADR 0094.
 
-
 ## Bounded default publication and retained recovery
 
 Writers default to at most 64 findings; readers accept 250. Only trusted
@@ -31,30 +30,22 @@ parts refuse creation. Existing opt-outs remain. See ADR 0093.
 
 <!-- selected-design -->
 
-
-The proposed [human file review adapter](human-file-review.md) binds selected
-unsupported binary changes and generated files excluded by policy to the exact
-owned review/result, complete changed inventory, base/head Git blobs and live
-authorized human source. Confirmation defaults off and never rewrites AI
-coverage, eligibility, baseline or cache. Host-derived `coverage_only_partial`
-provenance uses an explicitly versioned content digest projection; old result
-digests remain unchanged when absent. A separate fresh assessment can satisfy
-only that human-file coverage blocker after all files are confirmed. Other findings and approval facts remain in force.
-There is no cross-head carry and no automatic hosted command. An explicit
-verification may post one exact-head APPROVE when mixed coverage is the only
-remaining blocker. That post does not mark the AI result, baseline, or cache
-complete. The legacy finalizer still withholds a partial result. Broker
-composition and deployed resource qualification remain pending.
-Recording a confirmation is not approval.
+The proposed [human file review adapter](human-file-review.md) binds selected unsupported
+binary/policy-excluded generated changes to exact owned review/result, complete changed inventory,
+base/head Git blobs and live authorized human source. Confirmation defaults off; never rewrite AI
+coverage/eligibility/baseline/cache. Host-derived `coverage_only_partial` uses a versioned content
+digest projection; absent provenance preserves old digests. Fresh assessment satisfies only that coverage
+blocker after all files are confirmed; other findings/approval facts remain. No cross-head carry or automatic hosted command.
+Explicit verification may post one exact-head APPROVE when mixed coverage is the only blocker;
+AI result/baseline/cache stay incomplete. Legacy finalizer withholds partial results.
+Broker composition/deployed resource qualification remain pending. Confirmation is not approval.
 See [Proposed ADR 0077](adr/0077-explicit-human-file-review.md).
-
 
 reassessment check that identity before planning and dispatch. Ollama advertises
 the contract only with explicit fixed-model `require_completion_metadata=True`:
 it requires normal completion, exact model and bounded integer token usage before
 returning text. Present incomplete, length-terminated or over-cap metadata also
 refuses in legacy mode; absent legacy metadata retains its prior disposition.
-
 
 implementation. `packages/npm/cli/bin/review-sensei.js` is the only package
 that exposes the `review-sensei` command; it selects one exact platform package,
@@ -64,7 +55,6 @@ validates its fixed in-package payload, and forwards argv/process behavior.
 independent lane. A
 partial or compromised release is handled version-forward, never by moving a
 tag or replacing a tarball. See [ADR 0031](adr/0031-npm-launcher-and-standalone-platform-packages.md).
-
 
 (fixture adapter: test-only seam, omitted from production map)
 
@@ -96,23 +86,17 @@ clean review. Candidate text and snapshot contents remain untrusted data.
 evaluation loader and `FixtureProvider` into the unchanged `ReviewService`.
 Reports retain only aggregate, non-monetary metrics. Live endpoints are
 
-
-The repository quality boundary is deterministic and provider-independent. The
-`quality` CI job runs Ruff formatting/linting, mypy, compileall, and branch
-coverage; the `schemas` job validates the three packaged Draft 2020-12
-contracts and immutable GitHub Action pins; the `package` job builds both
-distributions, records SHA-256 digests, and runs the packaged dist-safe and
-downstream suites from an unpacked sdist after installing only the wheel
-outside the checkout; CodeQL analyzes Python and JavaScript/TypeScript and its
-deterministic SARIF findings gate is the enforcement surface. Checkout-only
-tests that need `scripts/`, `.github/`, `packages/`, or `deploy/` remain in the
-compatibility and quality jobs. All workflow permissions default to
+Deterministic, provider-independent CI gates Ruff format/lint, mypy, compileall,
+branch coverage, three packaged Draft 2020-12 contracts and immutable Action pins.
+Build both distributions/SHA-256s; run unpacked-sdist dist-safe/downstream against
+installed wheels outside checkout. CodeQL Python/JS/TS findings use deterministic SARIF.
+Checkout-only scripts/.github/packages/deploy tests stay in compatibility/quality jobs.
+All workflow permissions default to
 
 The public JSON schemas are structural contracts only. They reject malformed
 
 number ceilings documented in the README and ADR 0007. Profiles can only move
 downward. Canonical NFC UTF-8 repository paths and strict Git C-quoted paths are
-
 
 `src/review_sensei/workflow.py` owns portable manual GitHub Actions. Before git it
 validates untrusted `base_ref`/`head_ref`/`head_repository`/`review_sensei_version`/
@@ -121,18 +105,15 @@ commit OIDs, checks merge base and writes bounded triple-dot diffs without head
 checkout/execution. Installed `review-sensei prepare-diff` exposes it without consumer
 Code Sensei source.
 
-The generated caller is a read-only bootstrap: it grants `contents: read`,
-`pull-requests: read`, `issues: read`, and `id-token: write`, routes only on
-event shape, and calls the public reusable workflow at the configured tag with
-the event context. Every product decision — provider backend, model, endpoint,
-credential reference, runner requirement, and the GitHub policy switches —
-comes from the trusted configuration commit resolved by the reusable workflow,
-never from the caller. The reusable workflow resolves one plan from the
+The generated caller is a read-only bootstrap, granting only `contents: read`,
+`pull-requests: read`, `issues: read` and `id-token: write`. It routes only on event
+shape and sends event context to the configured public reusable tag. Backend, model,
+endpoint, credential reference, runner and GitHub policy come only from its resolved
+trusted configuration commit, never caller inputs. The reusable workflow resolves one plan from the
 package, then runs the backend on the runner kind that plan requires: cloud
 backends on GitHub-hosted compute, local backends on the operator's
 self-hosted runner (labelled `ollama` in the example), which must have Ollama
 and the selected model provisioned before dispatch. Provider egress is explicit
-
 
 marker. Before creating a setup pull request, the Cloudflare Worker or Python
 adapter reads only the three known generated paths from the trusted default
@@ -144,7 +125,6 @@ is the named base SHA, its author is the ReviewSensei App, its content is
 exactly current, and its comparison changes generated paths only, and is never
 force-moved; it changes no path outside the generated set, preserving
 learnings, secrets, existing variables, and unrelated repository files. See ADR
-
 
 - `ReviewRequest` contains a unified diff and optional repository metadata.
 - `ReviewRequest.learnings` contains only approved `LearningEntry` values loaded
@@ -267,7 +247,6 @@ learnings, secrets, existing variables, and unrelated repository files. See ADR
   are reference data, not instructions, and are serialized under the owning
   lens through `{review_context}`.
 
-
 an inline `categories` array. A stage cannot combine both forms. Reusing an id
 in multiple stages is allowed only when its title and focus items are identical,
 keeping the aggregated result vocabulary unambiguous.
@@ -329,7 +308,6 @@ The context loader rejects traversal, symlinks, secret-like names, unsupported
 text formats, unreadable or empty files, excessive file counts, and per-file or
 aggregate size violations. Selection and serialization are deterministic.
 
-
 - Provider transport or envelope failures raise `ProviderError`.
 - Invalid JSON, stage output, categories, or learning proposals receive one
   sanitized provider correction attempt. The rejected attempt is discarded
@@ -358,7 +336,6 @@ aggregate size violations. Selection and serialization are deterministic.
 - Expected failures from the bounded path, diff, request, transport, and result
   seams are static/sanitized and do not include supplied secret markers.
 
-
 There is no automatic-review budget to spend: a legitimate changed-head
 update is reviewable no matter how many rounds this pull request has already
 completed, and no workflow pre-check, grant, or `--rounds` request exists to
@@ -372,7 +349,6 @@ the per-head failed-attempt retry bound. Counters in the ledger
 (`completed_initial_reviews`, `completed_verification_rounds`) are diagnostic
 history, bounded for storage only, and never decide admission.
 
-
 - The GitHub learning publisher converts validated `learning_proposals` into a
   single ReviewSensei-owned draft PR per source PR. It uses content-addressed
   learning files, a stable source-PR branch/marker, hash-bound commit
@@ -380,7 +356,6 @@ history, bounded for storage only, and never decide admission.
   generations start fresh and omit files already byte-identical on the latest
   base; closed, deleted, manually edited, fork-owned, or ambiguous artifacts
   fail closed. Only merged learning files are eligible for later reviews.
-
 
 The primary distribution is the open-source package and CLI. Repositories run
 ReviewSensei themselves in GitHub Actions: checkout the trusted base, fetch the
@@ -403,7 +378,6 @@ hosted review engine. The Worker applies a bounded Web Crypto HMAC gate and
 payload validation, then a single named SQLite-backed Durable Object stores
 only delivery identity, digest, state, and a short lease. The same Worker uses
 
-
 Retain signed engine provenance, installed-CLI/downstream tests and workflow drain.
 
 provider-neutral review engine. `pyproject.toml` is the single package metadata
@@ -422,7 +396,6 @@ PyPI-primary and executing-commit install paths prove that identity in
 `review_sensei.release_manifest`; live disposable-repository canary and `v5`
 tag movement remain operator-only. See [ADR 0038](adr/0038-release-compatibility-manifest.md).
 
-
 collected by the published tags. The page must not put source code, diffs,
 prompts, review comments, credentials, or other sensitive ReviewSensei data in
 `dataLayer`. Container tags must follow the site's privacy notice and
@@ -440,7 +413,6 @@ Rollback is code-only for the repository integration: revert the snippets in
 a reviewed PR, merge to `main`, and verify that the deployed page no longer
 requests the GTM endpoints. For an active incident, the GTM workspace owner
 
-
 `malsabbagh/review-sensei` through a reproducible publication pipeline. An
 exclusion manifest (`.publication/exclusions.json`) lists every internal-only
 file pattern with a documented reason. A commit-oriented publication audit
@@ -453,7 +425,6 @@ is superseded for now. The Cloudflare package is only an optional installation
 bootstrap ingress; customer Actions still own review execution and provider
 compute. A hosted review service would require a new ADR and a fresh issue set.
 
-
 The optional OIDC installation-token broker is a narrow boundary outside the
 provider-neutral review core: `oidc.py` verifies GitHub Actions identity and
 `broker.py` applies workflow policy before reusing `GitHubAppAuth`. The App
@@ -462,7 +433,6 @@ and forks, missing or suspended installations, rate limits, and verification
 or GitHub failures are rejected fail-closed.
 
         -> audit (non-secret metadata only)
-
 
 adds a distinct version-2 session grant. The Worker transiently reloads complete
 human sources to verify numeric actors, exact snapshot and selection digests;
@@ -577,7 +547,6 @@ ceiling. Upgraded readers treat oversized trusted terminal markers as unreadable
 authority and prohibit initialization. Expanded writers require quiescing older
 readers/writers; rollback retains upgraded readers rather than resetting state.
 
-
 Learning publication is a hosting-side reconciliation boundary. The source
 PR's numeric repository id, PR number, head SHA, and default base head are
 reread before each mutation. Open PR discovery uses the stable `(repository id,
@@ -607,7 +576,6 @@ closed.
 See ADR 0026 and the learning publisher implementation for the complete
 candidate precedence and recovery rules.
 
-
 [ADR 0072](adr/0072-lossless-inline-review-evidence.md). Small baseline and human
 inventories retain their legacy JSON shape; larger inventories share a bounded
 canonical JSON/zlib/base64 reader. The existing authenticated ledger atomically
@@ -622,19 +590,16 @@ larger or more verbose inventories can still exceed inline bounds. Full finding
   downgraded or ambiguously rediscovered concerns remain uncertain, make the
   review partial and retain the prior durable baseline until resolved.
 
-OpenRouter approval stays withheld until retained qualification evidence binds
-independently expected effective review identities. GitHub publisher/result-facts
-reject profile/caller status strings and historical `not-required` defaults;
-replay preserves withholding. Other providers and permitted review events keep
-their policy.
+Independent retained `TrustedOpenRouterQualification` evidence gates OpenRouter approval.
+Evaluation/runtime digests differ; profile/caller/old `not-required` proves nothing.
+Facts v2 keep provider provenance/bounded exact-head/result receipts. All finalizers require
+matching App-owned eligibility readback and configured authority rechecks.
+Legacy facts parse without exemption; other providers' new reviews retain policy.
 
-Accepted replay binds complete immutable inventory, original result/facts,
-source identity and exact evidence; accumulated resolutions may persist.
-Source/evidence/authority changes forbid decision reuse. The adapter revalidates
-complete evidence, skips only persisted resolved IDs and preserves the inventory
-application boundary and provider allowances. Unbound older accepted payloads
-need a new authorized mention. See [ADR 0061](adr/0061-human-reply-reassessment.md)
-and the [finite source matrix](validation/large-lifecycle.md).
+Accepted replay binds complete immutable inventory, original result/facts, source identity
+and exact evidence. Resolutions may accumulate; changed source/evidence/authority forbids reuse.
+Revalidate full evidence; skip only durable resolved IDs. No inventory bypass or provider refill.
+Unbound old payloads need a new authorized mention (ADR 0061; [finite matrix](validation/large-lifecycle.md)).
 
   OpenRouter separates requested model, observed model/upstream and reported fingerprint.
   Optional `ProviderTokenUsage` has only three bounded reported counters; invalid
@@ -650,27 +615,38 @@ missing bindings or changed suffix/endpoint refuse support creation/loading. Old
 reports parse but cannot newly authorize unbound live support; historical targets
 remain eligible. Runtime approval binding remains missing. See ADR 0081.
 
-`ConversationService.reply` uses the generic executor and optional original
-`ResourceBudgetTracker`: retain elapsed time/calls/aggregate prompt/output accounting
-through transport retries and one JSON/non-object correction within bounded defaults.
-Semantic failures never request correction. GitHub starts tracking before context preparation,
-through operation entry/generation; expiry/exhaustion/cancellation cannot publish
-replies. Adapters receive remaining deadline/configured output cap without
-backend-specific policy.
+`ConversationService.reply` uses generic execution and optional original `ResourceBudgetTracker`:
+retain time/calls/aggregate prompt/output across transport retries and one JSON/non-object correction
+under bounded defaults; no semantic correction. GitHub tracks before context preparation
+through operation entry/generation. Expiry/exhaustion/cancellation forbid publication. Adapters get
+remaining deadline/configured output cap; no backend policy.
 
-Live evaluation separates exact fixture conformance/model quality. Bounded controls
-retain complete fixture inventory/identity and unchanged thresholds; promotion verifies
-their conjunction and complete attempted live inventory. Fixture work never enters
-live usage; recall includes misses. Old unbound reports parse but cannot newly authorize
-support. Composite controls reject missing live engine/prompt identity with bounded
-diagnostics. Apply strict adapter OpenRouter endpoint-metadata allowlist before live
-dispatch/report construction. See proposed ADR 0082.
+Live quality and exact fixture conformance differ. Bounded controls keep complete fixture
+inventory/identity and unchanged thresholds; promotion verifies both and all attempted live work.
+Exclude fixture usage; recall counts misses. Old unbound reports parse but cannot newly authorize
+support. Composite controls reject missing live engine/prompt identity with bounded diagnostics.
+Strict adapter OpenRouter endpoint-metadata allowlisting precedes live dispatch/report construction
+(proposed ADR 0082).
 
 Only confirmed owned replies or a complete empty comment list permit fallback.
 Genuine top-level legacy findings retain their exact-head inventory authority.
 Unknown, malformed, conflicting or unreadable roots refuse fallback.
 The metadata walk retains one shared ten-request, sixty-second bound.
 
-Publisher aliases must match original run/source/ref, runner and complete steps.
-Missing/ambiguous execution facts block qualification; re-exposed success never
-masks a newer distinct publisher execution.
+Publisher aliases require original run/source/ref/runner/complete-step equality.
+Missing/ambiguous facts or newer distinct executions block qualification.
+
+Restored handles bind operation/inventory/source, original clock/charges and time/generation/
+expiry/rollback limits. No replay reexecution, unknown-work publication, CLI/grant activation
+or broker funding (ADR 0086).
+
+Broker control prepays original liability; original deadlines gate fetches/JWKS waits.
+Reject redirects/bad or v2 scope/deadline-mismatched receipts. Isolate requests;
+no refunds/new authority/durability; legacy unchanged (ADR 0088).
+
+`admit_with_tail` joins reservation/admission; owned readback precedes inference (ADR 0090).
+
+Opt-in partitioned publication binds independent result/snapshot/policy/config/producer,
+original budget/conditional generation/owned numeric readback. Fresh scans verify all prose;
+partial roots keep links/capacity/full-ID status. Local replay only; default routes/all-resolved
+approval unqualified (ADR 0089).

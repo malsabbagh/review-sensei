@@ -18,6 +18,12 @@ CONTRACTS = (
     "test_provider_common_flow_contract",
     "test_openrouter_cli_contract",
     "test_large_public_lifecycle_contract",
+    "test_public_feedback_continuation_contract",
+    "test_original_operation_context_contract",
+    "test_broker_dispatch_control_contract",
+    "test_initial_assessment_tail_contract",
+    "test_rich_public_writer_contract",
+    "test_rich_feedback_contract",
     "test_openrouter_metadata_contract",
     "test_default_publication_recovery_contract",
     "test_default_human_inventory_contract",
@@ -25,6 +31,7 @@ CONTRACTS = (
     "test_hosted_history_readers_contract",
     "test_hosted_history_independent_contract",
     "test_hosted_graphql_qualification",
+    "test_openrouter_runtime_qualification_contract",
 )
 
 

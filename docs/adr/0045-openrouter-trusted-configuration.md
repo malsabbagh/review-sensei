@@ -49,7 +49,13 @@ model, and routing-policy identity fields are included in
 `configuration_digest` for evaluation and promotion evidence. Raw credentials are
 never hashed.
 
-### Approval status is not evidence (#115, 2026-10-18 amendment)
+### Approval status is not evidence (#115, initial 2026-10-18 amendment)
+
+The initial fail-closed repair below is historical.
+[ADR 0083](0083-trusted-runtime-openrouter-qualification.md) extends it with
+checked runtime authority, facts v2 and independently required persisted
+readback. Its positive API and legacy migration replace the deferrals below;
+the rejection of status strings remains in force.
 
 The profile status remains diagnostic configuration. It does not authorize
 GitHub approval. The result-facts builder and reusable publisher withhold

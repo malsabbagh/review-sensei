@@ -124,6 +124,7 @@ class AssessmentQueueTests(QueueFixture, unittest.TestCase):
         self.assertEqual(
             set(work.execution.pending_ids), set(queue.pending_order) - {late}
         )
+
         self.assertEqual(work.queue.resolved_ids, (late,))
         self.assertIn("49 pending findings were not assessed", work.reply.body)
         validate_work(
@@ -133,6 +134,214 @@ class AssessmentQueueTests(QueueFixture, unittest.TestCase):
             source_body=HUMAN,
             authority_digest="f" * 64,
         )
+
+    def test_accepted_replay_nonzero_clock_persists_high_water_without_new_allowance(
+        self,
+    ):
+        pending, bundle, queue = fixture(4)
+        store = DocumentStore()
+        wall = [datetime(2026, 10, 18, tzinfo=timezone.utc)]
+        ticks = [0.0]
+        tracker = ResourceBudgetTracker(
+            ResourceBudget.create(), monotonic=lambda: ticks[0]
+        )
+        self.run_work(
+            pending,
+            bundle,
+            queue,
+            provider=AssessingProvider(),
+            tracker=tracker,
+            checkpoint=store.checkpoint(now=lambda: wall[0]),
+        )
+        receipt = copy.deepcopy(store.document)
+        writes = len(store.writes)
+        wall[0] += timedelta(seconds=5)
+        ticks[0] += 5
+        restored = ResourceBudgetTracker(
+            ResourceBudget.create(), monotonic=lambda: ticks[0]
+        )
+        provider = AssessingProvider()
+        self.run_work(
+            pending,
+            bundle,
+            queue,
+            provider=provider,
+            tracker=restored,
+            checkpoint=store.checkpoint(now=lambda: wall[0]),
+        )
+        self.assertEqual(provider.calls, [])
+        self.assertEqual(len(store.writes), writes + 1)
+        self.assertEqual(store.document["deadline_at"], receipt["deadline_at"])
+        self.assertEqual(store.document["expires_at"], receipt["expires_at"])
+        self.assertEqual(store.document["counters"], receipt["counters"])
+        self.assertGreaterEqual(restored.elapsed_ms(), 5000)
+        self.assertEqual(restored.provider_calls, tracker.provider_calls)
+        retained = copy.deepcopy(store.document)
+        wall[0] += timedelta(hours=6)
+        with self.assertRaises(ReviewInputError):
+            self.run_work(
+                pending,
+                bundle,
+                queue,
+                provider=provider,
+                checkpoint=store.checkpoint(now=lambda: wall[0]),
+            )
+        self.assertEqual(provider.calls, [])
+        self.assertEqual(store.document, retained)
+
+    def test_single_prepared_read_cannot_refresh_a_competing_generation(self):
+        pending, bundle, queue = fixture(4)
+        store = DocumentStore()
+        checkpoint = store.checkpoint()
+        read = checkpoint.read
+        reads = []
+
+        def competing_read():
+            value = read()
+            reads.append(value)
+            store.generation += 1
+            return value
+
+        checkpoint.read = competing_read
+        provider = AssessingProvider()
+        with self.assertRaisesRegex(ReviewInputError, "stale writer"):
+            self.run_work(
+                pending, bundle, queue, provider=provider, checkpoint=checkpoint
+            )
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(provider.calls, [])
+        self.assertEqual(store.writes, [])
+
+    def test_accepted_replay_persists_current_charge_deltas_before_fresh_restore(self):
+        for counter in (
+            "provider_calls",
+            "transport_retries",
+            "structural_retries",
+            "prompt_bytes",
+            "response_bytes",
+        ):
+            with self.subTest(counter=counter):
+                pending, bundle, queue = fixture(4)
+                store = DocumentStore()
+                wall = [datetime(2026, 10, 18, tzinfo=timezone.utc)]
+                ticks = [0.0]
+                tracker = ResourceBudgetTracker(
+                    ResourceBudget.create(), monotonic=lambda: ticks[0]
+                )
+                self.run_work(
+                    pending,
+                    bundle,
+                    queue,
+                    provider=AssessingProvider(),
+                    tracker=tracker,
+                    checkpoint=store.checkpoint(now=lambda: wall[0]),
+                )
+                original = copy.deepcopy(store.document)
+                writes = len(store.writes)
+                if counter == "provider_calls":
+                    tracker.record_provider_call()
+                elif counter == "transport_retries":
+                    tracker.sleep_transport_retry(0)
+                elif counter == "structural_retries":
+                    tracker.structural_retries += 1
+                elif counter == "prompt_bytes":
+                    tracker.record_prompt_attempt("charged attempt")
+                else:
+                    tracker.record_response("charged response")
+                charged = getattr(tracker, counter)
+                wall[0] += timedelta(seconds=5)
+                ticks[0] += 5
+                provider = AssessingProvider()
+                self.run_work(
+                    pending,
+                    bundle,
+                    queue,
+                    provider=provider,
+                    tracker=tracker,
+                    checkpoint=store.checkpoint(now=lambda: wall[0]),
+                )
+                self.assertEqual(provider.calls, [])
+                self.assertEqual(store.document["counters"][counter], charged)
+                self.assertEqual(len(store.writes), writes + 1)
+
+                self.assertEqual(store.document["deadline_at"], original["deadline_at"])
+                self.assertEqual(store.document["expires_at"], original["expires_at"])
+                restored = ResourceBudgetTracker(
+                    ResourceBudget.create(), monotonic=lambda: ticks[0]
+                )
+                self.run_work(
+                    pending,
+                    bundle,
+                    queue,
+                    provider=provider,
+                    tracker=restored,
+                    checkpoint=store.checkpoint(now=lambda: wall[0]),
+                )
+                self.assertEqual(getattr(restored, counter), charged)
+                self.assertGreaterEqual(restored.elapsed_ms(), 5000)
+                self.assertEqual(provider.calls, [])
+                self.assertEqual(len(store.writes), writes + 2)
+
+    def test_unchanged_replay_checks_expiry_and_clock_after_validation(self):
+        for late in (timedelta(seconds=2), timedelta(milliseconds=50)):
+            with self.subTest(late=late):
+                pending, bundle, queue = fixture(4)
+                store = DocumentStore()
+                origin = datetime(2026, 10, 18, tzinfo=timezone.utc)
+                initial = store.checkpoint(now=lambda: origin)
+                initial.retention_seconds = 1
+                self.run_work(
+                    pending,
+                    bundle,
+                    queue,
+                    provider=AssessingProvider(),
+                    checkpoint=initial,
+                )
+                receipt = copy.deepcopy(store.document)
+                times = iter((origin + timedelta(milliseconds=100), origin + late))
+                replay = store.checkpoint(now=lambda: next(times))
+                replay.retention_seconds = 1
+                provider = AssessingProvider()
+                with self.assertRaisesRegex(
+                    ReviewInputError, "expired|clock regressed"
+                ):
+                    self.run_work(
+                        pending, bundle, queue, provider=provider, checkpoint=replay
+                    )
+                self.assertEqual(provider.calls, [])
+                self.assertEqual(store.document, receipt)
+
+    def test_replay_wall_high_water_survives_fresh_process_clocks(self):
+        pending, bundle, queue = fixture(4)
+        store = DocumentStore()
+        origin = datetime(2026, 10, 18, tzinfo=timezone.utc)
+        wall = [origin]
+
+        def run():
+            tracker = ResourceBudgetTracker(
+                ResourceBudget.create(), monotonic=lambda: 0
+            )
+            provider = AssessingProvider()
+            work = self.run_work(
+                pending,
+                bundle,
+                queue,
+                provider=provider,
+                tracker=tracker,
+                checkpoint=store.checkpoint(now=lambda: wall[0]),
+            )
+            return work, tracker, provider
+
+        run()
+        wall[0] = origin + timedelta(seconds=5)
+        _, tracker, provider = run()
+        self.assertEqual(provider.calls, [])
+        self.assertGreaterEqual(tracker.elapsed_ms(), 5000)
+        retained = copy.deepcopy(store.document)
+        wall[0] = origin + timedelta(seconds=3)
+        with self.assertRaises(ReviewInputError):
+            run()
+        self.assertEqual(store.document, retained)
 
     def test_unknown_foreign_short_duplicate_and_resolved_targets_refuse(self):
         pending, bundle, queue = fixture(4)
@@ -478,10 +687,12 @@ class AssessmentCheckpointTests(QueueFixture, unittest.TestCase):
         resumed.on_mutation = activate
         resumed.root_generation = lambda: store.generation
         original_budget = copy.deepcopy(store.document["resource_budget"])
+        original_mutations = len(contexts)
         provider = CorrectingProvider()
         self.run_work(pending, bundle, queue, provider=provider, checkpoint=resumed)
         self.assertEqual(provider.calls, [])
-        self.assertTrue(any(item.reason == "replay" for item in contexts))
+        self.assertEqual(len(contexts), original_mutations + 1)
+        self.assertEqual(contexts[-1].reason, "replay")
         self.assertEqual(store.document["resource_budget"], original_budget)
         self.assertEqual(store.document["counters"]["provider_calls"], 2)
 

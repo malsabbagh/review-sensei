@@ -24,6 +24,86 @@ from tests.test_human_assessment import APP, HEAD, State, prior
 
 
 class ReaderCompatibilityTests(unittest.TestCase):
+    def test_referenced_v5_roundtrip_preserves_versioned_provider_facts(self):
+        from review_sensei_github.default_human_inventory import HumanInventoryReference
+
+        reference = HumanInventoryReference("d" * 64 + "\t" + "e" * 64, "f" * 64)
+        original = prior()
+        for provider, qualification, binding in (
+            (None, "not-required", None),
+            ("ollama", "not-required", None),
+            ("openrouter", "qualified", "1" * 64),
+        ):
+            with self.subTest(provider=provider):
+                eligibility = replace(
+                    original,
+                    human_inventory_reference=reference,
+                    facts=replace(
+                        original.facts,
+                        provider=provider,
+                        qualification=qualification,
+                        qualification_binding=binding,
+                    ),
+                )
+                marker = approval_eligibility_marker(eligibility)
+                parsed = approval_eligibility_from_body(
+                    marker,
+                    human_inventory_reader=lambda observed: (
+                        original.human_review if observed == reference else None
+                    ),
+                )
+                self.assertEqual(parsed, eligibility)
+                self.assertEqual(parsed.to_dict()["schema_version"], "5")
+                self.assertEqual(
+                    parsed.to_dict()["facts"]["schema_version"],
+                    "1" if provider is None else "2",
+                )
+
+    def test_referenced_v5_rejects_malformed_or_downgraded_provider_facts(self):
+        from review_sensei_github.default_human_inventory import HumanInventoryReference
+
+        from review_sensei.schemas import validate_public_document
+
+        original = replace(
+            prior(),
+            human_inventory_reference=HumanInventoryReference(
+                "d" * 64 + "\t" + "e" * 64, "f" * 64
+            ),
+        ).to_dict()
+        for mutation in (
+            "missing-provider",
+            "unknown-version",
+            "legacy-provider",
+            "legacy-binding",
+            "foreign-provider-binding",
+            "invalid-binding",
+        ):
+            with self.subTest(mutation=mutation):
+                value = deepcopy(original)
+                facts = value["facts"]
+                if mutation == "missing-provider":
+                    del facts["provider"]
+                elif mutation == "unknown-version":
+                    facts["schema_version"] = "3"
+                elif mutation == "legacy-provider":
+                    facts["schema_version"] = "1"
+                elif mutation == "legacy-binding":
+                    facts["schema_version"] = "1"
+                    del facts["provider"]
+                    facts["qualification_binding"] = "1" * 64
+                elif mutation == "foreign-provider-binding":
+                    facts["qualification_binding"] = "1" * 64
+                else:
+                    facts["provider"] = "openrouter"
+                    facts["qualification_binding"] = "not-a-digest"
+                with self.assertRaises(ReviewInputError):
+                    validate_public_document(value, "eligibility-v5")
+                with self.assertRaises(ReviewInputError):
+                    ReviewApprovalEligibility.from_dict(
+                        value,
+                        human_inventory_reader=lambda _reference: prior().human_review,
+                    )
+
     def test_v1_wire_shape_and_fingerprints_remain_unchanged(self):
         original = prior()
         self.assertEqual(original.to_dict()["schema_version"], "1")
@@ -45,7 +125,8 @@ class ReaderCompatibilityTests(unittest.TestCase):
         inventory = PendingHumanReview(original.human_review.base_sha, (finding,))
         richer = replace(original, human_review=inventory)
         self.assertEqual(richer.to_dict()["schema_version"], "2.0")
-        self.assertEqual(richer.to_dict()["facts"]["schema_version"], "1")
+        self.assertEqual(richer.to_dict()["facts"]["schema_version"], "2")
+        self.assertEqual(richer.to_dict()["facts"]["provider"], "ollama")
         marker = approval_eligibility_marker(richer)
         self.assertTrue(marker.startswith("<!-- reviewsensei:eligibility:v1 "))
         self.assertEqual(approval_eligibility_from_body(marker), richer)
@@ -60,6 +141,65 @@ class ReaderCompatibilityTests(unittest.TestCase):
         unsupported["schema_version"] = "2.0"
         with self.assertRaises(ReviewInputError):
             ReviewApprovalEligibility.from_dict(unsupported)
+
+    def test_legacy_v1_facts_roundtrip_in_plain_and_cross_file_envelopes(self):
+        original = prior()
+        finding = replace(
+            original.human_review.findings[0],
+            required_paths=("src/app.py", "src/caller.py"),
+        )
+        richer = replace(
+            original,
+            human_review=PendingHumanReview(original.human_review.base_sha, (finding,)),
+        )
+        for eligibility, envelope in ((original, "1"), (richer, "2.0")):
+            with self.subTest(envelope=envelope):
+                legacy = eligibility.to_dict()
+                legacy["facts"]["schema_version"] = "1"
+                del legacy["facts"]["provider"]
+                self.assertNotIn("qualification_binding", legacy["facts"])
+                parsed = ReviewApprovalEligibility.from_dict(legacy)
+                self.assertIsNone(parsed.facts.provider)
+                self.assertEqual(parsed.to_dict(), legacy)
+                marker = approval_eligibility_marker(parsed)
+                reread = approval_eligibility_from_body(marker)
+                self.assertEqual(reread, parsed)
+                self.assertEqual(reread.to_dict()["schema_version"], envelope)
+                self.assertEqual(reread.to_dict()["facts"]["schema_version"], "1")
+
+    def test_persisted_legacy_v1_facts_load_without_inferred_provider_exemption(self):
+        original = prior()
+        clean = replace(
+            original,
+            human_review=None,
+            facts=replace(original.facts, has_human_adjudication_findings=False),
+        )
+        document = clean.to_dict()
+        document["facts"]["schema_version"] = "1"
+        del document["facts"]["provider"]
+        legacy = ReviewApprovalEligibility.from_dict(document)
+        state = State()
+        state.reviews = [state.review(legacy, 20)]
+        finalizer = ReviewApprovalFinalizer(http=state.http)
+        arguments = dict(
+            token="synthetic",
+            repository="owner/repo",
+            pull_request=1,
+            head_sha=HEAD,
+            app_slug=APP,
+        )
+        loaded = finalizer.load_eligibility(**arguments, require_valid=True)
+        self.assertEqual(loaded.to_dict(), document)
+        self.assertTrue(state.calls)
+        outcome = finalizer.finalize(
+            **arguments, eligibility=loaded, require_persisted=True
+        )
+        self.assertEqual(outcome.status, "approval_withheld")
+        self.assertEqual(outcome.diagnostic, "qualification_unverified")
+        self.assertEqual(state.events(), [])
+        self.assertEqual(
+            approval_eligibility_from_body(state.reviews[0]["body"]).to_dict(), document
+        )
 
     def test_unknown_latest_payload_never_exposes_previous_clean_authority(self):
         state = State()

@@ -245,30 +245,59 @@ Ordinary CI runs `tests/test_openrouter_qualification.py` and
 
 ## Runtime approval boundary (#115)
 
-The GitHub adapter does not yet bind retained qualification reports to the
-independently expected effective configuration of a review run. Until that
-integration exists, OpenRouter reviews withhold automatic approval. A named
-profile's `qualification_status`, a caller's `qualification="qualified"`, and
-the publisher's historical `not-required` default cannot mint eligible
-OpenRouter facts. A published target identifies which configurations the
-harness can evaluate; it does not grant support or approval.
+The reusable GitHub adapter accepts an explicitly configured
+`TrustedOpenRouterQualification` authority. It reuses
+`load_supported_openrouter_qualification` on immutable retained record/report
+bytes, with independent expected target, engine, prompt, evaluation configuration,
+corpus, observation date and reproducibility inputs. The trusted host also
+supplies actual runtime configuration, stages and limits; publication requires
+the analyzed context to match. Evaluation and runtime transaction configuration
+digests remain separate contracts. Never copy expected values from the record
+under test, PR-controlled configuration or model output.
 
-`tests/test_github_qualification_boundary.py` captures the real publisher's
-GitHub requests with external HTTP replaced. It checks omitted/asserted status,
-application publication, recovery, replay, and separate finalization of the
-newly persisted withheld facts. Permitted comments and requests for changes,
-other providers, and approval/write opt-outs keep their existing policy.
+Inject the same authority into `ReviewPublisher` and standalone
+`ReviewApprovalFinalizer`, and into `ConversationPublisher` /
+`HumanAssessmentPublisher` when those services perform delayed finalization.
+`GitHubApplication.publish_review` forwards its trusted `configuration_context`;
+`recover_review` accepts the same context without a model call. The authority
+covers one exact effective runtime configuration with a single stage provider;
+changed configuration requires a separately checked authority. See
+[ADR 0083](adr/0083-trusted-runtime-openrouter-qualification.md) for the complete
+composition, trust and migration contract.
 
-This repair does **not** complete #115. A supported positive runtime control
-still needs retained report-byte validation through
-`load_supported_openrouter_qualification`, independent effective engine,
-prompt, configuration and routing identities, and durable exact-head binding.
-The evaluation configuration digest and transaction configuration digest have
-different contracts and must not be treated as interchangeable. Existing
-standalone finalizer eligibility documents carry no provider/evidence identity;
-this test cannot prove that an older `qualified` document was backed by reports.
-Live qualification (#122) and installed/deployed acceptance (#123) remain
-separate operator evidence.
+Every public finalizer call requires matching App-owned exact-head eligibility
+readback, including provider exemption. Passing the compatibility argument
+`require_persisted=False` cannot relax it.
+
+New provider-bound facts use version `2`. They persist only the normalized
+provider and a 64-hex-character receipt over checked authority plus repository,
+PR, base, head and result identity. The finalizer rechecks current retained
+bytes and independently expected configuration before thread reads and again
+before APPROVE. Missing, changed, forged, stale or legacy-unbound context
+withholds; no accepting caller/profile string bypasses the gate. Existing
+thread, blocker, coverage, human-decision and opt-out requirements still apply.
+
+Legacy facts v1 remain readable but cannot prove provider exemption or checked
+qualification. An ordinary retry cannot silently upgrade them. The authenticated
+incomplete-rescan path may authorize a fresh analyzed result when its existing
+conditions hold; qualification remains a separate check. A complete legacy
+same-head publication has no such refresh authority: review a new head with the
+bound configuration. Old strict readers reject new facts v2 safely; use the
+matching current adapter and engine schemas.
+
+`tests/test_github_qualification_boundary.py` covers accepting-string negatives.
+`tests/test_github_trusted_qualification.py` covers synthetic checked positives,
+independent mismatches, application/recovery, replay and separate finalization.
+The installed-safe runtime contract uses the actual packaged corpus with
+synthetic provider output. Those controls qualify no real deployment.
+
+CLI/default hosted composition continues to withhold OpenRouter approval unless
+a trusted host explicitly injects the evidence authority. It does not read
+approval authority from repository files, ambient profile status or model
+output. Newly published Ollama/compatible reviews and informational/request-
+changes flows retain their existing policy. Live qualification (#122), actual
+installed/deployed operational acceptance (#123), and heterogeneous stage
+providers remain separate evidence or integration conditions.
 
 ## Release compatibility and canary
 

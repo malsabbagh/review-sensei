@@ -108,6 +108,9 @@ class CommandCapacityState:
                 coverage_blocker=None if complete else "partial",
                 qualification="not-required",
                 check_published=True,
+                # Bind the synthetic backend; legacy facts without a provider
+                # intentionally cannot authorize delayed approval.
+                provider=self.result.provider,
             ),
             self.human,
         )

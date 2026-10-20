@@ -16,6 +16,14 @@ Process: `docs/process/adr-process.md`
 | [0096](0096-bounded-hosted-history-readers.md) | Proposed | Recover oversized hosted histories within original read envelopes | #238, #240, #246, #267, #269; PR #316 | Complete lossless readers and presealed fence sizing |
 | [0094](0094-default-human-inventory-reference.md) | Proposed | Complete default human inventory references | #238, #246, #267; PR #316 | Transaction-bound admitted evidence, ordinary approval gates and bounded recovery |
 | [0093](0093-default-publication-retention.md) | Proposed | Bounded default publication and transaction-bound result retention | #238, #246, #267; PR #316 | Reader-first gated emission, existing result-part storage and no inference retry |
+| [0090](0090-coalesced-initial-assessment-tail.md) | Proposed | Coalesce owned reservation and complete admission under one consumed grant | #240, #242, #243, #244, #245, #269 | Original handle/deadline/liability and owned readback; no CLI activation |
+| [0089](0089-trusted-host-partitioned-review-publication.md) | Proposed | Explicit trusted-host complete partitioned review publication | #240, #241, #242, #244, #269 | Finite serialized local initial/partial-resolution profiles; default writer, full approval and deployed activation remain separate |
+| [0088](0088-broker-physical-dispatch-control.md) | Proposed | Enforce caller-funded broker internal liability and original deadline | #240, #242, #243, #244, #245, #269 | Explicit opt-in receipt; unchanged legacy protocol; no CLI activation or deployment |
+| [0087](0087-selected-assessment-context-and-owned-page-readback.md) | Proposed | Explicit selected assessment preparation and exact owned page readback before complete report confirmation | #240, #242, #244, #269 | Cold local-library 100 findings with 0/100/250 discussion comments; original budgets and all final fences |
+| [0086](0086-original-selected-operation-context.md) | Proposed | Expose original hosted operation context with bounded wall time | #240, #242, #243, #244, #245, #269 | Actual retained handles and complete identity; selected CLI/control accounting remain unqualified |
+| [0085](0085-bounded-complete-selected-feedback-reports.md) | Proposed | Bound complete selected-feedback reports with explicit shared guidance and exact-inventory queue references | #240, #242, #243, #244, #269 | Trusted-library opt-ins, unchanged budgets and no deployed activation |
+| [0084](0084-packed-assessment-queue-carrier.md) | Proposed | Retain a bounded lossless packed queue state carrier | #240, #242, #243, #269 | Independent decoded and encoded limits, original authority and accounting preserved |
+| [0083](0083-trusted-runtime-openrouter-qualification.md) | Proposed | Bind runtime OpenRouter approval to retained evidence and independent effective identity | #115 | Bounded receipts, versioned provider facts, fail-closed delayed finalization and legacy migration |
 | [0081](0081-openrouter-response-metadata-and-routing.md) | Proposed | Separate reported provider metadata and exact routing identifiers | #118–#121 | Optional bounded telemetry, hosted eligibility and unchanged qualification gates |
 | [0082](0082-separate-live-quality-from-deterministic-conformance.md) | Proposed | Separate live quality from exact deterministic fixture conformance | #118, #119, #120, #122 | Preserve thresholds; synthetic evaluator acceptance does not qualify a provider |
 | [0080](0080-explicit-incomplete-review-rescans.md) | Proposed | Explicit incomplete-review rescans | Maintainer-authorized bug fix | Durable request replay protection and unchanged approval gates |
@@ -101,6 +109,9 @@ Process: `docs/process/adr-process.md`
 | [0098](0098-operation-local-admitted-inventory-handoff.md) | Proposed | Reuse same-operation admitted inventory context with complete fresh fences | PR #316 composed-publication budget evidence | No response or authority cache; all mutable storage and prose checks remain fresh |
 
 ## Policy
+
+New proposal: [0084 - Lossless packed assessment queue carrier](0084-packed-assessment-queue-carrier.md)
+qualifies bounded trusted-library continuation without enabling CLI/Worker writers.
 
 Publication-control ADRs 0017 and 0018 are internal-only and are excluded from
 the public publication tree together with the publication workflow and operator

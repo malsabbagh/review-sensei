@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     )
 
 APPROVAL_ELIGIBILITY_SCHEMA_VERSION = "1"
+APPROVAL_FACTS_SCHEMA_VERSION = "2"
 APPROVAL_ELIGIBILITY_CROSS_FILE_VERSION = "2.0"
 DEFAULT_HUMAN_ELIGIBILITY_VERSION = "5"
 MAX_REFERENCED_ELIGIBILITY_BYTES = 32 * 1024
@@ -78,8 +79,23 @@ class ApprovalFacts:
     check_published: bool = True
     has_open_review_threads: bool | None = None
     persistence_status: str | None = None
+    provider: str | None = None
+    qualification_binding: str | None = None
 
     def __post_init__(self) -> None:
+        import re
+
+        if self.provider is not None and (
+            not isinstance(self.provider, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.provider) is None
+        ):
+            raise ReviewInputError("approval facts provider is invalid")
+        if self.qualification_binding is not None and (
+            self.provider != "openrouter"
+            or not isinstance(self.qualification_binding, str)
+            or re.fullmatch(r"[a-f0-9]{64}", self.qualification_binding) is None
+        ):
+            raise ReviewInputError("approval qualification binding is invalid")
         if self.persistence_status is not None and (
             self.persistence_status != "capacity-exceeded"
             or self.review_status != "partial"
@@ -88,7 +104,9 @@ class ApprovalFacts:
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = {
-            "schema_version": APPROVAL_ELIGIBILITY_SCHEMA_VERSION,
+            "schema_version": APPROVAL_FACTS_SCHEMA_VERSION
+            if self.provider is not None
+            else APPROVAL_ELIGIBILITY_SCHEMA_VERSION,
             "enabled": self.enabled,
             "app_authored": self.app_authored,
             "review_status": self.review_status,
@@ -101,6 +119,10 @@ class ApprovalFacts:
         }
         if self.persistence_status is not None:
             value["persistence_status"] = self.persistence_status
+        if self.provider is not None:
+            value["provider"] = self.provider
+        if self.qualification_binding is not None:
+            value["qualification_binding"] = self.qualification_binding
         return value
 
     @classmethod
@@ -121,10 +143,25 @@ class ApprovalFacts:
             "qualification",
             "check_published",
         }
-        if set(value) not in (expected, expected | {"persistence_status"}):
+        if not expected <= set(value) or set(value) - expected - {
+            "persistence_status",
+            "provider",
+            "qualification_binding",
+        }:
             raise ReviewInputError("approval facts must contain the documented fields")
-        if value.get("schema_version") != APPROVAL_ELIGIBILITY_SCHEMA_VERSION:
+        version = value.get("schema_version")
+        if version not in {
+            APPROVAL_ELIGIBILITY_SCHEMA_VERSION,
+            APPROVAL_FACTS_SCHEMA_VERSION,
+        }:
             raise ReviewInputError("approval facts schema_version is invalid")
+        if (
+            version == APPROVAL_FACTS_SCHEMA_VERSION and value.get("provider") is None
+        ) or (
+            version == APPROVAL_ELIGIBILITY_SCHEMA_VERSION
+            and ("provider" in value or "qualification_binding" in value)
+        ):
+            raise ReviewInputError("approval facts provider version is invalid")
         for label in (
             "enabled",
             "app_authored",
@@ -162,6 +199,8 @@ class ApprovalFacts:
             qualification=value["qualification"],
             check_published=value["check_published"],
             persistence_status=persistence_status,
+            provider=value.get("provider"),
+            qualification_binding=value.get("qualification_binding"),
         )
 
 
@@ -432,6 +471,7 @@ def approval_facts_from_result(
         has_human_adjudication_findings=has_human_adjudication_findings(result),
         coverage_blocker=coverage_state,
         qualification=qualification,
+        provider=result.provider.strip().lower(),
         check_published=check_published,
         has_open_review_threads=has_open_review_threads,
     )
@@ -582,9 +622,8 @@ def evaluate_approval_facts(facts: ApprovalFacts) -> AutoApprovalDecision:
 def restrict_result_qualification(result: ReviewResult, qualification: str) -> str:
     """A provider label or caller status cannot substitute for checked evidence.
 
-    There is currently no runtime binding from retained qualification reports to
-    independently expected effective review configuration. Until that boundary
-    exists, OpenRouter cannot mint eligible facts from either accepting string.
+    Only the publisher's independently configured retained-evidence authority
+    may qualify OpenRouter facts. Neither accepting string carries that proof.
     Preserve diagnostic withholding states and other providers' policy.
     """
 

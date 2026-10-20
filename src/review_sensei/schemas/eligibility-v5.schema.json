@@ -46,7 +46,10 @@
       ],
       "properties": {
         "schema_version": {
-          "const": "1"
+          "enum": [
+            "1",
+            "2"
+          ]
         },
         "enabled": {
           "type": "boolean"
@@ -96,6 +99,14 @@
         },
         "persistence_status": {
           "const": "capacity-exceeded"
+        },
+        "provider": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "qualification_binding": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
         }
       },
       "if": {
@@ -109,7 +120,53 @@
             "const": "partial"
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "schema_version": {
+                "const": "2"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "provider"
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "provider"
+                  ]
+                },
+                {
+                  "required": [
+                    "qualification_binding"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "qualification_binding"
+            ]
+          },
+          "then": {
+            "properties": {
+              "provider": {
+                "const": "openrouter"
+              }
+            }
+          }
+        }
+      ]
     },
     "human_inventory_reference": {
       "type": "object",
