@@ -1,7 +1,8 @@
 """Explicit nonactivating COMMENT-review staging and complete readback.
 
 The caller supplies its existing authorized publication token and shared A
-budget. This prototype is not enabled by ReviewPublisher or approval callers.
+budget. Default publication and approval routes do not activate this prototype;
+the explicit trusted-host partitioned writer composes it separately.
 """
 
 from __future__ import annotations

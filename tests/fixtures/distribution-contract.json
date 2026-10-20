@@ -97,12 +97,8 @@
         "tests/test_broker_dispatch_control.py",
         "tests/test_github_broker_client.py",
         "tests/test_initial_assessment_tail.py",
-        "tests/test_activation_tail.py",
         "tests/test_assessment_queue.py",
-        "tests/test_assessment_queue_storage.py",
-        "tests/test_authenticated_partitions.py",
-        "tests/test_evidence_capacity.py",
-        "tests/test_review_transaction.py"
+        "tests/test_rich250_public_writer.py"
       ],
       "description": "Runs after pip install dist/*.whl from a directory that cannot import checkout src/. Tests load only packaged or generated assets."
     },
