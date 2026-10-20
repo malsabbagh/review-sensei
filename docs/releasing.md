@@ -11,7 +11,8 @@ tags or invoke a release workflow.
 For the next complete-evidence library and lasting unified repository pipeline,
 follow [the runtime rollout plan](review-runtime-rollout.md). Its next-version
 candidate must be rechecked against all registries before preparation; `v5`
-promotion follows verified package publication rather than a floating install.
+promotion follows verified engine and hosted PyPI publication rather than a
+floating install.
 
 After a separately authorized signed major-channel move, follow
 [major-channel validation](major-tag-validation.md). The validator binds the
@@ -20,16 +21,19 @@ harness, and documents the default-branch dispatch needed for historical targets
 
 ## GitHub Release draft and publication
 
-For future tags containing this workflow, successful Python, native/npm and
-docs builds prepare a **draft** GitHub Release before the two protected package
-jobs request approval. Notes come from that version's reviewed, dated changelog
+Starting with the next release containing this policy, successful Python and
+docs builds prepare a **draft** GitHub Release before protected publication
+approval. Native/npm assembly runs independently. Notes come from that version's reviewed, dated changelog
 section, with links to its exact source commit and Release run. The four assets
 are the validated wheel, source archive, `SHA256SUMS` and SPDX SBOM. Checksums
 cover all three payloads; their GitHub build attestations must bind the signed
 tag ref, source digest and Release workflow on GitHub-hosted runners.
 
-Both existing `npm` and `pypi` environment approvals remain required. Only after
-both publisher jobs succeed does the final job publish the verified draft.
+Both existing `npm` and `pypi` environment approvals remain required for their
+own distribution channels. After the PyPI publisher succeeds, the final job
+publishes the verified draft without waiting for npm assembly or publication.
+A pending or failed npm lane stays visible and must be recovered independently;
+it is never marked successful to qualify the Python release.
 A draft or failed Release run cannot trigger released-docs Pages deployment.
 No additional GitHub App, private key, rules bypass or registry credential is
 needed: the two GitHub Release jobs use their short-lived workflow token with
@@ -57,6 +61,35 @@ unconditionally promoting an older retry.
 Existing immutable tags keep the workflow at their original commit. This change
 does not update or backfill their releases. Review any older-release recovery
 separately; never move a tag to opt it into the new process.
+
+## PyPI publication and v5 promotion
+
+The next-release policy in [ADR 0095](adr/0095-pypi-qualified-major-channel.md)
+requires verified publication of both `review-sensei` and `review-sensei-github`
+before v5 qualifies. It does not change the active 0.8.4 / 0.3.4 release or its
+promotion procedure. Merge and exact-head CI precede the next prepared release;
+no existing immutable tag is moved or retrofitted.
+
+The validator keeps the signed immutable engine release, reviewed source,
+GitHub release binding, exact assets and GitHub build provenance checks. It also
+reads back both PyPI wheels and sdists and verifies their digest, publication
+attestation, repository, workflow, signed source/ref, publishing run/attempt,
+GitHub-hosted runner and protected environment. The hosted wheel must pin the
+exact engine version. All four installed CLI lanes consume both verified wheel
+hashes, and the final recheck freezes both Python tag and registry identities.
+
+Overall Release success is not an admission signal for v5: npm can still be
+pending or failed. Required Python/source/docs/GitHub release jobs must each
+have a successful latest execution. Protected approvals, signed source
+preparation, workflow drain, downstream tests and the old-object lease still
+apply; this policy grants no authority to promote a channel.
+
+npm is a Node launcher with optional platform packages containing frozen native
+engine binaries, rather than an installer of the PyPI package. Its exact
+six-tarball inventory, attestations, registry integrity readback and protected
+publication remain separately verified. Released Pages documentation continues
+to require the complete successful Release including npm; that separate docs
+policy is not a prerequisite for v5 validation.
 
 ## npm release paths (issue #103)
 
@@ -360,6 +393,13 @@ reviewed source, marker metadata and immutable tag/run provenance.
 
 ## Public reusable-workflow tag channel
 
+For the next release, apply the [PyPI publication policy](#pypi-publication-and-v5-promotion)
+before the channel operation. npm/native builds or publication may remain
+pending or failed; they do not hold v5. Signed immutable engine source, both
+verified Python publications, workflow drainage, compatible readers, downstream
+tests and the exact old-object lease remain required. This does not change the
+separately authorized active 0.8.4 / 0.3.4 promotion.
+
 The customer setup contract follows the separate `v5` tag in the public
 `malsabbagh/review-sensei` repository. This tag is not a package-version tag:
 it identifies the reviewed reusable workflow snapshot and may be moved only by
@@ -572,6 +612,13 @@ published version; workflow rollback uses the previous immutable target, and
 Worker rollback uses the prior recorded deployment.
 
 ## Compatibility manifest and release sequencing
+
+This full-distribution manifest and legacy `v4` serialization contract still
+requires all five publication lanes. It does not represent next-release v5
+admission: use the independently verified Python publication receipt from
+[major-channel validation](major-tag-validation.md) for that channel. Never mark
+an incomplete npm lane complete or fabricate a full-distribution manifest to
+promote v5; preserve its actual partial state for independent recovery.
 
 A supported cutoff binds workflow commit, Python distribution, npm artifacts,
 public schema version, and Worker identity in one compatibility manifest.

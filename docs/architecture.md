@@ -651,6 +651,17 @@ auditable. A temporary environment-scoped token can bootstrap an entirely new
 package set; after the first release, npm Trusted Publishing binds each package
 to each authorized workflow, repository, and environment, eliminating the token.
 
+For the next release, Python/docs builds produce the verified GitHub draft
+without waiting for native/npm assembly; PyPI approval and publication release
+that draft independently of npm. Major-channel admission verifies both engine
+and hosted PyPI wheel/sdist publication attestations against signed immutable
+source, publisher run/attempt and protected environments.
+Retain signed engine provenance, installed-CLI/downstream tests and workflow drain.
+npm remains an independently attested native-binary
+distribution with its own protected approval and integrity readback. Overall
+Release/npm success remains a Pages condition, outside v5 admission. See
+[ADR 0095](adr/0095-pypi-qualified-major-channel.md).
+
 Release operations, PyPI registration, signed-tag ownership, verification,
 rollback/yank, and compromised-release response are documented in
 `docs/releasing.md`. The workflow cannot reserve the PyPI project or decide

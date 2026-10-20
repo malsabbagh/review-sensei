@@ -17,6 +17,7 @@ from email.parser import BytesParser
 from pathlib import Path
 
 import check_release_version as versions
+import pypi_channel_publication as pypi
 import release_docs as docs
 from qualify_published_cli import HOSTED_MANIFEST, hosted_version
 
@@ -321,6 +322,7 @@ def assert_current(receipt):
     if binding != receipt["release_binding"]:
         raise ValueError("published release binding changed during validation")
     published_assets(fresh["id"], binding)
+    pypi.assert_current(receipt["pypi_publication"])
 
 
 def qualify(selection, output, *, reserved=False):
@@ -369,24 +371,24 @@ def qualify(selection, output, *, reserved=False):
         )
     release = docs.api(f"releases/tags/v{version}")
     binding = release_binding(release, version, immutable_object, source)
-    run = docs.api(f"actions/runs/{binding['run_id']}")
-    if (
-        run.get("id") != binding["run_id"]
-        or run.get("head_sha") != source
-        or run.get("head_branch") != "v" + version
-        or type(run.get("run_attempt")) is not int
-        or run["run_attempt"] < 1
-    ):
-        raise ValueError("published release run/source differs")
-    docs.validate_run(
-        run, docs.api_pages(f"actions/runs/{binding['run_id']}/jobs?filter=all", "jobs")
-    )
+    publication = pypi.qualify(source, version, github_version, output / "pypi")
+    engine = publication["projects"]["review-sensei"]
+    if engine["run_id"] != binding["run_id"]:
+        raise ValueError("published release run/source differs from PyPI publication")
     if docs.api(f"compare/{source}...main").get("status") not in {"ahead", "identical"}:
         raise ValueError("released source is not an ancestor of reviewed main")
     assets = published_assets(release["id"], binding)
     wheel_digest = verify_wheel(
         assets[f"review_sensei-{version}-py3-none-any.whl"], binding, version, output
     )
+    if (
+        wheel_digest
+        != engine["artifacts"][f"review_sensei-{version}-py3-none-any.whl"]["sha256"]
+    ):
+        raise ValueError("GitHub and PyPI wheel digests differ")
+    github_wheel_digest = publication["projects"]["review-sensei-github"]["artifacts"][
+        f"review_sensei_github-{github_version}-py3-none-any.whl"
+    ]["sha256"]
     try:
         surface = validate_surface(snapshot)
     except ValueError as error:
@@ -400,6 +402,8 @@ def qualify(selection, output, *, reserved=False):
         "release_run_id": binding["run_id"],
         "release_binding": binding,
         "wheel_sha256": wheel_digest,
+        "github_wheel_sha256": github_wheel_digest,
+        "pypi_publication": publication,
         "source_data_sha256": hashes,
         "surface": surface,
         "status": "PASS" if surface["status"] == "PASS" else "ERROR",
@@ -425,6 +429,7 @@ def workflow_outputs(receipt):
                     "version",
                     "github_version",
                     "wheel_sha256",
+                    "github_wheel_sha256",
                     "source_sha",
                     "tag_object",
                     "channel",
