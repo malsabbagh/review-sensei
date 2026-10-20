@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import zipfile
+from datetime import datetime
 from email.parser import BytesParser
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -110,6 +111,135 @@ def signed_release(tag):
     return obj, source
 
 
+def _job_time(value):
+    if not isinstance(value, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", value
+    ):
+        raise ValueError("Python publisher execution timestamp is invalid")
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _publisher_execution(job, run):
+    """Validate authenticated GitHub execution facts, excluding record aliases."""
+    try:
+        if (
+            type(job["id"]) is not int
+            or job["id"] < 1
+            or type(job["run_id"]) is not int
+            or job["run_id"] != run["id"]
+            or job["head_sha"] != run["head_sha"]
+            or job["head_branch"] != run["head_branch"]
+        ):
+            raise ValueError("Python publisher execution scope differs")
+        text = ("name", "workflow_name", "runner_name", "runner_group_name")
+        if any(not isinstance(job[k], str) or not job[k].strip() for k in text):
+            raise ValueError("Python publisher execution identity is incomplete")
+        if type(job["runner_id"]) is not int or job["runner_id"] < 1:
+            raise ValueError("Python publisher runner identity is invalid")
+        group = job["runner_group_id"]
+        # GitHub re-exposes its default hosted group as null instead of zero.
+        # Stable runner id/name/group name/labels still match independently.
+        if group is None and job["runner_group_name"] == "GitHub Actions":
+            group = 0
+        if type(group) is not int or group < 0:
+            raise ValueError("Python publisher runner group is invalid")
+        labels = job["labels"]
+        if (
+            not isinstance(labels, list)
+            or not labels
+            or any(not isinstance(v, str) or not v.strip() for v in labels)
+            or len(set(labels)) != len(labels)
+        ):
+            raise ValueError("Python publisher runner labels are invalid")
+        created = _job_time(job["created_at"])
+        started = _job_time(job["started_at"])
+        completed = _job_time(job["completed_at"])
+        if started > completed or started < created <= completed:
+            raise ValueError("Python publisher execution timing is ambiguous")
+        steps = job["steps"]
+        if not isinstance(steps, list) or not steps:
+            raise ValueError("Python publisher execution steps are unavailable")
+        facts = []
+        previous = 0
+        for step in steps:
+            number = step["number"]
+            if (
+                type(number) is not int
+                or number <= previous
+                or not isinstance(step["name"], str)
+                or not step["name"].strip()
+                or step["status"] != "completed"
+                or step["conclusion"] not in {"success", "skipped"}
+            ):
+                raise ValueError("Python publisher execution steps are invalid")
+            previous = number
+            begin, end = step["started_at"], step["completed_at"]
+            if (
+                not (step["conclusion"] == "skipped" and begin is None and end is None)
+                and not started <= _job_time(begin) <= _job_time(end) <= completed
+            ):
+                raise ValueError("Python publisher step timing is invalid")
+            facts.append((number, step["name"], step["conclusion"], begin, end))
+        if not any(step[2] == "success" for step in facts):
+            raise ValueError("Python publisher execution has no completed step")
+        identity = (
+            job["run_id"],
+            job["head_sha"],
+            job["head_branch"],
+            job["name"],
+            job["workflow_name"],
+            job["started_at"],
+            job["completed_at"],
+            job["runner_id"],
+            job["runner_name"],
+            group,
+            job["runner_group_name"],
+            tuple(labels),
+            tuple(facts),
+        )
+        return identity, created <= started
+    except (KeyError, TypeError):
+        raise ValueError("Python publisher execution identity is incomplete") from None
+
+
+def _publication_origin(selected, candidates, run):
+    successful = [
+        job
+        for job in candidates
+        if job.get("status") == "completed" and job.get("conclusion") == "success"
+    ]
+    checked = [(job, *_publisher_execution(job, run)) for job in successful]
+    if len({job["id"] for job in successful}) != len(successful):
+        raise ValueError("Python publisher execution identity is ambiguous")
+    identity, original = _publisher_execution(selected, run)
+    origins = [
+        job
+        for job, facts, genuine in checked
+        if genuine
+        and job["run_attempt"] < selected["run_attempt"]
+        and facts == identity
+    ]
+    if len(origins) > 1:
+        raise ValueError("Python publisher execution origin is ambiguous")
+    if not origins and not original:
+        raise ValueError("Python publisher execution origin is unavailable")
+    origin = origins[0] if origins else selected
+    if sum(job["run_attempt"] == origin["run_attempt"] for job in candidates) != 1:
+        raise ValueError("Python publisher execution origin attempt is ambiguous")
+    for job in candidates:
+        if job["run_attempt"] <= origin["run_attempt"]:
+            continue
+        # A later alias of this success cannot hide an intervening execution.
+        # Incomplete/failed records also hold, without guessing their origin.
+        if (
+            job.get("status") != "completed"
+            or job.get("conclusion") != "success"
+            or _publisher_execution(job, run)[0] != identity
+        ):
+            raise ValueError("newer Python publisher execution conflicts with origin")
+    return origin
+
+
 def publication_run(source, tag, workflow, required, publisher):
     """Require newest executions of Python jobs; overall/npm status is irrelevant."""
     runs = docs.api_pages(
@@ -153,6 +283,9 @@ def publication_run(source, tag, workflow, required, publisher):
         ):
             raise ValueError("latest Python publication prerequisite did not succeed")
         selected[name] = newest[0]
+    publisher_job = _publication_origin(
+        selected[publisher], [j for j in jobs if j.get("name") == publisher], run
+    )
     fresh = docs.api(f"actions/runs/{run['id']}")
     if any(
         fresh.get(k) != run.get(k)
@@ -162,8 +295,8 @@ def publication_run(source, tag, workflow, required, publisher):
     return {
         "run_id": run["id"],
         "run_attempt": run["run_attempt"],
-        "publication_attempt": selected[publisher]["run_attempt"],
-        "publication_job_id": selected[publisher]["id"],
+        "publication_attempt": publisher_job["run_attempt"],
+        "publication_job_id": publisher_job["id"],
         "workflow": workflow,
     }
 

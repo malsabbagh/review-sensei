@@ -662,6 +662,13 @@ distribution with its own protected approval and integrity readback. Overall
 Release/npm success remains a Pages condition, outside v5 admission. See
 [ADR 0095](adr/0095-pypi-qualified-major-channel.md).
 
+Publisher aliases must match the original run/source/ref, runner and complete
+step identity; missing or ambiguous execution facts block qualification.
+A re-exposed success must never mask a newer distinct publisher execution.
+The current API attempt and original publishing attempt are separate receipt
+identities. Validation code comes from the recorded protected default-branch
+commit; the signed release source supplies the frozen workflow and manifest data.
+
 Release operations, PyPI registration, signed-tag ownership, verification,
 rollback/yank, and compromised-release response are documented in
 `docs/releasing.md`. The workflow cannot reserve the PyPI project or decide
