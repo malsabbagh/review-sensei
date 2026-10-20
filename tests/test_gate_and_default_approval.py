@@ -992,6 +992,67 @@ class CheckPublisherContractTests(unittest.TestCase):
         http, calls = make_http(list(responses))
         return ReviewCheckPublisher(http=http), calls
 
+    def test_native_app_slug_reuses_one_exact_head_check_across_replay(self):
+        native = {
+            "id": 42,
+            "name": "ReviewSensei",
+            "head_sha": HEAD,
+            "app": {"slug": "reviewsensei", "id": 123},
+        }
+        publisher, calls = self.check_publisher(
+            [
+                json_response({"check_runs": [native]}),
+                json_response({"id": 42}),
+                json_response({"check_runs": [native]}),
+                json_response({"id": 42}),
+            ]
+        )
+        outcome = review_check_outcome(
+            policy="auto-approve", review_status="partial", required_fixes=False
+        )
+        for _ in range(2):
+            result = publisher.complete(
+                token="token",
+                repository="owner/repo",
+                head_sha=HEAD,
+                app_slug=APP,
+                outcome=outcome,
+            )
+            self.assertEqual((result.status, result.check_run_id), ("updated", 42))
+        self.assertEqual([method for method, _, _ in calls], ["GET", "PATCH"] * 2)
+        self.assertTrue(
+            all(
+                url.endswith("/check-runs/42")
+                for method, url, _ in calls
+                if method == "PATCH"
+            )
+        )
+
+    def test_native_check_alias_never_adopts_a_sibling_app_name_or_head(self):
+        native = {
+            "id": 42,
+            "name": "ReviewSensei",
+            "head_sha": HEAD,
+            "app": {"slug": "reviewsensei", "id": 123},
+        }
+        for change in (
+            {"app": {"slug": "reviewsensei-other", "id": 456}},
+            {"name": "Another check"},
+            {"head_sha": "a" * 40},
+        ):
+            with self.subTest(change=change):
+                publisher, calls = self.check_publisher(
+                    [
+                        json_response({"check_runs": [{**native, **change}]}),
+                        json_response({"id": 99}, 201),
+                    ]
+                )
+                result = publisher.start(
+                    token="token", repository="owner/repo", head_sha=HEAD, app_slug=APP
+                )
+                self.assertEqual((result.status, result.check_run_id), ("created", 99))
+                self.assertEqual([method for method, _, _ in calls], ["GET", "POST"])
+
     def test_completed_review_conclusion_follows_the_policy(self):
         requested = review_check_outcome(
             policy="auto-approve", review_status="complete", required_fixes=True

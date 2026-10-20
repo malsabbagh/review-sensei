@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import base64
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Mapping
 
+from review_sensei.bounded_evidence import canonical_bytes
 from review_sensei.coverage import coverage_approval_state
 from review_sensei.errors import ReviewInputError
-from review_sensei.human_assessment import PendingHumanReview
+from review_sensei.human_assessment import HumanInventoryResolution, PendingHumanReview
 from review_sensei.models import ReviewResult
+from review_sensei.schemas import validate_public_document
 
 if TYPE_CHECKING:
+    from .default_human_inventory import HumanInventoryReference
     from .eligibility_parts import (
         PartitionedEligibilityContext,
         PartitionedEligibilityRoot,
@@ -21,6 +26,10 @@ if TYPE_CHECKING:
 APPROVAL_ELIGIBILITY_SCHEMA_VERSION = "1"
 APPROVAL_FACTS_SCHEMA_VERSION = "2"
 APPROVAL_ELIGIBILITY_CROSS_FILE_VERSION = "2.0"
+DEFAULT_HUMAN_ELIGIBILITY_VERSION = "5"
+MAX_REFERENCED_ELIGIBILITY_BYTES = 32 * 1024
+_MAX_ELIGIBILITY_MARKER_BYTES = 65_536
+_ELIGIBILITY_MARKER_PREFIX = "<!-- reviewsensei:eligibility:v1"
 REVIEW_STATUSES = frozenset({"complete", "partial", "incomplete", "summary-only"})
 EVIDENCE_POLICIES = frozenset({"legacy", "confirmed"})
 # ``not-required`` covers backends without a published qualification slice.
@@ -209,8 +218,11 @@ class ReviewApprovalEligibility:
     facts: ApprovalFacts
     human_review: PendingHumanReview | None = None
     partitioned_root: PartitionedEligibilityRoot | None = None
+    human_inventory_reference: HumanInventoryReference | None = None
 
     def to_dict(self) -> dict[str, object]:
+        if self.human_inventory_reference is not None:
+            return self._referenced_document()
         if self.partitioned_root is not None:
             return self.partitioned_root.to_document(self)
         value: dict[str, object] = {
@@ -228,15 +240,75 @@ class ReviewApprovalEligibility:
                 value["schema_version"] = APPROVAL_ELIGIBILITY_CROSS_FILE_VERSION
         return value
 
+    def _referenced_document(self) -> dict[str, object]:
+        from .default_human_inventory import HumanInventoryReference
+
+        reference = self.human_inventory_reference
+        inventory = self.human_review
+        if (
+            not isinstance(reference, HumanInventoryReference)
+            or not isinstance(inventory, PendingHumanReview)
+            or self.partitioned_root is not None
+            or self.facts.has_human_adjudication_findings != bool(inventory.pending)
+        ):
+            raise ReviewInputError("human inventory reference eligibility conflicts")
+        _validate_eligibility_identity(self.head_sha, self.result_digest)
+        value: dict[str, object] = {
+            "schema_version": DEFAULT_HUMAN_ELIGIBILITY_VERSION,
+            "head_sha": self.head_sha,
+            "result_digest": self.result_digest,
+            "facts": self.facts.to_dict(),
+            "human_inventory_reference": reference.to_dict(),
+            "human_resolution": HumanInventoryResolution.from_inventory(
+                inventory
+            ).to_dict(),
+        }
+        validate_public_document(value, "eligibility-v5")
+        # The initial marker must support every future resolved full ID. This
+        # bounds the complete marker; the publisher also reserves surrounding
+        # visible prose, finding index and lifecycle framing before any write.
+        maximum = dict(
+            value,
+            human_resolution=HumanInventoryResolution(
+                inventory.inventory_digest,
+                tuple(item.fingerprint for item in inventory.findings),
+            ).to_dict(),
+            facts=replace(self.facts, has_human_adjudication_findings=False).to_dict(),
+        )
+        wire = canonical_bytes(maximum)
+        marker_bytes = (
+            len(_ELIGIBILITY_MARKER_PREFIX)
+            + 1
+            + len(base64.urlsafe_b64encode(wire))
+            + len(" -->")
+        )
+        if (
+            len(wire) > MAX_REFERENCED_ELIGIBILITY_BYTES
+            or marker_bytes > _MAX_ELIGIBILITY_MARKER_BYTES
+        ):
+            raise ReviewInputError(
+                "human inventory eligibility exceeds future capacity"
+            )
+        return value
+
     @classmethod
     def from_dict(
         cls,
         value: object,
         *,
+        human_inventory_reader: Callable[[HumanInventoryReference], PendingHumanReview]
+        | None = None,
         partition_reader: PartitionReader | None = None,
         expected_context: PartitionedEligibilityContext | None = None,
         visible_reader: VisibleReader | None = None,
     ) -> "ReviewApprovalEligibility":
+        if (
+            isinstance(value, Mapping)
+            and value.get("schema_version") == DEFAULT_HUMAN_ELIGIBILITY_VERSION
+        ):
+            return cls._from_referenced_document(
+                value, human_inventory_reader=human_inventory_reader
+            )
         if isinstance(value, Mapping) and value.get("schema_version") == "4":
             from .eligibility_parts import parse_partitioned_eligibility
 
@@ -263,15 +335,8 @@ class ReviewApprovalEligibility:
             raise ReviewInputError("approval eligibility schema_version is invalid")
         head_sha = value.get("head_sha")
         result_digest = value.get("result_digest")
-        if (
-            not isinstance(head_sha, str)
-            or len(head_sha) != 40
-            or any(character not in "0123456789abcdef" for character in head_sha)
-            or not isinstance(result_digest, str)
-            or len(result_digest) != 64
-            or any(character not in "0123456789abcdef" for character in result_digest)
-        ):
-            raise ReviewInputError("approval eligibility identity is invalid")
+        _validate_eligibility_identity(head_sha, result_digest)
+        assert isinstance(head_sha, str) and isinstance(result_digest, str)
         facts = ApprovalFacts.from_dict(value.get("facts"))
         human_review = (
             PendingHumanReview.from_dict(value["human_review"])
@@ -304,6 +369,53 @@ class ReviewApprovalEligibility:
             human_review=human_review,
         )
 
+    @classmethod
+    def _from_referenced_document(
+        cls,
+        value: Mapping[str, object],
+        *,
+        human_inventory_reader: Callable[[HumanInventoryReference], PendingHumanReview]
+        | None,
+    ) -> ReviewApprovalEligibility:
+        if set(value) != {
+            "schema_version",
+            "head_sha",
+            "result_digest",
+            "facts",
+            "human_inventory_reference",
+            "human_resolution",
+        }:
+            raise ReviewInputError("human inventory eligibility fields are invalid")
+        if human_inventory_reader is None:
+            raise ReviewInputError(
+                "human inventory eligibility requires a trusted reader"
+            )
+        from .default_human_inventory import HumanInventoryReference
+
+        head_sha, result_digest = value["head_sha"], value["result_digest"]
+        _validate_eligibility_identity(head_sha, result_digest)
+        assert isinstance(head_sha, str) and isinstance(result_digest, str)
+        reference = HumanInventoryReference.from_dict(
+            value["human_inventory_reference"]
+        )
+        resolution = HumanInventoryResolution.from_dict(value["human_resolution"])
+        facts = ApprovalFacts.from_dict(value["facts"])
+        validate_public_document(value, "eligibility-v5")
+        inventory = human_inventory_reader(reference)
+        if not isinstance(inventory, PendingHumanReview):
+            raise ReviewInputError("human inventory reader returned invalid inventory")
+        restored = resolution.restore(inventory)
+        eligibility = cls(
+            head_sha=head_sha,
+            result_digest=result_digest,
+            facts=facts,
+            human_review=restored,
+            human_inventory_reference=reference,
+        )
+        # Includes pending/facts agreement and the full future resolution budget.
+        eligibility.to_dict()
+        return eligibility
+
     def evaluate(
         self, *, app_authored: bool, has_open_review_threads: bool | None
     ) -> AutoApprovalDecision:
@@ -316,6 +428,18 @@ class ReviewApprovalEligibility:
                 has_open_review_threads=has_open_review_threads,
             )
         )
+
+
+def _validate_eligibility_identity(head_sha: object, result_digest: object) -> None:
+    if (
+        not isinstance(head_sha, str)
+        or len(head_sha) != 40
+        or any(character not in "0123456789abcdef" for character in head_sha)
+        or not isinstance(result_digest, str)
+        or len(result_digest) != 64
+        or any(character not in "0123456789abcdef" for character in result_digest)
+    ):
+        raise ReviewInputError("approval eligibility identity is invalid")
 
 
 def approval_facts_from_result(

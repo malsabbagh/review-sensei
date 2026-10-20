@@ -668,6 +668,30 @@ class PendingDeliveryTests(unittest.TestCase):
             wrapped.request("GET", "/repos/owner/repo/pulls/1", token="synthetic")
         self.assertEqual(state.calls, [])
 
+    def test_shared_guidance_keeps_owned_page_readback_and_final_report_scan(self):
+        state = state_with_inventory()
+        original_request = state.http.request
+        page_reads = []
+        final_scans = []
+
+        def capture_readbacks(method, path, **arguments):
+            if method == "GET":
+                if re.search(r"/issues/comments/\d+$", path) and not path.endswith(
+                    "/10"
+                ):
+                    page_reads.append(path)
+                if "/issues/1/comments?" in path and state.reply_count == 3:
+                    final_scans.append(path)
+            return original_request(method, path, **arguments)
+
+        state.http.request = capture_readbacks
+        outcome = self.publish(state, layout="shared-guidance-v1")
+        self.assertEqual(outcome.status, "replied")
+        self.assertEqual(state.reply_count, 3)
+        self.assertEqual(len(page_reads), 3)
+        self.assertTrue(final_scans)
+        self.assertEqual(state.events(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

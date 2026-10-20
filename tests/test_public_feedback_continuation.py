@@ -349,6 +349,7 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
                 root_comment_id=10,
                 source_kind="issue",
                 expected_head_sha=state.head,
+                defer_evidence=cold_context == "deferred",
             )
             if cold_context
             else state.prepared()
@@ -393,7 +394,7 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
             self.assertEqual(len(state.latest_inventory().pending), 39)
             self.assertLessEqual(host.read_budget.calls, 60)
 
-    def test_accepted_interruption_replays_without_inference_but_keeps_publication_budget_blocked(
+    def test_accepted_interruption_replays_original_accounting_and_bounded_delivery(
         self,
     ):
         state, publisher, prepared = self.prepare()
@@ -436,19 +437,30 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
             self.assertEqual(
                 host.mutations, ["admission-dispatch", "accepted", "replay"]
             )
-            with self.assertRaises((ReviewInputError, GitHubPublicationError)):
-                publisher.publish(
-                    token="synthetic",
-                    review_token="synthetic",
-                    repository="owner/repo",
-                    pull_request=1,
-                    prepared=prepared,
-                    reply=replay,
-                    app_slug=APP,
-                )
-            self.assertEqual(len(state.latest_inventory().pending), 40)
+            before_publication = len(state.calls)
+            accepted_calls = host.read_budget.calls
+            outcome = publisher.publish(
+                token="synthetic",
+                review_token="synthetic",
+                repository="owner/repo",
+                pull_request=1,
+                prepared=prepared,
+                reply=replay,
+                app_slug=APP,
+            )
+            self.assertEqual(outcome.status, "replied")
+            self.assertEqual(outcome.approval_status, "approval_withheld")
+            self.assertEqual(state.latest_inventory().resolved, replay.selected_ids)
+            self.assertEqual(len(state.latest_inventory().pending), 39)
+            self.assertEqual(host.read_budget.calls, 60)
+            self.assertEqual(
+                len(state.calls) - before_publication,
+                host.read_budget.calls - accepted_calls,
+            )
+            self.assertEqual(host.read_budget.wall_deadline_ms, original_deadline)
+            self.assertEqual(host.tracker.execution_identity, original_identity)
+            self.assertEqual(replay_provider.calls, [])
             self.assertNotIn("APPROVE", state.events())
-            self.assertLessEqual(host.read_budget.calls, 60)
 
     def test_unknown_or_foreign_target_has_no_provider_or_checkpoint_mutation(self):
         for target in ("e" * 64, evidence_digest({"repository": "foreign/repo"})):
@@ -738,14 +750,14 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
                 state.latest_inventory().resolved, prepared.feedback.target_ids
             )
             self.assertEqual(len(state.latest_inventory().pending), 99)
-            self.assertEqual(host.read_budget.calls, 54)
+            self.assertEqual(host.read_budget.calls, 51)
             self.assertEqual(state.reply_count, 1)
             self.assertNotIn("APPROVE", state.events())
             self.assertEqual(state.latest_inventory().inventory_document(), original)
             for item in state.latest_inventory().pending:
                 self.assertIn(item.fingerprint, state.replies[0]["body"])
 
-    def test_ordinary_cold_100_with_long_history_refuses_without_advancing_authority(
+    def test_ordinary_cold_history_preserves_bounded_completion_or_retained_recovery(
         self,
     ):
         # Unlike the prepared-context positive control, ordinary conversation
@@ -768,8 +780,10 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
                     accepted = copy.deepcopy(host.last_envelope)
                     counters = host.tracker.provider_calls
                     deadline = host.read_budget.wall_deadline_ms
-                    with self.assertRaises((ReviewInputError, GitHubPublicationError)):
-                        publisher.publish(
+                    before_publication = len(state.calls)
+
+                    def publish():
+                        return publisher.publish(
                             token="synthetic",
                             review_token="synthetic",
                             repository="owner/repo",
@@ -779,7 +793,20 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
                             app_slug=APP,
                             pending_report_layout="shared-guidance-v1",
                         )
+
+                    if history_count == 100:
+                        outcome = publish()
+                        self.assertEqual(outcome.status, "replied")
+                        self.assertEqual(outcome.approval_status, "approval_withheld")
+                    else:
+                        with self.assertRaises(
+                            (ReviewInputError, GitHubPublicationError)
+                        ):
+                            publish()
                     self.assertEqual(host.read_budget.calls, 60)
+                    self.assertEqual(
+                        len(state.calls) - before_publication, 60 - accepted_reads
+                    )
                     self.assertEqual(host.read_budget.wall_deadline_ms, deadline)
                     self.assertEqual(host.tracker.provider_calls, counters)
                     observer = LocalSessionLedger(Path(directory))
@@ -793,17 +820,26 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
                     ).receipt(source_digest=host.source, operation_id=host.operation_id)
                     self.assertEqual(len(receipt["completed"]), 1)
                     self.assertEqual(receipt["counters"]["provider_calls"], 1)
-                    self.assertEqual(state.latest_inventory().resolved, ())
-                    self.assertEqual(len(state.latest_inventory().pending), 100)
+                    self.assertEqual(
+                        state.latest_inventory().resolved,
+                        prepared.feedback.target_ids if history_count == 100 else (),
+                    )
+                    self.assertEqual(
+                        len(state.latest_inventory().pending),
+                        99 if history_count == 100 else 100,
+                    )
                     self.assertEqual(
                         state.latest_inventory().inventory_document(), original
                     )
-                    # A provisional report is not a refreshed authority receipt.
                     self.assertEqual(state.reply_count, 1)
-                    self.assertEqual(state.events(), [])
+                    # A provisional receipt cannot advance authority when the
+                    # remaining history exhausts the original allowance.
+                    self.assertEqual(
+                        state.events(), ["COMMENT"] if history_count == 100 else []
+                    )
 
     def test_selected_cold_100_with_0_100_250_history_completes_original_budget(self):
-        for history_count, final_calls in ((0, 56), (100, 59), (250, 60)):
+        for history_count, final_calls in ((0, 53), (100, 56), (250, 59)):
             with self.subTest(history_count=history_count):
                 state, publisher, prepared = self.prepare(
                     100, history_count=history_count, cold_context="selected"
@@ -841,7 +877,7 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
                     self.assertEqual(state.events(), ["COMMENT"])
                     self.assertNotIn("APPROVE", state.events())
 
-    def test_ordinary_cold_100_without_history_completes_at_original_ceiling(self):
+    def test_ordinary_cold_100_without_history_completes_within_original_budget(self):
         state, publisher, prepared = self.prepare(100, cold_context=True)
         with tempfile.TemporaryDirectory() as directory:
             host = LocalFeedbackHost(directory, publisher, prepared, referenced=True)
@@ -857,7 +893,7 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
                 pending_report_layout="shared-guidance-v1",
             )
             self.assertEqual(result.approval_status, "approval_withheld")
-            self.assertEqual(host.read_budget.calls, 60)
+            self.assertEqual(host.read_budget.calls, 57)
             self.assertEqual(
                 state.latest_inventory().resolved, prepared.feedback.target_ids
             )
@@ -865,10 +901,12 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
 
     def test_selected_context_keeps_identical_complete_provider_inputs(self):
         inputs = []
-        for context in (True, "selected"):
+        context_calls = []
+        for context in (True, "selected", "deferred"):
             state, publisher, prepared = self.prepare(
                 100, history_count=250, cold_context=context
             )
+            context_calls.append(len(state.calls))
             with tempfile.TemporaryDirectory() as directory:
                 host = LocalFeedbackHost(
                     directory, publisher, prepared, referenced=True
@@ -889,6 +927,9 @@ class PublicFeedbackContinuationTests(unittest.TestCase):
                     )
                 )
         self.assertEqual(inputs[0], inputs[1])
+        self.assertEqual(inputs[0], inputs[2])
+        self.assertLess(context_calls[1], context_calls[0])
+        self.assertEqual(context_calls[1], context_calls[2])
 
     def test_selected_context_requires_explicit_target_and_live_exact_scope(self):
         for fault in ("targets", "base", "head", "identity", "revision", "author"):

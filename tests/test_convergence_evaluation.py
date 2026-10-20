@@ -7,7 +7,6 @@ import os
 import unittest
 from contextlib import redirect_stderr
 from dataclasses import replace
-from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -16,6 +15,7 @@ from review_sensei_github import GitHubApplication, GitHubWriteOptions
 from review_sensei_github.cli import main as _github_main
 from review_sensei_github.observed import (
     _admitted_material_ids,
+    _ObservedGitHub,
     _ObservedHTTPResponse,
     _ObservedProvider,
     observed_cutover_gaps,
@@ -23,6 +23,7 @@ from review_sensei_github.observed import (
     restored_compatible_baseline,
     run_observed_review_sequence,
 )
+from review_sensei_github.operation_host import RESULT_COMMENT_MARKER
 from review_sensei_github.publication import PublicationResult
 
 from review_sensei.baseline import (
@@ -30,6 +31,7 @@ from review_sensei.baseline import (
     ReviewBaseline,
     baseline_history_document,
 )
+from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.cli import main as _engine_main
 from review_sensei.context import ReviewContextCacheKey
 from review_sensei.convergence import (
@@ -68,6 +70,14 @@ from review_sensei.session import (
     SessionRecord,
 )
 
+try:
+    from session_fixture_clock import SESSION_FIXTURE_NOW, SessionFixtureClockMixin
+except ModuleNotFoundError:
+    from tests.session_fixture_clock import (
+        SESSION_FIXTURE_NOW,
+        SessionFixtureClockMixin,
+    )
+
 
 def main(argv: list[str]) -> int:
     """Observed evidence is a hosted command; other convergence flags stay local."""
@@ -86,7 +96,8 @@ DIFF = """diff --git a/src/app.py b/src/app.py
 +change
 """
 
-FIXED_NOW = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
+
+FIXED_NOW = SESSION_FIXTURE_NOW
 IDENTITY = SessionIdentity("owner/repo", 136, repository_id=99)
 HEAD = "a" * 40
 
@@ -235,6 +246,57 @@ class SequenceReplayTests(unittest.TestCase):
 
 
 class ObservedSequenceTests(unittest.TestCase):
+    def test_observed_default_publication_retains_owned_result_on_the_same_budget(self):
+        github = _ObservedGitHub()
+        budgets = []
+
+        def publication_budget():
+            budget = EvidenceReadBudget()
+            budgets.append(budget)
+            return budget
+
+        with (
+            patch("review_sensei_github.observed._ObservedGitHub", return_value=github),
+            patch(
+                "review_sensei_github.application.EvidenceReadBudget",
+                side_effect=publication_budget,
+            ),
+        ):
+            report = run_observed_review_sequence(
+                (SequenceStep(head_sha="a" * 40, label="retained-initial"),),
+                _policy(),
+            )
+        self.assertEqual(report.events[0].publication_status, "published")
+        self.assertEqual(report.events[0].provider_calls, 1)
+        self.assertEqual(len(budgets), 1)
+        self.assertEqual(budgets[0].calls, len(github.calls))
+        self.assertLessEqual(budgets[0].calls, 60)
+        self.assertTrue(github.issue_comments)
+        self.assertEqual(len(github.issue_comments), 3)
+        for comment in github.issue_comments:
+            self.assertTrue(
+                RESULT_COMMENT_MARKER in comment["body"]
+                or "<!-- reviewsensei:default-human-inventory-intent:v1 -->"
+                in comment["body"]
+            )
+            self.assertEqual(
+                comment["user"],
+                {"id": 42, "login": "reviewsensei[bot]", "type": "Bot"},
+            )
+            self.assertEqual(
+                comment["issue_url"],
+                "https://observed.github.invalid/repos/owner/repo/issues/136",
+            )
+        self.assertTrue(
+            any(
+                method == "POST"
+                and path == "/repos/owner/repo/issues/136/comments"
+                and RESULT_COMMENT_MARKER in body["body"]
+                for method, path, body in github.calls
+                if body is not None
+            )
+        )
+
     def test_observed_harness_records_real_service_and_publication_events(self):
         report = run_observed_review_sequence(
             (
@@ -935,7 +997,7 @@ def passing_cutover_inputs() -> dict[str, object]:
     }
 
 
-class ShadowObservationTests(unittest.TestCase):
+class ShadowObservationTests(SessionFixtureClockMixin, unittest.TestCase):
     def test_ambient_legacy_env_is_rejected_by_runtime_and_shadow_resolvers(self):
         with patch.dict(
             os.environ,

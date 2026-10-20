@@ -1,0 +1,29 @@
+{
+  "schema_version": "5",
+  "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "result_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "facts": {
+    "schema_version": "1",
+    "enabled": true,
+    "app_authored": false,
+    "review_status": "complete",
+    "evidence_policy": "legacy",
+    "has_blocking_findings": false,
+    "has_human_adjudication_findings": true,
+    "coverage_blocker": null,
+    "qualification": "not-required",
+    "check_published": true
+  },
+  "human_inventory_reference": {
+    "schema_version": "1.0",
+    "purpose": "default-human-inventory",
+    "event_key": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\teeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "payload_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  },
+  "human_resolution": {
+    "schema_version": "1",
+    "inventory_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "resolved": []
+  },
+  "authority": true
+}

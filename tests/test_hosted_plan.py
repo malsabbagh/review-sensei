@@ -48,6 +48,31 @@ def configuration(text, source=".reviewsensei.yml"):
 
 
 class HostedPlanResolutionTests(unittest.TestCase):
+    def test_complete_inventory_requires_explicit_reader_first_activation(self):
+        legacy = plan_hosted_execution(configuration("schema: 1\n"), environ={})
+        self.assertEqual(
+            dict(hosted_plan_outputs(legacy))["publication_inventory"], "legacy"
+        )
+        complete = plan_hosted_execution(
+            configuration(
+                "schema: 1\ngithub:\n  publication_inventory: complete\n"
+                "  operation_entry: disabled\n"
+            ),
+            environ={},
+        )
+        outputs = dict(hosted_plan_outputs(complete))
+        self.assertEqual(outputs["publication_inventory"], "complete")
+        self.assertEqual(outputs["operation_entry"], "disabled")
+        self.assertEqual(outputs["artifacts"], "none")
+        self.assertFalse(complete.policy.writes)
+
+    def test_inventory_activation_rejects_unrecognized_or_untyped_policy(self):
+        for value in ("250", "true", "v4", "anything"):
+            with self.subTest(value=value), self.assertRaises(ConfigurationError):
+                configuration(
+                    "schema: 1\ngithub:\n  publication_inventory: " + value + "\n"
+                )
+
     def test_packaged_defaults_select_the_local_runner(self):
         plan = plan_hosted_execution(configuration("schema: 1\n"), environ={})
         self.assertEqual(plan.backend, "local-ollama")

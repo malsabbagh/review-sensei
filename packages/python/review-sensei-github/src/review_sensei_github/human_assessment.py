@@ -8,8 +8,9 @@ import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.budgets import ReviewWorkBudgets
 from review_sensei.errors import ReviewInputError
 from review_sensei.evidence import EvidenceBundle, EvidenceGroup, evidence_digest
@@ -27,6 +28,7 @@ from review_sensei.human_assessment import (
     HUMAN_ASSESSMENT_EVIDENCE_DIAGNOSTICS,
     MAX_HUMAN_SOURCE_BYTES,
     HumanAssessmentReply,
+    PendingHumanReview,
     validate_assessment_evidence,
 )
 from review_sensei.models import ConversationReply
@@ -43,9 +45,12 @@ from .conversation import (
 )
 from .errors import GitHubConversationError, GitHubPublicationError
 from .http import GitHubHttp
-from .publication import ReviewApprovalFinalizer, approval_eligibility_marker
+from .publication import MAX_PUBLISHED_REVIEW_BODY_BYTES, approval_eligibility_marker
 from .qualification import TrustedOpenRouterQualification
 from .reply_budget import bounded_reply_publication
+
+if TYPE_CHECKING:
+    from .default_human_inventory import HumanInventoryReference
 
 
 class FeedbackBudgetHttp(GitHubHttp):
@@ -232,6 +237,14 @@ class HumanAssessmentPublisher:
         http: GitHubHttp,
         before_read: Callable[[], float] | None = None,
         qualification_authority: TrustedOpenRouterQualification | None = None,
+        human_inventory_reader: Callable[[HumanInventoryReference], PendingHumanReview]
+        | None = None,
+        human_inventory_reader_factory: Callable[
+            ..., Callable[[HumanInventoryReference], PendingHumanReview]
+        ]
+        | None = None,
+        evidence_budget: EvidenceReadBudget | None = None,
+        human_inventory_read_token: str | None = None,
     ) -> None:
         if before_read is not None:
             http = FeedbackBudgetHttp(http=http, before_read=before_read)
@@ -239,12 +252,74 @@ class HumanAssessmentPublisher:
             http.before_read if isinstance(http, FeedbackBudgetHttp) else None
         )
         self.http = http
+        self.human_inventory_reader = human_inventory_reader
         self.conversation = ConversationPublisher(
-            http=http, qualification_authority=qualification_authority
+            http=http,
+            qualification_authority=qualification_authority,
+            human_inventory_reader=human_inventory_reader,
+            human_inventory_reader_factory=human_inventory_reader_factory,
+            evidence_budget=evidence_budget,
+            human_inventory_read_token=human_inventory_read_token,
         )
-        self.finalizer = ReviewApprovalFinalizer(
-            http=http, qualification_authority=qualification_authority
+        # Reply publication, pending fences and delayed resolution must use the
+        # same configured finalizer rather than drop its independent reader.
+        self.finalizer = self.conversation.finalizer
+
+    @staticmethod
+    def _authority_body(
+        prepared: PreparedHumanAssessment,
+        inventory: PendingHumanReview,
+        eligibility: ReviewApprovalEligibility,
+        *,
+        evidence_sha256: str,
+    ) -> str:
+        conversation = prepared.conversation
+        marker = (
+            f"<!-- reviewsensei:human-review:v1 source={conversation.source_comment_id} kind={conversation.source_kind} "
+            f"evidence={evidence_sha256} "
+            f"updated={hashlib.sha256(conversation.source_updated_at.encode()).hexdigest()} "
+            f"head={conversation.head_sha} base={inventory.base_sha} result={prepared.eligibility.result_digest} -->"
         )
+        return (
+            f"Reassessed human-review findings for `{conversation.head_sha}`. "
+            f"{len(inventory.resolved)} addressed or safely dismissed findings; "
+            f"{len(inventory.pending)} still require human assessment. "
+            "All other review, coverage, qualification and approval requirements are preserved.\n\n"
+            f"{marker}\n\n{approval_eligibility_marker(eligibility)}"
+        )
+
+    def _preflight_reference_capacity(
+        self,
+        prepared: PreparedHumanAssessment,
+        eligibility: ReviewApprovalEligibility,
+    ) -> None:
+        if eligibility.human_inventory_reference is None:
+            return
+        inventory = eligibility.human_review
+        if inventory is None:
+            raise GitHubPublicationError("human assessment inventory is missing")
+        maximum_inventory = replace(
+            inventory,
+            resolved=tuple(sorted(item.fingerprint for item in inventory.findings)),
+        )
+        maximum = replace(
+            eligibility,
+            human_review=maximum_inventory,
+            facts=replace(eligibility.facts, has_human_adjudication_findings=False),
+        )
+        future_body = self._authority_body(
+            prepared, maximum_inventory, maximum, evidence_sha256="0" * 64
+        )
+        # Intermediate counts can use more digits than the terminal pending=0.
+        # Both counts are bounded by the original complete inventory cardinality.
+        count_framing = 2 * len(str(len(inventory.findings)))
+        if (
+            len(future_body.encode("utf-8")) + count_framing
+            > MAX_PUBLISHED_REVIEW_BODY_BYTES
+        ):
+            raise GitHubPublicationError(
+                "human assessment exceeds complete future publication capacity"
+            )
 
     @staticmethod
     def _source_metadata_digest(source: dict[str, Any]) -> str:
@@ -841,18 +916,6 @@ class HumanAssessmentPublisher:
             raise GitHubConversationError(
                 "human assessment identities are invalid"
             ) from exc
-        shared_initial_fence = (
-            prepared.feedback is not None
-            and pending_report_layout == "shared-guidance-v1"
-        )
-        if not shared_initial_fence and not self.source_fence(
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-            prepared=prepared,
-            app_slug=app_slug,
-        ):
-            return ReplyResult(status="skipped_edited_source")
         if "<!-- reviewsensei:" in reply.body:
             raise GitHubConversationError(
                 "human assessment reply contains a reserved marker"
@@ -902,35 +965,14 @@ class HumanAssessmentPublisher:
                 has_human_adjudication_findings=bool(updated_inventory.pending),
             ),
         )
+        # Receipt scans and local report framing cannot activate decisions.
+        # Acquire the complete fresh source/root/PR fence in the pending-page
+        # callback immediately before each write or reconciled return instead
+        # of spending another identical fence before that read-only work.
         resuming = False
-        if not shared_initial_fence:
-            current = self.finalizer.load_eligibility(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=conversation.head_sha,
-                app_slug=app_slug,
-            )
-            if current not in (original, refreshed):
-                return ReplyResult(status="skipped_stale_head")
-            preflight = self.finalizer._preflight(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=conversation.head_sha,
-                app_slug=app_slug,
-            )
-            if preflight.result is not None:
-                return ReplyResult(status=preflight.result.status)
-            if preflight.app_authored or preflight.base_sha != inventory.base_sha:
-                return ReplyResult(status="skipped_stale_base")
-            resuming = current == refreshed and (
-                updated_inventory != inventory or not inventory.pending
-            )
-        first_pending_fence = True
 
         def pending_fence() -> str | None:
-            nonlocal first_pending_fence, resuming
+            nonlocal resuming
             if not self.source_fence(
                 token=token,
                 repository=repository,
@@ -945,6 +987,8 @@ class HumanAssessmentPublisher:
                 pull_request=pull_request,
                 head_sha=conversation.head_sha,
                 app_slug=app_slug,
+                require_valid=True,
+                validate_visible_prose=False,
             )
             if latest not in (original, refreshed):
                 return "skipped_stale_head"
@@ -959,17 +1003,12 @@ class HumanAssessmentPublisher:
                 return live.result.status
             if live.app_authored or live.base_sha != inventory.base_sha:
                 return "skipped_stale_base"
-            if first_pending_fence and shared_initial_fence:
-                # This is the first publication I/O for the selected compact
-                # report. It supplies the initial live observation too, rather
-                # than reading source/latest/PR twice around pure rendering.
-                # Every later page/final fence still performs fresh reads.
-                resuming = latest == refreshed and (
-                    updated_inventory != inventory or not inventory.pending
-                )
-            first_pending_fence = False
+            resuming = latest == refreshed and (
+                updated_inventory != inventory or not inventory.pending
+            )
             return None
 
+        self._preflight_reference_capacity(prepared, refreshed)
         outcome = self.conversation.publish_pending(
             layout=pending_report_layout,
             eligibility=refreshed,
@@ -1030,6 +1069,32 @@ class HumanAssessmentPublisher:
             return ReplyResult(
                 status="skipped_edited_source", comment_id=outcome.comment_id
             )
+        if resuming:
+            # A previous attempt durably reassessed but failed before approval.
+            # The conversation publisher has now reconciled this source's
+            # reply (or acknowledged a new mention). Re-enter the exact-head
+            # finalizer without another assessment record or model decision.
+            # Its fresh PR/root/full-prose checks precede thread mutations and
+            # approval; repeating them here cannot authorize any new write.
+            finalized = self.finalizer.finalize_recorded_decisions(
+                token=review_token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=conversation.head_sha,
+                app_slug=app_slug,
+                eligibility=refreshed,
+                check_token=check_token,
+                reviews_policy=reviews_policy,
+            )
+            return ReplyResult(
+                status=finalized.status
+                if finalized.status.startswith("skipped_")
+                else outcome.status,
+                comment_id=outcome.comment_id,
+                resolution_status=finalized.thread_resolution,
+                approval_status=finalized.status,
+                approval_diagnostic=finalized.diagnostic,
+            )
         preflight = self.finalizer._preflight(
             token=review_token,
             repository=repository,
@@ -1051,34 +1116,11 @@ class HumanAssessmentPublisher:
             pull_request=pull_request,
             head_sha=conversation.head_sha,
             app_slug=app_slug,
+            require_valid=original.human_inventory_reference is not None,
         )
-        if current != (refreshed if resuming else original):
+        if current != original:
             return ReplyResult(
                 status="skipped_stale_head", comment_id=outcome.comment_id
-            )
-        if resuming:
-            # A previous attempt durably reassessed but failed before approval.
-            # The conversation publisher has now reconciled this source's
-            # reply (or acknowledged a new mention). Re-enter the exact-head
-            # finalizer without another assessment record or model decision.
-            finalized = self.finalizer.finalize_recorded_decisions(
-                token=review_token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=conversation.head_sha,
-                app_slug=app_slug,
-                eligibility=refreshed,
-                check_token=check_token,
-                reviews_policy=reviews_policy,
-            )
-            return ReplyResult(
-                status=finalized.status
-                if finalized.status.startswith("skipped_")
-                else outcome.status,
-                comment_id=outcome.comment_id,
-                resolution_status=finalized.thread_resolution,
-                approval_status=finalized.status,
-                approval_diagnostic=finalized.diagnostic,
             )
         evidence_digest = hashlib.sha256(
             json.dumps(
@@ -1120,18 +1162,8 @@ class HumanAssessmentPublisher:
                 separators=(",", ":"),
             ).encode()
         ).hexdigest()
-        marker = (
-            f"<!-- reviewsensei:human-review:v1 source={conversation.source_comment_id} kind={conversation.source_kind} "
-            f"evidence={evidence_digest} "
-            f"updated={hashlib.sha256(conversation.source_updated_at.encode()).hexdigest()} "
-            f"head={conversation.head_sha} base={inventory.base_sha} result={original.result_digest} -->"
-        )
-        body = (
-            f"Reassessed human-review findings for `{conversation.head_sha}`. "
-            f"{len(updated_inventory.resolved)} addressed or safely dismissed findings; "
-            f"{len(updated_inventory.pending)} still require human assessment. "
-            "All other review, coverage, qualification and approval requirements are preserved.\n\n"
-            f"{marker}\n\n{approval_eligibility_marker(refreshed)}"
+        body = self._authority_body(
+            prepared, updated_inventory, refreshed, evidence_sha256=evidence_digest
         )
         status, payload = self.http.request(
             "POST",

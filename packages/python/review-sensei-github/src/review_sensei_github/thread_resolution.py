@@ -9,18 +9,46 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
+from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.errors import ReviewInputError
+
 from .errors import GitHubHTTPError, GitHubPublicationError
-from .http import GitHubHttp
+from .http import BoundedGraphQLPages, GitHubHttp
 
 RESOLUTION_PREFIX = "<!-- reviewsensei:resolution:v2 "
 _RESOLUTION_RE = re.compile(re.escape(RESOLUTION_PREFIX) + r"([A-Za-z0-9_-]+) -->")
-_QUERY = """query FindingResolutionThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
+_QUERY = """query FindingResolutionThreads($owner: String!, $name: String!, $number: Int!, $after: String, $first: Int!) {
  repository(owner: $owner, name: $name) { pullRequest(number: $number) {
- reviewThreads(first: 100, after: $after) { nodes { id isResolved comments(first: 1) {
- nodes { databaseId body author { login } } } } pageInfo { hasNextPage endCursor } }
+ reviewThreads(first: $first, after: $after) { nodes { id isResolved comments(first: 1) {
+ nodes { databaseId body author { login __typename } } } } pageInfo { hasNextPage endCursor } }
  } } }"""
 _MUTATION = """mutation ResolveReviewThread($input: ResolveReviewThreadInput!) {
  resolveReviewThread(input: $input) { thread { id isResolved } } }"""
+
+
+def graphql_app_author(author: object, app_slug: str) -> bool:
+    """Match one configured App across REST and native GraphQL Bot spelling.
+
+    Unsuffixed aliases require GraphQL's Bot discriminator. Existing exact
+    REST-login fixtures can omit it; an explicit different actor type refuses.
+    Native REST root ownership is independently rechecked before mutations.
+    """
+    if not isinstance(author, dict) or not isinstance(author.get("login"), str):
+        return False
+    login = author["login"].casefold()
+    slug = app_slug.casefold()
+    kind = author.get("__typename")
+    exact = login == slug
+    native_alias = slug.endswith("[bot]") and login == slug[:-5]
+    if not exact and not native_alias:
+        return False
+    if exact and kind is None:
+        return True
+    if not isinstance(kind, str) or not kind:
+        # A possibly owned root with unreadable requested actor metadata must
+        # hold discovery/finalization, rather than disappear as a foreign root.
+        raise GitHubPublicationError("review thread App actor identity is unreadable")
+    return kind == "Bot"
 
 
 def digest(value: str) -> str:
@@ -209,6 +237,8 @@ class FindingThreadResolver:
         fence: Callable[[], bool],
         records: Sequence[Mapping[str, Any]] = (),
         supersede: Mapping[str, str] | None = None,
+        skip_resolved: bool = False,
+        cleanup_budget: EvidenceReadBudget | None = None,
     ) -> ThreadResolutionResult:
         from .publication import (
             finding_fingerprint_from_body,
@@ -223,8 +253,9 @@ class FindingThreadResolver:
         candidates = []
         seen_cursors: set[str] = set()
         # Complete discovery before any mutation. An incomplete scan grants nothing.
+        pages = BoundedGraphQLPages(self.http, max_requests=10)
         for _ in range(10):
-            status, payload = self.http.request(
+            status, payload = pages.request(
                 "POST",
                 "/graphql",
                 token=token,
@@ -248,7 +279,11 @@ class FindingThreadResolver:
                     raise ValueError
                 threads = payload["data"]["repository"]["pullRequest"]["reviewThreads"]
                 nodes, page = threads["nodes"], threads["pageInfo"]
-                if not isinstance(nodes, list) or type(page["hasNextPage"]) is not bool:
+                if (
+                    not isinstance(nodes, list)
+                    or len(nodes) > pages.page_size
+                    or type(page["hasNextPage"]) is not bool
+                ):
                     raise ValueError
                 for node in nodes:
                     if (
@@ -263,7 +298,7 @@ class FindingThreadResolver:
                     author = root.get("author")
                     if not isinstance(author, dict):
                         raise ValueError
-                    if str(author.get("login", "")).casefold() != app_slug.casefold():
+                    if not graphql_app_author(author, app_slug):
                         continue
                     scope = finding_publication_scope(root.get("body"))
                     instance = finding_instance_from_body(root.get("body"))
@@ -304,10 +339,27 @@ class FindingThreadResolver:
         resolved, unconfirmed = [], []
         found = {instance for _, _, instance, old in candidates if not old}
         unconfirmed.extend(sorted(instances - found))
-        for node, root, instance, old in candidates:
+        unconfirmed.extend(
+            sorted(
+                set(supersede or {})
+                - {node["id"] for node, _, _, old in candidates if old}
+            )
+        )
+        for position, (node, root, instance, old) in enumerate(candidates):
             identity = node["id"] if old else instance
             assert isinstance(identity, str)
+            if skip_resolved and node["isResolved"]:
+                # No write is needed. The opted-in caller has independently
+                # proven the complete native report and owns final approval
+                # fences; this is an observation, never a new decision grant.
+                resolved.append(identity)
+                continue
             try:
+                if cleanup_budget is not None:
+                    # Root + replacement scan + eligibility + PR, then mutation
+                    # and its one possible readback. Paginated fences may need
+                    # more read-only work; no mutation is admitted until they end.
+                    cleanup_budget.preflight(6)
                 # Re-read the root, decision, and PR immediately before each mutation.
                 status, live_root = self.http.request(
                     "GET",
@@ -341,6 +393,8 @@ class FindingThreadResolver:
                         raise GitHubPublicationError("resolution source changed")
                 if not fence():
                     raise GitHubPublicationError("thread resolution authority changed")
+                if cleanup_budget is not None:
+                    cleanup_budget.preflight(2)
                 if not node["isResolved"] and not self._resolve_confirmed(
                     token=token, thread_id=node["id"]
                 ):
@@ -348,6 +402,20 @@ class FindingThreadResolver:
                         "thread resolution mutation is unconfirmed"
                     )
                 resolved.append(identity)
-            except (GitHubHTTPError, GitHubPublicationError, AttributeError, TypeError):
+            except ReviewInputError:
+                if cleanup_budget is None:
+                    unconfirmed.append(identity)
+                    continue
+                for n, _, item, previous in candidates[position:]:
+                    pending = n["id"] if previous else item
+                    assert isinstance(pending, str)
+                    unconfirmed.append(pending)
+                break
+            except (
+                GitHubHTTPError,
+                GitHubPublicationError,
+                AttributeError,
+                TypeError,
+            ):
                 unconfirmed.append(identity)
         return ThreadResolutionResult(tuple(resolved), tuple(unconfirmed))

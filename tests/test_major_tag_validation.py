@@ -541,9 +541,11 @@ class MajorIntegrityTests(unittest.TestCase):
             "release_tag_object": IMMUTABLE,
             "version": VERSION,
             "release_binding": binding(),
+            "pypi_publication": {"source": SOURCE},
         }
         with (
             patch.object(gate, "signed_major", return_value=(OBJECT, SOURCE)),
+            patch.object(gate.pypi, "assert_current"),
             patch.object(gate.docs, "tag_identity", return_value=(IMMUTABLE, SOURCE)),
             patch.object(
                 gate.docs,
@@ -691,6 +693,13 @@ class SurfaceTests(unittest.TestCase):
             data["jobs"]["qualify"]["if"], "needs.gate.outputs.eligible == 'true'"
         )
         self.assertIn("--expected-wheel-sha256", text)
+        self.assertIn(
+            '--expected-github-wheel-sha256 "$EXPECTED_GITHUB_WHEEL_SHA256"', text
+        )
+        self.assertEqual(
+            data["jobs"]["gate"]["outputs"]["github_wheel_sha256"],
+            "${{ steps.gate.outputs.github_wheel_sha256 }}",
+        )
         self.assertIn('--github-version "$PUBLISHED_GITHUB_VERSION"', text)
         self.assertIn("ref: ${{ needs.gate.outputs.validator_sha }}", text)
         self.assertIn('test "$CLI_RESULT" = success', text)
@@ -731,7 +740,7 @@ class SurfaceTests(unittest.TestCase):
     def test_workflows_and_ci_use_the_same_yaml_requirement(self):
         self.assertEqual(
             (ROOT / "requirements/major-tag-validation.txt").read_text().strip(),
-            "PyYAML==6.0.3",
+            "PyYAML==6.0.3\npypi-attestations==0.0.30\nsigstore==4.5.0",
         )
         self.assertIn("-r test.txt", (ROOT / "requirements/ci.txt").read_text())
         self.assertIn(
@@ -822,6 +831,7 @@ class GateProcessTests(unittest.TestCase):
                 "version": VERSION + "\nextra=true",
                 "github_version": "0.1.1",
                 "wheel_sha256": DIGEST,
+                "github_wheel_sha256": "e" * 64,
                 "source_sha": SOURCE,
                 "tag_object": OBJECT,
                 "channel": "v5",
@@ -876,6 +886,7 @@ class GateProcessTests(unittest.TestCase):
             "version": VERSION,
             "github_version": "0.1.1",
             "wheel_sha256": DIGEST,
+            "github_wheel_sha256": "e" * 64,
             "source_sha": SOURCE,
             "tag_object": OBJECT,
             "channel": "v5",
@@ -972,6 +983,21 @@ class GateProcessTests(unittest.TestCase):
 
 
 class FullGateTests(unittest.TestCase):
+    def test_pypi_publication_qualifies_while_npm_is_pending_or_failed(self):
+        for status, conclusion, npm in [
+            ("in_progress", None, None),
+            ("completed", "failure", "failure"),
+        ]:
+            with self.subTest(npm=npm):
+                self.run.update(status=status, conclusion=conclusion)
+                for job in self.jobs:
+                    if job["name"] == "Publish npm packages with Trusted Publishing":
+                        job["conclusion"] = npm
+                receipt = gate.qualify(
+                    self.selected, self.root / ("pending" if npm is None else "failed")
+                )
+                self.assertEqual(receipt["status"], "PASS")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -1009,6 +1035,28 @@ class FullGateTests(unittest.TestCase):
         self.wheel = self.enterContext(
             patch.object(gate, "verify_wheel", return_value=DIGEST)
         )
+        self.publication = {
+            "source": SOURCE,
+            "projects": {
+                "review-sensei": {
+                    "run_id": 123,
+                    "artifacts": {
+                        f"review_sensei-{VERSION}-py3-none-any.whl": {"sha256": DIGEST}
+                    },
+                },
+                "review-sensei-github": {
+                    "artifacts": {
+                        f"review_sensei_github-{installer.hosted_version((ROOT / installer.HOSTED_MANIFEST).read_text(), VERSION)}-py3-none-any.whl": {
+                            "sha256": "e" * 64
+                        }
+                    }
+                },
+            },
+        }
+        self.pypi = self.enterContext(
+            patch.object(gate.pypi, "qualify", return_value=self.publication)
+        )
+        self.enterContext(patch.object(gate.pypi, "assert_current"))
         self.selected = gate.event_identity(event(), "push", context())
 
     def api(self, path):
@@ -1044,6 +1092,8 @@ class FullGateTests(unittest.TestCase):
             ("PASS", VERSION, DIGEST),
         )
         self.assertEqual(receipt["release_binding"], binding())
+        self.assertEqual(receipt["github_wheel_sha256"], "e" * 64)
+        self.assertEqual(receipt["pypi_publication"], self.publication)
         self.assertTrue(receipt["surface"]["data_only"])
         self.assertEqual(len(receipt["source_data_sha256"]), 11)
         manifest = (ROOT / installer.HOSTED_MANIFEST).read_bytes()
@@ -1087,10 +1137,24 @@ class FullGateTests(unittest.TestCase):
             self.assertRaises(ValueError),
         ):
             gate.qualify(self.selected, self.root / "different-source")
-        self.jobs[0]["conclusion"] = "failure"
+        self.pypi.side_effect = ValueError(
+            "latest Python publication prerequisite did not succeed"
+        )
         with self.assertRaises(ValueError):
             gate.qualify(self.selected, self.root / "failed-job")
         self.wheel.assert_not_called()
+
+    def test_github_and_pypi_must_bind_the_same_release_run_and_engine_bytes(self):
+        engine = self.publication["projects"]["review-sensei"]
+        engine["run_id"] = 999
+        with self.assertRaisesRegex(ValueError, "run/source differs"):
+            gate.qualify(self.selected, self.root / "wrong-publication")
+        engine["run_id"] = 123
+        engine["artifacts"][f"review_sensei-{VERSION}-py3-none-any.whl"]["sha256"] = (
+            "f" * 64
+        )
+        with self.assertRaisesRegex(ValueError, "wheel digests differ"):
+            gate.qualify(self.selected, self.root / "different-registry-bytes")
 
     def test_force_move_during_validation_fails_even_if_source_unchanged(self):
         with (

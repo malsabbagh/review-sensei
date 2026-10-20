@@ -26,6 +26,9 @@ from .errors import (
 MAX_GITHUB_RESPONSE_BYTES = 512 * 1024
 MAX_PAGINATION_PAGES = 10
 MAX_PAGINATION_ITEMS = MAX_PAGINATION_PAGES * 100
+# Ten-item pages avoid repeated five-item rescans for histories clustered near
+# GitHub's individual comment/review body limit. Fifty still admits long lists.
+HISTORY_PAGE_SIZES = (100, 50, 25, 10, 5, 1)
 _SAFE_SEGMENT = re.compile(r"[A-Za-z0-9._-]+")
 
 Opener = Callable[..., Any]
@@ -44,6 +47,50 @@ class GitHubHttpTransport(Protocol):
         timeout_seconds: float | None = None,
     ) -> tuple[int, dict[str, Any] | list[Any] | None]:
         """Return (status, parsed JSON body) for one bounded request."""
+
+
+class BoundedGraphQLPages:
+    """Retry one read cursor at smaller sizes within the original walk budget."""
+
+    def __init__(
+        self, http: GitHubHttpTransport, *, max_requests: int = MAX_PAGINATION_PAGES
+    ) -> None:
+        self.http = http
+        self.max_requests = max_requests
+        self.requests = 0
+        self.size_index = 0
+
+    @property
+    def page_size(self) -> int:
+        return (100, 50, 25, 5, 1)[self.size_index]
+
+    def request(
+        self, method: str, path: str, *, token: str, body: dict[str, Any]
+    ) -> tuple[int, dict[str, Any] | list[Any] | None]:
+        if (
+            method != "POST"
+            or path != "/graphql"
+            or not isinstance(body.get("query"), str)
+            or not body["query"].lstrip().startswith("query ")
+            or not isinstance(body.get("variables"), dict)
+        ):
+            raise GitHubHTTPError("GitHub paginated query is invalid")
+        while self.requests < self.max_requests:
+            self.requests += 1
+            submitted = {
+                **body,
+                "variables": {
+                    **body["variables"],
+                    "first": self.page_size,
+                },
+            }
+            try:
+                return self.http.request(method, path, token=token, body=submitted)
+            except GitHubHTTPResponseTooLargeError:
+                if self.page_size == 1:
+                    raise
+                self.size_index += 1
+        raise GitHubHTTPPaginationLimitError("GitHub query exhausted its read budget")
 
 
 def _validated_owner(owner: str) -> str:
@@ -189,12 +236,23 @@ class GitHubHttp:
             pass
         return ""
 
+    def pagination_page_size(self, path: str, offset: int = 0) -> int:
+        """Propagate an operation-local size hint through audited wrappers.
+
+        This carries no response bytes or completeness/authority decision.
+        Every scan still dispatches and proves its own bounded final page.
+        """
+        transport = self.__dict__.get("transport")
+        reader = getattr(transport, "pagination_page_size", None)
+        hint = reader(path, offset) if callable(reader) else 100
+        return hint if type(hint) is int and 1 <= hint <= 100 else 100
+
     def paginate(
         self,
         *,
         path: str,
         token: str,
-        page_sizes: tuple[int, ...] = (100,),
+        page_sizes: tuple[int, ...] | None = None,
         max_requests: int | None = None,
         timeout_seconds: float | None = None,
         monotonic: Callable[[], float] = time.monotonic,
@@ -204,13 +262,19 @@ class GitHubHttp:
         """Return at most ``MAX_PAGINATION_ITEMS`` list entries.
 
         Callers that handle large, untrusted list entries may provide strictly
-        descending page sizes where each smaller size evenly divides the prior
-        size. If a page exceeds the response budget, the same item offset is
-        retried with the next smaller size. After a smaller page succeeds, the
-        next aligned offset uses the largest page size that divides it, so one
+        descending page sizes. If a page exceeds the response budget, the same
+        item offset is retried with the next smaller size that aligns with it.
+        After a smaller page succeeds, the next aligned offset uses the largest page size that divides it, so one
         oversized page does not pin the rest of the list at the smaller size.
         """
 
+        # The ordinary list reader previously admitted at most ten 100-item
+        # pages. Keep that physical allowance when recovering oversized pages.
+        # Explicit adaptive callers retain their separately owned envelopes.
+        if page_sizes is None:
+            page_sizes = HISTORY_PAGE_SIZES
+            if max_requests is None:
+                max_requests = MAX_PAGINATION_PAGES
         if not page_sizes or any(
             isinstance(page_size, bool)
             or not isinstance(page_size, int)
@@ -222,12 +286,10 @@ class GitHubHttp:
                 "GitHub pagination page sizes must be integers from 1 through 100"
             )
         if any(
-            current <= following or current % following
+            current <= following
             for current, following in zip(page_sizes, page_sizes[1:])
         ):
-            raise GitHubHTTPError(
-                "GitHub pagination page sizes must descend and divide evenly"
-            )
+            raise GitHubHTTPError("GitHub pagination page sizes must descend strictly")
 
         if max_requests is not None and (
             isinstance(max_requests, bool)
@@ -261,6 +323,16 @@ class GitHubHttp:
             expected_items == MAX_PAGINATION_ITEMS
             and len(collected) == MAX_PAGINATION_ITEMS
         ):
+            hint = self.pagination_page_size(path, len(collected))
+            page_size_index = next(
+                (
+                    index
+                    for index in range(page_size_index, len(page_sizes))
+                    if page_sizes[index] <= hint
+                    and len(collected) % page_sizes[index] == 0
+                ),
+                page_size_index,
+            )
             page_size = page_sizes[page_size_index]
             if len(collected) % page_size:
                 raise GitHubHTTPError("GitHub pagination offset was invalid")
@@ -292,10 +364,17 @@ class GitHubHttp:
             except GitHubHTTPResponseTooLargeError:
                 if page_size_index + 1 >= len(page_sizes):
                     raise
-                next_page_size = page_sizes[page_size_index + 1]
-                if len(collected) % next_page_size:
+                next_index = next(
+                    (
+                        index
+                        for index in range(page_size_index + 1, len(page_sizes))
+                        if len(collected) % page_sizes[index] == 0
+                    ),
+                    None,
+                )
+                if next_index is None:
                     raise GitHubHTTPError("GitHub pagination offset was invalid")
-                page_size_index += 1
+                page_size_index = next_index
                 continue
             if monotonic() >= deadline:
                 raise GitHubHTTPPaginationLimitError(

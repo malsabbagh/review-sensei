@@ -114,3 +114,25 @@ attempt witness. Further deterministic integration can reduce actual owned-ledge
 transaction reads under its existing locking/ownership contract. None of these
 limits authorizes cap increases, a new allowance, policy changes, omitted data,
 provider inference replay or implicit source grants.
+
+## Current combined boundary rehearsal (2026-10-20)
+
+The local integration of original PR318 `88441c1` onto predecessor `24c8fdb`
+reproduces the bounded reader improvements without changing any allowance.
+Earlier receipts above retain their original source and measurements. Current
+synthetic controls measure prepared 100-finding delivery at 51 calls, selected
+100-finding delivery at 53/56/59 calls for 0/100/250 historical comments, and
+ordinary delivery at 57/60 calls for 0/100 historical comments. Ordinary
+250-comment delivery still refuses at 60 with all 100 concerns retained.
+The same-original-owner 40-finding replay completes at 60 with zero replay
+inference and 39 concerns still pending. Physical publication requests equal
+the charged calls, with original identity/deadline/provider counters preserved.
+
+Both protocols remain mandatory: referenced/default reports use bounded staged
+receipts; explicit shared guidance reads every owned numeric page ID, then the
+complete report and fresh final fence. A foreign stage token refuses before
+transport. Generic deferred and selected preparation retain complete evidence
+closure before inference; no provisional page grants resolution or approval.
+Guide/extract prose is compressed together under the unchanged 49,152-byte cap.
+These finite source controls do not establish installed/live-provider or deployed
+qualification, generic restart, CLI/grant/default activation or broker funding.

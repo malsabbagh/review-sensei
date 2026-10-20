@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, Mapping, Sequence, cast
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from review_sensei.baseline import (
     ReviewBaseline,
@@ -273,6 +273,7 @@ class _ObservedGitHub:
         self.head_sha = "0" * 40
         self.unresolved_blocking_thread = unresolved_blocking_thread
         self.reviews: list[dict[str, object]] = []
+        self.issue_comments: list[dict[str, object]] = []
         self.check_runs: dict[str, dict[str, object]] = {}
         self.gate_writes: list[dict[str, object]] = []
         self._check_run_heads: dict[int, str] = {}
@@ -331,8 +332,42 @@ class _ObservedGitHub:
         if body is not None and not isinstance(body, dict):
             raise ReviewInputError("observed GitHub request body is invalid")
         self.calls.append((request.method, path, body))
+        if request.method == "GET" and unquote(path) == "/users/reviewsensei[bot]":
+            return _ObservedHTTPResponse(
+                {"id": 42, "login": "reviewsensei[bot]", "type": "Bot"}
+            )
         if request.method == "GET" and path.endswith("/pulls/136"):
             return _ObservedHTTPResponse(self._pr_payload())
+        if path == "/repos/owner/repo/issues/136/comments":
+            if request.method == "GET":
+                query = parse_qs(parsed.query)
+                size = int(query.get("per_page", [100])[0])
+                page = int(query.get("page", [1])[0])
+                if not 1 <= size <= 100 or page < 1:
+                    raise ReviewInputError("observed comment pagination is invalid")
+                start = (page - 1) * size
+                return _ObservedHTTPResponse(self.issue_comments[start : start + size])
+            if request.method == "POST":
+                if body is None or not isinstance(body.get("body"), str):
+                    raise ReviewInputError(
+                        "observed comment publication body is missing"
+                    )
+                comment = {
+                    "id": 1000 + len(self.issue_comments),
+                    "body": body["body"],
+                    "user": {"id": 42, "login": "reviewsensei[bot]", "type": "Bot"},
+                    "issue_url": self.http.api_url + "/repos/owner/repo/issues/136",
+                }
+                self.issue_comments.append(comment)
+                return _ObservedHTTPResponse(comment, 201)
+        if request.method == "GET" and path.startswith(
+            "/repos/owner/repo/issues/comments/"
+        ):
+            identifier = path.rsplit("/", 1)[-1]
+            for comment in self.issue_comments:
+                if str(comment["id"]) == identifier:
+                    return _ObservedHTTPResponse(comment)
+            return _ObservedHTTPResponse({"message": "not found"}, 404)
         if request.method == "GET" and path.endswith("/pulls/136/reviews"):
             return _ObservedHTTPResponse(self.reviews)
         if request.method == "GET" and path.endswith("/check-runs"):

@@ -23,6 +23,12 @@ CONTRACTS = (
     "test_broker_dispatch_control_contract",
     "test_initial_assessment_tail_contract",
     "test_openrouter_metadata_contract",
+    "test_default_publication_recovery_contract",
+    "test_default_human_inventory_contract",
+    "test_override_metadata_contract",
+    "test_hosted_history_readers_contract",
+    "test_hosted_history_independent_contract",
+    "test_hosted_graphql_qualification",
     "test_openrouter_runtime_qualification_contract",
 )
 

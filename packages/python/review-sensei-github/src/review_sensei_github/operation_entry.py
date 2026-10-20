@@ -551,18 +551,14 @@ def _issue_comments(
     if not isinstance(http, GitHubHttp):
         return None
     path = http.repository_path(repository, f"/issues/{pull_request}/comments")
-    collected: list[object] = []
-    for page in range(1, 11):
-        status, payload = http.request(
-            "GET", f"{path}?per_page=100&page={page}", token=token
-        )
-        if status != 200 or not isinstance(payload, list) or len(payload) > 100:
-            return None
-        collected.extend(payload)
-        if len(payload) < 100:
-            http.primed_issue_comments[path] = collected
-            return collected
-    return None
+    from .errors import GitHubHTTPError
+
+    try:
+        collected = http.paginate(path=path, token=token, max_requests=10)
+    except GitHubHTTPError:
+        return None
+    http.primed_issue_comments[path] = collected
+    return collected
 
 
 def _bot_user_id(comments: list[object]) -> int | None:

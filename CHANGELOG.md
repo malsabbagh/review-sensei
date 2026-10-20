@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Refuse missing native reviews on terminal retries in either entry mode; when
+  native replay is admitted, record a non-passing authority check without a
+  terminal ledger rewrite.
 - Refuse unsafe OpenRouter evaluation endpoint metadata before live calls and
   report construction. Report missing composite-control identities as bounded
   input errors while preserving historical reports without controls.
@@ -16,6 +19,95 @@
   lowering corpus thresholds. Retain bounded control provenance, reject
   incomplete or contradictory promotion evidence, and count all expected
   findings in recall. Historical unbound reports cannot newly authorize support.
+- Preserve canonical YAML and hosted-plan OpenRouter endpoint routing through
+  the adapter; retired environment settings cannot replace or veto that policy.
+
+- Preserve requested and observed OpenRouter identities independently; never use
+  a returned model alias as the revision. Retain optional bounded token counters
+  and report unknown usage honestly across failed/interrupted attempts.
+- Accept bounded endpoint routing prefixes without relaxing privacy or fallback
+  policy. Make the existing hosted DeepSeek/Morph candidate eligible to collect
+  qualification evidence; it remains unqualified pending authorized live runs.
+- Bind retained live qualification reports to their actual requested routing
+  policy and endpoint; absent or changed bindings cannot authorize support.
+  Permit the evaluator's existing skipped-case status in its report schema.
+  Actual live quality remains independently required for qualification.
+
+- Add explicit manual publication-only recovery from the original trusted policy,
+  exact transaction context and retained result, without another provider call.
+- Stage recovery-capable caller templates behind runner-first rollout; default
+  setup and the installed caller retain the released compatible input contract.
+- Complete durable publication before optional superseded-thread cleanup; resume
+  bounded cleanup on exact retries while preserving current approval obligations.
+- Require retained native approval authority on complete-review replay; missing or
+  invalid authority keeps the check non-passing instead of reconstructing approval.
+- Share scoped pagination observations and authenticated inventory context within
+  one publication budget, retaining fresh ownership, storage and prose fences.
+- Use one clock sample for recovery-artifact creation and expiry so the minimum
+  supported lifetime remains valid across a wall-clock second boundary.
+
+## 0.8.6 - 2026-10-20
+
+Changes since [v0.8.5](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.5), from [fb2352791caa993bcb34cd64b867af02c07c8f82](https://github.com/malsabbagh/review-sensei/commit/fb2352791caa993bcb34cd64b867af02c07c8f82) through [83f5f5a0d27e2542b8feef6a8822fb16cc6bee4b](https://github.com/malsabbagh/review-sensei/commit/83f5f5a0d27e2542b8feef6a8822fb16cc6bee4b).
+
+Previous annotated tag object: `48c972a11cfd9393c7e967a215f2b0bb7db3c2ec`.
+
+- docs: record released v0.8.5 ([82381eefa5783ac22b65016533f03bfb793a494d](https://github.com/malsabbagh/review-sensei/commit/82381eefa5783ac22b65016533f03bfb793a494d)).
+- fix: select inventory reference when complete review frame overflows \(\#334\) ([83f5f5a0d27e2542b8feef6a8822fb16cc6bee4b](https://github.com/malsabbagh/review-sensei/commit/83f5f5a0d27e2542b8feef6a8822fb16cc6bee4b)).
+
+## review-sensei-github 0.3.6 - 2026-10-20
+
+- Pin `review-sensei==0.8.6`.
+
+## 0.8.5 - 2026-10-20
+
+- Recover oversized installed hosted startup, cleanup, operation replay and review
+  histories within existing physical read limits. Size ledger fences before
+  sealing and retain fail-closed activation, exact-head gates and publication recovery.
+
+- Recover oversized GitHub App history and installation inventories with smaller
+  pages while retaining the broker's response-byte, request and item limits.
+- Qualify the next v5 release from verified engine and hosted PyPI artifacts,
+  independently of npm completion. Preserve signed source, build/publication
+  provenance, protected approvals and installed-CLI/downstream validation.
+
+## review-sensei-github 0.3.5 - 2026-10-20
+
+- Pin `review-sensei==0.8.5`.
+
+## 0.8.4 - 2026-10-20
+
+Changes since [v0.8.3](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.3), from [3dd5ec537bec429a4d0b280b2c2b0e9ac203f4a6](https://github.com/malsabbagh/review-sensei/commit/3dd5ec537bec429a4d0b280b2c2b0e9ac203f4a6) through [e02665a6e08ae1ec1c839e0051bf390b528c4f82](https://github.com/malsabbagh/review-sensei/commit/e02665a6e08ae1ec1c839e0051bf390b528c4f82).
+
+Previous annotated tag object: `021871fe43b1e44b0e9ef18b89f1f19f72a732cf`.
+
+- docs: record released v0.8.3 ([c09d7fc2c7ce176be747bc38a1164f40305bf858](https://github.com/malsabbagh/review-sensei/commit/c09d7fc2c7ce176be747bc38a1164f40305bf858)).
+- config: enable complete publication inventories \(\#328\) ([7f943d58a436155c4f5283abff4177d17b3fc711](https://github.com/malsabbagh/review-sensei/commit/7f943d58a436155c4f5283abff4177d17b3fc711)).
+- Bound complete inline review reconciliation with adaptive pages \(\#329\) ([e02665a6e08ae1ec1c839e0051bf390b528c4f82](https://github.com/malsabbagh/review-sensei/commit/e02665a6e08ae1ec1c839e0051bf390b528c4f82)).
+
+## review-sensei-github 0.3.4 - 2026-10-20
+
+- Pin `review-sensei==0.8.4`.
+
+## 0.8.3 - 2026-10-19
+
+Changes since [v0.8.2](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.2), from [279b5f76992eb84e297e8bfc1063da6f1145a371](https://github.com/malsabbagh/review-sensei/commit/279b5f76992eb84e297e8bfc1063da6f1145a371) through [8059defabed5396ca9ecc25fcbb3981c98338f97](https://github.com/malsabbagh/review-sensei/commit/8059defabed5396ca9ecc25fcbb3981c98338f97).
+
+Previous annotated tag object: `0dd963666f1295dfab40f0a717b2c84d086378de`.
+
+- docs: record released v0.8.2 ([083f5ddd917d086aebc893c83fb8bb968b6aa4d7](https://github.com/malsabbagh/review-sensei/commit/083f5ddd917d086aebc893c83fb8bb968b6aa4d7)).
+- Merge pull request \#325 from malsabbagh/fix/default-publication-recovery ([6ad262d32da7ce105f625a0cf29790b9cd4de01c](https://github.com/malsabbagh/review-sensei/commit/6ad262d32da7ce105f625a0cf29790b9cd4de01c)).
+- Merge pull request \#326 from malsabbagh/fix/default-human-inventory ([3c67941f7b45ae529f7ce5a817c1899675c2a58e](https://github.com/malsabbagh/review-sensei/commit/3c67941f7b45ae529f7ce5a817c1899675c2a58e)).
+- Recover recorded decisions when review bodies reach capacity \(\#327\) ([8059defabed5396ca9ecc25fcbb3981c98338f97](https://github.com/malsabbagh/review-sensei/commit/8059defabed5396ca9ecc25fcbb3981c98338f97)).
+
+## review-sensei-github 0.3.3 - 2026-10-19
+
+- Pin `review-sensei==0.8.3`.
+
+## 0.8.2 - 2026-10-19
+
+- Keep current-head finding IDs addressable after App inline discussion replies
+  create empty review containers; preserve newer review authority and refusals.
 
 - Preserve prior concerns and history across every admitted full baseline
   refresh, including changed base/model recovery; omitted findings remain partial.
@@ -30,19 +122,10 @@
   Positive runtime report binding and legacy standalone finalizer qualification
   remain pending. Extend installed/post-package lifecycle acceptance with explicit
   finite capacity and deployment limitations.
-- Preserve canonical YAML and hosted-plan OpenRouter endpoint routing through
-  the adapter; retired environment settings cannot replace or veto that policy.
 
-- Preserve requested and observed OpenRouter identities independently; never use
-  a returned model alias as the revision. Retain optional bounded token counters
-  and report unknown usage honestly across failed/interrupted attempts.
-- Accept bounded endpoint routing prefixes without relaxing privacy or fallback
-  policy. Make the existing hosted DeepSeek/Morph candidate eligible to collect
-  qualification evidence; it remains unqualified pending authorized live runs.
-- Bind retained live qualification reports to their actual requested routing
-  policy and endpoint; absent or changed bindings cannot authorize support.
-  Permit the evaluator's existing skipped-case status in its report schema.
-  Actual live quality remains independently required for qualification.
+## review-sensei-github 0.3.2 - 2026-10-19
+
+- Pin `review-sensei==0.8.2`.
 
 ## 0.8.1 - 2026-10-18
 

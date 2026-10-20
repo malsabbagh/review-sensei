@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 Project: ReviewSensei
-Last updated: 2026-10-12
+Last updated: 2026-10-20
 
 ADRs capture durable architecture decisions for this repository. Use `docs/adr/NNNN-short-title.md` for individual records.
 
@@ -11,6 +11,11 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0099](0099-confirmed-publication-cleanup-progress.md) | Proposed | Complete durable publication before optional old-thread cleanup | #246, #269; PR #316 | Current approval guards remain mandatory; exact retries resume bounded cleanup |
+| [0097](0097-explicit-trusted-publication-recovery.md) | Proposed | Explicit manual publication recovery from original trusted context | #246; PR #316 | No inference, exact reservation/context proofs, original budget and managed caller parity |
+| [0096](0096-bounded-hosted-history-readers.md) | Proposed | Recover oversized hosted histories within original read envelopes | #238, #240, #246, #267, #269; PR #316 | Complete lossless readers and presealed fence sizing |
+| [0094](0094-default-human-inventory-reference.md) | Proposed | Complete default human inventory references | #238, #246, #267; PR #316 | Transaction-bound admitted evidence, ordinary approval gates and bounded recovery |
+| [0093](0093-default-publication-retention.md) | Proposed | Bounded default publication and transaction-bound result retention | #238, #246, #267; PR #316 | Reader-first gated emission, existing result-part storage and no inference retry |
 | [0090](0090-coalesced-initial-assessment-tail.md) | Proposed | Coalesce owned reservation and complete admission under one consumed grant | #240, #242, #243, #244, #245, #269 | Original handle/deadline/liability and owned readback; no CLI activation |
 | [0088](0088-broker-physical-dispatch-control.md) | Proposed | Enforce caller-funded broker internal liability and original deadline | #240, #242, #243, #244, #245, #269 | Explicit opt-in receipt; unchanged legacy protocol; no CLI activation or deployment |
 | [0087](0087-selected-assessment-context-and-owned-page-readback.md) | Proposed | Explicit selected assessment preparation and exact owned page readback before complete report confirmation | #240, #242, #244, #269 | Cold local-library 100 findings with 0/100/250 discussion comments; original budgets and all final fences |
@@ -98,6 +103,9 @@ Process: `docs/process/adr-process.md`
 | [0077](0077-explicit-human-file-review.md) | Proposed | Record explicit human review of unsupported binary files without treating AI coverage as complete | #253 | Confirmation is audit; mixed APPROVE waives only the binary blocker |
 | [0078](0078-review-sensei-github-split.md) | Proposed | Ship the GitHub Actions runtime as review-sensei-github | User-authorized split | Engine must not import the host; v5 moves only after the hosted package is published |
 | [0079](0079-reservation-leak-prevention-and-admission-self-heal.md) | Proposed | Prevent reservation leaks and self-heal at admission | Pending triage | Supersedes ADR 0063's explicit-continue rule; pause is never auto-cleared |
+| [0095](0095-pypi-qualified-major-channel.md) | Proposed | Qualify v5 from verified engine and hosted PyPI publication independently of npm | User-requested next-release policy | Preserve signed engine source, provenance, approvals and downstream gates |
+
+| [0098](0098-operation-local-admitted-inventory-handoff.md) | Proposed | Reuse same-operation admitted inventory context with complete fresh fences | PR #316 composed-publication budget evidence | No response or authority cache; all mutable storage and prose checks remain fresh |
 
 ## Policy
 

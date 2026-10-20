@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage verified tag assets as a draft; publish only after both registries succeed."""
+"""Stage verified tag assets as a draft; publish after the PyPI job succeeds."""
 
 from __future__ import annotations
 
@@ -22,11 +22,9 @@ BUILD_JOBS = {
     "Qualify signed prepared source and exact-head CI",
     "Build and attest release bundle",
     "Build release documentation",
-    "Assemble and validate npm package set",
 }
 PUBLISH_JOBS = {
     "Publish to PyPI with Trusted Publishing",
-    "Publish npm packages with Trusted Publishing",
     "Prepare draft GitHub release",
 }
 ARTIFACT = "review-sensei-release-bundle"

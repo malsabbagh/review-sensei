@@ -77,6 +77,7 @@ REVIEW_POLICIES = ("auto-approve", "blocking", "advisory")
 LEARNING_MODES = ("disabled", "proposals", "pull-requests")
 ARTIFACT_MODES = ("none", "diagnostics")
 OPERATION_ENTRY_MODES = ("enabled", "disabled")
+PUBLICATION_INVENTORIES = ("legacy", "complete")
 
 _KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 _INTEGER_PATTERN = re.compile(r"^-?\d+$")
@@ -98,6 +99,7 @@ GITHUB_FIELDS = (
     "learning",
     "artifacts",
     "operation_entry",
+    "publication_inventory",
 )
 ADVANCED_FIELDS = (
     "endpoint",
@@ -374,6 +376,7 @@ class GitHubSection:
     learning: str = "disabled"
     artifacts: str = "none"
     operation_entry: str = "enabled"
+    publication_inventory: str = "legacy"
 
 
 @dataclass(frozen=True)
@@ -1165,6 +1168,13 @@ def _build_github(
             "github.artifacts",
             ARTIFACT_MODES,
             "none",
+            fail=fail,
+        ),
+        publication_inventory=_enum_field(
+            mapping.get("publication_inventory"),
+            "github.publication_inventory",
+            PUBLICATION_INVENTORIES,
+            "legacy",
             fail=fail,
         ),
         operation_entry=_enum_field(
@@ -2615,6 +2625,7 @@ _DEFAULT_FIELD_VALUES: Mapping[str, Any] = {
     "github.learning": "disabled",
     "github.artifacts": "none",
     "github.operation_entry": "enabled",
+    "github.publication_inventory": "legacy",
     "advanced.endpoint.allow_custom_endpoint": False,
     "advanced.routing.upstream_provider": "not set",
     "advanced.context.symbol_context.enabled": False,
@@ -2650,6 +2661,7 @@ __all__ = [
     "ADVANCED_FIELDS",
     "ARTIFACT_MODES",
     "OPERATION_ENTRY_MODES",
+    "PUBLICATION_INVENTORIES",
     "AdvancedSection",
     "BACKEND_DEFAULTS",
     "BackendDefaults",

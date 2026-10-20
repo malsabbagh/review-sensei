@@ -82,6 +82,11 @@ def _github_parser() -> argparse.ArgumentParser:
     )
     publication_source = review.add_mutually_exclusive_group()
     publication_source.add_argument("--result", type=Path)
+    publication_source.add_argument(
+        "--recover-retained",
+        action="store_true",
+        help="Recover the original transaction-bound result from owned PR parts without inference; trusted contexts and a session ledger remain required.",
+    )
     review.add_argument(
         "--configuration-context",
         type=Path,
@@ -89,6 +94,16 @@ def _github_parser() -> argparse.ArgumentParser:
             "Trusted configuration-context JSON emitted alongside an "
             "identity-bound analysis result"
         ),
+    )
+    review.add_argument(
+        "--reconstruct-contexts",
+        action="store_true",
+        help="Explicit publication-only recovery: reconstruct the original canonical caller contexts from frozen trusted source and the authenticated committed transaction; never invoke inference.",
+    )
+    review.add_argument(
+        "--trusted-context-root",
+        type=Path,
+        help="Independently authenticated original policy checkout for --reconstruct-contexts; changed or unavailable context refuses.",
     )
     review.add_argument(
         "--evidence-context",
@@ -158,6 +173,21 @@ def _github_parser() -> argparse.ArgumentParser:
             "Canonical github.reviews mode: auto-approve (default), blocking, "
             "or advisory. Takes precedence over the approval boolean."
         ),
+    )
+    review.add_argument(
+        "--config", type=Path, help="Trusted publication configuration file"
+    )
+    review.add_argument(
+        "--publication-inventory",
+        choices=("legacy", "complete"),
+        default=None,
+        help="Enable complete larger inventories only after all readers support them; default comes from trusted configuration.",
+    )
+    review.add_argument(
+        "--operation-entry",
+        choices=("enabled", "disabled"),
+        default=None,
+        help="Preserve the configured validated-result retention policy.",
     )
     review.add_argument(
         "--enable-learning-prs",
@@ -322,13 +352,16 @@ def _require_accepted_result(
     repository: str,
     pull_request: int,
     app_slug: str,
+    operation_entry: str | None = None,
+    publication_http: Any = None,
+    checkpoint: dict[str, Any] | None = None,
 ) -> None:
     """Refuse publication when an operation record accepted different bytes."""
 
     if not os.environ.get("GITHUB_RUN_ID", "").strip():
         return
     configuration = load_configuration(None)
-    if configuration.github.operation_entry != "enabled":
+    if (operation_entry or configuration.github.operation_entry) != "enabled":
         return
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if not isinstance(token, str) or not token.strip():
@@ -337,7 +370,7 @@ def _require_accepted_result(
     from review_sensei_github.http import MAX_PAGINATION_PAGES, GitHubHttp
     from review_sensei_github.operation_entry import accepted_payload_matches
 
-    http = GitHubHttp()
+    http = publication_http if publication_http is not None else GitHubHttp()
     try:
         comments = http.paginate(
             path=http.repository_path(repository, f"/issues/{pull_request}/comments"),
@@ -373,6 +406,20 @@ def _require_accepted_result(
         ).encode()
     ).hexdigest()
     match = accepted_payload_matches(tuple(bodies), digest)
+    if match is False and checkpoint is not None:
+        from review_sensei.session import load_review_transaction_for_publication
+
+        # Analysis accepts bytes before the durable checkpoint adds its
+        # transaction envelope. Only an independently validated durable
+        # transaction permits that one normalization; retained part hashes do
+        # not constitute an operation acceptance proof.
+        load_review_transaction_for_publication(result=result, **checkpoint)
+        original = result.to_dict()
+        original.pop("transaction", None)
+        original_digest = hashlib.sha256(
+            json.dumps(original, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        match = accepted_payload_matches(tuple(bodies), original_digest)
     if match is False:
         raise ReviewInputError(
             "published result does not match the accepted operation record"
@@ -407,6 +454,10 @@ def _legacy_inventory(
     repository: str,
     pull_request: int,
     review: dict[str, Any],
+    empty_discussion: bool = False,
+    repository_id: int | None = None,
+    app_slug: str | None = None,
+    before_read=None,
 ):
     """Eligibility needs-human IDs, plus inline instance/lifecycle pairs."""
 
@@ -419,6 +470,7 @@ def _legacy_inventory(
         finding_blocking_from_body,
         finding_fingerprint_from_body,
         finding_instance_from_body,
+        finding_publication_scope,
     )
 
     body = review.get("body")
@@ -455,15 +507,61 @@ def _legacy_inventory(
             token=token,
             max_requests=MAX_PAGINATION_PAGES,
             timeout_seconds=60,
+            before_read=before_read,
         )
     except GitHubHTTPError as exc:
         raise ReviewInputError("current review inventory is incomplete") from exc
+    if not isinstance(comments, list):
+        raise ReviewInputError("current review inventory is incomplete")
+    comment_ids: set[int] = set()
+    root_base: str | None = None
     for comment in comments:
         if not isinstance(comment, dict):
+            if empty_discussion:
+                raise ReviewInputError("current review inventory is incomplete")
             continue
         comment_body = comment.get("body")
+        if empty_discussion:
+            user = comment.get("user")
+            comment_id = comment.get("id")
+            if (
+                type(comment_id) is not int
+                or comment_id < 1
+                or comment_id in comment_ids
+                or type(comment.get("pull_request_review_id")) is not int
+                or comment["pull_request_review_id"] != review_id
+                or not isinstance(user, dict)
+                or user.get("type") != "Bot"
+                or not isinstance(user.get("login"), str)
+                or user["login"].casefold() != (app_slug or "").casefold()
+                or not isinstance(comment_body, str)
+            ):
+                raise ReviewInputError("current review inventory is incomplete")
+            comment_ids.add(comment_id)
+            parent = comment.get("in_reply_to_id")
+            if parent is not None:
+                if type(parent) is not int or parent < 1:
+                    raise ReviewInputError("current review inventory is incomplete")
+                # A positively owned inline reply is discussion, not a new
+                # top-level finding, regardless of IDs quoted in its prose.
+                continue
         instance = finding_instance_from_body(comment_body)
         lifecycle = finding_fingerprint_from_body(comment_body)
+        scope = finding_publication_scope(comment_body) if empty_discussion else None
+        if empty_discussion:
+            if (
+                instance is None
+                or lifecycle is None
+                or instance in seen
+                or scope is None
+                or scope[:3] != (repository_id, pull_request, review.get("commit_id"))
+                or (root_base is not None and root_base != scope[3])
+                or comment_body.count("<!-- reviewsensei:finding:") != 1
+            ):
+                # Unknown, malformed or conflicting top-level roots must not
+                # expose an older clean inventory as if this were only replies.
+                raise ReviewInputError("current review inventory is incomplete")
+            root_base = scope[3]
         if not isinstance(instance, str) or instance in seen or lifecycle is None:
             continue
         seen.add(instance)
@@ -473,7 +571,7 @@ def _legacy_inventory(
                 instance=instance,
                 lifecycle=lifecycle,
                 blocking=blocking,
-                needs_human=False,
+                needs_human=scope[-1] is True if scope is not None else False,
                 body_placed=False,
                 overridable=True,
             )
@@ -498,6 +596,8 @@ def _override_facts(
     from the latest App review on this head. Older heads are returned only so
     a receipt can name the commit that last displayed an unknown ID.
     """
+
+    from time import monotonic
 
     from review_sensei_github.errors import GitHubHTTPError
     from review_sensei_github.http import MAX_PAGINATION_PAGES
@@ -536,8 +636,30 @@ def _override_facts(
     if not isinstance(reviews, list):
         raise ReviewInputError("current review fingerprints are unavailable")
     latest: dict[str, Any] | None = None
+    latest_legacy = None
     prior: dict[str, dict[str, Any]] = {}
-    for review in reviews:
+    legacy_requests = 0
+    legacy_deadline = monotonic() + 60
+
+    def before_legacy_read() -> float:
+        nonlocal legacy_requests
+        remaining = legacy_deadline - monotonic()
+        if legacy_requests >= MAX_PAGINATION_PAGES or remaining <= 0:
+            raise ReviewInputError("current review inventory is incomplete")
+        legacy_requests += 1
+        return min(60, remaining)
+
+    # Inspect only newer candidates, with one shared bounded metadata walk.
+    # An authoritative current-head record ends discussion-container fallback.
+    for review in sorted(
+        reviews,
+        key=lambda item: (
+            item.get("id", -1)
+            if isinstance(item, dict) and type(item.get("id")) is int
+            else -1
+        ),
+        reverse=True,
+    ):
         if not isinstance(review, dict):
             continue
         user = review.get("user")
@@ -553,14 +675,32 @@ def _override_facts(
         ):
             continue
         if commit_id == head_sha:
-            if latest is None or review_id >= int(latest["id"]):
-                latest = review
+            if latest is not None:
+                continue
+            if review.get("state") == "COMMENTED" and review.get("body") in (None, ""):
+                candidate = _legacy_inventory(
+                    http,
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    review=review,
+                    empty_discussion=True,
+                    repository_id=repository_id,
+                    app_slug=app_slug,
+                    before_read=before_legacy_read,
+                )
+                if not candidate:
+                    continue
+                latest_legacy = candidate
+            latest = review
             continue
         previous = prior.get(commit_id)
         if previous is None or review_id >= int(previous["id"]):
             prior[commit_id] = review
     inventory: tuple[Any, ...] = ()
-    if latest is not None and isinstance(latest.get("body"), str):
+    if latest_legacy is not None:
+        inventory = latest_legacy
+    elif latest is not None and isinstance(latest.get("body"), str):
         index = finding_inventory_for_head(
             latest["body"],
             repository_id=repository_id,
@@ -576,6 +716,7 @@ def _override_facts(
                 repository=repository,
                 pull_request=pull_request,
                 review=latest,
+                before_read=before_legacy_read,
             )
     prior_heads: list[tuple[str, tuple[Any, ...]]] = []
     for commit_id, review in prior.items():
@@ -972,6 +1113,12 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
     )
     if args.command in {"review", "publish"}:
         diff = read_bounded_utf8(args.diff, maximum=1_048_576, label="diff")
+        if args.recover_from and (
+            args.reconstruct_contexts or args.trusted_context_root is not None
+        ):
+            raise ReviewInputError(
+                "legacy artifact recovery does not reconstruct contexts; use --result or --recover-retained"
+            )
         if args.enable_review and (not args.base_branch or not args.base_sha):
             raise ReviewInputError(
                 "review publication requires --base-branch and --base-sha"
@@ -982,7 +1129,9 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             "base_sha": args.base_sha,
             "head_sha": args.head_sha,
         }
-        if args.recover_from and args.enable_learning_prs:
+        if (
+            args.recover_from or args.recover_retained or args.reconstruct_contexts
+        ) and args.enable_learning_prs:
             outcome = RunOutcome(
                 "publication_failed",
                 diagnostic="recovery_learning_prs_refused",
@@ -1009,6 +1158,18 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         else:
             convergence_policy = resolve_review_convergence_policy(mode=explicit_mode)
         if args.recover_from:
+            if any(
+                value is not None
+                for value in (
+                    args.config,
+                    args.publication_inventory,
+                    args.operation_entry,
+                )
+            ):
+                raise ReviewInputError(
+                    "legacy --recover-from does not accept publication profile settings; "
+                    "use --result or identity-bound --recover-retained"
+                )
             try:
                 artifact = load_recovery_artifact(args.recover_from)
                 artifact.validate(
@@ -1069,7 +1230,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             emit_host_outcome(outcome, output_path=args.outcome)
             print(review_publication.status)
             return run_outcome_exit_code(outcome.status)
-        if args.result is None:
+        if args.result is None and not args.recover_retained:
             outcome = RunOutcome(
                 "publication_failed",
                 diagnostic="publication_failed",
@@ -1077,16 +1238,22 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             )
             emit_host_outcome(outcome, output_path=args.outcome)
             print(
-                "review-sensei: review publication requires --result or --recover-from",
+                "review-sensei: review publication requires --result, --recover-from or --recover-retained",
                 file=sys.stderr,
             )
             print(outcome.status)
             return run_outcome_exit_code(outcome.status)
-        result = ReviewResult.from_dict(
-            json.loads(
-                read_bounded_utf8(args.result, maximum=2_097_152, label="result")
-            )
+        publication_configuration = load_configuration(args.config)
+        publication_inventory = (
+            args.publication_inventory
+            or publication_configuration.github.publication_inventory
         )
+        operation_entry = (
+            args.operation_entry or publication_configuration.github.operation_entry
+        )
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+
+        publication_budget = EvidenceReadBudget()
         configuration_context = (
             _load_context_document(
                 args.configuration_context,
@@ -1102,6 +1269,152 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         )
         admission_baseline = None
         admission_current_key = None
+        if args.trusted_context_root is not None and not args.reconstruct_contexts:
+            raise ReviewInputError(
+                "trusted context root requires --reconstruct-contexts"
+            )
+        if args.reconstruct_contexts and (
+            args.trusted_context_root is None
+            or any(
+                value is not None
+                for value in (
+                    args.configuration_context,
+                    args.evidence_context,
+                    args.admission_context,
+                )
+            )
+        ):
+            raise ReviewInputError(
+                "context reconstruction requires original trusted source and cannot replace supplied context documents"
+            )
+        if args.recover_retained or args.reconstruct_contexts:
+            if operation_entry != "enabled":
+                raise ReviewInputError(
+                    "retained result recovery requires operation_entry: enabled"
+                )
+            if not args.enable_review or not args.base_sha:
+                raise ReviewInputError(
+                    "retained result recovery requires review publication and exact base SHA"
+                )
+            metadata_token = os.environ.get("GITHUB_TOKEN") or os.environ.get(
+                "GH_TOKEN"
+            )
+            if not isinstance(metadata_token, str) or not metadata_token.strip():
+                raise ReviewInputError(
+                    "retained result recovery requires a metadata token"
+                )
+            recovery_ledger = session_ledger
+            if recovery_ledger is None and args.github_session_ledger:
+                from review_sensei_github.session_ledger import (
+                    GitHubIssueCommentSessionLedger,
+                )
+
+                recovery_ledger = GitHubIssueCommentSessionLedger(
+                    http,
+                    token=metadata_token.strip(),
+                    app_slug=args.app_slug,
+                    evidence_budget=publication_budget,
+                )
+            if recovery_ledger is None:
+                raise ReviewInputError(
+                    "retained result recovery requires a session ledger"
+                )
+            from contextlib import nullcontext
+
+            from review_sensei.session import SessionIdentity
+            from review_sensei_github.session_ledger import (
+                GitHubIssueCommentSessionLedger,
+            )
+
+            recovery_read: Any = nullcontext(None)
+            if (
+                args.reconstruct_contexts
+                and args.recover_retained
+                and isinstance(recovery_ledger, GitHubIssueCommentSessionLedger)
+            ):
+                from review_sensei_github.publication_recovery import (
+                    publication_recovery_read_phase,
+                )
+
+                recovery_read = publication_recovery_read_phase(
+                    http=http,
+                    token=metadata_token.strip(),
+                    ledger=recovery_ledger,
+                    identity=SessionIdentity(
+                        args.repository,
+                        args.pull_request,
+                        repository_id=args.repository_id,
+                    ),
+                    base_sha=args.base_sha,
+                    head_sha=args.head_sha,
+                    app_slug=args.app_slug,
+                    budget=publication_budget,
+                )
+            with recovery_read as recovery_phase:
+                if recovery_phase is not None:
+                    recovery_ledger = recovery_phase.ledger
+                if args.reconstruct_contexts:
+                    from review_sensei_github.publication_context_recovery import (
+                        reconstruct_publication_contexts,
+                    )
+                    from review_sensei_github.publication_recovery import (
+                        publication_session_ledger,
+                    )
+
+                    reconstructed = reconstruct_publication_contexts(
+                        source_root=args.trusted_context_root,
+                        diff=diff,
+                        ledger=(
+                            recovery_phase.ledger
+                            if recovery_phase is not None
+                            else publication_session_ledger(
+                                recovery_ledger, publication_budget
+                            )
+                        ),
+                        identity=SessionIdentity(
+                            args.repository,
+                            args.pull_request,
+                            repository_id=args.repository_id,
+                        ),
+                        base_sha=args.base_sha,
+                        head_sha=args.head_sha,
+                        policy=convergence_policy,
+                    )
+                    configuration_context = reconstructed.configuration
+                    evidence_context = reconstructed.evidence
+                    admission_baseline = reconstructed.baseline
+                    admission_current_key = reconstructed.current_key
+                if configuration_context is None or evidence_context is None:
+                    raise ReviewInputError(
+                        "retained result recovery requires trusted configuration and evidence contexts"
+                    )
+                if args.recover_retained:
+                    recovery_options = (
+                        {"recovery_phase": recovery_phase}
+                        if recovery_phase is not None
+                        else {}
+                    )
+                    result = application.recover_retained_review_result(
+                        token=metadata_token.strip(),
+                        repository=args.repository,
+                        repository_id=args.repository_id,
+                        pull_request=args.pull_request,
+                        base_sha=args.base_sha,
+                        head_sha=args.head_sha,
+                        app_slug=args.app_slug,
+                        ledger=recovery_ledger,
+                        configuration_context=configuration_context,
+                        evidence_context=evidence_context,
+                        convergence_policy=convergence_policy,
+                        budget=publication_budget,
+                        **recovery_options,
+                    )
+        if not args.recover_retained:
+            result = ReviewResult.from_dict(
+                json.loads(
+                    read_bounded_utf8(args.result, maximum=2_097_152, label="result")
+                )
+            )
         if args.admission_context is not None:
             if configuration_context is None:
                 # The identity-bound transaction is what makes the admission
@@ -1120,11 +1433,63 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 )
             except ReviewInputError as exc:
                 raise ReviewInputError(f"admission context is invalid: {exc}") from exc
+        acceptance_checkpoint = None
+        acceptance_http = None
+        if os.environ.get("GITHUB_RUN_ID", "").strip() and operation_entry == "enabled":
+            from review_sensei_github.publication_recovery import publication_http
+
+            acceptance_http = publication_http(http, publication_budget)
+            if result.transaction is not None and configuration_context is not None:
+                from review_sensei.models import ReviewTransaction
+                from review_sensei.session import SessionIdentity
+
+                acceptance_ledger = session_ledger
+                if args.recover_retained or args.reconstruct_contexts:
+                    acceptance_ledger = recovery_ledger
+                if acceptance_ledger is None and args.github_session_ledger:
+                    from review_sensei_github.session_ledger import (
+                        GitHubIssueCommentSessionLedger,
+                    )
+
+                    read_token = os.environ.get("GITHUB_TOKEN") or os.environ.get(
+                        "GH_TOKEN"
+                    )
+                    if not isinstance(read_token, str) or not read_token.strip():
+                        raise ReviewInputError("operation record is unavailable")
+                    acceptance_ledger = GitHubIssueCommentSessionLedger(
+                        http,
+                        token=read_token.strip(),
+                        app_slug=args.app_slug,
+                        evidence_budget=publication_budget,
+                    )
+                if acceptance_ledger is not None:
+                    acceptance_checkpoint = dict(
+                        ledger=acceptance_ledger,
+                        identity=SessionIdentity(
+                            repository=args.repository,
+                            pull_request=args.pull_request,
+                            repository_id=args.repository_id,
+                        ),
+                        base_sha=args.base_sha,
+                        head_sha=args.head_sha,
+                        policy_digest=convergence_policy.digest(),
+                        configuration_digest=ReviewTransaction.compute_configuration_digest(
+                            configuration_context
+                        ),
+                        evidence_digest=ReviewTransaction.compute_evidence_digest(
+                            evidence_context
+                            if evidence_context is not None
+                            else {"evidence_policy": "legacy", "snapshot_sha256": None}
+                        ),
+                    )
         _require_accepted_result(
             result,
             repository=args.repository,
             pull_request=args.pull_request,
             app_slug=args.app_slug,
+            operation_entry=operation_entry,
+            publication_http=acceptance_http,
+            checkpoint=acceptance_checkpoint,
         )
         try:
             review_outcome = application.publish_review(
@@ -1134,6 +1499,8 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     auto_approve=args.enable_auto_approve,
                     reviews_policy=getattr(args, "reviews_policy", None),
                     github_session_ledger=getattr(args, "github_session_ledger", False),
+                    complete_inventory=publication_inventory == "complete",
+                    operation_entry=operation_entry,
                 ),
                 oidc_token=args.oidc_token,
                 repository=args.repository,
@@ -1150,6 +1517,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 evidence_context=evidence_context,
                 baseline=admission_baseline,
                 current_key=admission_current_key,
+                publication_budget=publication_budget,
             )
         except GitHubPublicationTransientError as exc:
             outcome = RunOutcome(
@@ -1199,6 +1567,14 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             review_outcome, review_result=result, **identity
         )
         emit_host_outcome(outcome, output_path=args.outcome)
+        if getattr(review_outcome, "thread_resolution", None) == "unconfirmed":
+            print(
+                "review-sensei: old-thread cleanup is unconfirmed or incomplete; "
+                "use --result with the exact original result and trusted contexts "
+                "for this head and base to continue cleanup; "
+                "no inference is needed.",
+                file=sys.stderr,
+            )
         statuses = [review_outcome.status]
         statuses.extend(item.status for item in learning_outcomes)
         print(" ".join(statuses))

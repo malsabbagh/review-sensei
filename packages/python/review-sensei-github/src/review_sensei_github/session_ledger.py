@@ -90,7 +90,7 @@ from .errors import (
 )
 from .http import MAX_PAGINATION_ITEMS, GitHubHttp
 
-_COMMENT_PAGE_SIZES = (100, 20, 5)
+_COMMENT_PAGE_SIZES = (100, 20, 5, 1)
 _FENCE_PAGE_SIZE = 100
 _SINCE_MARGIN = timedelta(seconds=2)
 _UPDATED_AT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -327,6 +327,7 @@ class GitHubIssueCommentSessionLedger:
         self._reservation_owner = reservation_owner
         self._actions_read_token = actions_read_token
         self._actions_token_provider = actions_token_provider
+        self._request_started = False
         self.evidence_budget = evidence_budget
         self.enable_partition_writes = enable_partition_writes
         self.enable_history_graph = enable_history_graph
@@ -351,6 +352,7 @@ class GitHubIssueCommentSessionLedger:
         self._list_refresh = True
         self._list_anchor: str | None = None
         self._fence_anchor: str | None = None
+        self._fence_page_size = _FENCE_PAGE_SIZE
         self._verified_parts: dict[str, AuthenticatedPart] = {}
         self._part_digests: dict[str, str] = {}
         self._reuse_listed_parts = False
@@ -753,9 +755,7 @@ class GitHubIssueCommentSessionLedger:
         return shared
 
     def _fence_path(self, identity: SessionIdentity, page: int) -> str:
-        path = (
-            f"{self._comments_path(identity)}?per_page={_FENCE_PAGE_SIZE}&page={page}"
-        )
+        path = f"{self._comments_path(identity)}?per_page={self._fence_page_size}&page={page}"
         anchor = self._fence_anchor
         if isinstance(anchor, str) and anchor:
             path += f"&since={quote(anchor, safe='')}"
@@ -775,6 +775,19 @@ class GitHubIssueCommentSessionLedger:
         collected: list[Any] = []
         page_size_index = 0
         while len(collected) <= MAX_PAGINATION_ITEMS:
+            hint_path = self._comments_path(identity)
+            if since is not None:
+                hint_path += "?since=" + quote(since, safe="")
+            hint = self.http.pagination_page_size(hint_path, len(collected))
+            page_size_index = next(
+                (
+                    index
+                    for index in range(page_size_index, len(_COMMENT_PAGE_SIZES))
+                    if _COMMENT_PAGE_SIZES[index] <= hint
+                    and len(collected) % _COMMENT_PAGE_SIZES[index] == 0
+                ),
+                page_size_index,
+            )
             page_size = _COMMENT_PAGE_SIZES[page_size_index]
             if len(collected) % page_size:
                 raise ReviewInputError("partition metadata enumeration is unavailable")
@@ -797,6 +810,10 @@ class GitHubIssueCommentSessionLedger:
                 or len(payload) > page_size
             ):
                 raise ReviewInputError("partition metadata enumeration is unavailable")
+            # Select a safe size before sealing the tail's exact request URLs.
+            # A sealed fence never changes size or adds replacement requests.
+            if self._activation_ticket is None:
+                self._fence_page_size = min(self._fence_page_size, page_size)
             collected.extend(payload)
             if len(payload) < page_size:
                 return collected
@@ -819,11 +836,11 @@ class GitHubIssueCommentSessionLedger:
             if (
                 status != 200
                 or not isinstance(payload, list)
-                or len(payload) > _FENCE_PAGE_SIZE
+                or len(payload) > self._fence_page_size
             ):
                 raise ReviewInputError("partition metadata enumeration is unavailable")
             collected.extend(payload)
-            if len(payload) < _FENCE_PAGE_SIZE:
+            if len(payload) < self._fence_page_size:
                 self._merge_comments(collected)
                 self._note_anchor(collected)
                 return self._cached_comments()
@@ -842,6 +859,18 @@ class GitHubIssueCommentSessionLedger:
         page_size_index = 0
         used = 0
         while used < limit and len(collected) < MAX_PAGINATION_ITEMS:
+            hint = self.http.pagination_page_size(
+                self._comments_path(identity), len(collected)
+            )
+            page_size_index = next(
+                (
+                    index
+                    for index in range(page_size_index, len(_COMMENT_PAGE_SIZES))
+                    if _COMMENT_PAGE_SIZES[index] <= hint
+                    and len(collected) % _COMMENT_PAGE_SIZES[index] == 0
+                ),
+                page_size_index,
+            )
             page_size = _COMMENT_PAGE_SIZES[page_size_index]
             if len(collected) % page_size:
                 raise ReviewInputError("partition metadata enumeration is unavailable")
@@ -1017,6 +1046,7 @@ class GitHubIssueCommentSessionLedger:
         *,
         body: dict[str, object] | None = None,
     ) -> tuple[int, dict[str, Any] | list[Any] | None]:
+        self._request_started = True
         try:
             if self.evidence_budget is not None:
                 if self._activation_ticket is not None:

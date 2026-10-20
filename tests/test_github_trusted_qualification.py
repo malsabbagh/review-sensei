@@ -81,6 +81,129 @@ def synthetic_authority(**changes):
 
 
 class TrustedQualificationTests(unittest.TestCase):
+    def test_lost_approval_readback_rechecks_qualification_after_last_guard(self):
+        from review_sensei_github.errors import GitHubPublicationTransientError
+        from review_sensei_github.publication import approval_marker
+
+        from tests.test_github_publication import published_review
+
+        _, published = self.publish()
+        body = review_payloads(published)[0]["body"]
+        eligibility = approval_eligibility_from_body(body)
+        original = published_review(marker=body, head_sha="b" * 40, state="COMMENTED")
+        approved = published_review(
+            marker=approval_marker(
+                repository_id=1, pull_request=2, head_sha="b" * 40, base_sha="a" * 40
+            ),
+            head_sha="b" * 40,
+            state="APPROVED",
+        )
+        changed_context = runtime_context()
+        changed_context["provider"]["timeout_seconds"] = 30
+        changed = synthetic_authority(runtime_configuration=changed_context)
+        for change_at in (None, "last-guard", "readback-without-guard"):
+            with self.subTest(change_at=change_at):
+                reads = 0
+                guards = []
+
+                def observe(request):
+                    nonlocal reads
+                    if request.method == "GET" and "/reviews?" in request.full_url:
+                        reads += 1
+                        if change_at == "readback-without-guard" and reads == 2:
+                            finalizer.qualification_authority = changed
+                    return False
+
+                responses = [
+                    json_response(pr_payload(head_sha="b" * 40)),
+                    graphql_review_threads_response(),
+                    json_response(pr_payload(head_sha="b" * 40)),
+                    json_response([original]),
+                    json_response({}, 500),
+                    json_response([original, approved]),
+                ]
+                if change_at != "readback-without-guard":
+                    responses.append(json_response([original, approved]))
+                http, calls = make_http(responses, routes=((observe, lambda _: None),))
+                finalizer = ReviewApprovalFinalizer(
+                    http=http, qualification_authority=synthetic_authority()
+                )
+
+                def guard(reviews):
+                    self.assertTrue(reviews)
+                    guards.append(True)
+                    if change_at == "last-guard" and len(guards) == 2:
+                        finalizer.qualification_authority = changed
+
+                def finalize():
+                    return finalizer.finalize(
+                        token="token",
+                        repository="owner/repo",
+                        pull_request=2,
+                        head_sha="b" * 40,
+                        app_slug="reviewsensei[bot]",
+                        eligibility=eligibility,
+                        _before_approval=None
+                        if change_at == "readback-without-guard"
+                        else guard,
+                    )
+
+                if change_at is None:
+                    self.assertEqual(finalize().status, "already_approved")
+                else:
+                    with self.assertRaises(GitHubPublicationTransientError):
+                        finalize()
+                self.assertEqual(posted_events(calls), ["APPROVE"])
+                self.assertEqual(responses, [])
+
+    def test_authority_changed_during_final_capacity_fence_withholds_approval(self):
+        from tests.test_github_publication import published_review
+
+        _, published = self.publish()
+        body = review_payloads(published)[0]["body"]
+        eligibility = approval_eligibility_from_body(body)
+        changed_context = runtime_context()
+        changed_context["provider"]["timeout_seconds"] = 30
+        changed_authority = synthetic_authority(runtime_configuration=changed_context)
+        http, calls = make_http(
+            [
+                json_response(pr_payload(head_sha="b" * 40)),
+                graphql_review_threads_response(),
+                json_response(pr_payload(head_sha="b" * 40)),
+                json_response(
+                    [
+                        published_review(
+                            marker=body, head_sha="b" * 40, state="COMMENTED"
+                        )
+                    ]
+                ),
+                json_response({"id": 9}, 200),
+            ]
+        )
+        finalizer = ReviewApprovalFinalizer(
+            http=http, qualification_authority=synthetic_authority()
+        )
+        guarded = []
+
+        def final_capacity_fence(reviews):
+            self.assertTrue(reviews)
+            guarded.append(True)
+            finalizer.qualification_authority = changed_authority
+
+        outcome = finalizer.finalize(
+            token="token",
+            repository="owner/repo",
+            pull_request=2,
+            head_sha="b" * 40,
+            app_slug="reviewsensei[bot]",
+            eligibility=eligibility,
+            _before_approval=final_capacity_fence,
+        )
+        self.assertEqual(guarded, [True])
+        self.assertEqual(outcome.status, "approval_withheld")
+        self.assertEqual(outcome.diagnostic, "qualification_unverified")
+        self.assertEqual(posted_events(calls), [])
+
     def publish(
         self,
         *,

@@ -21,6 +21,8 @@ import {
   mergeFocusedV4ConfigFile,
   mergeFocusedV4WorkflowTemplate,
   publicWorkflowTagFromJobRef,
+  preRecoveryV5WorkflowTemplate,
+  preparedRecoveryWorkflowTemplate,
   releasedRunnerSwitchV4WorkflowTemplate,
   setupPullRequestBody,
   validatePublicWorkflowTag,
@@ -124,6 +126,30 @@ describe("setup-v4 public boundary", () => {
         "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
       ),
     ).toBeNull();
+  });
+
+  it("stages default emission at exact released pre-recovery caller bytes", () => {
+    expect(createHash("sha256").update(buildSetupFiles("v5")[0].content).digest("hex"))
+      .toBe("a1728c81138d371c66b2d2693c3f09972f2e305aa23d16aa7d09e53ca82d9b8f");
+    for (const tag of ["v5", "stable"]) {
+      const workflow = buildSetupFiles(tag)[0].content;
+      expect(workflow).toBe(preRecoveryV5WorkflowTemplate(tag));
+      expect(workflow).not.toContain("recover_publication:");
+      expect(workflow).not.toContain("recovery_policy_commit:");
+      expect(workflow).not.toContain("recovery_expected_head:");
+    }
+  });
+
+  it("keeps the next recovery caller explicitly prepared for later activation", () => {
+    const workflow = preparedRecoveryWorkflowTemplate("v5");
+    expect(workflow).toContain("recover_publication: ${{ inputs.recover_publication || false }}");
+    expect(workflow).toContain("recovery_policy_commit:");
+    expect(workflow).toContain("recovery_expected_head:");
+    expect(workflow).not.toBe(buildSetupFiles("v5")[0].content);
+    expect(workflow).toBe(readFileSync(
+      new URL("../../../examples/github-actions/review-sensei-review.yml", import.meta.url),
+      "utf8",
+    ));
   });
 
   it("generates the thin caller at the supplied public workflow tag", () => {
@@ -406,12 +432,7 @@ describe("setup-v4 public boundary", () => {
     expect(buildHistoricalProviderParityV4SetupFiles(tag)[2].content).toContain(
       "version: 0.1.1",
     );
-    expect(workflow).toBe(
-      readFileSync(
-        new URL("../../../examples/github-actions/review-sensei-review.yml", import.meta.url),
-        "utf8",
-      ).replace("@v5", `@${tag}`),
-    );
+    expect(workflow).toBe(preRecoveryV5WorkflowTemplate(tag));
   });
 });
 
