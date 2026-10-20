@@ -25,8 +25,11 @@ provider qualification and legitimately `not-required` providers. A transaction
 bound publication retains the complete admitted inventory and exact finding index
 in existing owned PR result parts, even when the legacy root
 subsequently refuses its capacity. The complete profile may use schema 5 when
-its human inventory exceeds legacy capacity. Legacy publication remains unchanged
-for inventories within its capacity.
+its human inventory exceeds legacy capacity, or when both ordinary and compact
+legacy presentations exceed the complete framed-body limit. In the latter case,
+preflight the same reference and future disposition reserve before staging.
+Legacy publication remains unchanged when its complete frame fits. Full prose,
+index placement, staging authority and all existing limits remain required.
 
 References confer no authority. Each operation independently selects its durable
 transaction, repository/PR/base/head, configured numeric Bot, publication identity,
