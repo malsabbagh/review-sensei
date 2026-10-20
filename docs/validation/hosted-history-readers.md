@@ -33,7 +33,8 @@ the public capture digest, never original comment bodies. The review history
 shape is 12 entries / 476,638 bytes. The shared REST history sequence includes ten-item pages so repeated scans of
 near-limit comment/review bodies fit the original composed budget. The previous
 sequence needed nine reads for the captured issue history; this sequence needs
-five. GraphQL retains its independent cursor page sizes.
+six. Retaining the 25-item candidate preserves admitted 100-entry medium-body
+histories; a smaller page size is used only at an aligned item offset. GraphQL retains its independent cursor page sizes.
 
 Synthetic exact byte counts exercise the real
 bounded JSON transport rather than a mocked overflow exception.

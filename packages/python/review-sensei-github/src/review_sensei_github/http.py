@@ -28,7 +28,7 @@ MAX_PAGINATION_PAGES = 10
 MAX_PAGINATION_ITEMS = MAX_PAGINATION_PAGES * 100
 # Ten-item pages avoid repeated five-item rescans for histories clustered near
 # GitHub's individual comment/review body limit. Fifty still admits long lists.
-HISTORY_PAGE_SIZES = (100, 50, 10, 5, 1)
+HISTORY_PAGE_SIZES = (100, 50, 25, 10, 5, 1)
 _SAFE_SEGMENT = re.compile(r"[A-Za-z0-9._-]+")
 
 Opener = Callable[..., Any]
@@ -262,10 +262,9 @@ class GitHubHttp:
         """Return at most ``MAX_PAGINATION_ITEMS`` list entries.
 
         Callers that handle large, untrusted list entries may provide strictly
-        descending page sizes where each smaller size evenly divides the prior
-        size. If a page exceeds the response budget, the same item offset is
-        retried with the next smaller size. After a smaller page succeeds, the
-        next aligned offset uses the largest page size that divides it, so one
+        descending page sizes. If a page exceeds the response budget, the same
+        item offset is retried with the next smaller size that aligns with it.
+        After a smaller page succeeds, the next aligned offset uses the largest page size that divides it, so one
         oversized page does not pin the rest of the list at the smaller size.
         """
 
@@ -287,12 +286,10 @@ class GitHubHttp:
                 "GitHub pagination page sizes must be integers from 1 through 100"
             )
         if any(
-            current <= following or current % following
+            current <= following
             for current, following in zip(page_sizes, page_sizes[1:])
         ):
-            raise GitHubHTTPError(
-                "GitHub pagination page sizes must descend and divide evenly"
-            )
+            raise GitHubHTTPError("GitHub pagination page sizes must descend strictly")
 
         if max_requests is not None and (
             isinstance(max_requests, bool)
@@ -360,10 +357,17 @@ class GitHubHttp:
             except GitHubHTTPResponseTooLargeError:
                 if page_size_index + 1 >= len(page_sizes):
                     raise
-                next_page_size = page_sizes[page_size_index + 1]
-                if len(collected) % next_page_size:
+                next_index = next(
+                    (
+                        index
+                        for index in range(page_size_index + 1, len(page_sizes))
+                        if len(collected) % page_sizes[index] == 0
+                    ),
+                    None,
+                )
+                if next_index is None:
                     raise GitHubHTTPError("GitHub pagination offset was invalid")
-                page_size_index += 1
+                page_size_index = next_index
                 continue
             if monotonic() >= deadline:
                 raise GitHubHTTPPaginationLimitError(

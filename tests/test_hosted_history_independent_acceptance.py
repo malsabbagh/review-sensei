@@ -147,15 +147,24 @@ class IndependentAcceptanceTests(unittest.TestCase):
     def test_combined_oversized_human_histories_complete_in_original_shared_budget(
         self,
     ):
-        state = LargeHumanState(near_capacity=True)
-        original = copy.deepcopy(state.history)
-        provider = human.Provider(human.response_for(state.eligibility))
-        outcome, _ = state.application_reply(provider)
-        self.assertEqual(outcome.approval_status, "approved")
-        self.assertEqual(len(provider.calls), 1)
-        self.assertEqual(state.events(), ["COMMENT", "APPROVE"])
-        self.assertEqual(state.history, original)
-        self.assertLessEqual(len(state.calls), 64)
+        for width in (None, 16_000, 20_000):
+            with self.subTest(medium_body_bytes=width):
+                state = (
+                    LargeHumanState(near_capacity=True)
+                    if width is None
+                    else LargeHumanState(count=100)
+                )
+                if width is not None:
+                    for item in state.history:
+                        item["body"] = "x" * width
+                original = copy.deepcopy(state.history)
+                provider = human.Provider(human.response_for(state.eligibility))
+                outcome, _ = state.application_reply(provider)
+                self.assertEqual(outcome.approval_status, "approved")
+                self.assertEqual(len(provider.calls), 1)
+                self.assertEqual(state.events(), ["COMMENT", "APPROVE"])
+                self.assertEqual(state.history, original)
+                self.assertLessEqual(len(state.calls), 64)
 
     def test_real_http_operation_port_completes_and_replays_both_large_histories(self):
         state = HostedOperationState()

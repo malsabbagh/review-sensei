@@ -478,7 +478,7 @@ class HostedHistoryReaderTests(unittest.TestCase):
 
     def test_default_reader_refuses_oversized_individual_and_exhausted_walk(self):
         for items, exception, attempts in (
-            ([{"body": "x" * 600_000}], GitHubHTTPResponseTooLargeError, 5),
+            ([{"body": "x" * 600_000}], GitHubHTTPResponseTooLargeError, 6),
             ([{"body": "x" * 100_000}] * 250, GitHubHTTPPaginationLimitError, 10),
         ):
             with self.subTest(exception=exception.__name__):
@@ -644,3 +644,24 @@ class HostedHistoryReaderTests(unittest.TestCase):
             ledger.evidence_budget.calls, len(state.calls) + len(broker.calls)
         )
         self.assertLessEqual(ledger.evidence_budget.calls, 64)
+
+    def test_history_reader_keeps_medium_page_capacity_and_exact_unaligned_offsets(
+        self,
+    ):
+        for width in (16_000, 20_000):
+            with self.subTest(body_bytes=width):
+                items = [{"id": i, "body": "x" * width} for i in range(100)]
+                server = HistoryServer(items)
+                self.assertEqual(
+                    server.http.paginate(path="/history", token="fixture"), items
+                )
+                self.assertLessEqual(len(server.calls), 10)
+        items = [
+            {"id": i, "body": "small" if i < 25 else "x" * 40_000} for i in range(50)
+        ]
+        server = HistoryServer(items)
+        self.assertEqual(server.http.paginate(path="/history", token="fixture"), items)
+        self.assertEqual(
+            [(int(q["per_page"][0]), int(q["page"][0])) for _, _, q in server.calls],
+            [(100, 1), (50, 1), (25, 1), (25, 2), (5, 6), (10, 4), (10, 5), (50, 2)],
+        )
