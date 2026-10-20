@@ -139,6 +139,60 @@ class ReplyIngressTests(unittest.TestCase):
 
 
 class PendingPresentationTests(unittest.TestCase):
+    def test_shared_guidance_retains_every_identity_path_and_validated_reason(self):
+        current = state_with_inventory(250).eligibility
+        reasons = {
+            item.fingerprint: f"Distinct rationale {index} 深🙂"
+            for index, item in enumerate(current.human_review.pending)
+        }
+        arguments = dict(
+            body="Discussion.",
+            head_sha=HEAD,
+            eligibility=current,
+            decision_reasons=reasons,
+        )
+        self.assertEqual(
+            pending_reply_pages(**arguments),
+            pending_reply_pages(**arguments, layout="legacy"),
+        )
+        pages = pending_reply_pages(**arguments, layout="shared-guidance-v1")
+        self.assertEqual(
+            pages, pending_reply_pages(**arguments, layout="shared-guidance-v1")
+        )
+        self.assertNotEqual(
+            pages[0].report_digest, pending_reply_pages(**arguments)[0].report_digest
+        )
+        text = "\n".join(page.body for page in pages)
+        identifiers = assign_finding_identifiers(
+            tuple(item.fingerprint for item in current.human_review.findings)
+        )
+        for item in current.human_review.pending:
+            self.assertEqual(text.count(item.fingerprint), 1)
+            self.assertIn(f"**{identifiers[item.fingerprint]}**", text)
+            self.assertIn("src&#47;app&#46;py", text)
+            self.assertIn(reasons[item.fingerprint], text)
+        self.assertIn("for each exact ID in a new authorized mention", text)
+        self.assertTrue(
+            all(len(page.body.encode()) <= MAX_PENDING_PAGE_BYTES for page in pages)
+        )
+
+    def test_unknown_layout_or_oversized_individual_body_refuses_without_truncation(
+        self,
+    ):
+        for layout in ("unknown", {}, [], None):
+            with self.subTest(layout=layout), self.assertRaises(ReviewInputError):
+                pending_reply_pages(
+                    body="Discussion.",
+                    head_sha=HEAD,
+                    eligibility=prior(),
+                    layout=layout,
+                )
+        for layout in ("legacy", "shared-guidance-v1"):
+            with self.subTest(layout=layout), self.assertRaises(ReviewInputError):
+                pending_reply_pages(
+                    body="深" * 1366, head_sha=HEAD, eligibility=prior(), layout=layout
+                )
+
     def test_unicode_rationale_controls_cannot_reorder_authority(self):
         current = prior()
         finding = current.human_review.pending[0]
@@ -442,7 +496,9 @@ class ReplyTransportTests(unittest.TestCase):
 
 
 class PendingDeliveryTests(unittest.TestCase):
-    def publish(self, state, *, body="Discussion.", fence=lambda: None):
+    def publish(
+        self, state, *, body="Discussion.", fence=lambda: None, layout="legacy"
+    ):
         return ConversationPublisher(http=state.http).publish_pending(
             token="synthetic",
             repository="owner/repo",
@@ -456,7 +512,57 @@ class PendingDeliveryTests(unittest.TestCase):
             source_kind="issue",
             eligibility=state.eligibility,
             fence=fence,
+            layout=layout,
         )
+
+    def test_shared_report_rechecks_whole_report_after_later_page_mutation(self):
+        state = state_with_inventory()
+        original_request = state.http.request
+
+        def mutate_previous_page(method, path, **arguments):
+            result = original_request(method, path, **arguments)
+            if (
+                method == "POST"
+                and path.endswith("/issues/1/comments")
+                and state.reply_count == 2
+            ):
+                state.replies[0]["body"] = "changed " + state.replies[0]["body"]
+            return result
+
+        state.http.request = mutate_previous_page
+        with self.assertRaisesRegex(GitHubConversationError, "receipt conflicts"):
+            self.publish(state, layout="shared-guidance-v1")
+        self.assertGreater(state.reply_count, 1)
+        self.assertEqual(state.events(), [])
+
+    def test_shared_report_whole_readback_failure_cannot_claim_complete(self):
+        state = state_with_inventory()
+        original_request = state.http.request
+        scans_after_last_post = 0
+
+        def lose_final_readback(method, path, **arguments):
+            nonlocal scans_after_last_post
+            if (
+                method == "GET"
+                and "/issues/1/comments" in path
+                and state.reply_count == 3
+            ):
+                scans_after_last_post += 1
+                if scans_after_last_post == 1:
+                    raise GitHubConversationError("whole report readback unavailable")
+            return original_request(method, path, **arguments)
+
+        expected = pending_reply_pages(
+            body="Discussion.",
+            head_sha=HEAD,
+            eligibility=state.eligibility,
+            layout="shared-guidance-v1",
+        )
+        self.assertEqual(len(expected), 3)
+        state.http.request = lose_final_readback
+        with self.assertRaisesRegex(GitHubConversationError, "whole report readback"):
+            self.publish(state, layout="shared-guidance-v1")
+        self.assertEqual(state.events(), [])
 
     def test_long_delivery_exact_readback_and_retry_create_no_duplicates(self):
         state = state_with_inventory()

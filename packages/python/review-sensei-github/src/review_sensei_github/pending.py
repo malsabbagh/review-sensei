@@ -73,6 +73,7 @@ def pending_reply_pages(
     diagnostic: str | None = None,
     decision_reasons: Mapping[str, str] | None = None,
     assessment_digest: str = "",
+    layout: str = "legacy",
 ) -> tuple[PendingReplyPage, ...]:
     """Keep every trusted unresolved human ID in a finite, deterministic report.
 
@@ -81,7 +82,9 @@ def pending_reply_pages(
     review prose. Model text and diagnostic codes never choose pending IDs.
     """
     if (
-        not isinstance(head_sha, str)
+        not isinstance(layout, str)
+        or layout not in {"legacy", "shared-guidance-v1"}
+        or not isinstance(head_sha, str)
         or len(head_sha) != 40
         or any(c not in "0123456789abcdef" for c in head_sha)
         or not isinstance(body, str)
@@ -116,6 +119,18 @@ def pending_reply_pages(
             identifiers = {
                 item: finding_identifier(item, hex_digits=64) for item in identities
             }
+        shared_guidance = (
+            (
+                "Current evidence is insufficient."
+                if diagnostic is not None
+                else "These published concerns still require human assessment."
+            )
+            + " Next: provide current-head code and human evidence for each exact ID in a new authorized mention."
+            if layout == "shared-guidance-v1" and inventory.pending
+            else ""
+        )
+        if shared_guidance:
+            lines[0] += "\n\n" + shared_guidance
         for item in sorted(inventory.pending, key=lambda value: value.fingerprint):
             identifier = identifiers[item.fingerprint]
             reason = (
@@ -127,6 +142,12 @@ def pending_reply_pages(
                 reason = "Validated reassessment reason: " + _display(
                     reasons[item.fingerprint], 192
                 )
+            if layout == "shared-guidance-v1":
+                lines.append(
+                    f"- **{identifier}** (`{item.fingerprint}`), {_display(item.path)}"
+                    + (": " + reason if reasons.get(item.fingerprint) else "")
+                )
+                continue
             lines.append(
                 f"- **{identifier}** (`{item.fingerprint}`), "
                 f"{_display(item.path)}: {reason} "
@@ -219,6 +240,7 @@ def pending_reply_pages(
                 "assessment_digest": assessment_digest,
                 "decision_reasons": reasons,
                 "lines": lines,
+                **({"layout": layout} if layout != "legacy" else {}),
             },
             sort_keys=True,
             separators=(",", ":"),

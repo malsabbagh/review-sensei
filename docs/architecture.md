@@ -806,14 +806,12 @@ resolve from trusted configuration, not this infrastructure input.
 Older setup-v4 callers remain recognized as managed content and migrate through
 the existing reviewable setup PR path.
 
-The reusable GitHub adapter can bind OpenRouter approval to independently
-configured retained evidence through `TrustedOpenRouterQualification`.
-Evaluation and runtime configuration digests remain separate, and neither
-profile/caller status nor the historical `not-required` default supplies proof.
-New facts v2 retain provider provenance and a bounded exact-head/result receipt;
-every public finalizer requires matching App-owned eligibility readback and
-revalidates configured OpenRouter authority. Legacy facts remain readable but
-cannot prove exemption. Other providers' new reviews retain their policy.
+`TrustedOpenRouterQualification` binds retained evidence to independently
+configured identities; evaluation/runtime digests stay separate. Caller/profile
+claims and old `not-required` facts supply no proof. Facts v2 retain provider
+and exact-head/result receipt. Every finalizer requires matching App-owned
+eligibility readback and rechecks configured OpenRouter authority. Legacy facts
+remain readable without exemption; other providers' new reviews keep their policy.
 Default CLI/hosted composition withholds until a trusted host explicitly wires
 the evidence authority. See [the runtime boundary](openrouter-qualification.md#runtime-approval-boundary-115)
 and [ADR 0083](adr/0083-trusted-runtime-openrouter-qualification.md) for scope,
@@ -1117,3 +1115,15 @@ GitHub caller creates that tracker before context preparation and retains it
 through operation entry and generation; expiry, exhaustion or cancellation
 cannot publish a generated reply. Provider adapters receive the remaining
 request deadline and their configured output cap without backend-specific policy.
+
+Restored handles bind operation/inventory/source and original clock/charges.
+Replay never reexecutes; unknown work never publishes. Time/generation bounds,
+expiry/rollback hold. No CLI/grant activation or broker funding. See proposed
+ADR 0086.
+
+The explicit `ConversationPublisher.prepare_selected_assessment_context` API
+routes selectors into the existing complete finding/evidence/source composition
+instead of loading unused generic discussion context. Its compact report path
+uses exact owned POST-ID readback followed by the complete report scan; the
+ordinary conversation route remains available. See
+[Proposed ADR 0087](adr/0087-selected-assessment-context-and-owned-page-readback.md).
