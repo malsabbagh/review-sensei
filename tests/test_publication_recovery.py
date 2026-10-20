@@ -21,6 +21,7 @@ from review_sensei_github.operation_host import (
     render_marked_comment,
 )
 from review_sensei_github.publication import (
+    FINDING_INDEX_MARKER_PREFIX,
     approval_eligibility_from_body,
     approval_eligibility_marker,
     finding_index_marker,
@@ -437,6 +438,86 @@ class NativeReplayAuthorityTests(unittest.TestCase):
         self.assertEqual(check["conclusion"], "action_required")
         self.assertEqual(check["output"]["title"], "Review publication failed")
         self.assertIn("could not publish", check["output"]["summary"])
+
+    def test_complete_native_proof_refusal_blocks_check_before_authority_lookup(self):
+        for fault, count, line, reverse in (
+            ("eligibility", 0, 2, False),
+            ("index", 0, 2, False),
+            ("both", 0, 2, False),
+            ("both", 0, 2, True),
+            ("invalid-index", 0, 2, False),
+            ("body-prose", 1, 2, False),
+            ("owner", 0, 2, False),
+        ):
+            with (
+                self.subTest(fault=fault, reverse=reverse),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                ledger = LocalSessionLedger(Path(directory))
+                result, key = checkpoint(ledger, count=count, line=line)
+                state = RetentionState()
+                state.reviews = []
+                options = GitHubWriteOptions(
+                    auto_review=True,
+                    auto_approve=False,
+                    github_writes=True,
+                    complete_inventory=True,
+                )
+                self.assertEqual(
+                    publish(
+                        application(state, ledger),
+                        result,
+                        key,
+                        publication_budget=EvidenceReadBudget(),
+                        options=options,
+                    ).status,
+                    "published",
+                )
+                self.assertEqual(state.check_runs[-1]["conclusion"], "success")
+                root = state.reviews[0]
+                eligibility = approval_eligibility_from_body(root["body"])
+                self.assertIsNotNone(eligibility)
+                if reverse:
+                    root["body"] = "\n".join(reversed(root["body"].splitlines()))
+                if fault != "index":
+                    root["body"] = root["body"].replace(
+                        approval_eligibility_marker(eligibility), ""
+                    )
+                if fault in {"index", "both"}:
+                    root["body"] = "\n".join(
+                        text
+                        for text in root["body"].splitlines()
+                        if FINDING_INDEX_MARKER_PREFIX not in text
+                    )
+                elif fault == "invalid-index":
+                    root["body"] += "\n" + FINDING_INDEX_MARKER_PREFIX + "invalid -->"
+                elif fault == "body-prose":
+                    self.assertIn(result.comments[0].body, root["body"])
+                    root["body"] = root["body"].replace(result.comments[0].body, "")
+                elif fault == "owner":
+                    root["user"] = {"login": APP, "type": "User"}
+                record = ledger.load(IDENTITY).record
+                parts = state.part_requests.count("POST")
+                state.calls.clear()
+                with self.assertRaises(GitHubPublicationError):
+                    publish(
+                        application(state, ledger),
+                        result,
+                        key,
+                        publication_budget=EvidenceReadBudget(),
+                        options=replace(options, auto_approve=True),
+                    )
+                self._assert_replay_check_blocked(state)
+                self.assertEqual(len(state.reviews), 1)
+                self.assertEqual(state.part_requests.count("POST"), parts)
+                self.assertFalse(
+                    any(
+                        path == "/graphql"
+                        and body.get("operationName") == "ResolveReviewThread"
+                        for _, path, body in state.calls
+                    )
+                )
+                self.assertEqual(ledger.load(IDENTITY).record, record)
 
     def test_complete_native_replay_rejects_missing_disabled_authority(self):
         for fault in ("missing", "invalid", "head", "result"):

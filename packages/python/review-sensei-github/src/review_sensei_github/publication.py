@@ -5680,18 +5680,23 @@ class ReviewPublisher:
                 if result_marker in body:
                     result_states.add(state)
                     if complete_review is not None:
-                        self._verify_complete_review(
-                            token=token,
-                            repository=repository,
-                            repository_id=repository_id,
-                            pull_request=pull_request,
-                            head_sha=head_sha,
-                            app_slug=app_slug,
-                            review=review,
-                            assembled=complete_review,
-                            base_sha=base_sha,
-                            result_digest=result_digest,
-                        )
+                        try:
+                            self._verify_complete_review(
+                                token=token,
+                                repository=repository,
+                                repository_id=repository_id,
+                                pull_request=pull_request,
+                                head_sha=head_sha,
+                                app_slug=app_slug,
+                                review=review,
+                                assembled=complete_review,
+                                base_sha=base_sha,
+                                result_digest=result_digest,
+                            )
+                        except GitHubPublicationTransientError:
+                            raise
+                        except (GitHubPublicationError, ReviewInputError) as exc:
+                            raise _NativeReplayAuthorityError(str(exc)) from exc
                         identifier = review.get("id")
                         if type(identifier) is int and identifier > 0:
                             self._confirmed_review_id = identifier

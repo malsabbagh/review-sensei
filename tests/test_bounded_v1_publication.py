@@ -12,7 +12,9 @@ from review_sensei_github import (
     GitHubHttp,
     GitHubHTTPPaginationLimitError,
     GitHubHTTPResponseTooLargeError,
+    GitHubHTTPTransientError,
     GitHubPublicationError,
+    GitHubPublicationTransientError,
     ReviewPublisher,
 )
 from review_sensei_github.publication import (
@@ -176,6 +178,19 @@ class CompleteInventoryPublicationTests(unittest.TestCase):
             ]
         )
 
+    def assert_failed_check_only(self, state):
+        mutations = [
+            (method, path)
+            for method, path, body in state.calls
+            if method != "GET"
+            and (
+                path != "/graphql" or body.get("operationName") == "ResolveReviewThread"
+            )
+        ]
+        self.assertTrue(mutations)
+        self.assertTrue(all("/check-runs" in path for _, path in mutations))
+        self.assertEqual(state.check_runs[-1]["conclusion"], "action_required")
+
     def test_77_findings_publish_all_full_text_and_exact_identities(self):
         findings = comments(77)
         state = State()
@@ -279,7 +294,7 @@ class CompleteInventoryPublicationTests(unittest.TestCase):
         state.calls.clear()
         with self.assertRaises((GitHubPublicationError, ReviewInputError)):
             publish(state, findings)
-        self.assert_no_mutations(state)
+        self.assert_failed_check_only(state)
 
     def test_legacy_review_missing_optional_prose_is_not_upgraded_by_replay(self):
         state = State()
@@ -294,7 +309,7 @@ class CompleteInventoryPublicationTests(unittest.TestCase):
         state.calls.clear()
         with self.assertRaisesRegex(GitHubPublicationError, "complete.*prose"):
             publish(state, findings)
-        self.assert_no_mutations(state)
+        self.assert_failed_check_only(state)
 
     def test_complete_body_publication_replays_without_a_second_review(self):
         state = State()
@@ -424,7 +439,30 @@ class CompleteInventoryPublicationTests(unittest.TestCase):
                 # Explicit observations mean it need not infer remote content.
                 with self.assertRaises(GitHubPublicationError):
                     publish(state, findings, **options)
-                self.assert_no_mutations(state)
+                self.assert_failed_check_only(state)
+
+    def test_transient_complete_inline_readback_keeps_transport_refusal(self):
+        state = inline_state()
+        findings = comments(1)
+        options = {
+            "convergence_policy": ReviewConvergencePolicy(mode="legacy"),
+            "allow_retired_legacy_policy": True,
+        }
+        self.assertEqual(publish(state, findings, **options).status, "published")
+        original = state.http.opener
+
+        def unavailable(request, timeout):
+            path = urlparse(request.full_url).path
+            if request.method == "GET" and "/reviews/" in path:
+                raise URLError("synthetic unavailable inline readback")
+            return original(request, timeout)
+
+        state.http.opener = unavailable
+        state.calls.clear()
+        with self.assertRaises(GitHubPublicationTransientError) as failure:
+            publish(state, findings, **options)
+        self.assertIsInstance(failure.exception.__cause__, GitHubHTTPTransientError)
+        self.assert_no_mutations(state)
 
     def test_human_and_path_future_bounds_remain_closed_before_mutation(self):
         cases = (
