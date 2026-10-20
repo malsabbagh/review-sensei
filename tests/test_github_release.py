@@ -176,6 +176,26 @@ class GitHubReleaseTests(unittest.TestCase):
         self.assertEqual(self.writes[-1][2], {"draft": False, "make_latest": "legacy"})
         self.assertEqual(len(self.commands), 4)
 
+    def test_draft_and_public_release_do_not_wait_for_native_or_npm_jobs(self):
+        for name in (
+            "Assemble and validate npm package set",
+            "Publish npm packages with Trusted Publishing",
+        ):
+            self.jobs.append(
+                {
+                    "name": name,
+                    "run_attempt": 2,
+                    "status": "waiting",
+                    "conclusion": None,
+                }
+            )
+        self.draft()
+        for job in self.jobs:
+            if "npm" in job["name"]:
+                job.update(status="completed", conclusion="failure")
+        RELEASE.manage(CONTEXT, self.assets, publish=True)
+        self.assertFalse(self.releases[0]["draft"])
+
     def test_lost_create_upload_and_publish_responses_reconcile_exact_state(self):
         self.lost_response.update({"POST", "upload", "PATCH"})
         self.draft()
@@ -564,7 +584,7 @@ class GitHubReleaseTests(unittest.TestCase):
             ),
         )
 
-    def test_workflow_draft_precedes_approvals_and_finalizer_waits_for_both(self):
+    def test_workflow_python_publication_has_no_transitive_npm_prerequisite(self):
         text = (ROOT / ".github/workflows/release.yml").read_text()
         # Bound every job block at the next job key, including appended jobs.
         # No YAML dependency is added to the standard-library checkout lane.
@@ -572,22 +592,23 @@ class GitHubReleaseTests(unittest.TestCase):
         jobs = dict(zip(parts[1::2], parts[2::2]))
         self.assertIn("needs: [assemble-npm, draft-release]", jobs["publish-npm"])
         self.assertIn("needs: [build, draft-release]", jobs["publish"])
+        self.assertIn("needs: [build, docs-build]", jobs["draft-release"])
         self.assertIn(
-            "needs: [build, draft-release, publish, publish-npm]",
+            "needs: [build, draft-release, publish]",
             jobs["github-release"],
         )
         self.assertEqual(
             RELEASE.BUILD_JOBS,
             {
                 re.search(r"(?m)^    name: (.+)$", jobs[job])[1]
-                for job in ("qualify-source", "build", "docs-build", "assemble-npm")
+                for job in ("qualify-source", "build", "docs-build")
             },
         )
         self.assertEqual(
             RELEASE.PUBLISH_JOBS,
             {
                 re.search(r"(?m)^    name: (.+)$", jobs[job])[1]
-                for job in ("publish", "publish-npm", "draft-release")
+                for job in ("publish", "draft-release")
             },
         )
         self.assertLess(

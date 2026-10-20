@@ -737,13 +737,13 @@ class SigningWorkflowTests(unittest.TestCase):
         self.assertNotIn("id-token: write", job)
         self.assertIn("skip-token-revoke: false", job)
 
-    def test_release_keeps_protected_publish_jobs_and_waits_for_both_before_github_release(
+    def test_release_keeps_both_protected_publishers_with_pypi_only_github_finalization(
         self,
     ):
         text = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertIn("sign_release.py --check-publication-gates", text)
         self.assertIn(
-            "needs: [build, draft-release, publish, publish-npm]",
+            "needs: [build, draft-release, publish]",
             text.split("  github-release:\n", 1)[1],
         )
         self.assertIn("name: npm", text)
