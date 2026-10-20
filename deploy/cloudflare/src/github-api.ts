@@ -37,6 +37,37 @@ export interface GitHubApiResponse {
   data: unknown;
 }
 
+/** Complete bounded history, restarting rather than mixing pagination offsets. */
+export async function readBoundedHistory(
+  readPage: (size: number, page: number) => Promise<GitHubApiResponse>,
+  invalidCode: string,
+): Promise<unknown[]> {
+  let requests = 0;
+  for (const size of [100, 50, 25, 5, 1]) {
+    const items: unknown[] = [];
+    try {
+      for (let page = 1; requests < 10; page += 1) {
+        requests += 1;
+        const response = await readPage(size, page);
+        if (response.status < 200 || response.status >= 300 ||
+          !Array.isArray(response.data) || response.data.length > size) {
+          throw new Error(invalidCode);
+        }
+        items.push(...response.data);
+        if (items.length > 1000) throw new Error(invalidCode);
+        if (response.data.length < size) return items;
+      }
+      throw new Error(invalidCode);
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "github_response_too_large" ||
+        size === 1 || requests >= 10) throw error;
+      // The byte cap is unchanged. Discard this incomplete inventory and
+      // restart at page one; failed physical reads consume the same budget.
+    }
+  }
+  throw new Error(invalidCode);
+}
+
 export interface InstallationToken {
   token: string;
   expiresAt: number;
@@ -257,6 +288,7 @@ function repositoryPath(repository: string, suffix = ""): string {
 async function boundedJson(response: Response): Promise<unknown> {
   const length = response.headers.get("content-length");
   if (length !== null && (!/^\d+$/.test(length) || Number(length) > MAX_RESPONSE_BYTES)) {
+    await response.body?.cancel();
     throw new Error("github_response_too_large");
   }
   if (response.body === null) {
@@ -743,36 +775,33 @@ export class GitHubApi {
       throw new Error("github_installation_token_invalid");
     }
 
-    const repositories: string[] = [];
-    const seen = new Set<string>();
-    for (let page = 1; page <= 10; page += 1) {
+    const raw = await readBoundedHistory(async (size, page) => {
       const response = await this.request(
         "GET",
-        `/installation/repositories?per_page=100&page=${page}`,
+        `/installation/repositories?per_page=${size}&page=${page}`,
         token,
       );
       if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
         throw new Error("github_installation_repositories_failed");
       }
-      const raw = response.data.repositories;
-      if (!Array.isArray(raw)) {
+      if (!Array.isArray(response.data.repositories)) {
         throw new Error("github_installation_repositories_invalid");
       }
-      for (const item of raw) {
-        const fullName = isObject(item) ? item.full_name : null;
-        if (typeof fullName !== "string" || !REPOSITORY_PATTERN.test(fullName)) {
-          throw new Error("github_installation_repository_invalid");
-        }
-        if (!seen.has(fullName)) {
-          seen.add(fullName);
-          repositories.push(fullName);
-        }
+      return { status: response.status, data: response.data.repositories };
+    }, "github_installation_repositories_limit");
+    const repositories: string[] = [];
+    const seen = new Set<string>();
+    for (const item of raw) {
+      const fullName = isObject(item) ? item.full_name : null;
+      if (typeof fullName !== "string" || !REPOSITORY_PATTERN.test(fullName)) {
+        throw new Error("github_installation_repository_invalid");
       }
-      if (raw.length < 100) {
-        return repositories;
+      if (!seen.has(fullName)) {
+        seen.add(fullName);
+        repositories.push(fullName);
       }
     }
-    throw new Error("github_installation_repositories_limit");
+    return repositories;
   }
 
   /** Issue one short-lived GitHub App installation token for the exact scope. */
@@ -937,18 +966,10 @@ export class GitHubApi {
   }
 
   private async pagedItems(path: string, token: string, invalidCode: string): Promise<unknown[]> {
-    const items: unknown[] = [];
-    for (let page = 1; page <= 10; page += 1) {
-      const response = await this.request("GET", `${path}?per_page=100&page=${page}`, token);
-      if (response.status < 200 || response.status >= 300 || !Array.isArray(response.data)) {
-        throw new Error(invalidCode);
-      }
-      items.push(...response.data);
-      if (response.data.length < 100) {
-        return items;
-      }
-    }
-    throw new Error(invalidCode);
+    return readBoundedHistory(
+      (size, page) => this.request("GET", `${path}?per_page=${size}&page=${page}`, token),
+      invalidCode,
+    );
   }
 
   private appAuthored(item: unknown, login: string): item is JsonObject {

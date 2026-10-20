@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Recover oversized GitHub App history and installation inventories with smaller
+  pages while retaining the broker's response-byte, request and item limits.
+
 ## 0.8.4 - 2026-10-20
 
 Changes since [v0.8.3](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.3), from [3dd5ec537bec429a4d0b280b2c2b0e9ac203f4a6](https://github.com/malsabbagh/review-sensei/commit/3dd5ec537bec429a4d0b280b2c2b0e9ac203f4a6) through [e02665a6e08ae1ec1c839e0051bf390b528c4f82](https://github.com/malsabbagh/review-sensei/commit/e02665a6e08ae1ec1c839e0051bf390b528c4f82).
