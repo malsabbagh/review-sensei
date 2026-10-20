@@ -1173,7 +1173,7 @@ no refunds/new authority/durability; legacy unchanged (ADR 0088).
 
 `admit_with_tail` joins reservation/admission; owned readback precedes inference (ADR 0090).
 
-Opt-in partitioned publication binds independent result/snapshot/policy/configuration/
-producer, original budget, conditional generation and owned numeric root readback.
-Full prose/capacity remain; defaults are unchanged. No late-flow or approval
-qualification (ADR 0089).
+Opt-in partitioned publication binds independent result/snapshot/policy/config/producer,
+original budget/conditional generation/owned numeric readback. Fresh scans verify all prose;
+partial roots keep links/capacity/full-ID status. Local replay only; default routes/all-resolved
+approval unqualified (ADR 0089).

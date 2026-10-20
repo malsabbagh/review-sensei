@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -19,7 +20,7 @@ from review_sensei.errors import ReviewInputError
 from review_sensei.human_assessment import HumanInventoryResolution, PendingHumanReview
 from review_sensei.human_inventory import inventory_from_result_document
 
-from .prose_publication import VisibleProseReceipt
+from .prose_publication import CommentReviewProseStore, VisibleProseReceipt
 
 if TYPE_CHECKING:
     from .approval import ReviewApprovalEligibility
@@ -124,6 +125,89 @@ class PartitionedEligibilityContext:
             self.max_root_bytes, self.framing_bytes, self.future_lifecycle_bytes
         )
         object.__setattr__(self, "binding", MappingProxyType(checked))
+
+
+@dataclass(frozen=True)
+class BoundPartitionedEligibilityReader:
+    """Explicit operation-local reader; mutable authority is always read fresh.
+
+    The trusted host supplies the independent context for this original source
+    operation. Only authenticated content-addressed payloads are reused; latest
+    root identity and every complete visible prose read remain live.
+    """
+
+    context: PartitionedEligibilityContext
+    partition_reader: PartitionReader
+    prose_store: CommentReviewProseStore
+    expected_root_body: str = field(repr=False)
+    _payloads: dict[bytes, object] = field(default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self):
+        if (
+            type(self.context) is not PartitionedEligibilityContext
+            or not isinstance(self.expected_root_body, str)
+            or len(self.expected_root_body.encode()) > self.context.max_root_bytes
+            or not self.expected_root_body
+            or not callable(self.partition_reader)
+            or type(self.prose_store) is not CommentReviewProseStore
+            or self.prose_store.budget is not self.context.budget
+            or f"github-bot:{self.prose_store.producer_id}"
+            != self.context.binding["producer"]
+        ):
+            raise ReviewInputError("bound partition reader is invalid")
+
+    def _with_owned_context(self, context, *, expected_root_body):
+        if (
+            type(context) is not PartitionedEligibilityContext
+            or context.budget is not self.context.budget
+            or dict(context.binding) != dict(self.context.binding)
+            or context.result_digest != self.context.result_digest
+            or context.visible_instances != self.context.visible_instances
+            or context.activation_generation < self.context.activation_generation
+            or (
+                context.max_root_bytes,
+                context.framing_bytes,
+                context.future_lifecycle_bytes,
+            )
+            != (
+                self.context.max_root_bytes,
+                self.context.framing_bytes,
+                self.context.future_lifecycle_bytes,
+            )
+        ):
+            raise ReviewInputError("bound partition reader owned context changed")
+        result = BoundPartitionedEligibilityReader(
+            context, self.partition_reader, self.prose_store, expected_root_body
+        )
+        result._payloads.update(copy.deepcopy(self._payloads))
+        return result
+
+    def _visible_from_fresh_listing(self, receipts, *, records, budget):
+        if budget is not self.context.budget:
+            raise ReviewInputError("bound visible reader original budget changed")
+        self.prose_store._revalidate_listing(receipts, records)
+
+    def read(self, manifest, *, expected_binding, budget):
+        if budget is not self.context.budget:
+            raise ReviewInputError("bound partition reader original budget changed")
+        checked = validate_manifest(manifest)
+        if checked["binding"] != dict(expected_binding):
+            raise ReviewInputError("bound partition reader association changed")
+        budget.check()
+        key = canonical_bytes(checked)
+        if key not in self._payloads:
+            value = self.partition_reader(
+                checked, expected_binding=expected_binding, budget=budget
+            )
+            raw = canonical_bytes(value)
+            if (
+                len(raw) != checked["decoded_bytes"]
+                or hashlib.sha256(raw).hexdigest() != checked["sha256"]
+            ):
+                raise ReviewInputError("bound partition reader foreign payload")
+            self._payloads[key] = copy.deepcopy(value)
+        budget.check()
+        return copy.deepcopy(self._payloads[key])
 
 
 def visible_result_document(
