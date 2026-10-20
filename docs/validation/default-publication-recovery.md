@@ -51,6 +51,60 @@ ordinary accepted-operation guard enabled. No provider is constructed by this
 recovery path. One fresh publication-attempt budget spans all its phases; it does
 not reset at each read or publication step.
 
+### Explicit manual reusable-caller recovery
+
+The canonical setup-v5 caller has an optional `recover_publication` input,
+defaulting to false. Select it only for an original committed result whose
+publication is pending or failed. Supply `recovery_policy_commit` (the full
+original trusted default-branch policy commit) and `recovery_expected_head`
+(the full original PR head). The caller still uses `operation: review`; it
+does not request a rescan or start another analysis round. Ordinary review
+retries continue to report `publication_recovery_required` without emitting a
+new result or context document.
+
+Both hosted and local reusable lanes require manual `workflow_dispatch`,
+the unchanged original live head, an exact base, and an original policy commit
+that is an ancestor of the currently frozen trusted default branch. Current
+trusted write/publication policy still applies. The lanes regenerate the diff
+with `prepare-diff` from the exact base/head, skip provider credential and
+inference steps, and call the installed package's existing publication path:
+
+```sh
+review-sensei-github publish --recover-retained --reconstruct-contexts \
+  --trusted-context-root original-trusted-policy \
+  --repository OWNER/REPO --repository-id REPOSITORY_ID --pull-request PR \
+  --head-sha EXACT_HEAD --base-sha EXACT_BASE --base-branch main \
+  --diff trusted.patch --github-session-ledger --allow-write --enable-review
+```
+
+`--reconstruct-contexts` recomputes the original canonical caller's secret-free
+configuration, evidence policy, stage/lens/learning context key and deterministic
+reservation using the independently frozen source. It checks them against the
+authenticated committed transaction before reading result parts. The original
+prior baseline must still be authenticated and available. A completed verification
+checkpoint may have replaced it: that case refuses with an instruction to supply
+the original admission context through the existing explicit context-document
+publication route. Reconstruction also refuses changed source/defaults, original
+overrides it cannot reproduce, unknown reservations and missing context. It never
+derives expected configuration from the retained result, current provider labels,
+or a different head's baseline. The existing CLI `--diff` input remains trusted
+caller evidence; the reusable workflow always regenerates it from checked commits.
+
+Context/ledger reads, retained result loading, accepted-operation validation,
+retention reconciliation and publication all use one publication-attempt budget.
+Recovery keeps broker OIDC, the broker-selected comment ledger, accepted-result
+checks, ownership, exact-head checks, replay fencing and limits enabled. A large
+history can still exhaust its budget and refuse. No learning PR is generated.
+
+The canonical caller source and packaged/Worker installer templates must reach
+their normal reviewed rollout before this optional input is available to a
+repository. Moving the reusable `v5` tag alone does not add dispatch inputs to an
+already installed caller. Exact pre-recovery managed callers can receive the
+updated caller through normal setup reconciliation; operator edits remain owned
+and are not overwritten. An older deployed installer continues producing its
+older caller until its separately qualified rollout. No broker capability,
+permission or secret changes are required.
+
 Missing, duplicate, malformed, foreign-owned, foreign-PR, stale-head, mismatching
 configuration or digest parts refuse. A failed/interrupted initial write can
 leave an unconfirmed durable phase. A fresh owner reconciles complete owned parts;

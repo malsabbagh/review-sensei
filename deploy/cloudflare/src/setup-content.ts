@@ -9,6 +9,7 @@
 
 import senseiOnlyV5CallerFixture from "../fixtures/sensei-only-v5-caller.yml";
 import keywordRescanV5CallerFixture from "../fixtures/released-v5-keyword-rescan-caller.yml";
+import preRecoveryV5CallerFixture from "../fixtures/released-v5-pre-recovery-caller.yml";
 import {
   historicalV4UninstallBytes,
   mergeFocusedV4CallerBytes,
@@ -802,6 +803,10 @@ export function keywordRescanV5WorkflowTemplate(publicWorkflowTag: string): stri
   return retagFrozenCaller(keywordRescanV5CallerFixture, publicWorkflowTag);
 }
 
+export function preRecoveryV5WorkflowTemplate(publicWorkflowTag: string): string {
+  return retagFrozenCaller(preRecoveryV5CallerFixture, publicWorkflowTag);
+}
+
 export function senseiOnlyV5WorkflowTemplate(publicWorkflowTag: string): string {
   return retagFrozenCaller(senseiOnlyV5CallerFixture, publicWorkflowTag);
 }
@@ -845,6 +850,17 @@ on:
         default: review
         type: choice
         options: [review]
+      recover_publication:
+        description: Publish the original retained result without inference
+        required: false
+        default: false
+        type: boolean
+      recovery_policy_commit:
+        description: Exact original trusted default-branch policy commit for recovery
+        required: false
+      recovery_expected_head:
+        description: Exact original pull-request head for recovery
+        required: false
       pull_request_number:
         description: Pull request number to review
         required: true
@@ -1071,6 +1087,9 @@ jobs:
     with:
       mode: @@{{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
       operation: @@{{ needs.resolve-trigger.outputs.operation }}
+      recover_publication: @@{{ inputs.recover_publication || false }}
+      recovery_policy_commit: @@{{ inputs.recovery_policy_commit || '' }}
+      recovery_expected_head: @@{{ inputs.recovery_expected_head || '' }}
       repository: @@{{ github.repository }}
       repository_id: @@{{ github.repository_id }}
       pull_request_number: @@{{ needs.resolve-trigger.outputs.pull_request_number || inputs.pull_request_number }}

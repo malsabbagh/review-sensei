@@ -312,6 +312,7 @@ def _looks_like_managed_v5_setup(path: str, content: str) -> bool:
                 _historical_v5_workflow(tag_matches[0]),
                 _sensei_only_v5_workflow(tag_matches[0]),
                 _keyword_rescan_v5_workflow(tag_matches[0]),
+                _pre_recovery_v5_workflow(tag_matches[0]),
             }
         except GitHubSetupError:
             return False
@@ -877,6 +878,28 @@ def _keyword_rescan_v5_workflow(public_workflow_tag: str) -> str:
     return _retag_frozen_caller(_keyword_rescan_v5_caller_bytes(), public_workflow_tag)
 
 
+@functools.lru_cache(maxsize=1)
+def _pre_recovery_v5_caller_bytes() -> str:
+    """Read exact released bytes before the optional publication recovery input."""
+    from importlib.resources import files
+
+    content = (
+        files("review_sensei_github.fixtures")
+        .joinpath("released-v5-pre-recovery-caller.yml")
+        .read_text(encoding="utf-8")
+    )
+    if (
+        hashlib.sha256(content.encode("utf-8")).hexdigest()
+        != "a1728c81138d371c66b2d2693c3f09972f2e305aa23d16aa7d09e53ca82d9b8f"
+    ):
+        raise GitHubSetupError("pre-recovery v5 caller fixture digest mismatch")
+    return content
+
+
+def _pre_recovery_v5_workflow(public_workflow_tag: str) -> str:
+    return _retag_frozen_caller(_pre_recovery_v5_caller_bytes(), public_workflow_tag)
+
+
 def _sensei_only_v5_workflow(public_workflow_tag: str) -> str:
     return _retag_frozen_caller(_sensei_only_v5_caller_bytes(), public_workflow_tag)
 
@@ -1292,6 +1315,17 @@ on:
         default: review
         type: choice
         options: [review]
+      recover_publication:
+        description: Publish the original retained result without inference
+        required: false
+        default: false
+        type: boolean
+      recovery_policy_commit:
+        description: Exact original trusted default-branch policy commit for recovery
+        required: false
+      recovery_expected_head:
+        description: Exact original pull-request head for recovery
+        required: false
       pull_request_number:
         description: Pull request number to review
         required: true
@@ -1518,6 +1552,9 @@ jobs:
     with:
       mode: ${{ github.event_name == 'pull_request' && 'automatic' || 'manual' }}
       operation: ${{ needs.resolve-trigger.outputs.operation }}
+      recover_publication: ${{ inputs.recover_publication || false }}
+      recovery_policy_commit: ${{ inputs.recovery_policy_commit || '' }}
+      recovery_expected_head: ${{ inputs.recovery_expected_head || '' }}
       repository: ${{ github.repository }}
       repository_id: ${{ github.repository_id }}
       pull_request_number: ${{ needs.resolve-trigger.outputs.pull_request_number || inputs.pull_request_number }}

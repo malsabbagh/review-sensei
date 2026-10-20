@@ -26,6 +26,7 @@ import test_checkpoint_publication_acceptance  # noqa: E402
 import test_default_publication_cli_journey  # noqa: E402
 import test_publication_cli_recovery  # noqa: E402
 import test_publication_recovery  # noqa: E402
+import test_trusted_publication_recovery  # noqa: E402
 
 
 class InstalledCompleteInventoryTests(
@@ -54,6 +55,12 @@ class InstalledPublicationCliTests(
 
 class InstalledPublicationRecoveryTests(
     test_publication_recovery.PublicationRecoveryTests
+):
+    pass
+
+
+class InstalledTrustedPublicationRecoveryTests(
+    test_trusted_publication_recovery.TrustedPublicationRecoveryTests
 ):
     pass
 

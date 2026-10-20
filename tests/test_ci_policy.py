@@ -685,7 +685,10 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("publish_args+=(--no-auto-approve)", text)
         self.assertIn('if [[ "$LEARNING" == "disabled" ]]; then', text)
         self.assertIn("review_args+=(--no-learning-proposals)", text)
-        self.assertIn('if [[ "$LEARNING" == "pull-requests" ]]; then', text)
+        self.assertIn(
+            'if [[ "$LEARNING" == "pull-requests" && "$RECOVER_PUBLICATION" != "true" ]]; then',
+            text,
+        )
         self.assertIn("publish_args+=(--enable-learning-prs)", text)
         self.assertIn('if [[ "$ARTIFACTS" == "diagnostics" ]]; then', text)
         self.assertIn("review_args+=(--recovery-artifact recovery-artifact.json)", text)
@@ -1020,9 +1023,9 @@ class ActionPinPolicyTests(unittest.TestCase):
         text = workflow.read_text(encoding="utf-8")
         self.assertEqual(
             text.count("BASE_REF: ${{ steps.trusted-base.outputs.sha }}"),
-            2,
+            3,
         )
-        self.assertEqual(text.count("HEAD_REF: ${{ inputs.head_sha }}"), 2)
+        self.assertEqual(text.count("HEAD_REF: ${{ inputs.head_sha }}"), 3)
         self.assertIn(
             "github.event.pull_request.number || github.run_id",
             text,
@@ -1171,9 +1174,21 @@ class ActionPinPolicyTests(unittest.TestCase):
             "needs.bootstrap.outputs.mentions == 'true'))"
         )
         self.assertEqual(text.count(gate), 2)
-        # Each provider job gates its review, reply, and diff-preparation steps
-        # on the operation the caller requested.
-        self.assertEqual(text.count("if: inputs.operation == 'review'\n"), 3)
+        # Recovery regenerates its exact diff but cannot enter either inference
+        # step. Normal review/reply operation gates stay explicit.
+        self.assertEqual(text.count("if: inputs.operation == 'review'\n"), 1)
+        self.assertEqual(
+            text.count(
+                "if: inputs.operation == 'review' && !inputs.recover_publication\n"
+            ),
+            2,
+        )
+        self.assertEqual(
+            text.count(
+                "if: inputs.operation == 'review' && inputs.recover_publication\n"
+            ),
+            1,
+        )
         self.assertEqual(text.count("if: inputs.operation == 'reply'\n"), 2)
         # Command operations are never selected by the plan's review policy:
         # maintainer commands keep their own authorization.
@@ -2158,7 +2173,7 @@ class ReusablePublishGuardTests(unittest.TestCase):
         admission_if = "if: success() && !cancelled() && inputs.operation == 'review'"
         publish_if = (
             admission_if + " && steps.publish-admission.outputs.status == 'current'"
-            " && steps.provider-review.outputs.result_ready == 'true'"
+            " && (steps.provider-review.outputs.result_ready == 'true' || inputs.recover_publication)"
         )
         upload_if = (
             "if: always() && !cancelled() && inputs.operation == 'review' && needs.bootstrap.outputs.artifacts"

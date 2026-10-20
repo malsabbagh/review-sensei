@@ -96,6 +96,16 @@ def _github_parser() -> argparse.ArgumentParser:
         ),
     )
     review.add_argument(
+        "--reconstruct-contexts",
+        action="store_true",
+        help="Explicit publication-only recovery: reconstruct the original canonical caller contexts from frozen trusted source and the authenticated committed transaction; never invoke inference.",
+    )
+    review.add_argument(
+        "--trusted-context-root",
+        type=Path,
+        help="Independently authenticated original policy checkout for --reconstruct-contexts; changed or unavailable context refuses.",
+    )
+    review.add_argument(
         "--evidence-context",
         type=Path,
         help="Optional trusted evidence-context JSON for an identity-bound result",
@@ -1103,6 +1113,12 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
     )
     if args.command in {"review", "publish"}:
         diff = read_bounded_utf8(args.diff, maximum=1_048_576, label="diff")
+        if args.recover_from and (
+            args.reconstruct_contexts or args.trusted_context_root is not None
+        ):
+            raise ReviewInputError(
+                "legacy artifact recovery does not reconstruct contexts; use --result or --recover-retained"
+            )
         if args.enable_review and (not args.base_branch or not args.base_sha):
             raise ReviewInputError(
                 "review publication requires --base-branch and --base-sha"
@@ -1249,7 +1265,27 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             if args.evidence_context is not None
             else None
         )
-        if args.recover_retained:
+        admission_baseline = None
+        admission_current_key = None
+        if args.trusted_context_root is not None and not args.reconstruct_contexts:
+            raise ReviewInputError(
+                "trusted context root requires --reconstruct-contexts"
+            )
+        if args.reconstruct_contexts and (
+            args.trusted_context_root is None
+            or any(
+                value is not None
+                for value in (
+                    args.configuration_context,
+                    args.evidence_context,
+                    args.admission_context,
+                )
+            )
+        ):
+            raise ReviewInputError(
+                "context reconstruction requires original trusted source and cannot replace supplied context documents"
+            )
+        if args.recover_retained or args.reconstruct_contexts:
             if operation_entry != "enabled":
                 raise ReviewInputError(
                     "retained result recovery requires operation_entry: enabled"
@@ -1257,10 +1293,6 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             if not args.enable_review or not args.base_sha:
                 raise ReviewInputError(
                     "retained result recovery requires review publication and exact base SHA"
-                )
-            if configuration_context is None or evidence_context is None:
-                raise ReviewInputError(
-                    "retained result recovery requires trusted configuration and evidence contexts"
                 )
             metadata_token = os.environ.get("GITHUB_TOKEN") or os.environ.get(
                 "GH_TOKEN"
@@ -1285,6 +1317,39 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 raise ReviewInputError(
                     "retained result recovery requires a session ledger"
                 )
+            if args.reconstruct_contexts:
+                from review_sensei.session import SessionIdentity
+                from review_sensei_github.publication_context_recovery import (
+                    reconstruct_publication_contexts,
+                )
+                from review_sensei_github.publication_recovery import (
+                    publication_session_ledger,
+                )
+
+                reconstructed = reconstruct_publication_contexts(
+                    source_root=args.trusted_context_root,
+                    diff=diff,
+                    ledger=publication_session_ledger(
+                        recovery_ledger, publication_budget
+                    ),
+                    identity=SessionIdentity(
+                        args.repository,
+                        args.pull_request,
+                        repository_id=args.repository_id,
+                    ),
+                    base_sha=args.base_sha,
+                    head_sha=args.head_sha,
+                    policy=convergence_policy,
+                )
+                configuration_context = reconstructed.configuration
+                evidence_context = reconstructed.evidence
+                admission_baseline = reconstructed.baseline
+                admission_current_key = reconstructed.current_key
+            if configuration_context is None or evidence_context is None:
+                raise ReviewInputError(
+                    "retained result recovery requires trusted configuration and evidence contexts"
+                )
+        if args.recover_retained:
             result = application.recover_retained_review_result(
                 token=metadata_token.strip(),
                 repository=args.repository,
@@ -1305,8 +1370,6 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     read_bounded_utf8(args.result, maximum=2_097_152, label="result")
                 )
             )
-        admission_baseline = None
-        admission_current_key = None
         if args.admission_context is not None:
             if configuration_context is None:
                 # The identity-bound transaction is what makes the admission
@@ -1336,7 +1399,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 from review_sensei.session import SessionIdentity
 
                 acceptance_ledger = session_ledger
-                if args.recover_retained:
+                if args.recover_retained or args.reconstruct_contexts:
                     acceptance_ledger = recovery_ledger
                 if acceptance_ledger is None and args.github_session_ledger:
                     from review_sensei_github.session_ledger import (

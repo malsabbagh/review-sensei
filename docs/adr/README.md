@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 Project: ReviewSensei
-Last updated: 2026-10-12
+Last updated: 2026-10-20
 
 ADRs capture durable architecture decisions for this repository. Use `docs/adr/NNNN-short-title.md` for individual records.
 
@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0097](0097-explicit-trusted-publication-recovery.md) | Proposed | Explicit manual publication recovery from original trusted context | #246; PR #316 | No inference, exact reservation/context proofs, original budget and managed caller parity |
 | [0096](0096-bounded-hosted-history-readers.md) | Proposed | Recover oversized hosted histories within original read envelopes | #238, #240, #246, #267, #269; PR #316 | Complete lossless readers and presealed fence sizing |
 | [0094](0094-default-human-inventory-reference.md) | Proposed | Complete default human inventory references | #238, #246, #267; PR #316 | Transaction-bound admitted evidence, ordinary approval gates and bounded recovery |
 | [0093](0093-default-publication-retention.md) | Proposed | Bounded default publication and transaction-bound result retention | #238, #246, #267; PR #316 | Reader-first gated emission, existing result-part storage and no inference retry |

@@ -35,6 +35,17 @@ on:
         required: false
         default: review
         type: string
+      recover_publication:
+        description: Explicit manual publication-only recovery; never infer
+        required: false
+        default: false
+        type: boolean
+      recovery_policy_commit:
+        required: false
+        type: string
+      recovery_expected_head:
+        required: false
+        type: string
       hosted_runner:
         description: Single Linux runner label for hosted jobs; empty uses ubuntu-latest
         required: false
@@ -179,6 +190,9 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
           OPERATION: ${{ inputs.operation }}
+          RECOVER_PUBLICATION: ${{ inputs.recover_publication }}
+          RECOVERY_POLICY_COMMIT: ${{ inputs.recovery_policy_commit }}
+          RECOVERY_EXPECTED_HEAD: ${{ inputs.recovery_expected_head }}
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
@@ -203,6 +217,15 @@ jobs:
             review|reply|command) ;;
             *) echo '::error::operation must be review, reply, or command' >&2; exit 1 ;;
           esac
+          if [[ "${RECOVER_PUBLICATION:-false}" == "true" ]]; then
+            if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" || "$MODE" != "manual" || "$OPERATION" != "review" || ! "${RECOVERY_POLICY_COMMIT:-}" =~ ^[a-f0-9]{40}$ || ! "${RECOVERY_EXPECTED_HEAD:-}" =~ ^[a-f0-9]{40}$ || "$HEAD_SHA" != "$RECOVERY_EXPECTED_HEAD" || ! "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+              echo '::error::publication recovery requires manual dispatch, original trusted policy commit, and the exact current original base/head' >&2
+              exit 1
+            fi
+          elif [[ "${RECOVER_PUBLICATION:-false}" != "false" || -n "${RECOVERY_POLICY_COMMIT:-}" || -n "${RECOVERY_EXPECTED_HEAD:-}" ]]; then
+            echo '::error::recovery selectors require explicit publication recovery' >&2
+            exit 1
+          fi
           case "$MODE" in
             automatic|manual) ;;
             *) echo '::error::workflow mode must be automatic or manual' >&2; exit 1 ;;
@@ -825,6 +848,25 @@ jobs:
           path: trusted-base
           fetch-depth: 0
 
+      - name: Check out original trusted recovery policy
+        if: inputs.recover_publication
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.recovery_policy_commit }}
+          path: recovery-policy
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Authenticate original recovery policy ancestry
+        if: inputs.recover_publication
+        env:
+          RECOVERY_POLICY_COMMIT: ${{ inputs.recovery_policy_commit }}
+        run: |
+          set -euo pipefail
+          [[ "$RECOVERY_POLICY_COMMIT" =~ ^[a-f0-9]{40}$ ]] || exit 1
+          [[ "$(git -C recovery-policy rev-parse HEAD)" == "$RECOVERY_POLICY_COMMIT" ]] || exit 1
+          git merge-base --is-ancestor "$RECOVERY_POLICY_COMMIT" HEAD || { echo '::error::original recovery policy is not trusted default-branch history' >&2; exit 1; }
+
       - name: Resolve trusted base SHA
         id: trusted-base
         run: echo "sha=$(git -C trusted-base rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -998,6 +1040,7 @@ jobs:
 
       - name: Scope the selected backend credential
         id: credential
+        if: ${{ !inputs.recover_publication }}
         env:
           CREDENTIAL_ENV: ${{ needs.bootstrap.outputs.credential_env }}
           CREDENTIAL_REQUIRED: ${{ needs.bootstrap.outputs.credential_required }}
@@ -1058,7 +1101,7 @@ jobs:
 
       - name: Run hosted review
         id: provider-review
-        if: inputs.operation == 'review'
+        if: inputs.operation == 'review' && !inputs.recover_publication
         env:
           RUNNER_KIND: ${{ needs.bootstrap.outputs.runner_kind }}
           BACKEND: ${{ needs.bootstrap.outputs.backend }}
@@ -1167,7 +1210,7 @@ jobs:
       # run's own reservation if the killed Python process could not. The
       # command is owner-only and never touches saved publication work.
       - name: Release this run's session reservation
-        if: always() && inputs.operation == 'review'
+        if: always() && inputs.operation == 'review' && !inputs.recover_publication
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -1241,7 +1284,7 @@ jobs:
           echo 'status=current' >> "$GITHUB_OUTPUT"
 
       - name: Publish or promote validated review through the broker
-        if: success() && !cancelled() && inputs.operation == 'review' && steps.publish-admission.outputs.status == 'current' && steps.provider-review.outputs.result_ready == 'true'
+        if: success() && !cancelled() && inputs.operation == 'review' && steps.publish-admission.outputs.status == 'current' && (steps.provider-review.outputs.result_ready == 'true' || inputs.recover_publication)
         env:
           # Read trusted operation receipts with the existing metadata token.
           GITHUB_TOKEN: ${{ github.token }}
@@ -1254,6 +1297,7 @@ jobs:
           REVIEWS: ${{ needs.bootstrap.outputs.reviews }}
           OPERATION_ENTRY: ${{ needs.bootstrap.outputs.operation_entry }}
           PUBLICATION_INVENTORY: ${{ needs.bootstrap.outputs.publication_inventory }}
+          RECOVER_PUBLICATION: ${{ inputs.recover_publication }}
           LEARNING: ${{ needs.bootstrap.outputs.learning }}
         run: |
           publish_args=(--enable-review --operation-entry "$OPERATION_ENTRY" --publication-inventory "$PUBLICATION_INVENTORY")
@@ -1262,16 +1306,18 @@ jobs:
           else
             publish_args+=(--no-auto-approve)
           fi
-          if [[ "$LEARNING" == "pull-requests" ]]; then
+          if [[ "$LEARNING" == "pull-requests" && "$RECOVER_PUBLICATION" != "true" ]]; then
             publish_args+=(--enable-learning-prs)
           fi
+          source_args=(--result review.json --configuration-context configuration-context.json --admission-context admission-context.json)
+          if [[ "$RECOVER_PUBLICATION" == "true" ]]; then
+            source_args=(--recover-retained --reconstruct-contexts --trusted-context-root "$PWD/recovery-policy")
+          fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" publish \
-            --result review.json --diff pr.patch --repository "$REPOSITORY" \
+            "${source_args[@]}" --diff pr.patch --repository "$REPOSITORY" \
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
             --outcome publication-outcome.json --github-session-ledger \
-            --configuration-context configuration-context.json \
-            --admission-context admission-context.json \
             --allow-write "${publish_args[@]}"
 
       - name: Generate and publish hosted mention reply
@@ -1391,6 +1437,25 @@ jobs:
           ref: ${{ needs.authoritative-preflight.outputs.base_sha || inputs.base_sha || inputs.base_ref }}
           path: trusted-base
           fetch-depth: 0
+
+      - name: Check out original trusted recovery policy
+        if: inputs.recover_publication
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.recovery_policy_commit }}
+          path: recovery-policy
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Authenticate original recovery policy ancestry
+        if: inputs.recover_publication
+        env:
+          RECOVERY_POLICY_COMMIT: ${{ inputs.recovery_policy_commit }}
+        run: |
+          set -euo pipefail
+          [[ "$RECOVERY_POLICY_COMMIT" =~ ^[a-f0-9]{40}$ ]] || exit 1
+          [[ "$(git -C recovery-policy rev-parse HEAD)" == "$RECOVERY_POLICY_COMMIT" ]] || exit 1
+          git merge-base --is-ancestor "$RECOVERY_POLICY_COMMIT" HEAD || { echo '::error::original recovery policy is not trusted default-branch history' >&2; exit 1; }
 
       - name: Resolve trusted base SHA
         id: trusted-base
@@ -1564,6 +1629,7 @@ jobs:
 
       - name: Scope the selected backend credential
         id: credential
+        if: ${{ !inputs.recover_publication }}
         env:
           CREDENTIAL_ENV: ${{ needs.bootstrap.outputs.credential_env }}
           CREDENTIAL_REQUIRED: ${{ needs.bootstrap.outputs.credential_required }}
@@ -1605,9 +1671,23 @@ jobs:
           printf '%s=%s\n' "$CREDENTIAL_ENV" "$credential_value" >> "$GITHUB_ENV"
           echo "materialized secret $CREDENTIAL_ENV for the selected backend"
 
+      - name: Prepare bounded original recovery diff
+        if: inputs.operation == 'review' && inputs.recover_publication
+        env:
+          BASE_REF: ${{ steps.trusted-base.outputs.sha }}
+          HEAD_REF: ${{ inputs.head_sha }}
+          HEAD_REPOSITORY: ${{ inputs.head_repository }}
+        run: |
+          args=()
+          if [[ -n "$HEAD_REPOSITORY" ]]; then args+=(--head-repository "$HEAD_REPOSITORY"); fi
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" prepare-diff \
+            --repository "$PWD/trusted-base" --base-ref "$BASE_REF" --head-ref "$HEAD_REF" \
+            "${args[@]}" --output pr.patch --max-diff-bytes 1048576 \
+            --max-diff-lines 50000 --max-diff-files 500 --max-diff-hunks 5000
+
       - name: Run local review
         id: provider-review
-        if: inputs.operation == 'review'
+        if: inputs.operation == 'review' && !inputs.recover_publication
         env:
           RUNNER_KIND: ${{ needs.bootstrap.outputs.runner_kind }}
           BACKEND: ${{ needs.bootstrap.outputs.backend }}
@@ -1721,7 +1801,7 @@ jobs:
       # run's own reservation if the killed Python process could not. The
       # command is owner-only and never touches saved publication work.
       - name: Release this run's session reservation
-        if: always() && inputs.operation == 'review'
+        if: always() && inputs.operation == 'review' && !inputs.recover_publication
         env:
           REPOSITORY: ${{ inputs.repository }}
           REPOSITORY_ID: ${{ inputs.repository_id }}
@@ -1795,7 +1875,7 @@ jobs:
           echo 'status=current' >> "$GITHUB_OUTPUT"
 
       - name: Publish or promote validated local review and learnings
-        if: success() && !cancelled() && inputs.operation == 'review' && steps.publish-admission.outputs.status == 'current' && steps.provider-review.outputs.result_ready == 'true'
+        if: success() && !cancelled() && inputs.operation == 'review' && steps.publish-admission.outputs.status == 'current' && (steps.provider-review.outputs.result_ready == 'true' || inputs.recover_publication)
         env:
           # Read trusted operation receipts with the existing metadata token.
           GITHUB_TOKEN: ${{ github.token }}
@@ -1808,6 +1888,7 @@ jobs:
           REVIEWS: ${{ needs.bootstrap.outputs.reviews }}
           OPERATION_ENTRY: ${{ needs.bootstrap.outputs.operation_entry }}
           PUBLICATION_INVENTORY: ${{ needs.bootstrap.outputs.publication_inventory }}
+          RECOVER_PUBLICATION: ${{ inputs.recover_publication }}
           LEARNING: ${{ needs.bootstrap.outputs.learning }}
         run: |
           publish_args=(--enable-review --operation-entry "$OPERATION_ENTRY" --publication-inventory "$PUBLICATION_INVENTORY")
@@ -1816,16 +1897,18 @@ jobs:
           else
             publish_args+=(--no-auto-approve)
           fi
-          if [[ "$LEARNING" == "pull-requests" ]]; then
+          if [[ "$LEARNING" == "pull-requests" && "$RECOVER_PUBLICATION" != "true" ]]; then
             publish_args+=(--enable-learning-prs)
           fi
+          source_args=(--result review.json --configuration-context configuration-context.json --admission-context admission-context.json)
+          if [[ "$RECOVER_PUBLICATION" == "true" ]]; then
+            source_args=(--recover-retained --reconstruct-contexts --trusted-context-root "$PWD/recovery-policy")
+          fi
           "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" publish \
-            --result review.json --diff pr.patch --repository "$REPOSITORY" \
+            "${source_args[@]}" --diff pr.patch --repository "$REPOSITORY" \
             --repository-id "$REPOSITORY_ID" --pull-request "$PULL_REQUEST" \
             --head-sha "$HEAD_SHA" --base-branch "$BASE_REF" --base-sha "$BASE_SHA" \
             --outcome publication-outcome.json --github-session-ledger \
-            --configuration-context configuration-context.json \
-            --admission-context admission-context.json \
             --allow-write "${publish_args[@]}"
 
       - name: Generate and publish local mention reply

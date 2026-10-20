@@ -175,6 +175,16 @@ and remains disabled for `artifacts: none`. Local analysis-only sessions retain
 their existing duplicate behavior. See the PR223 amendment to
 [ADR 0052](adr/0052-logical-review-transaction-across-analysis-and-publication.md).
 
+Explicit manual caller recovery can reconstruct the canonical caller's original
+contexts from an independently frozen trusted policy checkout, exact base/head
+diff and authenticated prior baseline. Recomputed configuration, evidence, policy
+and reservation identities must match the committed transaction before retained
+publication. Unavailable original admission evidence refuses. Both reusable lanes
+skip provider credentials and inference and retain one shared publication read
+budget, the existing broker/accepted-result/ledger/head guards and writer slot.
+The flag defaults off; ordinary retries keep their refusal. See
+[ADR 0097](adr/0097-explicit-trusted-publication-recovery.md).
+
 The review service owns the business invariants. Provider adapters own protocol,
 authentication, timeout, and response-envelope details. Publishers own GitHub
 API authentication and comment/review delivery. `prepare_publishable_review`
