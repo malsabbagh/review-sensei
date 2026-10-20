@@ -2,16 +2,6 @@
 
 ## Unreleased
 
-- Recover oversized installed hosted startup, cleanup, operation replay and review
-  histories within existing physical read limits. Size ledger fences before
-  sealing and retain fail-closed activation, exact-head gates and publication recovery.
-
-- Recover oversized GitHub App history and installation inventories with smaller
-  pages while retaining the broker's response-byte, request and item limits.
-- Qualify the next v5 release from verified engine and hosted PyPI artifacts,
-  independently of npm completion. Preserve signed source, build/publication
-  provenance, protected approvals and installed-CLI/downstream validation.
-
 - Refuse unsafe OpenRouter evaluation endpoint metadata before live calls and
   report construction. Report missing composite-control identities as bounded
   input errors while preserving historical reports without controls.
@@ -39,6 +29,22 @@
   policy and endpoint; absent or changed bindings cannot authorize support.
   Permit the evaluator's existing skipped-case status in its report schema.
   Actual live quality remains independently required for qualification.
+
+## 0.8.5 - 2026-10-20
+
+- Recover oversized installed hosted startup, cleanup, operation replay and review
+  histories within existing physical read limits. Size ledger fences before
+  sealing and retain fail-closed activation, exact-head gates and publication recovery.
+
+- Recover oversized GitHub App history and installation inventories with smaller
+  pages while retaining the broker's response-byte, request and item limits.
+- Qualify the next v5 release from verified engine and hosted PyPI artifacts,
+  independently of npm completion. Preserve signed source, build/publication
+  provenance, protected approvals and installed-CLI/downstream validation.
+
+## review-sensei-github 0.3.5 - 2026-10-20
+
+- Pin `review-sensei==0.8.5`.
 
 ## 0.8.4 - 2026-10-20
 
