@@ -12,13 +12,13 @@ from typing import Any, Callable, Mapping, Sequence
 from review_sensei.errors import ReviewInputError
 
 from .errors import GitHubHTTPError, GitHubPublicationError
-from .http import GitHubHttp
+from .http import BoundedGraphQLPages, GitHubHttp
 
 RESOLUTION_PREFIX = "<!-- reviewsensei:resolution:v2 "
 _RESOLUTION_RE = re.compile(re.escape(RESOLUTION_PREFIX) + r"([A-Za-z0-9_-]+) -->")
-_QUERY = """query FindingResolutionThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
+_QUERY = """query FindingResolutionThreads($owner: String!, $name: String!, $number: Int!, $after: String, $first: Int!) {
  repository(owner: $owner, name: $name) { pullRequest(number: $number) {
- reviewThreads(first: 100, after: $after) { nodes { id isResolved comments(first: 1) {
+ reviewThreads(first: $first, after: $after) { nodes { id isResolved comments(first: 1) {
  nodes { databaseId body author { login __typename } } } } pageInfo { hasNextPage endCursor } }
  } } }"""
 _MUTATION = """mutation ResolveReviewThread($input: ResolveReviewThreadInput!) {
@@ -251,8 +251,9 @@ class FindingThreadResolver:
         candidates = []
         seen_cursors: set[str] = set()
         # Complete discovery before any mutation. An incomplete scan grants nothing.
+        pages = BoundedGraphQLPages(self.http, max_requests=10)
         for _ in range(10):
-            status, payload = self.http.request(
+            status, payload = pages.request(
                 "POST",
                 "/graphql",
                 token=token,
@@ -276,7 +277,11 @@ class FindingThreadResolver:
                     raise ValueError
                 threads = payload["data"]["repository"]["pullRequest"]["reviewThreads"]
                 nodes, page = threads["nodes"], threads["pageInfo"]
-                if not isinstance(nodes, list) or type(page["hasNextPage"]) is not bool:
+                if (
+                    not isinstance(nodes, list)
+                    or len(nodes) > pages.page_size
+                    or type(page["hasNextPage"]) is not bool
+                ):
                     raise ValueError
                 for node in nodes:
                     if (

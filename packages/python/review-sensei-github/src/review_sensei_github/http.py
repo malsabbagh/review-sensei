@@ -46,6 +46,50 @@ class GitHubHttpTransport(Protocol):
         """Return (status, parsed JSON body) for one bounded request."""
 
 
+class BoundedGraphQLPages:
+    """Retry one read cursor at smaller sizes within the original walk budget."""
+
+    def __init__(
+        self, http: GitHubHttpTransport, *, max_requests: int = MAX_PAGINATION_PAGES
+    ) -> None:
+        self.http = http
+        self.max_requests = max_requests
+        self.requests = 0
+        self.size_index = 0
+
+    @property
+    def page_size(self) -> int:
+        return (100, 50, 25, 5, 1)[self.size_index]
+
+    def request(
+        self, method: str, path: str, *, token: str, body: dict[str, Any]
+    ) -> tuple[int, dict[str, Any] | list[Any] | None]:
+        if (
+            method != "POST"
+            or path != "/graphql"
+            or not isinstance(body.get("query"), str)
+            or not body["query"].lstrip().startswith("query ")
+            or not isinstance(body.get("variables"), dict)
+        ):
+            raise GitHubHTTPError("GitHub paginated query is invalid")
+        while self.requests < self.max_requests:
+            self.requests += 1
+            submitted = {
+                **body,
+                "variables": {
+                    **body["variables"],
+                    "first": self.page_size,
+                },
+            }
+            try:
+                return self.http.request(method, path, token=token, body=submitted)
+            except GitHubHTTPResponseTooLargeError:
+                if self.page_size == 1:
+                    raise
+                self.size_index += 1
+        raise GitHubHTTPPaginationLimitError("GitHub query exhausted its read budget")
+
+
 def _validated_owner(owner: str) -> str:
     if not isinstance(owner, str) or _SAFE_SEGMENT.fullmatch(owner) is None:
         raise GitHubHTTPError("GitHub owner is invalid")
@@ -205,7 +249,7 @@ class GitHubHttp:
         *,
         path: str,
         token: str,
-        page_sizes: tuple[int, ...] = (100,),
+        page_sizes: tuple[int, ...] | None = None,
         max_requests: int | None = None,
         timeout_seconds: float | None = None,
         monotonic: Callable[[], float] = time.monotonic,
@@ -222,6 +266,13 @@ class GitHubHttp:
         oversized page does not pin the rest of the list at the smaller size.
         """
 
+        # The ordinary list reader previously admitted at most ten 100-item
+        # pages. Keep that physical allowance when recovering oversized pages.
+        # Explicit adaptive callers retain their separately owned envelopes.
+        if page_sizes is None:
+            page_sizes = (100, 50, 25, 5, 1)
+            if max_requests is None:
+                max_requests = MAX_PAGINATION_PAGES
         if not page_sizes or any(
             isinstance(page_size, bool)
             or not isinstance(page_size, int)

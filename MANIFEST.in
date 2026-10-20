@@ -50,3 +50,7 @@ include tests/test_local_partition_read_cache.py
 include tests/test_authenticated_partitions.py
 include tests/test_command_capacity_recovery.py
 include tests/test_publication_future_capacity.py
+include tests/test_hosted_history_readers.py
+include tests/fixtures/regressions/pr316-history-shape.json
+include tests/test_activation_tail.py
+include tests/test_assessment_queue_storage.py
