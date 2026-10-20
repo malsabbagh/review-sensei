@@ -98,7 +98,8 @@
         "tests/test_github_broker_client.py",
         "tests/test_initial_assessment_tail.py",
         "tests/test_assessment_queue.py",
-        "tests/test_rich250_public_writer.py"
+        "tests/test_rich250_public_writer.py",
+        "tests/test_rich250_late_feedback.py"
       ],
       "description": "Runs after pip install dist/*.whl from a directory that cannot import checkout src/. Tests load only packaged or generated assets."
     },

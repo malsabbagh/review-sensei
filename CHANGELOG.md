@@ -5,6 +5,11 @@
 - Refuse missing native reviews on terminal retries in either entry mode; when
   native replay is admitted, record a non-passing authority check without a
   terminal ledger rewrite.
+- Add explicit trusted-library partial resolution for complete partitioned250-finding
+  reviews, preserving all prose, current full-ID status and original read budgets.
+  Fresh-process recovery, all-resolved approval and default CLI/hosted activation
+  remain outside the qualified finite profile.
+
 - Refuse unsafe OpenRouter evaluation endpoint metadata before live calls and
   report construction. Report missing composite-control identities as bounded
   input errors while preserving historical reports without controls.

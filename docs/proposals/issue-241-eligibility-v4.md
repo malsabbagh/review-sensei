@@ -2,10 +2,11 @@
 
 Status: Conditionally reviewed reader-first prototype. The explicit trusted-host
 library writer proposed in [ADR 0089](../adr/0089-trusted-host-partitioned-review-publication.md)
-adds a separately qualified initial publication profile. No default REST/CLI/
+adds separately qualified finite initial publication and pending-only partial
+resolution/replay profiles. No default REST/CLI/
 hosted writer rollout is enabled. Depends on A v1.1 and B
-instance-v1 / visible-prose-v1 / D feedback-v1. Consumer integration and complete
-consuming-grant/resource/fence qualification remain prerequisites for activation.
+instance-v1 / visible-prose-v1 / D feedback-v1. Default/deployed consumer integration and complete consuming-grant/resource/
+fence qualification remain prerequisites for activation.
 
 ## Closed root shape
 

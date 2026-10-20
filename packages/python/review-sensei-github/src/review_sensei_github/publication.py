@@ -80,6 +80,7 @@ from .checks import (
     check_outcome_for_result,
     review_check_outcome_for_publication_failure,
 )
+from .eligibility_parts import BoundPartitionedEligibilityReader
 from .errors import (
     GitHubHTTPError,
     GitHubHTTPPaginationLimitError,
@@ -1414,6 +1415,7 @@ class _BudgetedReviewPagination(GitHubHttp):
     def __init__(self, http: GitHubHttp, budget: EvidenceReadBudget) -> None:
         self.transport = http
         self.budget = budget
+        self.last_page_size = 100
 
     def request(
         self,
@@ -1425,6 +1427,9 @@ class _BudgetedReviewPagination(GitHubHttp):
         timeout_seconds: float | None = None,
     ) -> tuple[int, dict[str, Any] | list[Any] | None]:
         try:
+            page_size = re.search(r"[?&]per_page=(\d+)", path)
+            if page_size is not None:
+                self.last_page_size = int(page_size.group(1))
             if getattr(self.transport, "publication_budget", None) is self.budget:
                 result = self.transport.request(
                     method,
@@ -1435,7 +1440,17 @@ class _BudgetedReviewPagination(GitHubHttp):
                 )
                 self.budget.check()
                 return result
-            remaining = self.budget.consume()
+            # The explicit assessment transport already charges this exact
+            # budget on every physical dispatch; do not charge it twice.
+            from .human_assessment import FeedbackBudgetHttp
+
+            shared = (
+                isinstance(self.transport, FeedbackBudgetHttp)
+                and self.transport.before_read == self.budget.consume
+            )
+            remaining = (
+                self.budget._remaining_seconds() if shared else self.budget.consume()
+            )
             result = self.transport.request(
                 method,
                 path,
@@ -1556,6 +1571,7 @@ class ReviewApprovalFinalizer:
         ]
         | None = None,
         human_inventory_read_token: str | None = None,
+        partitioned_reader: BoundPartitionedEligibilityReader | None = None,
     ) -> None:
         if (
             human_inventory_reader is not None
@@ -1569,6 +1585,12 @@ class ReviewApprovalFinalizer:
             or not human_inventory_read_token.strip()
         ):
             raise GitHubPublicationError("human inventory read credential is invalid")
+        if partitioned_reader is not None and (
+            type(partitioned_reader) is not BoundPartitionedEligibilityReader
+            or partitioned_reader.context.budget is not evidence_budget
+        ):
+            raise ReviewInputError("partition finalizer original budget changed")
+        self.partitioned_reader = partitioned_reader
         self.http = http
         self.evidence_budget = evidence_budget
         self.human_inventory_reader = human_inventory_reader
@@ -1583,6 +1605,7 @@ class ReviewApprovalFinalizer:
             raise ReviewInputError("approval qualification authority is invalid")
         self.qualification_authority = qualification_authority
         self._operation_budget: EvidenceReadBudget | None = None
+        self._last_review_scan: tuple[int, int, int] | None = None
         self._human_inventory_scope: tuple[str, int, str, str, str] | None = None
         self._scoped_human_inventory_reader: _ScopedHumanInventoryReader | None = None
 
@@ -1676,7 +1699,10 @@ class ReviewApprovalFinalizer:
         # Legacy scans acquire one finite read budget. Partition consumers must
         # supply the same object used for parts/readback/fences; no phase reset.
         budget = self.evidence_budget or self._operation_budget or EvidenceReadBudget()
-        return _BudgetedReviewPagination(self.http, budget).paginate(
+        self._last_review_scan = None
+        before_calls = budget.calls
+        pager = _BudgetedReviewPagination(self.http, budget)
+        items = pager.paginate(
             path=self.http.repository_path(
                 repository, f"/pulls/{pull_request}/reviews"
             ),
@@ -1685,6 +1711,12 @@ class ReviewApprovalFinalizer:
             max_requests=64,
             timeout_seconds=60,
         )
+        self._last_review_scan = (
+            budget.calls - before_calls,
+            len(items),
+            pager.last_page_size,
+        )
+        return items
 
     def finalize(
         self,
@@ -3317,6 +3349,7 @@ class ReviewApprovalFinalizer:
         partition_reader: PartitionReader | None = None,
         expected_context: PartitionedEligibilityContext | None = None,
         visible_reader: VisibleReader | None = None,
+        expected_root_body: str | None = None,
     ) -> ReviewApprovalEligibility | None:
         """Read the persisted eligibility document for one reviewed head.
 
@@ -3335,6 +3368,26 @@ class ReviewApprovalFinalizer:
         if not isinstance(validate_visible_prose, bool):
             raise GitHubPublicationError("eligibility prose validation mode is invalid")
         with self._read_operation():
+            if self.partitioned_reader is not None:
+                if any(
+                    value is not None
+                    for value in (partition_reader, expected_context, visible_reader)
+                ):
+                    raise GitHubPublicationError(
+                        "partition reader composition conflicts"
+                    )
+                partition_reader = self.partitioned_reader.read
+                expected_context = self.partitioned_reader.context
+                if (
+                    self.partitioned_reader.context.binding["repository"] != repository
+                    or self.partitioned_reader.context.binding["pull_request"]
+                    != pull_request
+                    or self.partitioned_reader.context.binding["head_sha"] != head_sha
+                    or self.partitioned_reader.prose_store.app_slug != app_slug
+                ):
+                    raise GitHubPublicationError(
+                        "bound partition reader scope conflicts"
+                    )
             if not GIT_SHA_HEX.fullmatch(head_sha):
                 raise GitHubPublicationError("review head sha is invalid")
             if not isinstance(app_slug, str) or not app_slug.strip():
@@ -3349,6 +3402,43 @@ class ReviewApprovalFinalizer:
             reviews = self._load_head_reviews(
                 token=token, repository=repository, pull_request=pull_request
             )
+            if self.partitioned_reader is not None:
+                owned = next(
+                    (
+                        item
+                        for item in reviews
+                        if isinstance(item, dict)
+                        and item.get("id")
+                        == self.partitioned_reader.context.owned_root_id
+                    ),
+                    None,
+                )
+                if (
+                    not isinstance(owned, dict)
+                    or owned.get("pull_request_url")
+                    != self.http.api_url
+                    + self.http.repository_path(repository, f"/pulls/{pull_request}")
+                    or owned.get("body") != self.partitioned_reader.expected_root_body
+                    or (
+                        expected_root_body is not None
+                        and owned.get("body") != expected_root_body
+                    )
+                ):
+                    raise GitHubPublicationError(
+                        "bound partition owned root readback conflicts"
+                    )
+            elif expected_root_body is not None:
+                raise GitHubPublicationError(
+                    "exact root readback requires a bound reader"
+                )
+            bound_reader = self.partitioned_reader
+            if bound_reader is not None:
+
+                def visible_reader(receipts, *, budget):
+                    return bound_reader._visible_from_fresh_listing(
+                        receipts, records=reviews, budget=budget
+                    )
+
             return self._eligibility_from_reviews(
                 reviews,
                 head_sha=head_sha,
