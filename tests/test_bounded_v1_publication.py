@@ -8,7 +8,13 @@ from hashlib import sha256
 from urllib.error import URLError
 from urllib.parse import parse_qs, urlparse
 
-from review_sensei_github import GitHubHttp, GitHubPublicationError, ReviewPublisher
+from review_sensei_github import (
+    GitHubHttp,
+    GitHubHTTPPaginationLimitError,
+    GitHubHTTPResponseTooLargeError,
+    GitHubPublicationError,
+    ReviewPublisher,
+)
 from review_sensei_github.publication import (
     IndexedFinding,
     PublicationLimitError,
@@ -73,10 +79,11 @@ def publish(state, findings, **overrides):
     return ReviewPublisher(http=state.http).publish(**arguments)
 
 
-def inline_state():
+def inline_state(*, response_metadata_bytes=0):
     state = State()
     state.reviews = []
     state.inline_comments = None
+    state.readback_pages = []
     ordinary = state.http.opener
 
     def open_request(request, timeout):
@@ -103,11 +110,13 @@ def inline_state():
                         "pull_request_review_id": review_id,
                         "user": {"login": APP, "type": "Bot"},
                         "body": item["body"],
+                        "diff_hunk": "x" * response_metadata_bytes,
                     }
                     for i, item in enumerate(posted["comments"])
                 ]
             query = parse_qs(parsed.query)
             size, page = int(query["per_page"][0]), int(query["page"][0])
+            state.readback_pages.append((size, page))
             return json_response(observations[(page - 1) * size : page * size])
         return ordinary(request, timeout)
 
@@ -329,6 +338,55 @@ class CompleteInventoryPublicationTests(unittest.TestCase):
                 for _, path, _ in state.calls
             )
         )
+
+    def test_large_inline_metadata_reconciles_and_replays_with_bounded_pages(self):
+        for count in (100, 250):
+            with self.subTest(count=count):
+                state = inline_state(response_metadata_bytes=6000)
+                findings = comments(count, detail=200)
+                options = {
+                    "convergence_policy": ReviewConvergencePolicy(mode="legacy"),
+                    "allow_retired_legacy_policy": True,
+                }
+                self.assertEqual(
+                    publish(state, findings, **options).status, "published"
+                )
+                self.assertEqual(
+                    publish(state, findings, **options).status, "already_published"
+                )
+                self.assertTrue(any(size < 100 for size, _ in state.readback_pages))
+                writes = [
+                    body
+                    for method, path, body in state.calls
+                    if method == "POST" and path.endswith("/reviews")
+                ]
+                self.assertEqual(len(writes), 1)
+                self.assertEqual(len(writes[0]["comments"]), count)
+                self.assertNotEqual(writes[0]["event"], "APPROVE")
+
+    def test_inline_readback_size_and_request_limits_still_refuse_without_writes(self):
+        for count, metadata, cause in (
+            (1, 600_000, GitHubHTTPResponseTooLargeError),
+            (250, 20_000, GitHubHTTPPaginationLimitError),
+        ):
+            with self.subTest(count=count, metadata=metadata):
+                state = inline_state(response_metadata_bytes=metadata)
+                findings = comments(count, detail=200)
+                options = {
+                    "convergence_policy": ReviewConvergencePolicy(mode="legacy"),
+                    "allow_retired_legacy_policy": True,
+                }
+                self.assertEqual(
+                    publish(state, findings, **options).status, "published"
+                )
+                before = [call for call in state.calls if call[0] != "GET"]
+                with self.assertRaises(GitHubPublicationError) as failure:
+                    publish(state, findings, **options)
+                self.assertIsInstance(failure.exception.__cause__, cause)
+                self.assertEqual(
+                    [call for call in state.calls if call[0] != "GET"], before
+                )
+                self.assertLessEqual(len(state.readback_pages), 10)
 
     def test_missing_or_foreign_inline_prose_refuses_before_check_or_approval(self):
         for foreign in (False, True):
