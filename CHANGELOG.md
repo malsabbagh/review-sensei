@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Recover oversized GitHub App history and installation inventories with smaller
+  pages while retaining the broker's response-byte, request and item limits.
 - Qualify the next v5 release from verified engine and hosted PyPI artifacts,
   independently of npm completion. Preserve signed source, build/publication
   provenance, protected approvals and installed-CLI/downstream validation.

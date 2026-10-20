@@ -361,9 +361,10 @@ describe("token broker authorization", () => {
     expect(github.sessionAlreadyKnown).not.toHaveBeenCalled();
   });
 
-  it("issues a release-only token for the owning run after the head moves", async () => {
+  it.each([SHA, "c".repeat(40)])("issues a release-only token without reading history (head=%s)", async head => {
     const { broker, github } = harness();
-    github.pullRequestHead.mockResolvedValue("c".repeat(40));
+    github.pullRequestHead.mockResolvedValue(head);
+    github.sessionAlreadyKnown.mockRejectedValue(new Error("github_response_too_large"));
 
     const result = await broker.exchange({
       oidc_token: "signed-jwt",
