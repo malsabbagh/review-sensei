@@ -1585,6 +1585,130 @@ class PublicationRecoveryTests(unittest.TestCase):
                 any(m == "POST" and p.endswith("/reviews") for m, p, _ in state.calls)
             )
 
+    def test_terminal_native_refusal_is_independent_of_operation_entry(self):
+        from review_sensei_github.session_ledger import (
+            GitHubIssueCommentSessionLedger,
+            render_session_comment,
+        )
+
+        for initial_entry, entry in (
+            ("enabled", "enabled"),
+            ("enabled", "disabled"),
+            ("disabled", "enabled"),
+            ("disabled", "disabled"),
+        ):
+            with (
+                self.subTest(initial_entry=initial_entry, retry_entry=entry),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                seed = LocalSessionLedger(Path(directory))
+                result, key = checkpoint(seed, count=0)
+                state = RetentionState()
+                state.reviews = []
+                state.session_comment = {
+                    "id": 600,
+                    "body": render_session_comment(
+                        repository_id=1,
+                        pull_request=1,
+                        record=seed.load(IDENTITY).record,
+                    ),
+                    "user": state.app_user,
+                    "issue_url": "https://api.github.test/repos/owner/repo/issues/1",
+                }
+                ledger = GitHubIssueCommentSessionLedger(
+                    state.http, token="read", app_slug=APP
+                )
+                options = GitHubWriteOptions(
+                    auto_review=True,
+                    auto_approve=False,
+                    github_writes=True,
+                    complete_inventory=True,
+                    operation_entry=initial_entry,
+                )
+                self.assertEqual(
+                    publish(
+                        application(state, ledger),
+                        result,
+                        key,
+                        publication_budget=EvidenceReadBudget(),
+                        options=options,
+                    ).status,
+                    "published",
+                )
+                original = ledger.load(IDENTITY).record
+                self.assertEqual(original.transaction.phase, "publication_succeeded")
+                self.assertEqual(state.check_runs[-1]["conclusion"], "success")
+                original_body = state.session_comment["body"]
+                retry_options = replace(options, operation_entry=entry)
+                missing_admission = initial_entry == "disabled" and entry == "enabled"
+                if missing_admission:
+                    # Switching entry modes cannot manufacture admission
+                    # evidence that the original disabled publication never had.
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "admission evidence is missing"
+                    ):
+                        publish(
+                            application(state, ledger),
+                            result,
+                            key,
+                            publication_budget=EvidenceReadBudget(),
+                            options=retry_options,
+                        )
+                else:
+                    self.assertEqual(
+                        publish(
+                            application(state, ledger),
+                            result,
+                            key,
+                            publication_budget=EvidenceReadBudget(),
+                            options=retry_options,
+                        ).status,
+                        "already_published",
+                    )
+                self.assertEqual(len(state.reviews), 1)
+                self.assertEqual(ledger.load(IDENTITY).record, original)
+                self.assertEqual(state.session_comment["body"], original_body)
+                state.reviews.clear()
+                state.calls.clear()
+                before_checks = len(state.check_runs)
+                with self.assertRaisesRegex(
+                    ReviewInputError if missing_admission else GitHubPublicationError,
+                    "admission evidence is missing"
+                    if missing_admission
+                    else "complete native review is unavailable",
+                ):
+                    publish(
+                        application(state, ledger),
+                        result,
+                        key,
+                        publication_budget=EvidenceReadBudget(),
+                        options=retry_options,
+                    )
+                self.assertFalse(
+                    any(
+                        method == "POST" and path.endswith("/reviews")
+                        for method, path, _ in state.calls
+                    )
+                )
+                self.assertEqual(ledger.load(IDENTITY).record, original)
+                self.assertEqual(state.session_comment["body"], original_body)
+                # The existing admission CAS remains; terminal refusal must not
+                # add a publication success/failure completion rewrite.
+                self.assertEqual(
+                    sum(
+                        method == "PATCH" and path.endswith("/issues/comments/600")
+                        for method, path, _ in state.calls
+                    ),
+                    0 if missing_admission else 1,
+                )
+                if missing_admission:
+                    self.assertEqual(len(state.check_runs), before_checks)
+                else:
+                    self.assertGreater(len(state.check_runs), before_checks)
+                    self.assertEqual(
+                        state.check_runs[-1]["conclusion"], "action_required"
+                    )
+
     def test_configured_bot_login_case_preserves_numeric_owned_publication(self):
         for configured in (
             "REVIEW-SENSEI[bot]",

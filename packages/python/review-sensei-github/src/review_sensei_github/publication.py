@@ -4277,7 +4277,7 @@ class ReviewPublisher:
             if self._confirmed_publication_only and (
                 not result_states or self._confirmed_review_id is None
             ):
-                raise GitHubPublicationError(
+                raise _NativeReplayAuthorityError(
                     "confirmed publication complete native review is unavailable; "
                     "cleanup cannot recreate it"
                 )

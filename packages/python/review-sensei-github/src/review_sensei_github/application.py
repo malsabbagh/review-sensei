@@ -716,11 +716,11 @@ class GitHubApplication:
         terminal_cleanup_owner: tuple[ReviewTransaction, int] | None = None
         if (
             resume_thread_cleanup
-            and options.operation_entry == "enabled"
             and transaction_record is not None
             and transaction_record.transaction is not None
             and transaction_record.transaction.phase == "publication_succeeded"
         ):
+            # Terminal publication remains authoritative in either entry mode.
             # Only the independently selected ledger can establish this owner.
             # Native root/index/prose and all mutable authority fences still run.
             terminal_cleanup_owner = (

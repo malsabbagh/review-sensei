@@ -10,6 +10,9 @@
   bounded cleanup on exact retries while preserving current approval obligations.
 - Require retained native approval authority on complete-review replay; missing or
   invalid authority keeps the check non-passing instead of reconstructing approval.
+- Refuse missing native reviews on terminal retries in either entry mode; when
+  native replay is admitted, record a non-passing authority check without a
+  terminal ledger rewrite.
 - Share scoped pagination observations and authenticated inventory context within
   one publication budget, retaining fresh ownership, storage and prose fences.
 - Use one clock sample for recovery-artifact creation and expiry so the minimum
