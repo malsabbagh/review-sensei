@@ -6,7 +6,7 @@ production provider abstraction, runtime refactor, permissions or support claim.
 An ADR is unnecessary because no runtime/public/persistence contract changes.
 
 `tests/provider_common_flow_contract.py` supplies one reusable contract.
-Six generated configuration classes run the same fourteen methods, including
+Six generated configuration classes run the same nineteen methods, including
 legacy and unified work-mode subcases. Adding a factory supplies registry
 settings, explicit canonical backend/YAML/credential metadata, a constructor
 transport seam and protocol envelope functions; the
@@ -97,18 +97,18 @@ coverage. Installed and deployed execution remain integration gates.
 
 ## Expanded installed ingress observation
 
-The preceding86-method observations identify the earlier helper. Frozen source
-`28ceeeae9203ca6942fb8fe733f96c0aac82f499` expands it to116 methods with
+The preceding 86-method observations identify the earlier helper. Frozen source
+`28ceeeae9203ca6942fb8fe733f96c0aac82f499` expands it to 116 methods with
 the five additional ingress/control methods described in
 [the provider-flow matrix](provider-flows.md). The
-[exact expanded receipt](provider-ingress-candidate.json) records3,741 checkout
-tests, four complete coverage workers at82.77% (unchanged80% floor), and all16
-required local gates. All871 tracked build inputs matched the Git archive.
+[exact expanded receipt](provider-ingress-candidate.json) records 3,741 checkout
+tests, four complete coverage workers at 82.77% (unchanged 80% floor), and all 16
+required local gates. All 871 tracked build inputs matched the Git archive.
 
-The exact installed wheels passed234 dist-safe tests,11 downstream tests and18
+The exact installed wheels passed 234 dist-safe tests, 11 downstream tests and 18
 OpenAI configuration cases outside checkout. All six post-package suites passed
-1,281 cases, including199 lifecycle methods. The sdist contract checked48
-required entries and10 checkout-only exclusions; all119 engine and48 adapter
+1,281 cases, including 199 lifecycle methods. The sdist contract checked 48
+required entries and 10 checkout-only exclusions; all 119 engine and 48 adapter
 runtime files matched the frozen wheels and Git bytes. These observations use
 synthetic external authorization/HTTP, not a live broker or provider. They do
 not qualify the remaining event cross-product, unknown-effect recovery or the
