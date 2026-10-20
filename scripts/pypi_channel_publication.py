@@ -219,7 +219,7 @@ def _publication_origin(selected, candidates, run):
         and job["run_attempt"] < selected["run_attempt"]
         and facts == identity
     ]
-    if len(origins) > 1:
+    if len(origins) + int(original) > 1:
         raise ValueError("Python publisher execution origin is ambiguous")
     if not origins and not original:
         raise ValueError("Python publisher execution origin is unavailable")

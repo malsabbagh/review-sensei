@@ -205,6 +205,11 @@ class PublisherExecutionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.select()
 
+    def test_selected_and_earlier_genuine_origins_are_ambiguous(self):
+        self.alias["created_at"] = self.original["created_at"]
+        with self.assertRaisesRegex(ValueError, "origin is ambiguous"):
+            self.select()
+
     def test_latest_failed_or_changed_run_is_not_masked_by_original_success(self):
         self.alias["conclusion"] = "failure"
         with self.assertRaisesRegex(ValueError, "prerequisite"):
