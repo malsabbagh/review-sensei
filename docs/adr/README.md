@@ -91,6 +91,7 @@ Process: `docs/process/adr-process.md`
 | [0077](0077-explicit-human-file-review.md) | Proposed | Record explicit human review of unsupported binary files without treating AI coverage as complete | #253 | Confirmation is audit; mixed APPROVE waives only the binary blocker |
 | [0078](0078-review-sensei-github-split.md) | Proposed | Ship the GitHub Actions runtime as review-sensei-github | User-authorized split | Engine must not import the host; v5 moves only after the hosted package is published |
 | [0079](0079-reservation-leak-prevention-and-admission-self-heal.md) | Proposed | Prevent reservation leaks and self-heal at admission | Pending triage | Supersedes ADR 0063's explicit-continue rule; pause is never auto-cleared |
+| [0095](0095-pypi-qualified-major-channel.md) | Proposed | Qualify v5 from verified engine and hosted PyPI publication independently of npm | User-requested next-release policy | Preserve signed engine source, provenance, approvals and downstream gates |
 
 ## Policy
 

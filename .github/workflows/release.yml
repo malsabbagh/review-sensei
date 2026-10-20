@@ -456,7 +456,7 @@ jobs:
 
   draft-release:
     name: Prepare draft GitHub release
-    needs: [build, docs-build, assemble-npm]
+    needs: [build, docs-build]
     runs-on: ubuntu-latest
     # Serialize draft/finalizer work across all attempts of this exact tag.
     concurrency:
@@ -495,7 +495,7 @@ jobs:
 
   github-release:
     name: Create GitHub release assets
-    needs: [build, draft-release, publish, publish-npm]
+    needs: [build, draft-release, publish]
     runs-on: ubuntu-latest
     # Share the draft job's per-tag group; retries cancel no running attempt.
     concurrency:

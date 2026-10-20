@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Qualify the next v5 release from verified engine and hosted PyPI artifacts,
+  independently of npm completion. Preserve signed source, build/publication
+  provenance, protected approvals and installed-CLI/downstream validation.
+
 ## 0.8.4 - 2026-10-20
 
 Changes since [v0.8.3](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.3), from [3dd5ec537bec429a4d0b280b2c2b0e9ac203f4a6](https://github.com/malsabbagh/review-sensei/commit/3dd5ec537bec429a4d0b280b2c2b0e9ac203f4a6) through [e02665a6e08ae1ec1c839e0051bf390b528c4f82](https://github.com/malsabbagh/review-sensei/commit/e02665a6e08ae1ec1c839e0051bf390b528c4f82).
