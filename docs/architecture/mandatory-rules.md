@@ -1,3 +1,8 @@
+Same-operation inventory handoff must retain budget/transport/token/scope,
+fresh complete intent/parts reads and fresh ledger/Bot/PR/root/index/full-prose fences.
+Canonical admission is evidence only; see ADR 0098.
+
+## Default human inventory references
 
 Beyond legacy future-assessment capacity, closed schema 5 owned purpose-bound parts
 preserve every admitted human instance/metadata/original index. References grant no authority:
@@ -63,19 +68,23 @@ tag or replacing a tarball. See [ADR 0031](adr/0031-npm-launcher-and-standalone-
 
 (fixture adapter: test-only seam, omitted from production map)
 
-`ReviewService.run` always emits a versioned `RunOutcome`. Hard resource budgets
-cap provider calls, transport retries, prompt/output bytes, and elapsed time.
-One structural-correction retry remains distinct from transport retry. Opt-in
-`RecoveryArtifact` values can republish a validated result without invoking a
-model or rewriting trusted learnings or configuration. See
+`ReviewService.run` emits versioned `RunOutcome`. Hard budgets cap provider calls,
+transport retries, prompt/output bytes and elapsed time. One structural-correction
+retry differs from transport retry. Opt-in `RecoveryArtifact` republishes
+validated results without models or trusted learnings/configuration changes. See
 [ADR 0043](adr/0043-structured-run-outcomes-budgets-and-publication-recovery.md).
 
-the ledger's baseline and digests cannot reconstruct them. Reusable runners
-publish a newly produced or independently validated retained result and retain
-an explicitly enabled diagnostics bundle after publication failure. That bundle includes the reviewed diff and
-trusted configuration/admission contexts, retains the existing seven-day limit,
-and remains disabled for `artifacts: none`. Local analysis-only sessions retain
-their existing duplicate behavior. See the PR223 amendment to
+ledger baseline/digests cannot reconstruct them. Reusable runners publish
+new or independently validated retained results. Opt-in publication-failure
+diagnostics retain reviewed diff and trusted configuration/admission contexts up to seven
+days, disabled by `artifacts: none`. Local analysis-only duplicates remain unchanged.
+PR223 amendment to
+
+Opt-in recovery binds original trusted policy, exact base/head diff and authenticated
+prior baseline. Configuration/evidence/policy/reservation must match committed
+transaction. Missing admission/ordinary retries refuse. Both lanes skip provider
+credentials/inference; retain one read budget, broker/accepted-result/ledger/head
+guards and writer slot.
 
 API authentication and comment/review delivery. `prepare_publishable_review`
 sits between a validated `ReviewResult` and any publisher: `legacy` keeps
@@ -105,14 +114,12 @@ number ceilings documented in the README and ADR 0007. Profiles can only move
 downward. Canonical NFC UTF-8 repository paths and strict Git C-quoted paths are
 
 
-`src/review_sensei/workflow.py` owns the portable manual GitHub Actions boundary.
-It validates untrusted workflow inputs (`base_ref`, `head_ref`,
-`head_repository`, `review_sensei_version`, and diff limits) before invoking git,
-fetches explicit refs with list-based argv, resolves base/head refs to verified
-commit OIDs, verifies a merge base, and writes a bounded triple-dot diff without
-checking out or executing head code. The installed package exposes this through
-`review-sensei prepare-diff`, so consumer repositories that do not contain Code
-Sensei source can still run the reviewed workflow.
+`src/review_sensei/workflow.py` owns portable manual GitHub Actions. Before git it
+validates untrusted `base_ref`/`head_ref`/`head_repository`/`review_sensei_version`/
+diff limits. It fetches explicit refs with list argv, resolves verified base/head
+commit OIDs, checks merge base and writes bounded triple-dot diffs without head
+checkout/execution. Installed `review-sensei prepare-diff` exposes it without consumer
+Code Sensei source.
 
 The generated caller is a read-only bootstrap: it grants `contents: read`,
 `pull-requests: read`, `issues: read`, and `id-token: write`, routes only on
@@ -615,30 +622,28 @@ larger or more verbose inventories can still exceed inline bounds. Full finding
   downgraded or ambiguously rediscovered concerns remain uncertain, make the
   review partial and retain the prior durable baseline until resolved.
 
-OpenRouter approval remains withheld until retained qualification evidence is
-bound to independently expected effective review identities. The GitHub
-publisher and result-facts builder do not accept profile/caller status strings
-or the historical `not-required` default as that evidence; replay preserves the
-withheld facts. Other providers and permitted review events keep their policy.
+OpenRouter approval stays withheld until retained qualification evidence binds
+independently expected effective review identities. GitHub publisher/result-facts
+reject profile/caller status strings and historical `not-required` defaults;
+replay preserves withholding. Other providers and permitted review events keep
+their policy.
 
-Accepted operation results additionally bind their replay to complete immutable
-inventory, original result/facts, source identity and exact evidence. Replays
-may retain accumulated resolutions, but cannot reuse decisions after another
-source, evidence or authority change. The adapter revalidates complete evidence
-and skips only already-persisted resolved IDs; it does not weaken the inventory
-application boundary or grant another provider allowance. Unbound older accepted
-payloads require a new authorized mention. See the replay amendment in
-[ADR 0061](adr/0061-human-reply-reassessment.md) and the finite source matrix in
-[large lifecycle qualification](validation/large-lifecycle.md).
+Accepted replay binds complete immutable inventory, original result/facts,
+source identity and exact evidence; accumulated resolutions may persist.
+Source/evidence/authority changes forbid decision reuse. The adapter revalidates
+complete evidence, skips only persisted resolved IDs and preserves the inventory
+application boundary and provider allowances. Unbound older accepted payloads
+need a new authorized mention. See [ADR 0061](adr/0061-human-reply-reassessment.md)
+and the [finite source matrix](validation/large-lifecycle.md).
+
   OpenRouter separates requested model, observed model/upstream and reported fingerprint.
-  Optional `ProviderTokenUsage` contains only three bounded reported counters;
-  invalid optional metadata stays unknown. Aggregate only counters every attempt
-  reports; failures/cancellation remain attempted work. Retain full bounded family/
-  variant/region/tier prefixes through canonical YAML/resolver/CLI/hosted plan;
-  published mappings require the same upstream family. Trusted `ProviderSettings`
-  forbids ambient policy replacement; named profiles retain exact binding and prefixes
-  enter policy digests. DeepSeek/Morph evidence eligibility is not qualification/
-  approval. See proposed ADR 0081.
+  Optional `ProviderTokenUsage` has only three bounded reported counters; invalid
+  optional metadata stays unknown. Aggregate only counters every attempt reports;
+  failures/cancellation are attempted work. Retain full bounded family/variant/region/
+  tier prefixes through canonical YAML/resolver/CLI/hosted plan; published mappings
+  require the same upstream family. Trusted `ProviderSettings` forbids ambient policy
+  replacement; named profiles retain exact binding; prefixes enter policy digests.
+  DeepSeek/Morph evidence eligibility is not qualification/approval. See proposed ADR 0081.
 
 Live reports must bind actual requested routing-policy digest/base URL to selected target;
 missing bindings or changed suffix/endpoint refuse support creation/loading. Old
@@ -647,11 +652,11 @@ remain eligible. Runtime approval binding remains missing. See ADR 0081.
 
 `ConversationService.reply` uses the generic executor and optional original
 `ResourceBudgetTracker`: retain elapsed time/calls/aggregate prompt/output accounting
-across transport retries and one JSON/non-object correction within bounded defaults.
-Semantic failures never request correction. GitHub creates the tracker before context
-preparation, retaining it through operation entry/generation; expiry/exhaustion/
-cancellation cannot publish replies. Adapters receive remaining deadline and configured
-output cap without backend-specific policy.
+through transport retries and one JSON/non-object correction within bounded defaults.
+Semantic failures never request correction. GitHub starts tracking before context preparation,
+through operation entry/generation; expiry/exhaustion/cancellation cannot publish
+replies. Adapters receive remaining deadline/configured output cap without
+backend-specific policy.
 
 Live evaluation separates exact fixture conformance/model quality. Bounded controls
 retain complete fixture inventory/identity and unchanged thresholds; promotion verifies
@@ -665,3 +670,7 @@ Only confirmed owned replies or a complete empty comment list permit fallback.
 Genuine top-level legacy findings retain their exact-head inventory authority.
 Unknown, malformed, conflicting or unreadable roots refuse fallback.
 The metadata walk retains one shared ten-request, sixty-second bound.
+
+Publisher aliases must match original run/source/ref, runner and complete steps.
+Missing/ambiguous execution facts block qualification; re-exposed success never
+masks a newer distinct publisher execution.

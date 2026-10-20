@@ -313,7 +313,7 @@ class SetupPlanTests(unittest.TestCase):
             workflow,
             (
                 Path(__file__).parent.parent
-                / "examples/github-actions/review-sensei-review.yml"
+                / ".github/workflows/review-sensei-review.yml"
             ).read_text(encoding="utf-8"),
         )
         uninstall = dict((f.path, f.content) for f in plan.files)[
@@ -361,7 +361,7 @@ class SetupPlanTests(unittest.TestCase):
             workflow,
             (
                 Path(__file__).parent.parent
-                / "examples/github-actions/review-sensei-review.yml"
+                / ".github/workflows/review-sensei-review.yml"
             )
             .read_text(encoding="utf-8")
             .replace("@v5", "@stable"),
@@ -939,7 +939,8 @@ class SetupPullRequestServiceTests(unittest.TestCase):
 
         tag = setup_module.DEFAULT_PUBLIC_WORKFLOW_TAG
         current = _tagged_workflow(tag)
-        self.assertEqual(current, setup_module._resolve_trigger_workflow(tag))
+        self.assertEqual(current, setup_module._pre_recovery_v5_workflow(tag))
+        self.assertNotEqual(current, setup_module._prepared_recovery_workflow(tag))
         reverted = current.replace(
             "# ReviewSensei setup version: 5",
             "# ReviewSensei setup version: 4",

@@ -216,6 +216,10 @@ class _FindingIndexError(GitHubPublicationError):
         super().__init__(message)
 
 
+class _NativeReplayAuthorityError(GitHubPublicationError):
+    """Complete native replay cannot establish its retained approval authority."""
+
+
 def finding_index_marker(
     *,
     repository_id: int,
@@ -1489,6 +1493,15 @@ class _ScopedHumanInventoryReader:
         self.budget.check()
         return inventory
 
+    def attach_authenticated_store(self, store: HumanInventoryStore) -> bool:
+        from .default_human_reader import DefaultHumanInventoryReader
+
+        self.budget.check()
+        reader = self._reader()
+        if type(reader) is not DefaultHumanInventoryReader:
+            return False
+        return reader.attach_authenticated_store(store)
+
     def validate_root(self, review: dict[str, Any], reviews: list[Any]) -> None:
         self.budget.check()
         validate = getattr(self._reader(), "validate_root", None)
@@ -1621,6 +1634,29 @@ class ReviewApprovalFinalizer:
         self._human_inventory_scope = scope
         self._scoped_human_inventory_reader = reader
         return reader
+
+    def _attach_authenticated_human_inventory(
+        self,
+        store: HumanInventoryStore,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        head_sha: str,
+        app_slug: str,
+    ) -> None:
+        if store.authenticated_reference is None:
+            return
+        reader = self._human_reader_for_scope(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            app_slug=app_slug,
+        )
+        attach = getattr(reader, "attach_authenticated_store", None)
+        if callable(attach):
+            attach(store)
 
     def _review_pages(
         self, *, token: str, repository: str, pull_request: int
@@ -3458,6 +3494,74 @@ class ReviewPublisher:
         self.http = http
         self.finalizer = ReviewApprovalFinalizer(http=http)
         self.checks = ReviewCheckPublisher(http=http)
+        self._defer_thread_cleanup = False
+        self._confirmed_publication_only = False
+        self._pending_thread_cleanup: Callable[[], str | None] | None = None
+        self._confirmed_review_id: int | None = None
+
+    def _finish_thread_cleanup(
+        self, publication: PublicationResult
+    ) -> PublicationResult:
+        """Run optional work only after the caller's mandatory completion."""
+        cleanup, self._pending_thread_cleanup = self._pending_thread_cleanup, None
+        if cleanup is None or publication.status not in {
+            "published",
+            "already_published",
+        }:
+            return publication
+        diagnostic = cleanup()
+        return replace(
+            publication, thread_resolution="unconfirmed" if diagnostic else None
+        )
+
+    def _schedule_thread_cleanup(
+        self,
+        *,
+        token: str,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        base_sha: str,
+        app_slug: str,
+        eligibility: ReviewApprovalEligibility,
+        replacements: Sequence[tuple[ReviewComment, str, str, str]],
+        review_id: int,
+        threads: Sequence[tuple[str, str]] | None = None,
+    ) -> None:
+        if not replacements:
+            return
+
+        def cleanup() -> str | None:
+            try:
+                candidates = threads
+                if candidates is None:
+                    candidates = self._published_finding_suppression(
+                        token=token,
+                        repository=repository,
+                        pull_request=pull_request,
+                        app_slug=app_slug,
+                        repository_id=repository_id,
+                        head_sha=head_sha,
+                        base_sha=base_sha,
+                    ).superseded_threads
+                return self._supersede_replaced_threads(
+                    token=token,
+                    threads=candidates,
+                    confirmed_review_id=review_id,
+                    repository=repository,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    app_slug=app_slug,
+                    eligibility=eligibility,
+                    replacements=replacements,
+                )
+            except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+                return "thread_resolution_unconfirmed"
+
+        self._pending_thread_cleanup = cleanup
 
     def prepare(
         self,
@@ -3716,6 +3820,8 @@ class ReviewPublisher:
         human_inventory_store: HumanInventoryStore | None = None,
         allow_human_inventory_start: bool = False,
     ) -> PublicationResult:
+        self._pending_thread_cleanup = None
+        self._confirmed_review_id = None
         owns_operation_budget = (
             self.finalizer.evidence_budget is None
             and self.finalizer._operation_budget is None
@@ -3723,7 +3829,7 @@ class ReviewPublisher:
         if owns_operation_budget:
             self.finalizer._operation_budget = EvidenceReadBudget()
         try:
-            return self._publish_impl(
+            publication = self._publish_impl(
                 token=token,
                 repository=repository,
                 repository_id=repository_id,
@@ -3760,6 +3866,11 @@ class ReviewPublisher:
                 complete_inventory=complete_inventory,
                 human_inventory_store=human_inventory_store,
                 allow_human_inventory_start=allow_human_inventory_start,
+            )
+            return (
+                publication
+                if self._defer_thread_cleanup
+                else self._finish_thread_cleanup(publication)
             )
         finally:
             if owns_operation_budget:
@@ -3941,7 +4052,7 @@ class ReviewPublisher:
             qualification=qualification,
             retained_eligibility=retained_eligibility,
         )
-        # Only legacy single-piece capacity may select the new default store.
+        # Legacy inventory or complete framed-body capacity may select the store.
         # A fixed-width placeholder qualifies every authority/body allocation
         # before the first inventory, check, or review write. No reference or
         # caller-supplied hash can authorize a new staging attempt.
@@ -3976,6 +4087,14 @@ class ReviewPublisher:
                 raise GitHubPublicationError(
                     "human inventory store authority mismatches publication"
                 )
+            self.finalizer._attach_authenticated_human_inventory(
+                human_inventory_store,
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
         if human_inventory is not None:
             try:
                 human_inventory.to_dict()
@@ -4060,11 +4179,7 @@ class ReviewPublisher:
             reserve = _disposition_frame_reserve(
                 preflight_document, preflight_review.index_entries
             )
-            for compact in (False, True):
-                if compact:
-                    preflight_review = replace(
-                        preflight_review, compact_references=True
-                    )
+            while True:
                 try:
                     fit_assembled_review(
                         preflight_review,
@@ -4088,9 +4203,39 @@ class ReviewPublisher:
                         reserved_bytes=reserve,
                         preserve_explanations=human_inventory is not None,
                     )
-                except PublicationLimitError:
-                    if preflight_review.compact_references:
-                        raise
+                except PublicationLimitError as exc:
+                    if not preflight_review.compact_references:
+                        preflight_review = replace(
+                            preflight_review, compact_references=True
+                        )
+                        continue
+                    if (
+                        exc.check == "framed-review-body"
+                        and not needs_human_inventory
+                        and stage_human_inventory
+                        and human_inventory is not None
+                    ):
+                        # The inventory may fit alone while its legacy marker
+                        # crowds out the complete body. Qualify the same v5
+                        # reference and future receipt before staging anything.
+                        prospective_eligibility = replace(
+                            prospective_eligibility,
+                            human_inventory_reference=HumanInventoryReference(
+                                context.event_key, "0" * 64
+                            ),
+                        )
+                        preflight_document = replace(
+                            preflight_document,
+                            human_inventory_reference=(
+                                prospective_eligibility.human_inventory_reference
+                            ),
+                        )
+                        reserve = _disposition_frame_reserve(
+                            preflight_document, preflight_review.index_entries
+                        )
+                        needs_human_inventory = True
+                        continue
+                    raise
                 else:
                     break
             if complete_inventory:
@@ -4129,6 +4274,37 @@ class ReviewPublisher:
                     result_digest=review_result_digest(result),
                 )
             )
+            if self._confirmed_publication_only and (
+                not result_states or self._confirmed_review_id is None
+            ):
+                raise _NativeReplayAuthorityError(
+                    "confirmed publication complete native review is unavailable; "
+                    "cleanup cannot recreate it"
+                )
+            if (
+                result_states
+                and complete_review is not None
+                and persisted_eligibility is not None
+                and self._confirmed_review_id is not None
+            ):
+                self._schedule_thread_cleanup(
+                    token=token,
+                    repository=repository,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    app_slug=app_slug,
+                    eligibility=persisted_eligibility,
+                    replacements=complete_review.inline_comments,
+                    review_id=self._confirmed_review_id,
+                )
+                if persisted_eligibility.result_digest != review_result_digest(result):
+                    # A newer same-head result cannot lend this older report
+                    # authority to mutate threads, even when its own index is valid.
+                    self._pending_thread_cleanup = lambda: (
+                        "thread_resolution_unconfirmed"
+                    )
             if (
                 complete_inventory
                 and identity_states
@@ -4221,6 +4397,16 @@ class ReviewPublisher:
                             persisted_eligibility=persisted_eligibility,
                         )
                     return PublicationResult(status="already_published")
+        except _NativeReplayAuthorityError:
+            self._complete_failed_check(
+                check_token=check_token,
+                repository=repository,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                policy=effective_policy,
+                transient=False,
+            )
+            raise
         except GitHubHTTPTransientError as exc:
             raise GitHubPublicationTransientError(
                 "review reconciliation failed temporarily"
@@ -4363,6 +4549,14 @@ class ReviewPublisher:
                     "visible_prose": [],
                 },
                 allow_start=allow_human_inventory_start,
+            )
+            self.finalizer._attach_authenticated_human_inventory(
+                human_inventory_store,
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
             )
             if needs_human_inventory:
                 prospective_eligibility = replace(
@@ -4592,6 +4786,30 @@ class ReviewPublisher:
                 != retained_eligibility
             ):
                 return PublicationResult(status="skipped_stale_head")
+
+        def schedule_reconciled_cleanup() -> None:
+            # Exact complete reconciliation selects the native review id. A
+            # legacy marker alone cannot authorize old-thread mutations.
+            if self._confirmed_review_id is None:
+                if suppression.superseded_threads and prepared_comments:
+                    self._pending_thread_cleanup = lambda: (
+                        "thread_resolution_unconfirmed"
+                    )
+                return
+            self._schedule_thread_cleanup(
+                token=token,
+                threads=suppression.superseded_threads,
+                review_id=self._confirmed_review_id,
+                repository=repository,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                app_slug=app_slug,
+                eligibility=eligibility,
+                replacements=prepared_comments,
+            )
+
         try:
             status, payload = self.http.request(
                 "POST",
@@ -4620,6 +4838,7 @@ class ReviewPublisher:
                 base_sha=base_sha,
                 result_digest=review_result_digest(result),
             ):
+                schedule_reconciled_cleanup()
                 return self._finalize_after_publication(
                     token=token,
                     repository=repository,
@@ -4645,10 +4864,10 @@ class ReviewPublisher:
         if status == 200 and isinstance(payload, dict):
             review_id = payload.get("id")
             if isinstance(review_id, int):
-                self._supersede_replaced_threads(
+                self._schedule_thread_cleanup(
                     token=token,
                     threads=suppression.superseded_threads,
-                    confirmed_review_id=review_id,
+                    review_id=review_id,
                     repository=repository,
                     repository_id=repository_id,
                     pull_request=pull_request,
@@ -4738,6 +4957,7 @@ class ReviewPublisher:
                     status="publication_incomplete",
                     diagnostic="publication_ambiguous",
                 )
+            schedule_reconciled_cleanup()
             return self._finalize_after_publication(
                 token=token,
                 repository=repository,
@@ -4765,6 +4985,7 @@ class ReviewPublisher:
                 base_sha=base_sha,
                 result_digest=review_result_digest(result),
             ):
+                schedule_reconciled_cleanup()
                 return self._finalize_after_publication(
                     token=token,
                     repository=repository,
@@ -4889,7 +5110,7 @@ class ReviewPublisher:
         app_slug: str,
         eligibility: ReviewApprovalEligibility,
         replacements: Sequence[tuple[ReviewComment, str, str, str]],
-    ) -> None:
+    ) -> str | None:
         from .thread_resolution import FindingThreadResolver
 
         replacement_concerns = {item[1] for item in replacements}
@@ -4903,7 +5124,7 @@ class ReviewPublisher:
             or type(confirmed_review_id) is not int
             or confirmed_review_id < 1
         ):
-            return
+            return None
         try:
 
             def fence() -> bool:
@@ -4942,7 +5163,7 @@ class ReviewPublisher:
                     and not live.app_authored
                 )
 
-            FindingThreadResolver(self.http).resolve(
+            resolution = FindingThreadResolver(self.http).resolve(
                 token=token,
                 repository=repository,
                 repository_id=repository_id,
@@ -4953,9 +5174,12 @@ class ReviewPublisher:
                 instances=frozenset(),
                 supersede=matching,
                 fence=fence,
+                skip_resolved=True,
+                cleanup_budget=getattr(self.http, "publication_budget", None),
             )
-        except (GitHubHTTPError, GitHubPublicationError):
-            return
+            return resolution.diagnostic
+        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+            return "thread_resolution_unconfirmed"
 
     def _published_finding_suppression(
         self,
@@ -5482,28 +5706,49 @@ class ReviewPublisher:
                 if result_marker in body:
                     result_states.add(state)
                     if complete_review is not None:
-                        self._verify_complete_review(
-                            token=token,
-                            repository=repository,
-                            repository_id=repository_id,
-                            pull_request=pull_request,
-                            head_sha=head_sha,
-                            app_slug=app_slug,
-                            review=review,
-                            assembled=complete_review,
-                            base_sha=base_sha,
-                            result_digest=result_digest,
-                        )
-        eligibility = self.finalizer._eligibility_from_reviews(
-            payload,
-            head_sha=head_sha,
-            app_slug=app_slug,
-            require_valid=True,
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-        )
+                        try:
+                            self._verify_complete_review(
+                                token=token,
+                                repository=repository,
+                                repository_id=repository_id,
+                                pull_request=pull_request,
+                                head_sha=head_sha,
+                                app_slug=app_slug,
+                                review=review,
+                                assembled=complete_review,
+                                base_sha=base_sha,
+                                result_digest=result_digest,
+                            )
+                        except GitHubPublicationTransientError:
+                            raise
+                        except (GitHubPublicationError, ReviewInputError) as exc:
+                            raise _NativeReplayAuthorityError(str(exc)) from exc
+                        identifier = review.get("id")
+                        if type(identifier) is int and identifier > 0:
+                            self._confirmed_review_id = identifier
+        try:
+            eligibility = self.finalizer._eligibility_from_reviews(
+                payload,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                require_valid=True,
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+            )
+        except GitHubPublicationTransientError:
+            raise
+        except GitHubPublicationError as exc:
+            if repository_id is not None:
+                raise _NativeReplayAuthorityError(str(exc)) from exc
+            raise
         if repository_id is not None:
+            if result_states and eligibility is None:
+                # Complete native replay needs retained authority. Inferring it
+                # from result bytes could discard a persisted approval veto.
+                raise _NativeReplayAuthorityError(
+                    "complete publication approval eligibility is missing"
+                )
             # A complete-inventory replay must validate the retained inventory
             # before the already-published path updates checks or finalizes.
             try:
@@ -5516,9 +5761,11 @@ class ReviewPublisher:
                     eligibility=eligibility,
                 )
             except ReviewInputError:
-                raise GitHubPublicationError(
+                raise _NativeReplayAuthorityError(
                     "persisted finding index is invalid"
                 ) from None
+            except GitHubPublicationError as exc:
+                raise _NativeReplayAuthorityError(str(exc)) from exc
         return frozenset(identity_states), frozenset(result_states), eligibility
 
     def _verify_complete_review(

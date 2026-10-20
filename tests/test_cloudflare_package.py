@@ -340,9 +340,9 @@ class CloudflarePackageTests(unittest.TestCase):
         self.assertEqual(_released_runner_switch_v4_workflow("v4"), canonical)
         self.assertEqual(
             _tagged_workflow("v5"),
-            (
-                ROOT / "examples" / "github-actions" / "review-sensei-review.yml"
-            ).read_text(encoding="utf-8"),
+            (ROOT / ".github" / "workflows" / "review-sensei-review.yml").read_text(
+                encoding="utf-8"
+            ),
         )
         ts_source = (
             CLOUDFLARE / "src" / "released-runner-switch-v4-caller.ts"
@@ -356,6 +356,8 @@ class CloudflarePackageTests(unittest.TestCase):
             SetupPlanBuilder,
             _current_config_file,
             _current_uninstall_workflow,
+            _pre_recovery_v5_workflow,
+            _prepared_recovery_workflow,
         )
 
         ts_source = (CLOUDFLARE / "src" / "setup-content.ts").read_text(
@@ -398,7 +400,9 @@ class CloudflarePackageTests(unittest.TestCase):
         example = (
             ROOT / "examples" / "github-actions" / "review-sensei-review.yml"
         ).read_text(encoding="utf-8")
-        self.assertEqual(plan.files[0].content, example)
+        self.assertEqual(plan.files[0].content, _pre_recovery_v5_workflow("v5"))
+        self.assertEqual(example, _prepared_recovery_workflow("v5"))
+        self.assertNotEqual(plan.files[0].content, example)
         self.assertEqual(plan.files[1].content, _current_uninstall_workflow())
 
     def test_user_guidance_describes_setup_v5_publication_contract(self):

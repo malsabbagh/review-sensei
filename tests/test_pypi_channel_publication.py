@@ -85,6 +85,28 @@ class PublicationTests(unittest.TestCase):
                     "run_attempt": 1,
                     "status": "completed",
                     "conclusion": "success",
+                    "run_id": index,
+                    "head_sha": SOURCE,
+                    "head_branch": tag,
+                    "workflow_name": workflow,
+                    "created_at": "2026-10-20T10:00:00Z",
+                    "started_at": "2026-10-20T10:00:01Z",
+                    "completed_at": "2026-10-20T10:00:03Z",
+                    "runner_id": 1000,
+                    "runner_name": "GitHub Actions 1000",
+                    "runner_group_id": 0,
+                    "runner_group_name": "GitHub Actions",
+                    "labels": ["ubuntu-latest"],
+                    "steps": [
+                        {
+                            "number": 1,
+                            "name": "Publish wheel and source distribution",
+                            "status": "completed",
+                            "conclusion": "success",
+                            "started_at": "2026-10-20T10:00:01Z",
+                            "completed_at": "2026-10-20T10:00:02Z",
+                        }
+                    ],
                 }
                 for n, name in enumerate(sorted(required))
             ]
@@ -421,6 +443,47 @@ class ProvenancePolicyTests(unittest.TestCase):
             return_value=SimpleNamespace(attestation_bundles=[self.bundle]),
         ):
             publication.verify_plan(self.plan)
+
+    def test_reexposed_metadata_plan_preserves_verified_original_invocation(self):
+        from sigstore.verify import policy
+
+        from tests.test_pypi_publication_attempts import captured_publication_case
+
+        run, jobs, original, _alias = captured_publication_case()
+
+        def pages(path, key):
+            return [run] if key == "workflow_runs" else jobs
+
+        with (
+            patch.object(publication.docs, "api_pages", side_effect=pages),
+            patch.object(publication.docs, "api", return_value=run),
+        ):
+            selected = publication.publication_run(
+                run["head_sha"],
+                "v0.8.6",
+                "release.yml",
+                publication.ENGINE_JOBS,
+                publication.PUBLISH_JOB,
+            )
+        self.assertEqual(selected["run_attempt"], 3)
+        self.assertEqual(selected["publication_attempt"], original["run_attempt"])
+        plan = json.loads(self.plan.read_text())
+        plan[0].update(
+            run_id=selected["run_id"],
+            publication_attempt=selected["publication_attempt"],
+        )
+        self.plan.write_text(json.dumps(plan))
+        # Actual independently captured engine certificate invocation, not the
+        # re-exposed job's run_attempt. Full signature verification stays in the
+        # unchanged production attestation verifier; this fixture tests policy.
+        self.claims[policy.OIDCRunInvocationURI.oid] = (
+            "https://github.com/malsabbagh/review-sensei/actions/runs/39405656742/attempts/2"
+        )
+        self.run_plan()
+        plan[0]["publication_attempt"] = 3
+        self.plan.write_text(json.dumps(plan))
+        with self.assertRaises(Exception):
+            self.run_plan()
 
     def test_every_signed_claim_is_enforced_against_the_exact_publication(self):
         self.run_plan()

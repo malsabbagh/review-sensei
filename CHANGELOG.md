@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Refuse missing native reviews on terminal retries in either entry mode; when
+  native replay is admitted, record a non-passing authority check without a
+  terminal ledger rewrite.
 - Refuse unsafe OpenRouter evaluation endpoint metadata before live calls and
   report construction. Report missing composite-control identities as bounded
   input errors while preserving historical reports without controls.
@@ -29,6 +32,32 @@
   policy and endpoint; absent or changed bindings cannot authorize support.
   Permit the evaluator's existing skipped-case status in its report schema.
   Actual live quality remains independently required for qualification.
+
+- Add explicit manual publication-only recovery from the original trusted policy,
+  exact transaction context and retained result, without another provider call.
+- Stage recovery-capable caller templates behind runner-first rollout; default
+  setup and the installed caller retain the released compatible input contract.
+- Complete durable publication before optional superseded-thread cleanup; resume
+  bounded cleanup on exact retries while preserving current approval obligations.
+- Require retained native approval authority on complete-review replay; missing or
+  invalid authority keeps the check non-passing instead of reconstructing approval.
+- Share scoped pagination observations and authenticated inventory context within
+  one publication budget, retaining fresh ownership, storage and prose fences.
+- Use one clock sample for recovery-artifact creation and expiry so the minimum
+  supported lifetime remains valid across a wall-clock second boundary.
+
+## 0.8.6 - 2026-10-20
+
+Changes since [v0.8.5](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.5), from [fb2352791caa993bcb34cd64b867af02c07c8f82](https://github.com/malsabbagh/review-sensei/commit/fb2352791caa993bcb34cd64b867af02c07c8f82) through [83f5f5a0d27e2542b8feef6a8822fb16cc6bee4b](https://github.com/malsabbagh/review-sensei/commit/83f5f5a0d27e2542b8feef6a8822fb16cc6bee4b).
+
+Previous annotated tag object: `48c972a11cfd9393c7e967a215f2b0bb7db3c2ec`.
+
+- docs: record released v0.8.5 ([82381eefa5783ac22b65016533f03bfb793a494d](https://github.com/malsabbagh/review-sensei/commit/82381eefa5783ac22b65016533f03bfb793a494d)).
+- fix: select inventory reference when complete review frame overflows \(\#334\) ([83f5f5a0d27e2542b8feef6a8822fb16cc6bee4b](https://github.com/malsabbagh/review-sensei/commit/83f5f5a0d27e2542b8feef6a8822fb16cc6bee4b)).
+
+## review-sensei-github 0.3.6 - 2026-10-20
+
+- Pin `review-sensei==0.8.6`.
 
 ## 0.8.5 - 2026-10-20
 
