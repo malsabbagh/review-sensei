@@ -44,9 +44,23 @@ DEFAULT_INVENTORY_INTENT_MARKER = (
 )
 
 
-def human_checkpoint(ledger, *, count=77, detail=3, gate=None):
+def human_checkpoint(
+    ledger, *, count=77, detail=3, gate=None, summary=None, body_findings=0
+):
     """Checkpoint the original varied bodies and exact identities publicly."""
     result = human_result(varied_comments(count, detail=detail, unique_paths=32))
+    if body_findings:
+        result = replace(
+            result,
+            comments=tuple(
+                replace(comment, side="FILE", line=None)
+                if index < body_findings
+                else comment
+                for index, comment in enumerate(result.comments)
+            ),
+        )
+    if summary is not None:
+        result = replace(result, summary=summary)
     configuration = trusted_configuration(gate)
     if gate == "partial":
         paths = tuple(sorted({comment.path for comment in result.comments}))
@@ -142,7 +156,7 @@ def located_files(comments):
     """Valid additions cover original line numbers; finding IDs never change."""
     files = []
     for path in sorted({comment.path for comment in comments}):
-        lines = max(comment.line for comment in comments if comment.path == path)
+        lines = max(comment.line or 1 for comment in comments if comment.path == path)
         patch = (
             f"@@ -0,0 +1,{lines} @@\n+return reject_remote_requests(data)\n"
             + "+pass\n" * (lines - 1)

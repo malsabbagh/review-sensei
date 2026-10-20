@@ -262,6 +262,8 @@ class DefaultHumanInventoryTests(unittest.TestCase):
             self.assertIsNotNone(eligibility)
             self.assertEqual(eligibility.human_review.findings, expected.findings)
             self.assertEqual(eligibility.human_review.base_sha, BASE)
+            if not complete_metadata:
+                self.assertIsNone(eligibility.human_inventory_reference)
             if complete_metadata:
                 self.assertEqual(
                     eligibility.human_review.inventory_document(),
@@ -301,6 +303,85 @@ class DefaultHumanInventoryTests(unittest.TestCase):
                 LocalSessionLedger(Path(directory) / "ledger").load(IDENTITY).record
             )
             self.assertEqual(restored.transaction.phase, "publication_succeeded")
+
+    def test_legacy_inventory_whole_frame_uses_reference_without_losing_prose(self):
+        for gate in (None, "partial"):
+            with self.subTest(gate=gate), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "ledger"
+                overview = "Original overview. " + "x" * 31_000
+                result, key = human_checkpoint(
+                    LocalSessionLedger(path),
+                    count=53,
+                    detail=1,
+                    summary=overview,
+                    body_findings=20,
+                    gate=gate,
+                )
+                expected = PendingHumanReview.from_result(result, BASE)
+                expected.to_dict()  # The standalone legacy inventory is valid.
+                state = DefaultHumanState(result.comments)
+                outcome = publish_human(
+                    state, LocalSessionLedger(path), result, key, gate=gate
+                )
+                self.assertEqual(outcome.status, "published")
+                current = self.load_current(state, path)
+                self.assertIsNotNone(current.human_inventory_reference)
+                self.assertEqual(current.human_review.findings, expected.findings)
+                self.assertEqual(len(current.human_review.pending), 53)
+                self.assertIn(overview, state.reviews[0]["body"])
+                self.assertEqual(len(state.inline), 33)
+                self.assert_visible_inventory(state, result, current, path)
+                self.assertNotIn("APPROVE", state.events())
+                self.assertEqual(state.check_runs[-1]["conclusion"], "action_required")
+                if gate == "partial":
+                    self.assertEqual(current.facts.review_status, "partial")
+                    self.assertEqual(current.facts.coverage_blocker, "partial")
+                self.assertEqual(
+                    LocalSessionLedger(path).load(IDENTITY).record.transaction.phase,
+                    "publication_succeeded",
+                )
+
+    def test_whole_frame_overflow_cannot_stage_or_grant_raw_recovery_authority(self):
+        from review_sensei_github.publication import PublicationLimitError
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger"
+            result, key = human_checkpoint(
+                LocalSessionLedger(path),
+                count=53,
+                detail=1,
+                summary="Original overview. " + "x" * 31_000,
+                body_findings=40,
+            )
+            PendingHumanReview.from_result(result, BASE).to_dict()
+            state = DefaultHumanState(result.comments)
+            with self.assertRaises(PublicationLimitError) as raised:
+                publish_human(state, LocalSessionLedger(path), result, key)
+            self.assertEqual(raised.exception.check, "framed-review-body")
+            self.assertFalse(state.reviews)
+            self.assertFalse(state.check_runs)
+            self.assertFalse(
+                any(DEFAULT_INVENTORY_INTENT_MARKER in p["body"] for p in state.parts)
+            )
+            self.assertEqual(
+                LocalSessionLedger(path).load(IDENTITY).record.transaction.phase,
+                "publication_failed",
+            )
+            budget = EvidenceReadBudget()
+            ledger = LocalSessionLedger(path)
+            raw = recover(application(state, ledger), ledger, budget=budget)
+            self.assertEqual(raw.content_digest(), result.content_digest())
+            before = len(state.calls)
+            with self.assertRaises(ReviewInputError):
+                publish_human(state, ledger, raw, key, publication_budget=budget)
+            self.assertFalse(
+                any(m in {"POST", "PATCH"} for m, _, _ in state.calls[before:])
+            )
+            self.assertFalse(state.reviews)
+            self.assertFalse(
+                any(DEFAULT_INVENTORY_INTENT_MARKER in p["body"] for p in state.parts)
+            )
+            self.assertNotIn("APPROVE", state.events())
 
     def test_control_inline_human_findings_use_the_same_default_publication_and_reader(
         self,
