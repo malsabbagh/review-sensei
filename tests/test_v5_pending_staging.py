@@ -248,6 +248,25 @@ class V5PendingStagingTests(unittest.TestCase):
         self.assertGreater(self.state.reply_count, 1)
         self.assertEqual(self.state.events(), [])
 
+    def test_invalid_pending_stage_is_forwarded_and_refused_before_transport(self):
+        with self.assertRaisesRegex(
+            GitHubConversationError, "pending reply stage is invalid"
+        ):
+            self.publisher.publish(
+                token="synthetic",
+                repository="owner/repo",
+                pull_request=1,
+                source_comment_id=10,
+                source_updated_at="updated",
+                head_sha=HEAD,
+                reply=ConversationReply("Supported original evidence.", False),
+                app_slug=APP,
+                root_comment_id=10,
+                source_kind="issue",
+                _pending_stage=object(),
+            )
+        self.assertEqual(self.state.calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

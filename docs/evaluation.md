@@ -45,6 +45,18 @@ coverage. Finding matching is one-to-one by canonical path, changed line,
 category, and normalized body terms. Provider calls, UTF-8 prompt/response
 bytes, elapsed time, and `ceil(bytes / 4)` are non-monetary proxies.
 
+Live evaluation runs the complete existing fixture evaluation as a separate
+local conformance control on the same corpus, engine and packaged prompts.
+Those exact fixture and rejection rates supply the deterministic section.
+Actual live results supply quality metrics and live usage; provider/model and
+summary wording are not compared with fixture JSON. Expected-finding recall
+uses the full expected inventory, including findings the live result missed.
+The `evaluation_control` block retains the distinct fixture identity, full
+case inventory and every unchanged threshold. Live rows record whether work
+completed. The overall verdict requires both controls and nonempty complete
+live quality work with provider attempts. Fixture calls never enter live usage.
+See proposed [ADR 0082](adr/0082-separate-live-quality-from-deterministic-conformance.md).
+
 The corpus is a four-category regression sentinel plus an acceptable clean case
 and malformed-output rejection. It cannot establish broad model quality, and
 transparent body-term matching can under-credit valid paraphrases. Prompt
@@ -76,6 +88,18 @@ review. Fixture runs are deterministic engine checks only and can never approve
 a real model, prompt, generation-setting, or routing promotion. Rerunning
 fixture evaluation after failing live evidence cannot convert that failure into
 approval.
+
+The current report-bound promotion gates also require consistent live
+`evaluation_control` evidence. They cross-check inventories, expected counts,
+identities, rates, metrics and verdicts. Historical reports without the optional
+v1 control remain structurally valid but cannot newly authorize support under
+this protocol. Update strict readers to the current packaged schema; preserve
+old retained bytes and collect new evidence rather than adding control fields
+to old artifacts. The protocol changes new live configuration digests.
+
+Control consistency does not cryptographically attest an unsigned report's
+producer. Operator-retained evidence and independently expected target identities
+remain separate requirements; synthetic passing tests cannot qualify a model.
 
 Such a promotion requires a validated `promotion-record` document (the packaged
 `promotion-record` schema) bound to passing live evaluation reports. The record

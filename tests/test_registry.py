@@ -330,20 +330,22 @@ class ProviderRegistryTests(unittest.TestCase):
         profile = get_provider_profile("openrouter-sonnet")
         self.assertEqual(profile.qualification_status, "unqualified")
 
-    def test_openrouter_unprofiled_policy_must_match_env(self):
-        with self.assertRaisesRegex(
-            ProviderError, "does not match OPENROUTER_UPSTREAM_PROVIDER"
+    def test_openrouter_unprofiled_keeps_explicit_policy_despite_retired_env(self):
+        policy = OpenRouterRoutingPolicy(upstream_provider="morph/variant")
+        with patch.dict(
+            "os.environ",
+            {"OPENROUTER_UPSTREAM_PROVIDER": "invalid old value"},
+            clear=True,
         ):
-            default_registry().create(
+            provider = default_registry().create(
                 ProviderSettings(
                     name="openrouter",
-                    model="anthropic/claude-3.5-sonnet",
-                    api_key="secret",
-                    openrouter_policy=OpenRouterRoutingPolicy(
-                        upstream_provider="openai"
-                    ),
+                    model="deepseek/deepseek-v4.1-flash",
+                    api_key="synthetic",
+                    openrouter_policy=policy,
                 )
             )
+        self.assertEqual(provider.routing_policy, policy)
 
     def test_openrouter_unprofiled_requires_routing_policy(self):
         with self.assertRaisesRegex(ProviderError, "requires a routing policy"):

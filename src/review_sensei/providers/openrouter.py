@@ -33,7 +33,13 @@ from urllib.request import (
 import certifi
 
 from ..errors import ProviderError, ReviewInputError
-from ..models import ProviderRequest, ProviderResponse
+from ..models import (
+    MAX_PROVIDER_TOKEN_COUNT,
+    ProviderRequest,
+    ProviderResponse,
+    ProviderTokenUsage,
+    _validate_observed_identifier,
+)
 from ..validation import validate_bounded_text
 from .transport import (
     MAX_TRANSPORT_TIMEOUT_SECONDS,
@@ -50,7 +56,11 @@ ALLOWLISTED_OPENROUTER_HOSTNAME = "openrouter.ai"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_APP_REFERER = "https://reviewsensei.dev"
 DEFAULT_APP_TITLE = "ReviewSensei"
-_UPSTREAM_PROVIDER_SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+# Bounded subset of the documented provider[/variant][/region][/tier] grammar.
+# No normalization may silently drop a routing suffix.
+_UPSTREAM_PROVIDER_SLUG = re.compile(
+    r"^[a-z0-9][a-z0-9_-]{0,63}(?:/[a-z0-9][a-z0-9_-]{0,63}){0,3}$"
+)
 
 
 def _validated_upstream_provider_slug(value: str) -> str:
@@ -515,7 +525,7 @@ class OpenRouterProvider:
             data = json.loads(body_text)
         except UnicodeDecodeError as exc:
             raise ProviderError("OpenRouter response was not valid UTF-8") from exc
-        except (TypeError, json.JSONDecodeError) as exc:
+        except (TypeError, ValueError) as exc:
             raise ProviderError("OpenRouter response was not valid JSON") from exc
 
         if isinstance(data, dict) and data.get("error") is not None:
@@ -552,34 +562,54 @@ class OpenRouterProvider:
                 "OpenRouter review response exceeded the configured size limit"
             ) from exc
 
-        revision = None
-        if isinstance(data, dict):
-            observed_model = data.get("model")
-            fingerprint = data.get("system_fingerprint")
-            candidate = (
-                observed_model
-                if isinstance(observed_model, str) and observed_model.strip()
-                else fingerprint
-            )
-            if isinstance(candidate, str) and candidate.strip():
-                try:
-                    validate_bounded_text(
-                        candidate.strip(),
-                        request.limits.max_revision_bytes,
-                        label="OpenRouter observed revision",
-                        allow_empty=False,
+        # Metadata is optional and untrusted. Invalid fields become unknown;
+        # retain only bounded protocol identifiers and allowlisted counters.
+        # Never use a model alias as a revision or infer an observed endpoint
+        # from our requested routing policy. No enrichment request is made.
+        def observed_identifier(key: str, maximum: int) -> str | None:
+            candidate = data.get(key) if isinstance(data, dict) else None
+            if not isinstance(candidate, str):
+                return None
+            try:
+                _validate_observed_identifier(
+                    candidate, maximum, label="OpenRouter metadata"
+                )
+            except ReviewInputError:
+                return None
+            return candidate
+
+        observed_model = observed_identifier("model", request.limits.max_model_bytes)
+        observed_upstream = observed_identifier("provider", MAX_UPSTREAM_PROVIDER_BYTES)
+        revision = observed_identifier(
+            "system_fingerprint", request.limits.max_revision_bytes
+        )
+        usage = data.get("usage") if isinstance(data, dict) else None
+        token_usage = None
+        if isinstance(usage, dict):
+            counters = {}
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                value = usage.get(key)
+                counters[key] = (
+                    value
+                    if (
+                        isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and 0 <= value <= MAX_PROVIDER_TOKEN_COUNT
                     )
-                except ReviewInputError as exc:
-                    raise ProviderError(
-                        "OpenRouter observed revision exceeded the configured size limit"
-                    ) from exc
-                revision = candidate.strip()
+                    else None
+                )
+            if any(value is not None for value in counters.values()):
+                token_usage = ProviderTokenUsage(**counters)
         return ProviderResponse(
             text=text,
             provider=self.name,
             model=model,
             limits=request.limits,
             revision=revision,
+            observed_model=observed_model,
+            observed_upstream=observed_upstream,
+            revision_source="provider-system-fingerprint" if revision else None,
+            token_usage=token_usage,
         )
 
 

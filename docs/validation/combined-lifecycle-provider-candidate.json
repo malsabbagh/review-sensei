@@ -1,0 +1,240 @@
+{
+  "schema_version": 1,
+  "kind": "unpublished-candidate-exact-source-qualification",
+  "source_commit": "b2bf03400788ad2a507cecded65b2b912c3cd2e3",
+  "harness_commit": "b2bf03400788ad2a507cecded65b2b912c3cd2e3",
+  "baseline_commit": "7a641b8b6402292f213159853400aff4f2e9a3d9",
+  "platform": {
+    "system": "Darwin",
+    "machine": "arm64",
+    "python": "3.14.6"
+  },
+  "build": {
+    "source_commit": "b2bf03400788ad2a507cecded65b2b912c3cd2e3",
+    "tracked_files_matched": 868,
+    "source_archive_sha256": "60b68a1240178fc04ff28cefcb344d944334f73b4ad97d40e258f5acbba58334",
+    "artifacts": {
+      "github/review_sensei_github-0.3.1-py3-none-any.whl": {
+        "sha256": "959fd1c416596d84e3ee2ed5765fdfbc59cdee085921d74889d7df99762deba7",
+        "bytes": 295527
+      },
+      "review_sensei-0.8.1-py3-none-any.whl": {
+        "sha256": "c2e6518fbb3c796718efd1e06ea8aeb8142207703ec894da6d65bf447d3a1690",
+        "bytes": 533947
+      },
+      "review_sensei-0.8.1.tar.gz": {
+        "sha256": "cdc8725e0a907617efee1c5e1af1661693e4ed0505a783116f6033a5cffabb83",
+        "bytes": 1213109
+      }
+    }
+  },
+  "runtime_matches_harness": true,
+  "checkout": {
+    "discovered": 3710,
+    "inventory_sha256": "53cadadd07f85c9a15b9a4e501bd2f9407d62b74d9b2ca9833132d0c967216f5",
+    "execution_complete": true,
+    "worker_exits": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "coverage_percent": 82.71,
+    "coverage_floor_percent": 80,
+    "coverage_elapsed_seconds": 82.167,
+    "normal_tests": 3710,
+    "normal_elapsed_seconds": 251.897
+  },
+  "installed": {
+    "review_sensei": {
+      "origin": "<isolated-environment>/lib/python3.14/site-packages/review_sensei",
+      "verified_files": 119
+    },
+    "review_sensei_github": {
+      "origin": "<isolated-environment>/lib/python3.14/site-packages/review_sensei_github",
+      "verified_files": 48
+    }
+  },
+  "consumer_results": [
+    {
+      "name": "help",
+      "exit": 0
+    },
+    {
+      "name": "dist_safe",
+      "exit": 0,
+      "tests_run": 204
+    },
+    {
+      "name": "downstream",
+      "exit": 0,
+      "tests_run": 11
+    },
+    {
+      "name": "openai_configuration",
+      "exit": 0,
+      "tests_run": 18
+    },
+    {
+      "name": "qualify",
+      "exit": 0,
+      "total": 489,
+      "pass": 489,
+      "fail": 0
+    },
+    {
+      "name": "transports",
+      "exit": 0,
+      "total": 18,
+      "pass": 18,
+      "fail": 0
+    },
+    {
+      "name": "seam_boundaries",
+      "exit": 0,
+      "total": 519,
+      "pass": 519,
+      "fail": 0
+    },
+    {
+      "name": "operations",
+      "exit": 0,
+      "total": 39,
+      "pass": 39,
+      "fail": 0
+    },
+    {
+      "name": "operation_state",
+      "exit": 0,
+      "total": 17,
+      "pass": 17,
+      "fail": 0
+    },
+    {
+      "name": "lifecycle",
+      "exit": 0,
+      "tests_run": 169,
+      "total": 169,
+      "pass": 169,
+      "fail": 0
+    },
+    {
+      "name": "pip_check",
+      "exit": 0
+    }
+  ],
+  "static_gates": [
+    {
+      "name": "format",
+      "exit": 0
+    },
+    {
+      "name": "ruff",
+      "exit": 0
+    },
+    {
+      "name": "mypy",
+      "exit": 0
+    },
+    {
+      "name": "compile",
+      "exit": 0
+    },
+    {
+      "name": "action-pins",
+      "exit": 0
+    },
+    {
+      "name": "json",
+      "exit": 0
+    },
+    {
+      "name": "schemas",
+      "exit": 0
+    },
+    {
+      "name": "readers",
+      "exit": 0
+    },
+    {
+      "name": "corpus",
+      "exit": 0
+    },
+    {
+      "name": "site-manifest",
+      "exit": 0
+    },
+    {
+      "name": "site-pages",
+      "exit": 0
+    },
+    {
+      "name": "protection",
+      "exit": 0
+    },
+    {
+      "name": "diff",
+      "exit": 0
+    }
+  ],
+  "sdist": {
+    "required_entries": 47,
+    "excluded_checkout_modules": 10
+  },
+  "additional_installed_checks": [
+    {
+      "module": "tests.test_human_assessment.HumanAssessmentTests",
+      "method": "test_recorded_replay_rejects_invalid_identities_before_any_publication",
+      "tests_run": 1,
+      "subcases": [
+        "duplicate_decision_fingerprint",
+        "unknown_finding_fingerprint"
+      ],
+      "exit": 0,
+      "runtime": "exact installed engine and adapter, frozen sdist test helper, isolated Python, live network forbidden",
+      "effect": "typed refusal with unchanged reads, reviews, replies and checks"
+    }
+  ],
+  "commands": [
+    "python scripts/run_checkout_tests.py --workers 4 --coverage --costs tests/fixtures/checkout-class-seconds.json --report <outside-checkout>/checkout-timings.json",
+    "python -m coverage report --precision=2 --show-missing --fail-under=80",
+    "python -m unittest discover -s tests -v",
+    "python -m build --no-isolation --outdir <artifacts> <verified-git-archive>",
+    "python -m build --no-isolation --wheel --outdir <artifacts>/github <verified-git-archive>/packages/python/review-sensei-github",
+    "python scripts/check_sdist_contract.py <engine-sdist>",
+    "<consumer-python> -I -m unittest discover -s <sdist>/tests/dist_safe -v",
+    "<consumer-python> -I -m unittest discover -s <sdist>/tests/downstream -v",
+    "<consumer-python> -I tests/published_cli/openai_configuration.py --wheel <engine-wheel> --expected-version 0.8.1 --report <new-directory>",
+    "<consumer-python> tests/published_cli/{qualify,transports,seam_boundaries,operations,operation_state,lifecycle}.py --expected-version 0.8.1 --report <new-directory> [--expected-github-version 0.3.1 for hosted suites]",
+    "<consumer-python> -I <runner> <sdist-root> # loads the one named real-codec identity regression above; asserts both installed package origins and denies live socket connections"
+  ],
+  "limits": [
+    "100 independent SHA256 identities and 250 compact IDs: one required path, short Unicode prose, 100/250 ordinary historical comments; rich 250 independent IDs intentionally refuse the inline 24 KiB reserve",
+    "Rich partition writer activation, public fair/targeted queues and joint retention/deployed-reader qualification remain open",
+    "Full original 64-dispatch/60-second physical-service accounting and durable server-origin elapsed-time replay remain unqualified",
+    "OpenRouter positive report-bound runtime approval and legacy standalone-finalizer binding remain open; new accepting status claims withhold",
+    "Full provider/event/control installed cross-product, five native final artifacts, deployed upgrade/drain/rollback remain separate gates",
+    "No merge/release/channel/deployment/settings or secret changes performed",
+    "Finite captured/loopback and synthetic host/process evidence; not live/deployed qualification",
+    "Provider observations and usage remain claims/unknown where absent; no prices or capability invented",
+    "Fixture-control/live-quality synthetic reports do not satisfy three independent actual provider invocations and human adjudication",
+    "Source/runtime interface is shared; CLI/workflow configuration allowlists and provider-specific auth/endpoint/capability declarations remain explicit",
+    "Exact PR-head CI and ReviewSensei decisions are separate from this local artifact receipt"
+  ],
+  "stack_base_commit": "daf6e8ab0941f512e50bbef91335cc4611fee1b5",
+  "shared_provider_matrix": {
+    "cases": 86,
+    "common_methods_per_configuration": 14,
+    "configurations": [
+      "local Ollama defaults",
+      "Ollama cloud DeepSeek4.1Flash",
+      "Ollama cloud GLM5.3",
+      "default HTTPS OpenAI-compatible",
+      "explicit custom HTTPS OpenAI-compatible",
+      "strict OpenRouter DeepSeek/Morph"
+    ],
+    "additional_ollama_controls": 2,
+    "helper": "tests/provider_common_flow_contract.py",
+    "discussion_helper": "tests/conversation_deadline_contract.py"
+  }
+}

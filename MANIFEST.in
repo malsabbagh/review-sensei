@@ -24,9 +24,16 @@ include tests/session_fixture_clock.py
 include tests/openrouter_cli_contract.py
 include tests/baseline_cli_contract.py
 include tests/provider_deadline_contract.py
+include tests/conversation_deadline_contract.py
+include tests/provider_common_flow_contract.py
+include tests/github_ingress_contract.py
 include tests/test_large_public_lifecycle.py
+include tests/test_public_feedback_continuation.py
 include tests/test_human_assessment.py
 include tests/test_operation_entry.py
+include tests/test_operation_host.py
+include tests/test_operation_wall_clock.py
+include tests/test_handle_aware_operation_entry.py
 include tests/test_review_work.py
 include tests/test_bounded_v1_publication.py
 include tests/test_publication_recovery.py
@@ -58,3 +65,9 @@ include tests/fixtures/regressions/pr316-history-shape.json
 include tests/test_activation_tail.py
 include tests/test_assessment_queue_storage.py
 include tests/test_hosted_history_independent_acceptance.py
+include tests/test_broker_dispatch_control.py
+include tests/test_github_broker_client.py
+include tests/test_initial_assessment_tail.py
+include tests/test_assessment_queue.py
+include tests/test_rich250_public_writer.py
+include tests/test_rich250_late_feedback.py

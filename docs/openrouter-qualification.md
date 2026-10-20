@@ -13,16 +13,32 @@ credentials, or enable website support labels solely because the adapter merged.
 
 ## Qualification target
 
-The first supported slice is intentionally small:
+The current hosted candidate eligible for qualification is intentionally small:
 
-| Field | Initial value |
+| Field | Candidate value |
 | --- | --- |
 | Provider | `openrouter` |
-| Model | `anthropic/claude-3.5-haiku` |
-| Upstream provider | `anthropic` |
+| Model | `deepseek/deepseek-v4.1-flash` |
+| Upstream provider | `morph` (family constraint) |
 | Base URL | `https://openrouter.ai/api/v1` |
 | Endpoint scope | `remote` |
 | Routing policy | No fallbacks, `require_parameters`, `data_collection=deny`, `zdr=true` |
+
+Hosted selectability and target eligibility do not grant `supported` status.
+The historical Haiku/Anthropic eligibility is retained; other hosted models and
+unknown combinations cannot inherit this candidate's evidence. The `morph` slug
+selects eligible endpoints in a provider family, not one fixed region/deployment.
+Current strict-policy capability and three independent live passing runs remain
+pending #122. The [official routing contract](https://openrouter.ai/docs/guides/routing/provider-selection#targeting-specific-provider-endpoints)
+allows family and endpoint prefixes; full slugs are preserved in requests and
+policy/configuration digests. Endpoint variants shown in protocol tests are not
+qualified targets. Check the [candidate catalog](https://openrouter.ai/deepseek/deepseek-v4.1-flash/providers)
+and actual strict-policy behavior during authorized qualification; no live catalog
+lookup occurs in ordinary execution or CI.
+
+The candidate policy digest is
+`27fbcad31a801f636838de7fe087bdd9bb73b5318416cd473a92b72eb2efe400`.
+A changed upstream suffix produces a different digest and requires new evidence.
 
 Record the routing policy digest with
 `review_sensei.openrouter_qualification.routing_policy_digest`. Mutable model
@@ -52,18 +68,41 @@ explicitly authorized inputs, `--allow-live-model`, `--allow-data-egress`, and
 a non-empty `--provider-version`:
 
 ```bash
-review-sensei evaluate --mode live \
+OPENROUTER_UPSTREAM_PROVIDER=morph review-sensei evaluate --mode live \
   --corpus evaluation/v1/corpus.json \
   --provider openrouter \
   --base-url https://openrouter.ai/api/v1 \
-  --model anthropic/claude-3.5-haiku \
+  --model deepseek/deepseek-v4.1-flash \
   --provider-version <observed-openrouter-revision> \
   --allow-live-model --allow-data-egress \
   --output openrouter-live-1.json
 ```
 
+`--provider-version` remains an operator attestation, not a response probe.
+`ProviderResponse.revision` contains only a reported fingerprint when available;
+model aliases never substitute for it. Record unavailable identity honestly and
+retain provenance separately. Optional provider-reported usage is telemetry and
+cannot establish qualification or approve a review.
+
 Repeat until three independent passing reports exist. Retain exact report files
 and provider terms/egress approval separately from the public support record.
+
+Each live invocation now runs exact local fixture conformance separately from
+actual live finding quality. Both must satisfy every original corpus threshold;
+missing/incomplete live work or a failed control withholds passing evidence.
+The optional `evaluation_control` records both provenance and the complete local
+inventory (proposed ADR 0082). A passing fixture run cannot repair bad live
+quality. Historical reports without this control still parse, but cannot newly
+mint or validate supported promotion; preserve their original bytes and collect
+new evidence. No real provider has been qualified by the synthetic regressions.
+
+Live OpenRouter reports bind their actual requested policy and endpoint in
+`run.openrouter_routing_policy_digest` and `run.openrouter_base_url`. Every live
+report must match the qualification target on both fields before a support
+record can be minted or checked. A `morph/variant` policy cannot inherit `morph`
+family evidence. Old reports without these optional schema fields still parse,
+but cannot newly authorize support; preserve their original bytes and collect
+new bound evidence. Historical Haiku/Anthropic remains an eligible target.
 
 ## Support record
 
@@ -84,12 +123,12 @@ Emit from Python:
 import json
 
 from review_sensei.openrouter_qualification import (
-    INITIAL_OPENROUTER_QUALIFICATION_TARGET,
+    CURRENT_HOSTED_OPENROUTER_QUALIFICATION_TARGET,
     qualification_record_from_reports,
     require_supported_openrouter_qualification,
 )
 
-target = INITIAL_OPENROUTER_QUALIFICATION_TARGET
+target = CURRENT_HOSTED_OPENROUTER_QUALIFICATION_TARGET
 artifacts = [path.read_bytes() for path in retained_report_paths]
 reports = [json.loads(artifact) for artifact in artifacts]
 
@@ -206,30 +245,59 @@ Ordinary CI runs `tests/test_openrouter_qualification.py` and
 
 ## Runtime approval boundary (#115)
 
-The GitHub adapter does not yet bind retained qualification reports to the
-independently expected effective configuration of a review run. Until that
-integration exists, OpenRouter reviews withhold automatic approval. A named
-profile's `qualification_status`, a caller's `qualification="qualified"`, and
-the publisher's historical `not-required` default cannot mint eligible
-OpenRouter facts. A published target identifies which configurations the
-harness can evaluate; it does not grant support or approval.
+The reusable GitHub adapter accepts an explicitly configured
+`TrustedOpenRouterQualification` authority. It reuses
+`load_supported_openrouter_qualification` on immutable retained record/report
+bytes, with independent expected target, engine, prompt, evaluation configuration,
+corpus, observation date and reproducibility inputs. The trusted host also
+supplies actual runtime configuration, stages and limits; publication requires
+the analyzed context to match. Evaluation and runtime transaction configuration
+digests remain separate contracts. Never copy expected values from the record
+under test, PR-controlled configuration or model output.
 
-`tests/test_github_qualification_boundary.py` captures the real publisher's
-GitHub requests with external HTTP replaced. It checks omitted/asserted status,
-application publication, recovery, replay, and separate finalization of the
-newly persisted withheld facts. Permitted comments and requests for changes,
-other providers, and approval/write opt-outs keep their existing policy.
+Inject the same authority into `ReviewPublisher` and standalone
+`ReviewApprovalFinalizer`, and into `ConversationPublisher` /
+`HumanAssessmentPublisher` when those services perform delayed finalization.
+`GitHubApplication.publish_review` forwards its trusted `configuration_context`;
+`recover_review` accepts the same context without a model call. The authority
+covers one exact effective runtime configuration with a single stage provider;
+changed configuration requires a separately checked authority. See
+[ADR 0083](adr/0083-trusted-runtime-openrouter-qualification.md) for the complete
+composition, trust and migration contract.
 
-This repair does **not** complete #115. A supported positive runtime control
-still needs retained report-byte validation through
-`load_supported_openrouter_qualification`, independent effective engine,
-prompt, configuration and routing identities, and durable exact-head binding.
-The evaluation configuration digest and transaction configuration digest have
-different contracts and must not be treated as interchangeable. Existing
-standalone finalizer eligibility documents carry no provider/evidence identity;
-this test cannot prove that an older `qualified` document was backed by reports.
-Live qualification (#122) and installed/deployed acceptance (#123) remain
-separate operator evidence.
+Every public finalizer call requires matching App-owned exact-head eligibility
+readback, including provider exemption. Passing the compatibility argument
+`require_persisted=False` cannot relax it.
+
+New provider-bound facts use version `2`. They persist only the normalized
+provider and a 64-hex-character receipt over checked authority plus repository,
+PR, base, head and result identity. The finalizer rechecks current retained
+bytes and independently expected configuration before thread reads and again
+before APPROVE. Missing, changed, forged, stale or legacy-unbound context
+withholds; no accepting caller/profile string bypasses the gate. Existing
+thread, blocker, coverage, human-decision and opt-out requirements still apply.
+
+Legacy facts v1 remain readable but cannot prove provider exemption or checked
+qualification. An ordinary retry cannot silently upgrade them. The authenticated
+incomplete-rescan path may authorize a fresh analyzed result when its existing
+conditions hold; qualification remains a separate check. A complete legacy
+same-head publication has no such refresh authority: review a new head with the
+bound configuration. Old strict readers reject new facts v2 safely; use the
+matching current adapter and engine schemas.
+
+`tests/test_github_qualification_boundary.py` covers accepting-string negatives.
+`tests/test_github_trusted_qualification.py` covers synthetic checked positives,
+independent mismatches, application/recovery, replay and separate finalization.
+The installed-safe runtime contract uses the actual packaged corpus with
+synthetic provider output. Those controls qualify no real deployment.
+
+CLI/default hosted composition continues to withhold OpenRouter approval unless
+a trusted host explicitly injects the evidence authority. It does not read
+approval authority from repository files, ambient profile status or model
+output. Newly published Ollama/compatible reviews and informational/request-
+changes flows retain their existing policy. Live qualification (#122), actual
+installed/deployed operational acceptance (#123), and heterogeneous stage
+providers remain separate evidence or integration conditions.
 
 ## Release compatibility and canary
 

@@ -202,7 +202,7 @@ class OpenRouterProviderTests(unittest.TestCase):
             provider.complete(ProviderRequest(prompt="private"))
         self.assertTrue(raised.exception.transient)
 
-    def test_revision_prefers_observed_model(self):
+    def test_revision_uses_fingerprint_instead_of_observed_model(self):
         provider = OpenRouterProvider(
             model="anthropic/claude-3.5-sonnet",
             api_key="secret",
@@ -213,7 +213,8 @@ class OpenRouterProviderTests(unittest.TestCase):
             ),
         )
         result = provider.complete(ProviderRequest(prompt="review"))
-        self.assertEqual(result.revision, "anthropic/claude-3.5-sonnet")
+        self.assertEqual(result.revision, "fp_123")
+        self.assertEqual(result.observed_model, "anthropic/claude-3.5-sonnet")
 
     def test_allow_model_override_false_ignores_request_model(self):
         captured: dict[str, object] = {}

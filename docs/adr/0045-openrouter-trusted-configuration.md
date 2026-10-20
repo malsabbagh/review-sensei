@@ -49,7 +49,13 @@ model, and routing-policy identity fields are included in
 `configuration_digest` for evaluation and promotion evidence. Raw credentials are
 never hashed.
 
-### Approval status is not evidence (#115, 2026-10-18 amendment)
+### Approval status is not evidence (#115, initial 2026-10-18 amendment)
+
+The initial fail-closed repair below is historical.
+[ADR 0083](0083-trusted-runtime-openrouter-qualification.md) extends it with
+checked runtime authority, facts v2 and independently required persisted
+readback. Its positive API and legacy migration replace the deferrals below;
+the rejection of status strings remains in force.
 
 The profile status remains diagnostic configuration. It does not authorize
 GitHub approval. The result-facts builder and reusable publisher withhold
@@ -159,3 +165,16 @@ Tradeoffs:
 Run `tests.test_openrouter`, `tests.test_cli`, `tests.test_diagnostics_and_patches`,
 and `tests.test_registry`. Roll back by removing OpenRouter profiles and CLI
 branches; the #96 adapter can remain registered without being selectable.
+
+
+## Amendment (2026-10-18) - canonical review routing authority
+
+Canonical review execution obtains routing from trusted
+`advanced.routing.upstream_provider`, including validated endpoint suffixes within
+the published model's upstream family. The resolved typed policy reaches
+`ProviderSettings` unchanged. Its registry boundary no longer reads or compares
+`OPENROUTER_UPSTREAM_PROVIDER`; named-profile policy equality remains mandatory.
+The earlier environment-equality description applies to the historical path.
+Legacy `evaluate` still resolves its environment policy at the CLI boundary.
+See proposed ADR 0081 and issue #121. This changes no privacy, fallback,
+credential, qualification or approval condition.

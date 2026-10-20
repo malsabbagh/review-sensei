@@ -45,6 +45,7 @@ from .provider_config import (
 from .providers.openai_compatible import validate_openai_compatible_endpoint
 from .providers.openrouter import (
     DEFAULT_OPENROUTER_BASE_URL,
+    OpenRouterRoutingPolicy,
     is_allowlisted_openrouter_endpoint,
 )
 from .validation import (
@@ -83,7 +84,6 @@ _INTEGER_PATTERN = re.compile(r"^-?\d+$")
 _FLOAT_PATTERN = re.compile(r"^-?\d+\.\d+$")
 _OLLAMA_MODEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]+$")
 _OPENROUTER_MODEL_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$")
-_UPSTREAM_PROVIDER_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _CREDENTIAL_ENV_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 _RETIRED_REPLACEMENT_PATTERN = re.compile(r"^[a-z][a-z0-9_.]*$")
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
@@ -1265,11 +1265,11 @@ def _build_routing(
         None,
         fail=fail,
     )
-    if upstream is not None and not _UPSTREAM_PROVIDER_PATTERN.fullmatch(upstream):
-        raise fail(
-            "advanced.routing.upstream_provider",
-            "must be a lower-case provider slug such as 'morph'",
-        )
+    if upstream is not None:
+        try:
+            OpenRouterRoutingPolicy(upstream_provider=upstream)
+        except ValueError as exc:
+            raise fail("advanced.routing.upstream_provider", str(exc)) from exc
     return RoutingSection(upstream_provider=upstream)
 
 
@@ -2007,16 +2007,16 @@ def _resolve_upstream(
         return None
     hosted = published_hosted_openrouter_models()
     if model in hosted:
-        documented = _documented_upstream(model)
-        if configured is not None and configured != documented:
+        try:
+            return hosted_openrouter_upstream(model, configured_upstream=configured)
+        except ReviewInputError as exc:
             raise _located(
                 configuration,
                 "advanced.routing.upstream_provider",
                 f"'{configured}' does not match the documented upstream "
-                f"'{documented}' for model '{model}'; routing restrictions cannot "
-                "be relaxed",
-            )
-        return documented
+                f"'{_documented_upstream(model)}' for model '{model}'; routing "
+                "restrictions cannot be relaxed",
+            ) from exc
     return configured if configured is not None else defaults.upstream_provider
 
 

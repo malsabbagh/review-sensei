@@ -1246,6 +1246,7 @@ class GitHubApplication:
                         configuration_context
                     ),
                 ),
+                "configuration_context": configuration_context,
                 "candidates": candidates,
                 "snapshot": snapshot,
                 "snapshot_sha256": snapshot_sha256,
@@ -2299,6 +2300,7 @@ class GitHubApplication:
         app_slug: str,
         now=None,
         convergence_policy: ReviewConvergencePolicy | None = None,
+        configuration_context: Mapping[str, object] | None = None,
     ) -> PublicationResult:
         """Publish a retained result without invoking a model or writing learnings."""
 
@@ -2356,6 +2358,7 @@ class GitHubApplication:
                 model=result.model,
             ),
             convergence_policy=convergence_policy,
+            configuration_context=configuration_context,
         )
 
     def publish_learning(
@@ -2724,6 +2727,9 @@ class GitHubApplication:
             raise ReviewInputError(
                 "broader discovery requires trusted full-review policy"
             )
+        # Context preparation, authorization and operation-entry latency all
+        # consume this caller's original provider-work deadline.
+        work_tracker = ResourceBudgetTracker(budget or ResourceBudget.create())
         replier = self.replier
         broker = self.broker
         shared_evidence_budget = evidence_budget or EvidenceReadBudget()
@@ -2817,10 +2823,10 @@ class GitHubApplication:
         # A malformed owned root is a held operation, not a generic reply.
         assessor = None
         human = None
-        work_tracker = ResourceBudgetTracker(budget or ResourceBudget.create())
         if isinstance(replier, ConversationPublisher):
             assessor = HumanAssessmentPublisher(
                 http=replier.http,
+                qualification_authority=replier.finalizer.qualification_authority,
                 evidence_budget=shared_evidence_budget,
                 human_inventory_reader_factory=operation_owner._human_inventory_reader,
                 human_inventory_read_token=read_token,
@@ -3155,6 +3161,7 @@ class GitHubApplication:
                 execute=lambda: ConversationService(reply_provider).reply(
                     prepared.context,
                     model=model,
+                    tracker=work_tracker,
                 ),
                 encode=_conversation_bytes,
                 decode=_conversation_from_bytes,

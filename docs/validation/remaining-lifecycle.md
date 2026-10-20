@@ -37,14 +37,14 @@ of those modules; focused notes describe the additional experiments.
 | #269 | `test_assessment_history`, `test_assessment_history_index`, `test_history_association`, `test_evidence_capacity` | Joint current/history/root/physical retention and delayed deployed readers must pass together before rich writer activation |
 | #313 | `baseline_cli_contract.BaselineCLIContract`: fresh processes for changed base/model, exact retry, omitted concern, failed/partial/oversized refresh, unknown trust, pause, concurrent owner and cancellation; [focused evidence](baseline-recovery.md) | Installed synthetic CLI proof is bounded; live hosted baseline invalidation is a separate rollout observation |
 | #314 | Shared `provider_deadline_contract`, `test_run_outcomes`, `test_review_work`: partially spent/expired budget, durable callback, retry/correction/chunks, shorter transport timeout and cancellation | Transport timeouts bound cooperative adapters. Arbitrary uncooperative third-party Python code is not preempted; external provider latency is not inferred from loopback |
-| #115 | `test_github_qualification_boundary`: direct publisher, result facts, profile claim, replay, application/recovery and delayed finalizer; unchecked OpenRouter status cannot authorize new approval | Positive report-byte-bound runtime qualification API and independent qualification binding for legacy standalone-finalizer records remain unavailable; OpenRouter approval stays withheld |
+| #115 | `test_github_qualification_boundary`, `test_github_trusted_qualification`: independent checked retained bytes, effective identities, positive publisher/application/recovery/replay, exact-head delayed finalizer, mandatory App-owned readback and legacy/forged-provider rejection; installed-safe packaged-corpus control | Reusable host authority is explicit, not inferred by CLI/default deployment. Real #122 qualification and #123 installed/deployed operational evidence remain external; complete unbound legacy records require a new-head bound review, while authenticated incomplete rescans keep their existing conditions |
 | #116 | `test_workflow`, `test_github_setup`, `test_comment_command_contract`, `test_github_trigger`, Worker parity tests | Retained historical pairs, generated current caller and actual selected deployed runner/Worker must retain independent identities; tag text does not attest compatibility |
 | #117 | `openrouter_cli_contract.OpenRouterCLIContract`: actual CLI/resolver/adapter, strict Morph request, selected credential, missing key, incompatible backend, malformed output and sentinel redaction; existing installed `openai_configuration.py`, six published suites | This is not the full automatic/manual/learning/conversation/inline operation × control × provider cross-product. Source tests do not substitute for the missing installed/deployed rows |
 | #118 | Separate provider-contract candidate aligns selectable DeepSeek/Morph with target eligibility | Target eligibility is not passing qualification or a pinned endpoint/region; live target gate #122 remains |
 | #119 | Separate provider-contract candidate tests requested/observed model, upstream and fingerprint independently | Mutable alias and absent observed identity remain explicit unknowns; no enrichment request |
 | #120 | Separate provider-contract candidate tests bounded provider-reported counters and evaluation aggregation | Missing/partial usage is unknown, local call accounting is distinct and no price/cost is invented |
 | #121 | Separate provider-contract candidate tests bounded normalized provider/variant/region/tier routing and strict captured policy | Endpoint prefix syntax does not itself establish an available provider endpoint or capability; no fallback or privacy relaxation |
-| #122 | Existing checked report-byte loader and duplicate/identity/fixture negatives in `test_openrouter_qualification` | Three independent live OpenRouter qualification invocations, matching retained reports and human adjudication were not authorized/run by this task. Approved Ollama review is a different scope |
+| #122 | Checked report-byte loader and duplicate/identity/fixture negatives; `test_openrouter_routing_evidence`, `test_live_evaluation`, and installed real packaged-corpus CLI tests bind route identity and separate exact fixture controls from actual quality under unchanged thresholds | Three independent authorized live invocations, matching retained reports and human adjudication remain absent. Three synthetic invocations prove the harness/gates, not real model qualification. Approved Ollama review is a different scope |
 | #123 | Existing setup/plan/application control tests, candidate installed lanes, existing deployed release milestone credited only to its source | Qualified OpenRouter App→broker→Actions→installed-engine delivery, all controls and disposable-installation upgrade/rollback remain pending; no deployment performed |
 | #146 | Existing `test_review_transaction`, `test_session_ledger`, baseline subprocess journeys, exact candidate package origins and published qualification receipts | Full released F1–F6/control/failure sequence, managed upgrade/state preservation and compatible in-flight rollback require their named artifacts and authorized installation |
 
@@ -60,6 +60,16 @@ load-error cases as qualification failures:
 - `tests/dist_safe/test_provider_deadline_contract.py`
 - `tests/dist_safe/test_openrouter_cli_contract.py`
 - `tests/dist_safe/test_large_public_lifecycle_contract.py`
+- `tests/dist_safe/test_openrouter_metadata_contract.py` (provider stack)
+- `tests/dist_safe/test_conversation_deadline_contract.py` (shared provider stack)
+- `tests/dist_safe/test_provider_common_flow_contract.py` (shared provider stack)
+
+The lifecycle-only receipt below uses the original six declared files. The
+provider stack adds metadata/configuration, shared conversation deadlines and
+common-flow contracts, retaining the nine-file union. Its exact combined receipt
+is recorded separately. [The provider matrix](provider-flows.md) distinguishes
+the existing common interface and all six deterministic configuration factories
+from installed and live/deployed qualification.
 
 The sdist distribution contract declares every shared helper and preserves
 checkout-only exclusions. Package CI uses only the two built wheels and the

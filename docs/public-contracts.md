@@ -1341,6 +1341,89 @@ provider-controlled public result; only the App publisher records it. Literal
 evidence validation and authenticated source/base/head checks precede every
 update. See [ADR 0061](adr/0061-human-reply-reassessment.md).
 
+
+## OpenRouter response observations and usage (#119–#121)
+
+`ProviderResponse.model` keeps the effective requested OpenRouter model.
+Optional `observed_model` and `observed_upstream` retain independent reported
+identifiers. `revision` uses only the response fingerprint, with
+`revision_source="provider-system-fingerprint"`; neither a mutable model alias
+nor requested routing policy supplies missing observations. These values are
+provider claims, not immutable-build proof, operator attestations or approval.
+Other adapters retain their existing model/revision behavior.
+
+`ProviderTokenUsage` optionally reports `prompt_tokens`, `completion_tokens` and
+`total_tokens`. Each counter is an integer from 0 through 2^63-1, excluding
+booleans. Missing or malformed protocol counters remain unknown; constructors
+reject invalid typed caller data. Only bounded ASCII observation identifiers and
+these counters are retained. Nested usage, prices, reasoning and arbitrary
+provider structures are discarded; no extra API request is made.
+
+Live evaluation's optional v1 `metrics.provider_reported_usage` identifies its
+source and attempted/reported call counts. A counter total is null if any attempt
+lacks that counter or its aggregate exceeds the bound. `complete` requires all
+three totals and at least one attempt. Partial sums are never emitted as complete
+run totals. Failed, truncated and cancelled calls remain attempts. This telemetry
+is separate from local work budgets and `token_proxy_4_bytes`.
+Old reports without the optional object remain valid. Strict readers should load
+the updated packaged v1 schema; additive v1 fields follow the existing policy.
+An older closed reader rejects new live reports containing the object; this is
+not a claim of compatibility with an unchanged strict reader. Update the reader
+before consuming new reports. Retained qualification evidence bytes must not be
+rewritten to remove telemetry: their digests bind the original artifact.
+Fixture outputs are unchanged. No monetary fields or support claims are added.
+
+OpenRouter routing policies accept one to four lowercase ASCII slug segments,
+up to 64 characters per segment and 128 bytes total. The full prefix is serialized
+and hashed without dropping suffixes. A family prefix can select multiple
+eligible endpoints; syntax validation does not prove the endpoint exists or
+qualifies. Privacy, TLS, no-fallback and credential boundaries are unchanged.
+
+Canonical `advanced.routing.upstream_provider` accepts those same bounded
+prefixes. For a model with a published upstream mapping, only that family or a
+suffix within it is accepted; a different family fails before adapter construction.
+Offline/hosted plans and actual CLI requests preserve the selected prefix. Typed
+`ProviderSettings` is trusted explicit configuration, so the registry does not
+consult retired routing environment variables. Named-profile routing restrictions
+remain exact. The legacy evaluation command still resolves its environment policy
+at the CLI boundary. Selecting a suffix does not inherit family qualification;
+unknown endpoint capabilities remain unverified.
+
+Live OpenRouter evaluation reports optionally expose
+`run.openrouter_routing_policy_digest` and `run.openrouter_base_url`, derived
+from the actual adapter's requested policy/endpoint. The qualification gate
+requires both fields to equal its independent target for every live report;
+absence, another upstream/suffix or another endpoint fails closed. Historical
+v1 documents still validate structurally, but unbound live reports cannot newly
+mint/load support. Retained evidence bytes must not be migrated by adding fields.
+The case-status enum also admits the live producer's existing `skipped` status;
+a skipped case is not converted to a passed deterministic check.
+
+## Live evaluation conformance and quality (#122)
+
+Optional v1 `evaluation_control` has a closed, bounded fixture-conformance
+protocol, a distinct fixture provider/model/configuration identity, matching
+engine/prompt/corpus identities, the complete fixture case inventory, and all
+original corpus thresholds. Each live quality case optionally records
+`execution_complete`. New live evaluations always supply these fields; old
+documents without them still parse but cannot newly authorize supported
+promotion. Strict readers require the updated schema. Never rewrite retained
+historical report bytes to add conformance evidence.
+
+The deterministic section comes from exact local fixture execution; actual live
+findings supply quality metrics through the existing one-to-one oracle. Recall
+counts every expected finding. Full fixture JSON identity is never a live-model
+quality assertion. The overall verdict requires all original numerical
+thresholds plus a nonempty complete live quality inventory with provider
+attempts. Live usage excludes fixture work. The protocol participates in new
+live configuration digests, leaving fixture output unchanged.
+
+Report readers and promotion gates cross-check inventories, expected counts,
+identity, metrics, rates and verdicts; a passing fixture control cannot rescue
+failed live quality. These checks establish consistency of retained reports,
+not cryptographic producer attestation. Three independent live invocations and
+OpenRouter target/retained-byte bindings remain required. See proposed ADR 0082.
+
 ## Bounded default publication and result retention
 
 `github.publication_inventory` is `legacy` by default and accepts only `legacy`

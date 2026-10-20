@@ -1,7 +1,8 @@
 """Explicit nonactivating COMMENT-review staging and complete readback.
 
 The caller supplies its existing authorized publication token and shared A
-budget. This prototype is not enabled by ReviewPublisher or approval callers.
+budget. Default publication and approval routes do not activate this prototype;
+the explicit trusted-host partitioned writer composes it separately.
 """
 
 from __future__ import annotations
@@ -195,8 +196,12 @@ class CommentReviewProseStore:
         if not _positive_id(identifier):
             raise ReviewInputError("visible prose numeric identity is invalid")
         item = self._request("GET", f"{self.path}/reviews/{identifier}")
+        return self._validate_readback(item, identifier, head_sha)
+
+    def _validate_readback(self, item, identifier, head_sha):
         if (
             not isinstance(item, dict)
+            or not _positive_id(item.get("id"))
             or item.get("id") != identifier
             or not self._owned(item)
             or item.get("pull_request_url") != self.pull_request_url
@@ -328,6 +333,32 @@ class CommentReviewProseStore:
 
     def revalidate(self, receipts: tuple[VisibleProseReceipt, ...]) -> None:
         """Fresh complete exact readback before activation or finalization."""
+        self._verify_receipts(receipts, self._read, preflight_reads=True)
+
+    def _revalidate_listing(self, receipts, records):
+        """Validate records supplied only by the finalizer's fresh complete scan.
+
+        This is a pure validator, never a freshness or authorization proof. The
+        bound finalizer owns fetching every page immediately before invoking it.
+        """
+        self.budget.check()
+        if not isinstance(records, list) or len(records) > MAX_RETAINED_PROSE_REVIEWS:
+            raise ReviewInputError("visible prose complete listing is invalid")
+        observed = {}
+        for item in records:
+            identifier = item.get("id") if isinstance(item, dict) else None
+            if not _positive_id(identifier) or identifier in observed:
+                raise ReviewInputError("visible prose listing identity conflicts")
+            observed[identifier] = item
+        self._verify_receipts(
+            receipts,
+            lambda identifier, head: self._validate_readback(
+                observed.get(identifier), identifier, head
+            ),
+        )
+        self.budget.check()
+
+    def _verify_receipts(self, receipts, read, *, preflight_reads=False):
         if (
             not isinstance(receipts, tuple)
             or any(not isinstance(item, VisibleProseReceipt) for item in receipts)
@@ -340,11 +371,12 @@ class CommentReviewProseStore:
             or sum(len(item.instances) for item in receipts) > 250
         ):
             raise ReviewInputError("visible prose receipt set is incomplete")
-        self.budget.preflight(len(receipts))
+        if preflight_reads:
+            self.budget.preflight(len(receipts))
         for index, receipt in enumerate(receipts):
             if receipt.index != index or receipt.producer_id != self.producer_id:
                 raise ReviewInputError("visible prose receipt authority conflicts")
-            observed = self._read(receipt.review_id, receipt.head_sha)
+            observed = read(receipt.review_id, receipt.head_sha)
             raw = observed.body.encode("utf-8")
             if (
                 len(raw) != receipt.bytes

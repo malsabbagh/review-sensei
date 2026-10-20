@@ -224,5 +224,123 @@ class GitHubHttpTests(unittest.TestCase):
         self.assertEqual(calls, [(20, 1), (20, 2), (10, 3)])
 
 
+class SharedReviewReadbackFixtureTests(unittest.TestCase):
+    def test_seeded_reviews_appear_once_in_bounded_multi_page_listing(self):
+        from tests.fake_github_http import json_response, make_http
+
+        http, calls = make_http(
+            [
+                json_response([{"id": 2}]),
+                json_response([{"id": 3}, {"id": 4}]),
+                json_response([]),
+            ],
+            review_readback=True,
+            initial_reviews=[{"id": 1}],
+        )
+        reviews = http.paginate(
+            path="/repos/owner/repo/pulls/2/reviews",
+            token="synthetic",
+            page_sizes=(2,),
+            max_requests=3,
+            expected_items=4,
+        )
+        self.assertEqual(reviews, [{"id": value} for value in (1, 2, 3, 4)])
+        self.assertEqual(len({review["id"] for review in reviews}), len(reviews))
+        self.assertEqual(
+            [parse_qs(urlsplit(url).query)["page"] for _, url, _ in calls],
+            [["1"], ["2"], ["3"]],
+        )
+
+    def test_independent_listing_still_sees_seeded_first_page(self):
+        from tests.fake_github_http import json_response, make_http
+
+        http, _ = make_http(
+            [json_response([]), json_response([])],
+            review_readback=True,
+            initial_reviews=[{"id": 1}],
+        )
+        for _ in range(2):
+            self.assertEqual(
+                http.paginate(
+                    path="/repos/owner/repo/pulls/2/reviews",
+                    token="synthetic",
+                    page_sizes=(2,),
+                    max_requests=1,
+                ),
+                [{"id": 1}],
+            )
+
+    def test_explicit_missing_readback_never_injects_seeded_or_posted_rows(self):
+        from tests.fake_github_http import json_response, make_http
+
+        http, _ = make_http(
+            [json_response({"id": 2}), json_response([])],
+            review_readback=False,
+            initial_reviews=[{"id": 1}],
+        )
+        http.request(
+            "POST",
+            "/repos/owner/repo/pulls/2/reviews",
+            token="synthetic",
+            body={
+                "body": "synthetic review",
+                "commit_id": "b" * 40,
+                "event": "COMMENT",
+            },
+        )
+        self.assertEqual(
+            http.paginate(
+                path="/repos/owner/repo/pulls/2/reviews",
+                token="synthetic",
+                page_sizes=(2,),
+                max_requests=1,
+            ),
+            [],
+        )
+
+    def test_app_owned_eligibility_loader_reads_complete_seeded_history(self):
+        from review_sensei_github.publication import (
+            ReviewApprovalFinalizer,
+            approval_eligibility_marker,
+        )
+
+        from tests.fake_github_http import json_response, make_http
+        from tests.test_github_publication import eligibility_document, published_review
+
+        head = "b" * 40
+        eligibility = eligibility_document(head_sha=head)
+        seeded = published_review(
+            marker=approval_eligibility_marker(eligibility),
+            head_sha=head,
+            state="COMMENTED",
+        )
+        for readback in (True, False):
+            with self.subTest(readback=readback):
+                # Both listings fill two 100-row pages and require a terminal
+                # read. Only the opt-in fixture supplies the App-owned record.
+                first_count = 99 if readback else 100
+                http, calls = make_http(
+                    [
+                        json_response([{"id": value} for value in range(first_count)]),
+                        json_response([{"id": value} for value in range(100, 200)]),
+                        json_response([]),
+                    ],
+                    review_readback=readback,
+                    initial_reviews=[seeded],
+                )
+                loaded = ReviewApprovalFinalizer(http=http).load_eligibility(
+                    token="synthetic",
+                    repository="owner/repo",
+                    pull_request=2,
+                    head_sha=head,
+                    app_slug="reviewsensei[bot]",
+                )
+                self.assertEqual(loaded, eligibility if readback else None)
+                self.assertEqual(
+                    [parse_qs(urlsplit(url).query)["page"] for _, url, _ in calls],
+                    [["1"], ["2"], ["3"]],
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

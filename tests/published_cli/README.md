@@ -42,6 +42,13 @@ available with `qualify.py --large-total-work`; they are excluded from this boun
 default lane. Native/npm packages, injected GitHub reply regression suites, real
 provider quality and all combinatorial interactions need separate evidence.
 
+The lifecycle inventory also loads `test_provider_common_flow_contract`: one
+factory-parameterized contract runs actual Ollama, HTTPS OpenAI-compatible and
+strict-routing OpenRouter adapters through captured synthetic transports. It
+covers canonical CLI dispatch and shared engine/reassessment/replay seams; it
+does not qualify live endpoints or a full installed/deployed configuration cross
+product. See `docs/validation/provider-common-flow.md` for the exact boundary.
+
 The `Qualify published CLI` workflow runs after `Release` completes. Its gate reads
 the **same run attempt's** PyPI job from the GitHub API, requires its success, and
 reads the exact `workflow_run.head_sha` manifest as data to resolve the version.
@@ -84,7 +91,7 @@ digests. It does not claim those old bytes implement newer lifecycle behavior.
 Default post-publication qualification runs all six suites; receipts always list
 selected and excluded suites so a subset cannot be mistaken for full coverage.
 
-Lifecycle contracts load from the six declared files under `tests/dist_safe`,
+Lifecycle contracts load from the nine declared files under `tests/dist_safe`,
 so a same-named module elsewhere on the search path cannot shadow them. Receipts
 include `tests_run` separately from row counts, a sanitized `load_error` for file
 import failures, and an explicit failed `empty-suite` row if discovery is empty.
@@ -115,3 +122,15 @@ profiles use one required path and 100/250 ordinary historical comments; they
 do not qualify 250 rich independent identities or 100/250 distinct paths. Four
 fixture modules are explicitly retained by the distribution contract. Product
 imports stay under the wheel environment; socket connections are forbidden.
+
+The OpenRouter metadata/routing contract is part of the default lifecycle
+inventory after publication as well as the sdist package lane. Its captured
+transport is synthetic and does not qualify a live target or approval.
+
+The same inventory includes the shared provider common-flow and discussion
+deadline contracts. Six configuration factories run identical engine journeys:
+local Ollama, approved DeepSeek and GLM cloud settings, default and explicitly
+permitted custom HTTPS OpenAI-compatible endpoints, and strict OpenRouter.
+Protocol envelopes vary in factory fixtures; lifecycle assertions are shared.
+See [the provider matrix](../../docs/validation/provider-flows.md). Captured
+transports establish deterministic composition, not live/deployed qualification.

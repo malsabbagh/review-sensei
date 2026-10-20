@@ -76,13 +76,13 @@ from .provider_config import (
     openrouter_policy_from_env,
     openrouter_timeout_default,
     openrouter_upstream_default,
-    resolve_effective_provider_configuration,
     validate_profile_provider_match,
 )
 from .providers import ProviderSettings, default_registry
 from .providers.openai_compatible import is_allowlisted_openai_compatible_endpoint
 from .providers.openrouter import (
     OpenRouterRoutingPolicy,
+    is_allowlisted_openrouter_endpoint,
 )
 from .providers.profiles import get_provider_profile
 from .providers.routing import bind_stage_providers
@@ -383,13 +383,14 @@ def _require_allowlisted_openrouter_configuration(args: argparse.Namespace) -> N
     provider = str(getattr(args, "provider", "")).strip().lower()
     if provider != "openrouter":
         return
-    resolve_effective_provider_configuration(
-        profile=getattr(args, "profile", None),
-        provider=provider,
-        base_url=getattr(args, "base_url", None),
-        model=getattr(args, "model", None),
-        api_key_env=getattr(args, "api_key_env", None),
+    profile_name = getattr(args, "profile", None)
+    base_url = (
+        get_provider_profile(profile_name).base_url
+        if profile_name
+        else getattr(args, "base_url", None) or DEFAULT_OPENROUTER_BASE_URL
     )
+    if not is_allowlisted_openrouter_endpoint(base_url):
+        raise ReviewInputError("openrouter endpoint is not allowlisted")
 
 
 def _require_allowlisted_openai_endpoint(args: argparse.Namespace) -> None:
@@ -471,13 +472,13 @@ def _provider_settings_from_args(
     api_key: str | None,
     fixture_response: Path | None = None,
     argv: list[str] | None = None,
+    openrouter_policy: OpenRouterRoutingPolicy | None = None,
 ) -> ProviderSettings:
     profile_name = getattr(args, "profile", None)
     explicit = getattr(args, "_explicit_cli_options", None)
     provider_name = str(args.provider).strip().lower()
-    openrouter_policy = (
-        _openrouter_policy_from_args(args) if provider_name == "openrouter" else None
-    )
+    if provider_name == "openrouter" and openrouter_policy is None:
+        openrouter_policy = _openrouter_policy_from_args(args)
     if provider_name == "openrouter":
         _require_allowlisted_openrouter_configuration(args)
     if profile_name:
@@ -698,6 +699,12 @@ def resolve_review_inference(
             api_key=api_key,
             fixture_response=getattr(args, "fixture_response", None),
             argv=argv,
+            openrouter_policy=(
+                OpenRouterRoutingPolicy(resolved.upstream_provider)
+                if resolved.backend == "openrouter"
+                and resolved.upstream_provider is not None
+                else None
+            ),
         ),
         api_key,
     )

@@ -371,3 +371,19 @@ and redeploy.
 This repository does not run `wrangler deploy` or register the GitHub App as
 part of CI. Those are operator-owned external writes and require the target
 Cloudflare account, GitHub App, and production approval.
+
+## Optional physical control protocol
+
+A controlled caller can prepay finite broker-internal liability and send a closed
+`control_budget` with operation/request IDs, original absolute deadline and an
+internal dispatch ceiling. The broker gates its actual OIDC/GitHub fetches and
+returns a scoped `control_receipt`; existing authentication and source checks
+still apply. Controlled Python clients reject missing or changed receipts and
+never refund unused or uncertain liability. Legacy callers send no new metadata.
+See [Proposed ADR0088](../../docs/adr/0088-broker-physical-dispatch-control.md).
+
+This source-only opt-in is not deployed or selected-CLI-qualified by its fixture
+suite. Run `npm test` and `npm run typecheck` here, then from the repository root
+run `python -m tests.epic238_broker_control_qualification -v` to verify actual
+production policy through the synthetic external transport bridge. No credential,
+permission, deployment or public-channel change is part of that test.

@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+- Refuse missing native reviews on terminal retries in either entry mode; when
+  native replay is admitted, record a non-passing authority check without a
+  terminal ledger rewrite.
+- Add explicit trusted-library partial resolution for complete partitioned250-finding
+  reviews, preserving all prose, current full-ID status and original read budgets.
+  Fresh-process recovery, all-resolved approval and default CLI/hosted activation
+  remain outside the qualified finite profile.
+
+- Refuse unsafe OpenRouter evaluation endpoint metadata before live calls and
+  report construction. Report missing composite-control identities as bounded
+  input errors while preserving historical reports without controls.
+- Extend reusable installed-provider acceptance through actual GitHub CLI issue
+  and inline delivery, durable replay, preflight/refusal, credential isolation,
+  learning controls and every hosted-policy projection combination.
+- Preserve the exact evaluation corpus bytes in Windows Git checkouts so its
+  pinned inventory and fixture/live controls retain the same hashes.
+- Bound ordinary AI discussion, correction and transport retries by the original
+  caller deadline and shared call/output allowance before publishing a reply.
+- Separate exact local fixture conformance from live model quality without
+  lowering corpus thresholds. Retain bounded control provenance, reject
+  incomplete or contradictory promotion evidence, and count all expected
+  findings in recall. Historical unbound reports cannot newly authorize support.
+- Preserve canonical YAML and hosted-plan OpenRouter endpoint routing through
+  the adapter; retired environment settings cannot replace or veto that policy.
+
+- Preserve requested and observed OpenRouter identities independently; never use
+  a returned model alias as the revision. Retain optional bounded token counters
+  and report unknown usage honestly across failed/interrupted attempts.
+- Accept bounded endpoint routing prefixes without relaxing privacy or fallback
+  policy. Make the existing hosted DeepSeek/Morph candidate eligible to collect
+  qualification evidence; it remains unqualified pending authorized live runs.
+- Bind retained live qualification reports to their actual requested routing
+  policy and endpoint; absent or changed bindings cannot authorize support.
+  Permit the evaluator's existing skipped-case status in its report schema.
+  Actual live quality remains independently required for qualification.
+
 - Add explicit manual publication-only recovery from the original trusted policy,
   exact transaction context and retained result, without another provider call.
 - Stage recovery-capable caller templates behind runner-first rollout; default
@@ -10,9 +46,6 @@
   bounded cleanup on exact retries while preserving current approval obligations.
 - Require retained native approval authority on complete-review replay; missing or
   invalid authority keeps the check non-passing instead of reconstructing approval.
-- Refuse missing native reviews on terminal retries in either entry mode; when
-  native replay is admitted, record a non-passing authority check without a
-  terminal ledger rewrite.
 - Share scoped pagination observations and authenticated inventory context within
   one publication budget, retaining fresh ownership, storage and prose fences.
 - Use one clock sample for recovery-artifact creation and expiry so the minimum

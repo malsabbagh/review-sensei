@@ -144,6 +144,16 @@ recovery, or change approval policy.
 
 ## Complete selection API: isolated implementation, integration pending
 
+The opt-in queue owner also supplies `pack_queue_state` / `unpack_queue_state`:
+a lossless bounded carrier for the complete original queue receipt. A trusted
+host may use its existing authenticated inline manifest when the packed document
+fits the existing future-growth allocation, otherwise retain partition storage
+or refuse within the original allowance. [ADR 0084](adr/0084-packed-assessment-queue-carrier.md)
+and the [finite public continuation matrix](validation/public-feedback-continuation.md)
+record actual local-ledger composition, source/generation refusals, accepted
+replay without inference, and the remaining varied-100/rich-250 limits. This does
+not enable selector or queue activation in the ordinary CLI/Worker route.
+
 Epic [#238](https://github.com/malsabbagh/review-sensei/issues/238), lane
 [#243](https://github.com/malsabbagh/review-sensei/issues/243), introduces
 `feedback-v1` domain admission and hosted read-only adapter seams. The default

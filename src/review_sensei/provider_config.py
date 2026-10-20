@@ -63,7 +63,16 @@ def hosted_openrouter_upstream(
         )
     if configured_upstream is not None:
         configured = configured_upstream.strip()
-        if configured and configured != upstream:
+        if configured:
+            try:
+                OpenRouterRoutingPolicy(upstream_provider=configured)
+            except ValueError as exc:
+                raise ReviewInputError(str(exc)) from exc
+        if (
+            configured
+            and configured != upstream
+            and not configured.startswith(upstream + "/")
+        ):
             raise ReviewInputError(
                 "OPENROUTER_UPSTREAM_PROVIDER does not match hosted model"
             )

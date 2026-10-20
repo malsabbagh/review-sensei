@@ -22,7 +22,7 @@ from review_sensei.baseline import ReviewBaseline, baseline_history_document
 from review_sensei.context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from review_sensei.convergence import BlockerCandidate, ReviewConvergencePolicy
 from review_sensei.disposition import apply_session_command, parse_maintainer_command
-from review_sensei.errors import ReviewInputError
+from review_sensei.errors import ProviderError, ReviewInputError
 from review_sensei.models import (
     ConversationContext,
     ConversationMessage,
@@ -31,12 +31,17 @@ from review_sensei.models import (
     ReviewComment,
     ReviewResult,
 )
-from review_sensei.outcomes import RecoveryArtifact
+from review_sensei.outcomes import (
+    RecoveryArtifact,
+    ResourceBudget,
+    ResourceBudgetTracker,
+)
 from review_sensei.session import (
     InMemorySessionLedger,
     SessionIdentity,
     SessionRecord,
 )
+from tests.conversation_deadline_contract import Clock, Provider
 from tests.test_operation_entry import MemoryComments
 
 
@@ -1591,7 +1596,9 @@ class GitHubApplicationTests(unittest.TestCase):
             def complete(self, request):
                 raise RuntimeError("provider unavailable")
 
-        with self.assertRaisesRegex(RuntimeError, "provider unavailable"):
+        with self.assertRaisesRegex(
+            ProviderError, "conversation provider transport or completion failed"
+        ):
             self.application.generate_and_publish_reply(
                 options=GitHubWriteOptions(
                     github_writes=True,
@@ -1616,6 +1623,114 @@ class GitHubApplicationTests(unittest.TestCase):
             ["add", "remove"],
         )
         self.assertEqual(self.replier.calls, [])
+
+    def _discussion(self, provider, **kwargs):
+        return self.application.generate_and_publish_reply(
+            options=GitHubWriteOptions(github_writes=True, mention_replies=True),
+            oidc_token="synthetic-oidc",
+            read_token="synthetic-read",
+            repository="owner/repo",
+            pull_request=1,
+            source_comment_id=10,
+            source_updated_at="updated",
+            expected_head_sha=None,
+            reply_provider=provider,
+            model=provider.model,
+            app_slug="review-sensei[bot]",
+            root_comment_id=10,
+            source_kind="issue",
+            **kwargs,
+        )
+
+    def test_ordinary_discussion_context_and_operation_consume_original_deadline(self):
+        clock = Clock()
+        trackers = []
+
+        def factory(budget):
+            value = ResourceBudgetTracker(budget, monotonic=clock, sleeper=clock.sleep)
+            trackers.append(value)
+            return value
+
+        prepare = self.replier.prepare_context
+
+        def prepare_context(**kwargs):
+            clock.value += 0.3
+            return prepare(**kwargs)
+
+        def enter(**kwargs):
+            clock.value += 0.2
+            return kwargs["execute"]()
+
+        def malformed(request):
+            clock.value += 0.2
+            return "{"
+
+        self.replier.prepare_context = prepare_context
+        provider = Provider([malformed, '{"body":"ok"}'])
+        with (
+            patch(
+                "review_sensei_github.application.ResourceBudgetTracker",
+                side_effect=factory,
+            ),
+            patch.object(self.application, "_through_operation", side_effect=enter),
+        ):
+            reply = self._discussion(
+                provider, budget=ResourceBudget.create(timeout_ms=1000)
+            )
+        self.assertEqual(reply.status, "replied")
+        self.assertEqual(len(trackers), 1)
+        self.assertAlmostEqual(provider.requests[0].timeout_seconds, 0.5)
+        self.assertAlmostEqual(provider.requests[1].timeout_seconds, 0.3)
+        self.assertEqual(trackers[0].provider_calls, 2)
+        self.assertEqual(len(self.replier.calls), 1)
+
+    def test_ordinary_discussion_expired_during_context_never_generates_or_publishes(
+        self,
+    ):
+        clock = Clock()
+        prepare = self.replier.prepare_context
+
+        def prepare_context(**kwargs):
+            clock.value += 1.1
+            return prepare(**kwargs)
+
+        self.replier.prepare_context = prepare_context
+        provider = Provider(['{"body":"must not run"}'])
+        with (
+            patch(
+                "review_sensei_github.application.ResourceBudgetTracker",
+                side_effect=lambda budget: ResourceBudgetTracker(
+                    budget, monotonic=clock
+                ),
+            ),
+            self.assertRaises(ReviewInputError) as raised,
+        ):
+            self._discussion(provider, budget=ResourceBudget.create(timeout_ms=1000))
+        self.assertEqual(raised.exception.diagnostic, "deadline_exceeded")
+        self.assertEqual(provider.requests, [])
+        self.assertEqual(self.replier.calls, [])
+        self.assertEqual(
+            [operation for operation, _ in self.replier.reaction_calls],
+            ["add", "remove"],
+        )
+
+    def test_ordinary_discussion_call_exhaustion_and_cancellation_never_publish(self):
+        for action, error, budget in (
+            ("{", ReviewInputError, ResourceBudget.create(max_provider_calls=1)),
+            (KeyboardInterrupt(), KeyboardInterrupt, ResourceBudget.create()),
+        ):
+            with self.subTest(error=error):
+                self.replier.calls.clear()
+                self.replier.reaction_calls.clear()
+                provider = Provider([action])
+                with self.assertRaises(error):
+                    self._discussion(provider, budget=budget)
+                self.assertEqual(len(provider.requests), 1)
+                self.assertEqual(self.replier.calls, [])
+                self.assertEqual(
+                    [operation for operation, _ in self.replier.reaction_calls],
+                    ["add", "remove"],
+                )
 
     def _operation_parts(self):
         comments = MemoryComments()

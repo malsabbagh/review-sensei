@@ -78,6 +78,8 @@ def _authority_body(
             has_blocking_findings=blocking,
             has_human_adjudication_findings=True,
             coverage_blocker=None if review_status == "complete" else "partial",
+            # This metadata fixture models a published synthetic backend.
+            provider="fixture",
         ),
         PendingHumanReview(
             "c" * 40,

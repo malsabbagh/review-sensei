@@ -1,3 +1,4 @@
+import type { BrokerDispatchControl } from "./broker-dispatch-control";
 import type { WorkerEnv } from "./env";
 
 const MAX_RESPONSE_BYTES = 512 * 1024;
@@ -422,12 +423,16 @@ export class GitHubApi {
   private privateKey: Promise<CryptoKey> | undefined;
   private readonly apiUrl: string;
 
-  constructor(private readonly env: WorkerEnv) {
+  constructor(private readonly env: WorkerEnv, private readonly dispatchControl?: BrokerDispatchControl) {
     const apiUrl = (env.GITHUB_API_URL ?? "https://api.github.com").trim();
     if (!/^https:\/\//i.test(apiUrl) && !/^http:\/\/(?:127\.0\.0\.1|localhost)(?::|\/|$)/i.test(apiUrl)) {
       throw new Error("github_api_url_invalid");
     }
     this.apiUrl = apiUrl.replace(/\/+$/, "");
+  }
+
+  withDispatchControl(control: BrokerDispatchControl): GitHubApi {
+    return new GitHubApi(this.env, control);
   }
 
   private async key(): Promise<CryptoKey> {
@@ -475,6 +480,7 @@ export class GitHubApi {
     }
     const response = await fetch(`${this.apiUrl}${path}`, {
       method,
+      ...(this.dispatchControl === undefined ? {} : { signal: this.dispatchControl.beforeDispatch(), redirect: "manual" }),
       headers: {
         accept: "application/vnd.github+json",
         ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
@@ -484,7 +490,10 @@ export class GitHubApi {
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-    return { status: response.status, data: await boundedJson(response) };
+    await this.dispatchControl?.checkResponse(response);
+    const data = await boundedJson(response);
+    this.dispatchControl?.check();
+    return { status: response.status, data };
   }
 
   async installationFor(repository: string): Promise<number | null> {
@@ -661,7 +670,8 @@ export class GitHubApi {
     if (this.apiUrl === "https://api.github.com") {
       try {
         return await this.publicWorkflowRuntimeShasFromGit(validatedTag);
-      } catch {
+      } catch (error) {
+        if (this.dispatchControl !== undefined && error instanceof Error && error.message.startsWith("broker_control_")) throw error;
         // Fall back to the bounded REST resolver below when the public Git
         // endpoint is unavailable or returns an unsupported advertisement.
       }
@@ -719,20 +729,25 @@ export class GitHubApi {
       response = await fetch(
         `${PUBLIC_WORKFLOW_GIT_URL}/info/refs?service=git-upload-pack`,
         {
+          ...(this.dispatchControl === undefined ? {} : { signal: this.dispatchControl.beforeDispatch(), redirect: "manual" }),
           headers: {
             accept: "application/x-git-upload-pack-advertisement",
             "user-agent": "ReviewSensei-GitHub-App/1.0 (+https://reviewsensei.dev)",
           },
         },
       );
-    } catch {
+    } catch (error) {
+      if (this.dispatchControl !== undefined && error instanceof Error && error.message.startsWith("broker_control_")) throw error;
       throw new Error("github_workflow_tag_unavailable");
     }
+    await this.dispatchControl?.checkResponse(response);
     if (!response.ok) {
       throw new Error(`github_workflow_tag_unavailable_${response.status}`);
     }
     try {
-      return advertisedTagShas(await boundedBytes(response, MAX_PUBLIC_REF_BYTES), tag);
+      const result = advertisedTagShas(await boundedBytes(response, MAX_PUBLIC_REF_BYTES), tag);
+      this.dispatchControl?.check();
+      return result;
     } catch (error) {
       if (error instanceof Error && /^github_workflow_tag_/.test(error.message)) {
         throw error;

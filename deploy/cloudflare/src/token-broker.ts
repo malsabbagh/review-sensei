@@ -1,3 +1,4 @@
+import { BrokerDispatchControl, type BrokerControlReceipt } from "./broker-dispatch-control";
 import type { WorkerEnv } from "./env";
 import { GitHubApi, type PublicWorkflowRuntimeShas } from "./github-api";
 import { type OidcClaims, verifyOidcAssertion } from "./oidc";
@@ -102,6 +103,7 @@ interface BrokerBody {
   session?: unknown;
   session_attestation?: unknown;
   release_only?: unknown;
+  control_budget?: unknown;
 }
 
 interface SessionScope {
@@ -536,6 +538,7 @@ export class TokenBroker {
   ): Promise<{
     token: string;
     capability: Capability;
+    control_receipt?: BrokerControlReceipt;
     session_state?: SessionState;
     session_grant?: string;
     session_attestation?: SessionAttestation;
@@ -545,6 +548,14 @@ export class TokenBroker {
     if (!isObject(body) || typeof body.oidc_token !== "string" || body.oidc_token.length === 0) {
       throw new Error("broker_request_invalid");
     }
+    const control = body.control_budget === undefined ? undefined : new BrokerDispatchControl(body.control_budget);
+    if (control !== undefined && isObject(body.session_attestation) && body.session_attestation.version === 2) {
+      const parsed = parseFeedbackAttestation(body.session_attestation);
+      if (parsed.mutation.operation_id !== control.request.operation_id ||
+        (parsed.mutation.read_accounting as Record<string, unknown>).deadline_unix_ms !== control.request.deadline_unix_ms) throw new Error("broker_control_binding_invalid");
+    }
+    const github = control === undefined ? this.github : this.github.withDispatchControl(control);
+    const receipt = () => control === undefined ? {} : { control_receipt: control.receipt() };
     const requested = capability(body.capability);
     if (requested !== "review_session" && body.session !== undefined) {
       throw new Error("broker_session_invalid");
@@ -558,27 +569,28 @@ export class TokenBroker {
     const claims = await verifyOidcAssertion(body.oidc_token, {
       audience: "sts.reviewsensei.dev",
       issuer: "https://token.actions.githubusercontent.com",
+      dispatchControl: control,
     });
     const configuredTag = validatePublicWorkflowTag(this.env.PUBLIC_WORKFLOW_TAG ?? "");
     const observedTag = authorizeObservedWorkflowTag(
       configuredTag,
       claims.job_workflow_ref,
     );
-    const runtime = await this.github.publicWorkflowRuntimeShas(observedTag);
+    const runtime = await github.publicWorkflowRuntimeShas(observedTag);
     this.authorizeClaims(claims, observedTag, runtime);
-    const installationId = await this.github.installationFor(claims.repository);
+    const installationId = await github.installationFor(claims.repository);
     if (installationId === null) {
       throw new Error("broker_installation_unavailable");
     }
     // The repository endpoint requires an installation (or user) access
     // token for private repositories. App JWTs are accepted for the
     // installation lookup above, but not for repository metadata.
-    const metadataToken = await this.github.installationToken(
+    const metadataToken = await github.installationToken(
       installationId,
       claims.repository,
       REPOSITORY_METADATA_PERMISSIONS,
     );
-    const info = await this.github.repositoryInfo(
+    const info = await github.repositoryInfo(
       claims.repository,
       metadataToken.token,
     );
@@ -588,14 +600,14 @@ export class TokenBroker {
     const requestedSession = requested === "review_session"
       ? sessionScope(body.session, claims.repository_id)
       : undefined;
-    const token = await this.github.capabilityToken(
+    const token = await github.capabilityToken(
       installationId,
       claims.repository,
       CAPABILITIES[requested],
       CAPABILITIES_ACCEPTING_RETURNED_CONTENTS_READ.has(requested),
     );
     if (requestedSession !== undefined) {
-      const currentHead = await this.github.pullRequestHead(
+      const currentHead = await github.pullRequestHead(
         claims.repository,
         requestedSession.pull_request,
         token,
@@ -608,7 +620,7 @@ export class TokenBroker {
         // The caller must still prove ledger ownership before releasing.
         if (body.release_only === true) {
           return {
-            token,
+            ...receipt(), token,
             capability: requested,
             release_only: true,
             reservation_owner: {
@@ -621,7 +633,7 @@ export class TokenBroker {
       }
       if (body.release_only === true) {
         return {
-          token,
+          ...receipt(), token,
           capability: requested,
           release_only: true,
           reservation_owner: {
@@ -641,7 +653,7 @@ export class TokenBroker {
       const attestation = requestedAttestation === undefined
         ? undefined
         : await authorizeLiveSessionActor(
-          this.github,
+          github,
           claims.repository,
           requestedSession,
           claims,
@@ -649,7 +661,7 @@ export class TokenBroker {
           token,
         );
       const enrollment = await enrollSession(
-        this.github,
+        github,
         claims.repository,
         requestedSession,
         token,
@@ -663,7 +675,7 @@ export class TokenBroker {
           runId: attestation.run_id,
         });
         return {
-          token,
+          ...receipt(), token,
           capability: requested,
           session_state: enrollment,
           session_grant: grant,
@@ -671,17 +683,18 @@ export class TokenBroker {
         };
       }
       return {
-        token, capability: requested, session_state: enrollment,
+        ...receipt(), token, capability: requested, session_state: enrollment,
         reservation_owner: { run_id: claims.run_id, head_sha: requestedSession.head_sha },
       };
     }
-    return { token, capability: requested };
+    return { ...receipt(), token, capability: requested };
   }
 
   /** Verify an opaque broker grant before a hosted session-ledger mutation. */
   async verifySessionGrant(
     grant: unknown,
     attestation: unknown,
+    control?: BrokerDispatchControl,
   ): Promise<SessionAttestation> {
     if (typeof grant !== "string" || !/^sg1\.[1-9][0-9]{10,15}\.[A-Za-z0-9_-]{43}$/.test(grant)) {
       throw new Error("broker_session_grant_invalid");
@@ -690,6 +703,12 @@ export class TokenBroker {
       throw new Error("broker_session_attestation_invalid");
     }
     const value = attestation as Record<string, unknown>;
+    if (control !== undefined && value.version === 2) {
+      const parsed = parseFeedbackAttestation(value, true);
+      if (parsed.mutation.operation_id !== control.request.operation_id ||
+        (parsed.mutation.read_accounting as Record<string, unknown>).deadline_unix_ms !== control.request.deadline_unix_ms) throw new Error("broker_control_binding_invalid");
+    }
+    const github = control === undefined ? this.github : this.github.withDispatchControl(control);
     const repositoryId = value.repository_id;
     if (
       typeof repositoryId !== "number" ||
@@ -704,7 +723,7 @@ export class TokenBroker {
       throw new Error("broker_session_attestation_invalid");
     }
     const observedTag = authorizeObservedWorkflowTag(configuredTag, value.job_workflow_ref);
-    const runtime = await this.github.publicWorkflowRuntimeShas(observedTag);
+    const runtime = await github.publicWorkflowRuntimeShas(observedTag);
     const parsed = sessionAttestationForVerification(value, scope, runtime);
     const authentic = await sessionGrantAuthentic(signingKey(this.env), grant, {
       scope: `${scope.repository_id}:${scope.pull_request}:${scope.head_sha}`,
@@ -715,6 +734,7 @@ export class TokenBroker {
     if (!authentic) {
       throw new Error("broker_session_grant_invalid");
     }
+    control?.check();
     return parsed;
   }
 

@@ -318,6 +318,7 @@ jobs:
           - target: linux-x64-gnu
             os: ubuntu-latest
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -325,6 +326,17 @@ jobs:
       - name: Build and smoke on Debian 12
         shell: bash
         run: bash scripts/build_linux_standalone_in_container.sh "${{ matrix.target }}"
+
+      - name: Archive exact Linux native candidate
+        run: python scripts/qualify_candidate_artifacts.py archive --target "${{ matrix.target }}" --input "dist/standalone/${{ matrix.target }}/review-sensei" --output "dist/candidate-native/${{ matrix.target }}" --source-sha "${{ github.sha }}"
+      - name: Retain exact Linux native candidate
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: candidate-native-${{ matrix.target }}
+          path: dist/candidate-native/${{ matrix.target }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
   intel-standalone:
     name: Intel macOS standalone ABI and parity
@@ -365,6 +377,151 @@ jobs:
           path: ${{ runner.temp }}/frozen-crypto.json
           if-no-files-found: warn
 
+      - name: Archive exact Intel native candidate
+        run: python scripts/qualify_candidate_artifacts.py archive --target darwin-x64 --input dist/standalone/darwin-x64/review-sensei --output dist/candidate-native/darwin-x64 --source-sha "${{ github.sha }}"
+      - name: Retain exact Intel native candidate
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: candidate-native-darwin-x64
+          path: dist/candidate-native/darwin-x64
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  native-candidate:
+    name: Additional native candidate (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            os: macos-14
+          - target: win32-x64
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            packaging/standalone/requirements.txt
+            requirements/*.txt
+            pyproject.toml
+            packages/python/review-sensei-github/pyproject.toml
+      - name: Install native oracle and pinned builder
+        run: |
+          python scripts/install_standalone_oracle.py --target "${{ matrix.target }}"
+          python -m pip install -r packaging/standalone/requirements.txt
+      - name: Build missing candidate target
+        run: python scripts/build_standalone.py --target "${{ matrix.target }}" --output "dist/standalone/${{ matrix.target }}"
+      - name: Smoke and archive native candidate
+        shell: bash
+        env:
+          PYTHONPATH: src
+        run: |
+          set -euo pipefail
+          executable="dist/standalone/${{ matrix.target }}/review-sensei/review-sensei"
+          if [[ "${{ matrix.target }}" == win32-x64 ]]; then executable+=".exe"; fi
+          python scripts/standalone_smoke.py --executable "$executable" --repository "$GITHUB_WORKSPACE" --diff evaluation/v1/diffs/off-by-one.patch --fixture-response evaluation/v1/responses/off-by-one.json --base-ref "$(git rev-parse HEAD^)" --head-ref "$(git rev-parse HEAD)"
+          python scripts/qualify_candidate_artifacts.py archive --target "${{ matrix.target }}" --input "dist/standalone/${{ matrix.target }}/review-sensei" --output "dist/candidate-native/${{ matrix.target }}" --source-sha "$(git rev-parse HEAD)"
+      - name: Retain exact native candidate
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: candidate-native-${{ matrix.target }}
+          path: dist/candidate-native/${{ matrix.target }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  candidate-npm:
+    name: Assemble exact candidate npm tarballs
+    needs: [linux-standalone, intel-standalone, native-candidate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Install pinned pack CLI
+        run: npm install --global npm@11.5.1
+      - name: Download all five exact native bundles
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: candidate-native-*
+          path: dist/candidate-download
+          merge-multiple: false
+      - name: Verify native receipts, assemble and pack without lifecycle scripts
+        run: python scripts/qualify_candidate_artifacts.py assemble --input dist/candidate-download --output dist/candidate-npm --source-sha "${{ github.sha }}"
+      - name: Retain exact unpublished npm tarballs and provenance
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: candidate-npm-tarballs
+          path: dist/candidate-npm/packed
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  candidate-consumer:
+    name: Installed candidate launcher and native (${{ matrix.target }})
+    needs: candidate-npm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            os: macos-14
+          - target: darwin-x64
+            os: macos-15-intel
+          - target: linux-arm64-gnu
+            os: ubuntu-24.04-arm
+          - target: linux-x64-gnu
+            os: ubuntu-latest
+          - target: win32-x64
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements/*.txt
+            pyproject.toml
+            packages/python/review-sensei-github/pyproject.toml
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Install parity oracle and pinned installer
+        run: |
+          python -m pip install .
+          npm install --global npm@11.5.1
+      - name: Download exact packed candidates
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: candidate-npm-tarballs
+          path: dist/candidate-packed
+      - name: Install selected local tarballs offline and smoke actual installed bytes
+        run: python scripts/qualify_candidate_artifacts.py consume --target "${{ matrix.target }}" --input dist/candidate-packed --output dist/candidate-consumer --source-sha "${{ github.sha }}"
+      - name: Retain installed candidate evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: candidate-consumer-${{ matrix.target }}
+          path: dist/candidate-consumer
+          if-no-files-found: error
+          retention-days: 7
+
   workers:
     name: Cloudflare Worker
     runs-on: ubuntu-latest
@@ -395,6 +552,10 @@ jobs:
         env:
           EPIC238_F_MEASUREMENTS: ${{ runner.temp }}/feedback-broker-ipc-metrics.json
         run: python -W error::ResourceWarning -m tests.epic238_feedback_broker_qualification -v
+      - name: Qualify original broker physical dispatch accounting
+        run: python -W error::ResourceWarning -m tests.epic238_broker_control_qualification -v
+      - name: Qualify coalesced original assessment admission
+        run: python -W error::ResourceWarning -m tests.epic238_initial_tail_qualification -v
       - name: Run Worker tests
         working-directory: deploy/cloudflare
         run: npm test
@@ -450,7 +611,7 @@ jobs:
   required-checks:
     name: Required checks
     if: ${{ !cancelled() }}
-    needs: [compatibility, quality, schemas, package, npm, linux-standalone, intel-standalone, workers, codeql]
+    needs: [compatibility, quality, schemas, package, npm, linux-standalone, intel-standalone, native-candidate, candidate-npm, candidate-consumer, workers, codeql]
     runs-on: ubuntu-latest
     steps:
       - name: Require every gate
@@ -470,5 +631,8 @@ jobs:
           require_success "${{ needs.npm.result }}"
           require_success "${{ needs.linux-standalone.result }}"
           require_success "${{ needs.intel-standalone.result }}"
+          require_success "${{ needs.native-candidate.result }}"
+          require_success "${{ needs.candidate-npm.result }}"
+          require_success "${{ needs.candidate-consumer.result }}"
           require_success "${{ needs.workers.result }}"
           require_success "${{ needs.codeql.result }}"

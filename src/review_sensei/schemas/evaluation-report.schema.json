@@ -96,6 +96,17 @@
         "configuration_digest": {
           "type": "string",
           "pattern": "^[a-f0-9]{64}$"
+        },
+        "openrouter_routing_policy_digest": {
+          "description": "Optional effective requested policy binding, required by the OpenRouter live qualification gate. Independent of observed metadata.",
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "openrouter_base_url": {
+          "description": "Optional effective non-secret OpenRouter endpoint binding, required by the live qualification gate.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
         }
       }
     },
@@ -107,6 +118,26 @@
         "review_configuration_id": {
           "type": "string",
           "minLength": 1
+        }
+      }
+    },
+    "evaluation_control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "fixture",
+        "thresholds"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "fixture-conformance-and-live-quality-v1"
+        },
+        "fixture": {
+          "$ref": "#/$defs/fixtureConformance"
+        },
+        "thresholds": {
+          "$ref": "#/$defs/evaluationThresholds"
         }
       }
     },
@@ -156,6 +187,84 @@
         "response_bytes": {
           "type": "integer",
           "minimum": 0
+        },
+        "provider_reported_usage": {
+          "description": "Optional live-run telemetry. Null totals are unknown or incomplete, never a partial sum. Independent of work budgets and the byte-based proxy.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source",
+            "attempts",
+            "reported_attempts",
+            "complete",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens"
+          ],
+          "properties": {
+            "source": {
+              "const": "provider-reported"
+            },
+            "attempts": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "reported_attempts": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "complete": {
+              "type": "boolean"
+            },
+            "prompt_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "completion_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            },
+            "total_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 9223372036854775807
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "complete": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "prompt_tokens": {
+                    "type": "integer"
+                  },
+                  "completion_tokens": {
+                    "type": "integer"
+                  },
+                  "total_tokens": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          ]
         },
         "token_proxy_4_bytes": {
           "type": "integer",
@@ -246,6 +355,139 @@
     }
   },
   "$defs": {
+    "fixtureConformance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "provider",
+        "model",
+        "engine_digest",
+        "prompt_digest",
+        "configuration_digest",
+        "corpus_digest",
+        "review_configuration_id",
+        "cases",
+        "deterministic",
+        "quality",
+        "threshold_failures",
+        "passed"
+      ],
+      "properties": {
+        "mode": {
+          "const": "fixture"
+        },
+        "provider": {
+          "const": "fixture"
+        },
+        "model": {
+          "const": "fixture-v1"
+        },
+        "engine_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "prompt_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "configuration_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "corpus_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "review_configuration_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "cases": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/caseResult"
+          }
+        },
+        "deterministic": {
+          "$ref": "#/properties/deterministic"
+        },
+        "quality": {"$ref": "#/properties/quality"},
+        "threshold_failures": {"$ref": "#/properties/threshold_failures"},
+        "passed": {"type": "boolean"}
+      }
+    },
+    "evaluationThresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deterministic",
+        "quality"
+      ],
+      "properties": {
+        "deterministic": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "exact_fixture_result_rate",
+            "expected_contract_rejection_rate"
+          ],
+          "properties": {
+            "exact_fixture_result_rate": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "expected_contract_rejection_rate": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        "quality": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "actionable_precision_minimum",
+            "false_positive_rate_maximum",
+            "expected_finding_recall_minimum",
+            "location_validity_minimum",
+            "category_coverage_minimum"
+          ],
+          "properties": {
+            "actionable_precision_minimum": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "false_positive_rate_maximum": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "expected_finding_recall_minimum": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "location_validity_minimum": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "category_coverage_minimum": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        }
+      }
+    },
     "caseResult": {
       "type": "object",
       "additionalProperties": false,
@@ -276,8 +518,9 @@
           "type": "string",
           "minLength": 1
         },
+        "execution_complete": {"type": "boolean"},
         "status": {
-          "enum": ["passed", "failed", "rejected-expected", "rejected-unexpected"]
+          "enum": ["passed", "failed", "skipped", "rejected-expected", "rejected-unexpected"]
         },
         "expected_matches": {
           "type": "integer",

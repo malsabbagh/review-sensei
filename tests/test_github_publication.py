@@ -48,9 +48,18 @@ from review_sensei.validation import ReviewLimits
 from review_sensei.verifier import CandidateFinding, EvidenceReference
 
 try:
-    from fake_github_http import json_response, make_http, placement_responses
+    from fake_github_http import json_response, placement_responses
+    from fake_github_http import make_http as _make_http
 except ModuleNotFoundError:
-    from tests.fake_github_http import json_response, make_http, placement_responses
+    from tests.fake_github_http import json_response, placement_responses
+    from tests.fake_github_http import make_http as _make_http
+
+
+def make_http(responses, routes=(), **kwargs):
+    """This fixture models successful review writes becoming readable."""
+    kwargs.setdefault("review_readback", True)
+    return _make_http(responses, routes=routes, **kwargs)
+
 
 DIFF = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py
@@ -324,7 +333,16 @@ class ReviewPublisherTests(unittest.TestCase):
             "eligibility": eligibility_document(head_sha=head),
         }
         arguments.update(overrides)
-        http, calls = make_http(responses)
+        http, calls = make_http(
+            responses,
+            initial_reviews=(
+                published_review(
+                    marker=approval_eligibility_marker(arguments["eligibility"]),
+                    head_sha=arguments["head_sha"],
+                    state="COMMENTED",
+                ),
+            ),
+        )
         return ReviewApprovalFinalizer(http=http).finalize(**arguments), calls
 
     def test_prepared_review_shortcut_rechecks_publication_context_and_runtime_state(
@@ -2105,7 +2123,7 @@ class ReviewPublisherTests(unittest.TestCase):
             ["ReviewThreads"],
         )
 
-    def test_deleted_blocking_roots_do_not_deadlock_an_existing_change_request(self):
+    def test_deleted_roots_do_not_grant_unbound_legacy_review_approval(self):
         head = "b" * 40
         marker = review_marker(
             repository_id=1,
@@ -2131,13 +2149,13 @@ class ReviewPublisherTests(unittest.TestCase):
             result=clean_result(),
             auto_approve=True,
         )
-        # Publisher returns already_published after reconciling the existing
-        # identity review; the nested finalizer write is APPROVE.
+        # Resolved/deleted roots do not supply independent provider or result
+        # provenance. A legacy per-head comment cannot authorize this rerun.
         self.assertEqual(outcome.status, "already_published")
-        self.assertEqual(posted_events(calls), ["APPROVE"])
-        self.assertEqual(review_payloads(calls)[0]["commit_id"], head)
+        self.assertEqual(posted_events(calls), [])
+        self.assertEqual(outcome.diagnostic, "approval_withheld")
 
-    def test_change_request_promotes_to_approve_after_blocking_roots_resolve(self):
+    def test_resolved_roots_do_not_grant_unbound_legacy_review_approval(self):
         head = "b" * 40
         marker = review_marker(
             repository_id=1,
@@ -2164,13 +2182,11 @@ class ReviewPublisherTests(unittest.TestCase):
             result=clean_result(),
             auto_approve=True,
         )
-        # Publisher returns already_published after reconciling the existing
-        # identity review; the nested finalizer write is APPROVE.
+        # Resolved/deleted roots do not supply independent provider or result
+        # provenance. A legacy per-head comment cannot authorize this rerun.
         self.assertEqual(outcome.status, "already_published")
-        self.assertEqual(posted_events(calls), ["APPROVE"])
-        body = review_payloads(calls)[0]
-        self.assertEqual(body["commit_id"], head)
-        self.assertNotIn("comments", body)
+        self.assertEqual(posted_events(calls), [])
+        self.assertEqual(outcome.diagnostic, "approval_withheld")
 
     def test_finalizer_promotes_resolved_change_request_as_approved(self):
         head = "b" * 40
@@ -2880,7 +2896,7 @@ deleted file mode 100644
         self.assertEqual(outcome.status, "already_published")
         self.assertEqual([call[0] for call in calls], ["GET", "GET"])
 
-    def test_clean_rerun_promotes_same_head_comment_after_threads_resolve(self):
+    def test_clean_rerun_cannot_upgrade_unbound_same_head_comment(self):
         head = "b" * 40
         marker = review_marker(
             repository_id=1,
@@ -2904,11 +2920,11 @@ deleted file mode 100644
             result=clean_result(),
             auto_approve=True,
         )
+        # Resolved/deleted roots do not supply independent provider or result
+        # provenance. A legacy per-head comment cannot authorize this rerun.
         self.assertEqual(outcome.status, "already_published")
-        self.assertEqual(posted_events(calls), ["APPROVE"])
-        body = review_payloads(calls)[0]
-        self.assertEqual(body["commit_id"], head)
-        self.assertNotIn("comments", body)
+        self.assertEqual(posted_events(calls), [])
+        self.assertEqual(outcome.diagnostic, "approval_withheld")
 
     def test_non_blocking_rerun_promotes_same_head_comment_after_threads_resolve(self):
         head = "b" * 40
@@ -2919,6 +2935,12 @@ deleted file mode 100644
             head_sha=head,
             result=non_blocking,
         )
+        marker += "\n" + approval_eligibility_marker(
+            eligibility_document(
+                head_sha=head,
+                result=non_blocking,
+            )
+        )
         outcome, calls = self.publish(
             [
                 json_response(pr_payload(head_sha=head)),
@@ -2928,7 +2950,9 @@ deleted file mode 100644
                 json_response(pr_payload(head_sha=head)),
                 graphql_review_threads_response(nodes=({"isResolved": True},)),
                 json_response(pr_payload(head_sha=head)),
-                json_response([]),
+                json_response(
+                    [published_review(marker=marker, head_sha=head, state="COMMENTED")]
+                ),
                 json_response({"id": 6}, 200),
             ],
             checks=FakeCheckRuns(),
@@ -3000,7 +3024,13 @@ deleted file mode 100644
             repository_id=1,
             pull_request=2,
             head_sha=head,
-            result=result(),
+            result=clean_result(),
+        )
+        marker += "\n" + approval_eligibility_marker(
+            eligibility_document(
+                head_sha=head,
+                result=clean_result(),
+            )
         )
         prior_comment = published_review(
             marker=marker, head_sha=head, state="COMMENTED"
@@ -3013,7 +3043,13 @@ deleted file mode 100644
                     json_response(pr_payload(head_sha=head)),
                     graphql_review_threads_response(),
                     json_response(pr_payload(head_sha=head)),
-                    json_response([]),
+                    json_response(
+                        [
+                            published_review(
+                                marker=marker, head_sha=head, state="COMMENTED"
+                            )
+                        ]
+                    ),
                     json_response({}, 500),
                     json_response([prior_comment]),
                 ],

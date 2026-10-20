@@ -565,7 +565,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         text = workflow.read_text(encoding="utf-8")
         self.assertIn("language: [python, javascript-typescript]", text)
         self.assertIn(
-            "needs: [compatibility, quality, schemas, package, npm, linux-standalone, intel-standalone, workers, codeql]",
+            "needs: [compatibility, quality, schemas, package, npm, linux-standalone, intel-standalone, native-candidate, candidate-npm, candidate-consumer, workers, codeql]",
             text,
         )
         self.assertIn('require_success "${{ needs.codeql.result }}"', text)
@@ -2046,7 +2046,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotIn("secrets:", canary)
         self.assertIn("Required checks", ci)
         self.assertIn(
-            "needs: [compatibility, quality, schemas, package, npm, linux-standalone, intel-standalone, workers, codeql]",
+            "needs: [compatibility, quality, schemas, package, npm, linux-standalone, intel-standalone, native-candidate, candidate-npm, candidate-consumer, workers, codeql]",
             ci,
         )
         self.assertNotIn("downstream-canary", ci)

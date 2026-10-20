@@ -3255,12 +3255,19 @@ def _validate_tail_draft(
     operation: Mapping[str, object],
     reservation_id: str,
     budget: EvidenceReadBudget,
+    initial_slot: str | None = None,
 ) -> None:
     SessionRecord.from_dict(draft.to_dict())
     if (
         (draft.repository, draft.repository_id, draft.pull_request)
         != (before.repository, before.repository_id, before.pull_request)
-        or before.reservation_id != reservation_id
+        or (
+            before.reservation_id != reservation_id
+            if initial_slot is None
+            else before.reservation_id is not None
+            or before.last_committed_reservation_id == reservation_id
+            or draft.reserved_slot != initial_slot
+        )
         or draft.reservation_id != reservation_id
         or draft.generation != before.generation + 1
     ):
