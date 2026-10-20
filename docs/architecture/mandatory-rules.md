@@ -1,3 +1,7 @@
+Same-operation inventory handoff must retain budget/transport/token/scope,
+fresh complete intent/parts reads and fresh ledger/Bot/PR/root/index/full-prose fences.
+Canonical admission is evidence only; see ADR 0098.
+
 ## Default human inventory references
 
 Complete publication may use closed eligibility schema 5 when the admitted human
@@ -96,19 +100,23 @@ tag or replacing a tarball. See [ADR 0031](adr/0031-npm-launcher-and-standalone-
 
 (fixture adapter: test-only seam, omitted from production map)
 
-`ReviewService.run` always emits a versioned `RunOutcome`. Hard resource budgets
-cap provider calls, transport retries, prompt/output bytes, and elapsed time.
-One structural-correction retry remains distinct from transport retry. Opt-in
-`RecoveryArtifact` values can republish a validated result without invoking a
-model or rewriting trusted learnings or configuration. See
+`ReviewService.run` emits versioned `RunOutcome`. Hard budgets cap provider calls,
+transport retries, prompt/output bytes and elapsed time. One structural-correction
+retry differs from transport retry. Opt-in `RecoveryArtifact` republishes
+validated results without models or trusted learnings/configuration changes. See
 [ADR 0043](adr/0043-structured-run-outcomes-budgets-and-publication-recovery.md).
 
-the ledger's baseline and digests cannot reconstruct them. Reusable runners
-publish a newly produced or independently validated retained result and retain
-an explicitly enabled diagnostics bundle after publication failure. That bundle includes the reviewed diff and
-trusted configuration/admission contexts, retains the existing seven-day limit,
-and remains disabled for `artifacts: none`. Local analysis-only sessions retain
-their existing duplicate behavior. See the PR223 amendment to
+ledger baseline/digests cannot reconstruct them. Reusable runners publish
+new or independently validated retained results. Opt-in publication-failure
+diagnostics retain reviewed diff and trusted configuration/admission contexts up to seven
+days, disabled by `artifacts: none`. Local analysis-only duplicates remain unchanged.
+PR223 amendment to
+
+Opt-in recovery binds original trusted policy, exact base/head diff and authenticated
+prior baseline. Configuration/evidence/policy/reservation must match committed
+transaction. Missing admission/ordinary retries refuse. Both lanes skip provider
+credentials/inference; retain one read budget, broker/accepted-result/ledger/head
+guards and writer slot.
 
 API authentication and comment/review delivery. `prepare_publishable_review`
 sits between a validated `ReviewResult` and any publisher: `legacy` keeps

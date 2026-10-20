@@ -134,7 +134,16 @@ class TrustedPublicationRecoveryTests(unittest.TestCase):
             self.assertEqual(github_main(["review", *argv]), 0)
         return argv
 
-    def invoke(self, root, state, *, reconstruct=False, actions=False, extra=()):
+    def invoke(
+        self,
+        root,
+        state,
+        *,
+        reconstruct=False,
+        result_source=False,
+        actions=False,
+        extra=(),
+    ):
         arguments = [
             "publish",
             "--allow-write",
@@ -166,8 +175,12 @@ class TrustedPublicationRecoveryTests(unittest.TestCase):
             str(root / "publication-outcome.json"),
         ]
         if reconstruct:
+            arguments += (
+                ["--result", str(root / "result.json")]
+                if result_source
+                else ["--recover-retained"]
+            )
             arguments += [
-                "--recover-retained",
                 "--reconstruct-contexts",
                 "--trusted-context-root",
                 str(root),
@@ -277,6 +290,36 @@ class TrustedPublicationRecoveryTests(unittest.TestCase):
             self.assertEqual(
                 LocalSessionLedger(root / "ledger").load(IDENTITY).record, before
             )
+
+    def test_reconstructed_recovery_refuses_learning_prs_before_any_publication(self):
+        for result_source in (False, True):
+            with (
+                self.subTest(result_source=result_source),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                self.original_analysis(root)
+                state = _FailedPublication()
+                self.assertEqual(self.invoke(root, state)[0], 1)
+                ledger = LocalSessionLedger(root / "ledger")
+                before = ledger.load(IDENTITY).record
+                state.fail_review = False
+                state.calls.clear()
+                code, _, error = self.invoke(
+                    root,
+                    state,
+                    reconstruct=True,
+                    result_source=result_source,
+                    extra=("--enable-learning-prs",),
+                )
+                self.assertEqual(code, 1, error)
+                outcome = json.loads((root / "publication-outcome.json").read_text())
+                self.assertEqual(outcome["diagnostic"], "recovery_learning_prs_refused")
+                self.assertIn(
+                    "publication recovery cannot write learning pull requests", error
+                )
+                self.assertEqual(state.calls, [])
+                self.assertEqual(ledger.load(IDENTITY).record, before)
 
     def test_stale_head_missing_source_and_changed_diff_refuse_without_mutations(self):
         for fault in ("head", "source", "diff"):

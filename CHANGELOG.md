@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Add explicit manual publication-only recovery from the original trusted policy,
+  exact transaction context and retained result, without another provider call.
+- Complete durable publication before optional superseded-thread cleanup; resume
+  bounded cleanup on exact retries while preserving current approval obligations.
+- Share scoped pagination observations and authenticated inventory context within
+  one publication budget, retaining fresh ownership, storage and prose fences.
+- Use one clock sample for recovery-artifact creation and expiry so the minimum
+  supported lifetime remains valid across a wall-clock second boundary.
+
 ## 0.8.5 - 2026-10-20
 
 - Recover oversized installed hosted startup, cleanup, operation replay and review

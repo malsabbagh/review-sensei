@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import parse_qs, urlparse
@@ -18,12 +20,20 @@ from review_sensei_github.operation_host import (
     comment_payload,
     render_marked_comment,
 )
+from review_sensei_github.publication import (
+    approval_eligibility_from_body,
+    approval_eligibility_marker,
+    finding_index_marker,
+    finding_instance_marker,
+    finding_marker,
+    parse_finding_index,
+)
 from review_sensei_github.publication_recovery import PublicationBudgetHttp
 
 from review_sensei.baseline import ReviewBaseline, baseline_finding_from_comment
 from review_sensei.bounded_evidence import EvidenceReadBudget
-from review_sensei.context import ReviewContextCacheKey
-from review_sensei.convergence import ReviewConvergencePolicy
+from review_sensei.context import ReviewContextCacheKey, finding_lifecycle_for_comment
+from review_sensei.convergence import ReviewConvergencePolicy, derive_blocker_candidate
 from review_sensei.coverage import CoverageManifest, FileCoverage
 from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewComment, ReviewResult, ReviewTransaction
@@ -111,16 +121,188 @@ class RetentionState(State):
         return super().open(request, timeout)
 
 
-def checkpoint(ledger, count=77, *, body_size=0):
+class SupersessionState(RetentionState):
+    """Evolving native threads, exact inline readback, and a remote session."""
+
+    def __init__(self, result, *, old_count=79):
+        super().__init__()
+        self.reviews = []
+        self.inline = []
+        self.resolved = []
+        self.cleanup_hook = None
+        self.mutation_mode = None
+        self.mutation_attempts = []
+        self.fail_completion = False
+        comment = result.comments[0]
+        concern = finding_lifecycle_for_comment(comment).fingerprint
+        body = (
+            finding_instance_marker(comment)
+            + "\n"
+            + finding_marker(
+                repository_id=1,
+                pull_request=1,
+                head_sha="c" * 40,
+                base_sha=BASE,
+                result=result,
+                blocking=comment.blocks_approval,
+                fingerprint=concern,
+                needs_human=comment.needs_human,
+            )
+        )
+        self.roots = {
+            1000 + i: {
+                "id": 1000 + i,
+                "body": body,
+                "user": self.app_user,
+                "pull_request_url": "https://api.github.test/repos/owner/repo/pulls/1",
+            }
+            for i in range(old_count)
+        }
+        self.threads = [
+            {
+                "id": f"OLD_{i}",
+                "isResolved": False,
+                "comments": {
+                    "nodes": [
+                        {
+                            "databaseId": identifier,
+                            "body": root["body"],
+                            "author": {"login": APP, "__typename": "Bot"},
+                        }
+                    ]
+                },
+            }
+            for i, (identifier, root) in enumerate(self.roots.items())
+        ]
+
+    def open(self, request, timeout):
+        parsed = urlparse(request.full_url)
+        path = parsed.path
+        body = json.loads(request.data) if request.data else None
+        if (
+            self.fail_completion
+            and self.reviews
+            and request.method == "PATCH"
+            and path.endswith("/issues/comments/600")
+        ):
+            self.calls.append((request.method, path, body))
+            return json_response({}, 500)
+        if path == "/graphql":
+            self.calls.append((request.method, path, body))
+            operation = body["operationName"]
+            if operation == "ResolveReviewThread":
+                thread_id = body["variables"]["input"]["threadId"]
+                self.mutation_attempts.append(thread_id)
+                if self.mutation_mode != "unconfirmed":
+                    self.resolved.append(thread_id)
+                    for node in self.threads:
+                        if node["id"] == thread_id:
+                            node["isResolved"] = True
+                if self.mutation_mode is not None:
+                    return json_response({}, 500)
+                return json_response(
+                    {
+                        "data": {
+                            "resolveReviewThread": {
+                                "thread": {"id": thread_id, "isResolved": True}
+                            }
+                        }
+                    }
+                )
+            if operation == "ResolutionReadback":
+                thread_id = body["variables"]["id"]
+                node = next(n for n in self.threads if n["id"] == thread_id)
+                return json_response(
+                    {
+                        "data": {
+                            "node": {"id": thread_id, "isResolved": node["isResolved"]}
+                        }
+                    }
+                )
+            first = body["variables"].get("first", 100)
+            start = int(body["variables"].get("after") or 0)
+            end = start + first
+            return json_response(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": copy.deepcopy(self.threads[start:end]),
+                                    "pageInfo": {
+                                        "hasNextPage": end < len(self.threads),
+                                        "endCursor": str(end),
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            )
+        if request.method == "GET" and "/pulls/comments/" in path:
+            self.calls.append((request.method, path, body))
+            if self.cleanup_hook:
+                self.cleanup_hook(self)
+            return json_response(self.roots[int(path.rsplit("/", 1)[1])])
+        if (
+            request.method == "GET"
+            and "/reviews/" in path
+            and path.endswith("/comments")
+        ):
+            self.calls.append((request.method, path, body))
+            review_id = int(path.split("/")[-2])
+            return json_response(
+                [c for c in self.inline if c["pull_request_review_id"] == review_id]
+            )
+        response = super().open(request, timeout)
+        if (
+            request.method == "POST"
+            and path.endswith("/reviews")
+            and "comments" in body
+        ):
+            review_id = self.reviews[-1]["id"]
+            for value in body["comments"]:
+                identifier = 2000 + len(self.inline)
+                root = {
+                    "id": identifier,
+                    "body": value["body"],
+                    "user": self.app_user,
+                    "pull_request_review_id": review_id,
+                    "pull_request_url": "https://api.github.test/repos/owner/repo/pulls/1",
+                }
+                self.inline.append(root)
+                self.roots[identifier] = root
+                self.threads.append(
+                    {
+                        "id": f"CURRENT_{identifier}",
+                        "isResolved": False,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "databaseId": identifier,
+                                    "body": value["body"],
+                                    "author": {"login": APP, "__typename": "Bot"},
+                                }
+                            ]
+                        },
+                    }
+                )
+        return response
+
+
+def checkpoint(
+    ledger, count=77, *, body_size=0, blocking=False, line=2, needs_human=False
+):
     comments = tuple(
         ReviewComment(
             path="src/app.py",
-            line=2,
+            line=line,
             body=f"Independent required decision {i}." + "x" * body_size,
             symbol=f"operation_{i}",
             defect_kind=f"case-{i}",
-            needs_human=False,
-            blocking=False,
+            needs_human=needs_human,
+            blocking=blocking,
+            severity="high" if blocking else None,
         )
         for i in range(count)
     )
@@ -225,6 +407,498 @@ def recover(app, ledger, *, app_slug=APP, **kwargs):
 
 
 class PublicationRecoveryTests(unittest.TestCase):
+    def test_optional_supersession_cannot_starve_durable_completion(self):
+        from review_sensei_github.session_ledger import (
+            GitHubIssueCommentSessionLedger,
+            render_session_comment,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            seed = LocalSessionLedger(Path(directory))
+            result, key = checkpoint(seed, count=1, line=1, blocking=True)
+            state = SupersessionState(result)
+            state.session_comment = {
+                "id": 600,
+                "body": render_session_comment(
+                    repository_id=1, pull_request=1, record=seed.load(IDENTITY).record
+                ),
+                "user": state.app_user,
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/1",
+            }
+            ledger = GitHubIssueCommentSessionLedger(
+                state.http, token="read", app_slug=APP
+            )
+            budget = EvidenceReadBudget()
+            outcome = publish(
+                application(state, ledger),
+                result,
+                key,
+                publication_budget=budget,
+                blocker_candidates=(
+                    derive_blocker_candidate(
+                        result.comments[0],
+                        on_changed_path=True,
+                        evidence_locations_validated=True,
+                        has_failure_condition=True,
+                        has_actionable_remedy=True,
+                        has_specific_violation=True,
+                    ),
+                ),
+                options=GitHubWriteOptions(
+                    auto_review=True, github_writes=True, complete_inventory=True
+                ),
+            )
+            self.assertEqual(outcome.status, "published")
+            self.assertEqual(outcome.thread_resolution, "unconfirmed")
+            self.assertEqual(
+                ledger.load(IDENTITY).record.transaction.phase, "publication_succeeded"
+            )
+            self.assertEqual(budget.calls, len(state.calls) - 1)
+            self.assertLessEqual(budget.calls, 60)
+            self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+
+    def test_same_head_terminal_retries_resume_cleanup_without_duplicate_publication(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = LocalSessionLedger(Path(directory))
+            result, key = checkpoint(ledger, count=1, line=1, blocking=True)
+            candidate = derive_blocker_candidate(
+                result.comments[0],
+                on_changed_path=True,
+                evidence_locations_validated=True,
+                has_failure_condition=True,
+                has_actionable_remedy=True,
+                has_specific_violation=True,
+            )
+            state = SupersessionState(result, old_count=9)
+            previous = 9
+            initial_posts = None
+            for attempt in range(10):
+                state.calls.clear()
+                budget = EvidenceReadBudget()
+                outcome = publish(
+                    application(state, ledger),
+                    result,
+                    key,
+                    publication_budget=budget,
+                    blocker_candidates=(candidate,),
+                    options=GitHubWriteOptions(
+                        auto_review=True, github_writes=True, complete_inventory=True
+                    ),
+                )
+                self.assertEqual(
+                    outcome.status, "published" if attempt == 0 else "already_published"
+                )
+                self.assertEqual(
+                    ledger.load(IDENTITY).record.transaction.phase,
+                    "publication_succeeded",
+                )
+                self.assertEqual(
+                    ledger.load(IDENTITY).record.completed_initial_reviews, 1
+                )
+                self.assertEqual(budget.calls, len(state.calls))
+                self.assertLessEqual(budget.calls, 60)
+                pending = sum(
+                    not n["isResolved"]
+                    for n in state.threads
+                    if n["id"].startswith("OLD_")
+                )
+                self.assertLess(
+                    pending, previous, "an explicit retry must make bounded progress"
+                )
+                self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+                self.assertEqual(outcome.diagnostic, "required_fixes_open")
+                self.assertTrue(
+                    all(
+                        not n["isResolved"]
+                        for n in state.threads
+                        if n["id"].startswith("CURRENT_")
+                    )
+                )
+                self.assertEqual(len(state.reviews), 1)
+                self.assertEqual(len(state.inline), 1)
+                posts = state.part_requests.count("POST")
+                if initial_posts is None:
+                    initial_posts = posts
+                self.assertEqual(posts, initial_posts)
+                self.assertEqual(len(state.resolved), len(set(state.resolved)))
+                if not pending:
+                    self.assertIsNone(outcome.thread_resolution)
+                    break
+                self.assertEqual(outcome.thread_resolution, "unconfirmed")
+                previous = pending
+            else:
+                self.fail("bounded explicit retries did not finish the finite backlog")
+            self.assertGreater(attempt, 0)
+
+    def test_optional_cleanup_keeps_root_head_base_and_latest_eligibility_fences(self):
+        for fault in ("root", "owner", "head", "base", "eligibility"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                ledger = LocalSessionLedger(Path(directory))
+                result, key = checkpoint(ledger, count=1, line=1, blocking=True)
+                candidate = derive_blocker_candidate(
+                    result.comments[0],
+                    on_changed_path=True,
+                    evidence_locations_validated=True,
+                    has_failure_condition=True,
+                    has_actionable_remedy=True,
+                    has_specific_violation=True,
+                )
+                state = SupersessionState(result, old_count=1)
+
+                def race(host):
+                    host.cleanup_hook = None
+                    if fault == "root":
+                        host.roots[1000]["body"] += "\nEdited old root"
+                    elif fault == "owner":
+                        host.roots[1000]["user"] = {"login": "alice", "type": "User"}
+                    elif fault == "head":
+                        host.head = "d" * 40
+                    elif fault == "base":
+                        host.base = "d" * 40
+                    else:
+                        review = host.reviews[-1]
+                        eligibility = approval_eligibility_from_body(review["body"])
+                        self.assertIsNotNone(eligibility)
+                        changed = replace(
+                            eligibility, facts=replace(eligibility.facts, enabled=False)
+                        )
+                        review["body"] = review["body"].replace(
+                            approval_eligibility_marker(eligibility),
+                            approval_eligibility_marker(changed),
+                        )
+
+                state.cleanup_hook = race
+                budget = EvidenceReadBudget()
+                outcome = publish(
+                    application(state, ledger),
+                    result,
+                    key,
+                    publication_budget=budget,
+                    blocker_candidates=(candidate,),
+                    options=GitHubWriteOptions(
+                        auto_review=True, github_writes=True, complete_inventory=True
+                    ),
+                )
+                self.assertEqual(outcome.status, "published")
+                self.assertEqual(outcome.thread_resolution, "unconfirmed")
+                self.assertEqual(
+                    ledger.load(IDENTITY).record.transaction.phase,
+                    "publication_succeeded",
+                )
+                self.assertEqual(state.mutation_attempts, [])
+                self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+                self.assertEqual(budget.calls, len(state.calls))
+                self.assertLessEqual(budget.calls, 60)
+
+    def test_optional_cleanup_reconciles_ambiguous_mutation_once(self):
+        for mode, confirmed in (("lost", True), ("unconfirmed", False)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                ledger = LocalSessionLedger(Path(directory))
+                result, key = checkpoint(ledger, count=1, line=1, blocking=True)
+                candidate = derive_blocker_candidate(
+                    result.comments[0],
+                    on_changed_path=True,
+                    evidence_locations_validated=True,
+                    has_failure_condition=True,
+                    has_actionable_remedy=True,
+                    has_specific_violation=True,
+                )
+                state = SupersessionState(result, old_count=1)
+                state.mutation_mode = mode
+                budget = EvidenceReadBudget()
+                outcome = publish(
+                    application(state, ledger),
+                    result,
+                    key,
+                    publication_budget=budget,
+                    blocker_candidates=(candidate,),
+                    options=GitHubWriteOptions(
+                        auto_review=True, github_writes=True, complete_inventory=True
+                    ),
+                )
+                self.assertEqual(state.mutation_attempts, ["OLD_0"])
+                self.assertEqual(state.threads[0]["isResolved"], confirmed)
+                self.assertEqual(
+                    outcome.thread_resolution, None if confirmed else "unconfirmed"
+                )
+                self.assertEqual(outcome.diagnostic, "required_fixes_open")
+                self.assertEqual(
+                    ledger.load(IDENTITY).record.transaction.phase,
+                    "publication_succeeded",
+                )
+                self.assertEqual(
+                    sum(
+                        body.get("operationName") == "ResolutionReadback"
+                        for _, _, body in state.calls
+                        if isinstance(body, dict)
+                    ),
+                    1,
+                )
+                self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+                self.assertEqual(budget.calls, len(state.calls))
+
+    def test_terminal_cleanup_retry_requires_exact_original_root_index_and_inline_prose(
+        self,
+    ):
+        for fault in ("index", "inline", "owner"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                ledger = LocalSessionLedger(Path(directory))
+                result, key = checkpoint(ledger, count=1, line=1, blocking=True)
+                candidate = derive_blocker_candidate(
+                    result.comments[0],
+                    on_changed_path=True,
+                    evidence_locations_validated=True,
+                    has_failure_condition=True,
+                    has_actionable_remedy=True,
+                    has_specific_violation=True,
+                )
+                state = SupersessionState(result, old_count=9)
+                options = GitHubWriteOptions(
+                    auto_review=True, github_writes=True, complete_inventory=True
+                )
+                publish(
+                    application(state, ledger),
+                    result,
+                    key,
+                    publication_budget=EvidenceReadBudget(),
+                    blocker_candidates=(candidate,),
+                    options=options,
+                )
+                self.assertGreater(len(state.resolved), 0)
+                previous = tuple(state.resolved)
+                parts = state.part_requests.count("POST")
+                if fault == "index":
+                    state.reviews[0]["body"] = state.reviews[0]["body"].replace(
+                        "reviewsensei:finding-index:v1", "removed-index", 1
+                    )
+                elif fault == "inline":
+                    state.inline[0]["body"] += "\nEdited explanation"
+                else:
+                    state.reviews[0]["user"] = {"login": APP, "type": "User"}
+                state.calls.clear()
+                with self.assertRaises(GitHubPublicationError):
+                    publish(
+                        application(state, ledger),
+                        result,
+                        key,
+                        publication_budget=EvidenceReadBudget(),
+                        blocker_candidates=(candidate,),
+                        options=options,
+                    )
+                self.assertEqual(tuple(state.resolved), previous)
+                self.assertEqual(state.part_requests.count("POST"), parts)
+                self.assertEqual(len(state.reviews), 1)
+                self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+                self.assertEqual(
+                    ledger.load(IDENTITY).record.transaction.phase,
+                    "publication_succeeded",
+                )
+
+    def test_publication_completion_preserves_current_body_and_human_obligations(self):
+        for line, human in ((2, False), (1, True)):
+            with (
+                self.subTest(line=line, human=human),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                ledger = LocalSessionLedger(Path(directory))
+                result, key = checkpoint(ledger, count=1, line=line, blocking=True)
+                candidate = derive_blocker_candidate(
+                    result.comments[0],
+                    on_changed_path=True,
+                    evidence_locations_validated=True,
+                    has_failure_condition=True,
+                    has_actionable_remedy=True,
+                    has_specific_violation=True,
+                )
+                if human:
+                    candidate = replace(candidate, needs_human=True)
+                state = SupersessionState(result, old_count=1)
+                outcome = publish(
+                    application(state, ledger),
+                    result,
+                    key,
+                    publication_budget=EvidenceReadBudget(),
+                    blocker_candidates=(candidate,),
+                    options=GitHubWriteOptions(
+                        auto_review=True, github_writes=True, complete_inventory=True
+                    ),
+                )
+                self.assertEqual(outcome.status, "published")
+                self.assertEqual(
+                    ledger.load(IDENTITY).record.transaction.phase,
+                    "publication_succeeded",
+                )
+                self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+                self.assertEqual(
+                    outcome.diagnostic,
+                    "human_adjudication_open" if human else "required_fixes_open",
+                )
+                eligibility = approval_eligibility_from_body(state.reviews[0]["body"])
+                self.assertIsNotNone(eligibility)
+                if human:
+                    self.assertTrue(eligibility.facts.has_human_adjudication_findings)
+                else:
+                    self.assertTrue(eligibility.facts.has_blocking_findings)
+
+    def test_cleanup_admission_preserves_mutation_readback_liability(self):
+        from review_sensei_github.thread_resolution import FindingThreadResolver
+
+        for phase in ("entry", "after-fence"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                ledger = LocalSessionLedger(Path(directory))
+                result, _ = checkpoint(ledger, count=1, line=1, blocking=True)
+                state = SupersessionState(result, old_count=1)
+                budget = EvidenceReadBudget()
+                # These charges represent work already performed by this caller.
+                if phase == "entry":
+                    for _ in range(55):
+                        budget.consume()
+
+                def fence():
+                    if phase == "after-fence":
+                        while budget.calls < 59:
+                            budget.consume()
+                    return True
+
+                outcome = FindingThreadResolver(
+                    PublicationBudgetHttp(state.http, budget)
+                ).resolve(
+                    token="token",
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha=HEAD,
+                    base_sha=BASE,
+                    app_slug=APP,
+                    instances=frozenset(),
+                    supersede={
+                        "OLD_0": finding_lifecycle_for_comment(
+                            result.comments[0]
+                        ).fingerprint
+                    },
+                    fence=fence,
+                    skip_resolved=True,
+                    cleanup_budget=budget,
+                )
+                self.assertEqual(outcome.unconfirmed, ("OLD_0",))
+                self.assertEqual(outcome.resolved, ())
+                self.assertEqual(state.mutation_attempts, [])
+                self.assertEqual(budget.calls, 56 if phase == "entry" else 59)
+                self.assertFalse(state.threads[0]["isResolved"])
+
+    def test_mandatory_durable_completion_failure_never_runs_optional_cleanup(self):
+        from review_sensei_github.session_ledger import (
+            GitHubIssueCommentSessionLedger,
+            render_session_comment,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            seed = LocalSessionLedger(Path(directory))
+            result, key = checkpoint(seed, count=1, line=1, blocking=True)
+            candidate = derive_blocker_candidate(
+                result.comments[0],
+                on_changed_path=True,
+                evidence_locations_validated=True,
+                has_failure_condition=True,
+                has_actionable_remedy=True,
+                has_specific_violation=True,
+            )
+            state = SupersessionState(result, old_count=1)
+            state.session_comment = {
+                "id": 600,
+                "body": render_session_comment(
+                    repository_id=1, pull_request=1, record=seed.load(IDENTITY).record
+                ),
+                "user": state.app_user,
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/1",
+            }
+            state.fail_completion = True
+            ledger = GitHubIssueCommentSessionLedger(
+                state.http, token="read", app_slug=APP
+            )
+            with self.assertRaises((GitHubPublicationError, ReviewInputError)):
+                publish(
+                    application(state, ledger),
+                    result,
+                    key,
+                    publication_budget=EvidenceReadBudget(),
+                    blocker_candidates=(candidate,),
+                    options=GitHubWriteOptions(
+                        auto_review=True, github_writes=True, complete_inventory=True
+                    ),
+                )
+            self.assertEqual(state.mutation_attempts, [])
+            self.assertEqual(state.resolved, [])
+            self.assertEqual(len(state.reviews), 1)
+            self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+            self.assertNotEqual(
+                ledger.load(IDENTITY).record.transaction.phase, "publication_succeeded"
+            )
+
+    def test_terminal_cleanup_does_not_borrow_a_newer_results_eligibility(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = LocalSessionLedger(Path(directory))
+            result, key = checkpoint(ledger, count=1, line=1, blocking=True)
+            candidate = derive_blocker_candidate(
+                result.comments[0],
+                on_changed_path=True,
+                evidence_locations_validated=True,
+                has_failure_condition=True,
+                has_actionable_remedy=True,
+                has_specific_violation=True,
+            )
+            state = SupersessionState(result, old_count=9)
+            options = GitHubWriteOptions(
+                auto_review=True, github_writes=True, complete_inventory=True
+            )
+            publish(
+                application(state, ledger),
+                result,
+                key,
+                publication_budget=EvidenceReadBudget(),
+                blocker_candidates=(candidate,),
+                options=options,
+            )
+            previous = tuple(state.resolved)
+            original = state.reviews[0]
+            eligibility = approval_eligibility_from_body(original["body"])
+            index = parse_finding_index(
+                original["body"], repository_id=1, pull_request=1, head_sha=HEAD
+            )
+            changed = replace(eligibility, result_digest="e" * 64)
+            later = copy.deepcopy(original)
+            later["id"] = 9999
+            later["body"] = (
+                approval_eligibility_marker(changed)
+                + "\n"
+                + finding_index_marker(
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha=HEAD,
+                    base_sha=BASE,
+                    result_digest=changed.result_digest,
+                    entries=index.entries,
+                    complete_inventory=True,
+                )
+            )
+            state.reviews.append(later)
+            outcome = publish(
+                application(state, ledger),
+                result,
+                key,
+                publication_budget=EvidenceReadBudget(),
+                blocker_candidates=(candidate,),
+                options=options,
+            )
+            self.assertEqual(outcome.status, "already_published")
+            self.assertEqual(outcome.diagnostic, "approval_withheld")
+            self.assertEqual(tuple(state.resolved), previous)
+            self.assertEqual(outcome.thread_resolution, "unconfirmed")
+            self.assertEqual(len(state.reviews), 2)
+            self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+
     def test_configured_bot_login_case_preserves_numeric_owned_publication(self):
         for configured in (
             "REVIEW-SENSEI[bot]",

@@ -117,16 +117,23 @@ class GitHubIssueCommentOperationPort:
             return tuple(self._view(item) for item in primed)
         collected: list[OperationComment] = []
         page_sizes = (100, 50, 20, 10, 5, 1)
-        hint = (
-            self._http.pagination_page_size(self._list_path)
-            if isinstance(self._http, GitHubHttp)
-            else 100
-        )
-        size_index = next(
-            index for index, size in enumerate(page_sizes) if size <= hint
-        )
+        size_index = 0
         deadline = time.monotonic() + 60
         for _ in range(10):
+            hint = (
+                self._http.pagination_page_size(self._list_path, len(collected))
+                if isinstance(self._http, GitHubHttp)
+                else 100
+            )
+            size_index = next(
+                (
+                    index
+                    for index in range(size_index, len(page_sizes))
+                    if page_sizes[index] <= hint
+                    and len(collected) % page_sizes[index] == 0
+                ),
+                size_index,
+            )
             page_size = page_sizes[size_index]
             if len(collected) % page_size:
                 raise ValueError("operation comment listing offset conflicts")

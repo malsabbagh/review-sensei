@@ -14,7 +14,8 @@ import re
 from copy import copy
 from dataclasses import replace
 from typing import Any, Mapping
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
+from weakref import WeakKeyDictionary
 
 from review_sensei.bounded_evidence import EvidenceReadBudget, canonical_bytes
 from review_sensei.convergence import ReviewConvergencePolicy
@@ -28,13 +29,99 @@ from review_sensei.session import (
     load_review_transaction_for_publication,
 )
 
-from .errors import GitHubPublicationError
+from .errors import GitHubHTTPResponseTooLargeError, GitHubPublicationError
 from .http import GitHubHttp
 from .operation_comments import (
     GitHubIssueCommentOperationPort,
     ResultPartStore,
     ensure_result_part_capacity,
 )
+
+# Metadata dies with the original budget. No response bytes, credentials or
+# authority decisions are retained; distinct physical transports stay isolated.
+_PAGINATION_OBSERVATIONS: WeakKeyDictionary = WeakKeyDictionary()
+
+
+def _page_scope(path: str) -> tuple[str, int, int] | None:
+    parsed = urlsplit(path)
+    query = parse_qs(parsed.query)
+    sizes, pages = query.pop("per_page", []), query.pop("page", [])
+    if len(sizes) != 1 or len(pages) != 1:
+        return None
+    if not sizes[0].isdigit() or not pages[0].isdigit():
+        return None
+    size, page = int(sizes[0]), int(pages[0])
+    if not 1 <= size <= 100 or not 1 <= page <= 1000:
+        return None
+    scope = parsed.path + "?" + urlencode(sorted(query.items()), doseq=True)
+    return scope, (page - 1) * size, size
+
+
+def _publication_transport(http: GitHubHttp) -> GitHubHttp:
+    """Identity of an audited wrapper stack; never a response or authority proof."""
+    from .human_assessment import FeedbackBudgetHttp
+
+    while type(http) in {
+        PublicationBudgetHttp,
+        _PaginationObservationHttp,
+        FeedbackBudgetHttp,
+    }:
+        http = getattr(http, "transport")
+    return http
+
+
+class _PaginationObservationHttp(GitHubHttp):
+    """Observe oversized pages without owning request accounting."""
+
+    def __init__(self, http: GitHubHttp, budget: EvidenceReadBudget) -> None:
+        super().__init__(api_url=http.api_url, timeout=getattr(http, "timeout", 30))
+        self.transport = http
+        # Preserve the existing one-shot operation-entry handoff. This adapter
+        # adds no response cache and must not silently discard an admitted list.
+        self.primed_issue_comments = http.primed_issue_comments
+        self.observation_budget = budget
+        from .human_assessment import FeedbackBudgetHttp
+
+        base = http
+        while type(base) in {
+            PublicationBudgetHttp,
+            _PaginationObservationHttp,
+            FeedbackBudgetHttp,
+        }:
+            base = getattr(base, "transport")
+        operation = _PAGINATION_OBSERVATIONS.setdefault(budget, WeakKeyDictionary())
+        self._oversized_page_ceilings = operation.setdefault(base, {})
+
+    def pagination_page_size(self, path: str, offset: int = 0) -> int:
+        parsed = urlsplit(path)
+        query = parse_qs(parsed.query)
+        query.pop("per_page", None)
+        query.pop("page", None)
+        scope = parsed.path + "?" + urlencode(sorted(query.items()), doseq=True)
+        return self._oversized_page_ceilings.get((self.api_url, scope, offset), 100)
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        token: str,
+        body: dict[str, object] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> tuple[int, dict[str, Any] | list[Any] | None]:
+        scope = _page_scope(path) if method == "GET" else None
+        key = (self.api_url, *scope[:2]) if scope is not None else None
+        try:
+            response = self.transport.request(
+                method, path, token=token, body=body, timeout_seconds=timeout_seconds
+            )
+        except GitHubHTTPResponseTooLargeError:
+            if key is not None and scope is not None:
+                self._oversized_page_ceilings[key] = min(
+                    max(1, scope[2] - 1), self._oversized_page_ceilings.get(key, 100)
+                )
+            raise
+        return response
 
 
 class PublicationBudgetHttp(GitHubHttp):
@@ -44,24 +131,30 @@ class PublicationBudgetHttp(GitHubHttp):
         from .human_assessment import FeedbackBudgetHttp
 
         super().__init__(api_url=http.api_url, timeout=getattr(http, "timeout", 30))
-        self.transport = http
         self.publication_budget = budget
-        callback = getattr(http, "before_read", None)
-        known_wrapper = type(http) is PublicationBudgetHttp
+        accounting_http = http
+        while type(accounting_http) is _PaginationObservationHttp:
+            if accounting_http.observation_budget is not budget:
+                raise GitHubPublicationError("publication budget identity mismatches")
+            accounting_http = accounting_http.transport
+        callback = getattr(accounting_http, "before_read", None)
+        known_wrapper = type(accounting_http) is PublicationBudgetHttp
         wrapped_budget = (
-            getattr(http, "publication_budget", None) if known_wrapper else None
+            getattr(accounting_http, "publication_budget", None)
+            if known_wrapper
+            else None
         )
-        known_feedback = type(http) is FeedbackBudgetHttp
+        known_feedback = type(accounting_http) is FeedbackBudgetHttp
         if (known_wrapper and wrapped_budget is not budget) or (
             known_feedback and callback != budget.consume
         ):
             raise GitHubPublicationError("publication budget identity mismatches")
         self._already_charged = known_wrapper or known_feedback
-        self._page_size_hints: dict[str, int] = {}
+        self.transport = _PaginationObservationHttp(http, budget)
 
-    def pagination_page_size(self, path: str) -> int:
-        """Reuse only a bounded page-size observation, never response data."""
-        return self._page_size_hints.get(path, 100)
+    def pagination_page_size(self, path: str, offset: int = 0) -> int:
+        """Reuse only oversized-request ceilings at this exact item offset."""
+        return self.transport.pagination_page_size(path, offset)
 
     def request(
         self,
@@ -87,15 +180,6 @@ class PublicationBudgetHttp(GitHubHttp):
             else remaining,
         )
         budget.check()
-        if method == "GET" and isinstance(response[1], list):
-            parsed = urlsplit(path)
-            sizes = parse_qs(parsed.query).get("per_page", [])
-            if len(sizes) == 1 and sizes[0].isdigit():
-                size = int(sizes[0])
-                if 1 <= size <= 100 and len(response[1]) <= size:
-                    self._page_size_hints[parsed.path] = min(
-                        size, self.pagination_page_size(parsed.path)
-                    )
         return response
 
 
@@ -126,9 +210,18 @@ def publication_session_ledger(
         raise GitHubPublicationError("publication ledger budget identity mismatches")
     copied = copy(ledger)
     transport = copied.http
-    while type(transport) in {PublicationBudgetHttp, FeedbackBudgetHttp}:
+    while type(transport) in {
+        PublicationBudgetHttp,
+        FeedbackBudgetHttp,
+        _PaginationObservationHttp,
+    }:
         if type(transport) is PublicationBudgetHttp:
             if transport.publication_budget is not budget:
+                raise GitHubPublicationError(
+                    "publication ledger budget identity mismatches"
+                )
+        elif type(transport) is _PaginationObservationHttp:
+            if transport.observation_budget is not budget:
                 raise GitHubPublicationError(
                     "publication ledger budget identity mismatches"
                 )
@@ -137,7 +230,7 @@ def publication_session_ledger(
                 "publication ledger budget identity mismatches"
             )
         transport = getattr(transport, "transport")
-    copied.http = transport
+    copied.http = _PaginationObservationHttp(transport, budget)
     copied.evidence_budget = budget
     return copied
 

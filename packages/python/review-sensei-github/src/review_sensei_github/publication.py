@@ -1489,6 +1489,15 @@ class _ScopedHumanInventoryReader:
         self.budget.check()
         return inventory
 
+    def attach_authenticated_store(self, store: HumanInventoryStore) -> bool:
+        from .default_human_reader import DefaultHumanInventoryReader
+
+        self.budget.check()
+        reader = self._reader()
+        if type(reader) is not DefaultHumanInventoryReader:
+            return False
+        return reader.attach_authenticated_store(store)
+
     def validate_root(self, review: dict[str, Any], reviews: list[Any]) -> None:
         self.budget.check()
         validate = getattr(self._reader(), "validate_root", None)
@@ -1621,6 +1630,29 @@ class ReviewApprovalFinalizer:
         self._human_inventory_scope = scope
         self._scoped_human_inventory_reader = reader
         return reader
+
+    def _attach_authenticated_human_inventory(
+        self,
+        store: HumanInventoryStore,
+        *,
+        token: str,
+        repository: str,
+        pull_request: int,
+        head_sha: str,
+        app_slug: str,
+    ) -> None:
+        if store.authenticated_reference is None:
+            return
+        reader = self._human_reader_for_scope(
+            token=token,
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=head_sha,
+            app_slug=app_slug,
+        )
+        attach = getattr(reader, "attach_authenticated_store", None)
+        if callable(attach):
+            attach(store)
 
     def _review_pages(
         self, *, token: str, repository: str, pull_request: int
@@ -3458,6 +3490,73 @@ class ReviewPublisher:
         self.http = http
         self.finalizer = ReviewApprovalFinalizer(http=http)
         self.checks = ReviewCheckPublisher(http=http)
+        self._defer_thread_cleanup = False
+        self._pending_thread_cleanup: Callable[[], str | None] | None = None
+        self._confirmed_review_id: int | None = None
+
+    def _finish_thread_cleanup(
+        self, publication: PublicationResult
+    ) -> PublicationResult:
+        """Run optional work only after the caller's mandatory completion."""
+        cleanup, self._pending_thread_cleanup = self._pending_thread_cleanup, None
+        if cleanup is None or publication.status not in {
+            "published",
+            "already_published",
+        }:
+            return publication
+        diagnostic = cleanup()
+        return replace(
+            publication, thread_resolution="unconfirmed" if diagnostic else None
+        )
+
+    def _schedule_thread_cleanup(
+        self,
+        *,
+        token: str,
+        repository: str,
+        repository_id: int,
+        pull_request: int,
+        head_sha: str,
+        base_sha: str,
+        app_slug: str,
+        eligibility: ReviewApprovalEligibility,
+        replacements: Sequence[tuple[ReviewComment, str, str, str]],
+        review_id: int,
+        threads: Sequence[tuple[str, str]] | None = None,
+    ) -> None:
+        if not replacements:
+            return
+
+        def cleanup() -> str | None:
+            try:
+                candidates = threads
+                if candidates is None:
+                    candidates = self._published_finding_suppression(
+                        token=token,
+                        repository=repository,
+                        pull_request=pull_request,
+                        app_slug=app_slug,
+                        repository_id=repository_id,
+                        head_sha=head_sha,
+                        base_sha=base_sha,
+                    ).superseded_threads
+                return self._supersede_replaced_threads(
+                    token=token,
+                    threads=candidates,
+                    confirmed_review_id=review_id,
+                    repository=repository,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    app_slug=app_slug,
+                    eligibility=eligibility,
+                    replacements=replacements,
+                )
+            except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+                return "thread_resolution_unconfirmed"
+
+        self._pending_thread_cleanup = cleanup
 
     def prepare(
         self,
@@ -3716,6 +3815,8 @@ class ReviewPublisher:
         human_inventory_store: HumanInventoryStore | None = None,
         allow_human_inventory_start: bool = False,
     ) -> PublicationResult:
+        self._pending_thread_cleanup = None
+        self._confirmed_review_id = None
         owns_operation_budget = (
             self.finalizer.evidence_budget is None
             and self.finalizer._operation_budget is None
@@ -3723,7 +3824,7 @@ class ReviewPublisher:
         if owns_operation_budget:
             self.finalizer._operation_budget = EvidenceReadBudget()
         try:
-            return self._publish_impl(
+            publication = self._publish_impl(
                 token=token,
                 repository=repository,
                 repository_id=repository_id,
@@ -3760,6 +3861,11 @@ class ReviewPublisher:
                 complete_inventory=complete_inventory,
                 human_inventory_store=human_inventory_store,
                 allow_human_inventory_start=allow_human_inventory_start,
+            )
+            return (
+                publication
+                if self._defer_thread_cleanup
+                else self._finish_thread_cleanup(publication)
             )
         finally:
             if owns_operation_budget:
@@ -3976,6 +4082,14 @@ class ReviewPublisher:
                 raise GitHubPublicationError(
                     "human inventory store authority mismatches publication"
                 )
+            self.finalizer._attach_authenticated_human_inventory(
+                human_inventory_store,
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+            )
         if human_inventory is not None:
             try:
                 human_inventory.to_dict()
@@ -4129,6 +4243,30 @@ class ReviewPublisher:
                     result_digest=review_result_digest(result),
                 )
             )
+            if (
+                result_states
+                and complete_review is not None
+                and persisted_eligibility is not None
+                and self._confirmed_review_id is not None
+            ):
+                self._schedule_thread_cleanup(
+                    token=token,
+                    repository=repository,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    app_slug=app_slug,
+                    eligibility=persisted_eligibility,
+                    replacements=complete_review.inline_comments,
+                    review_id=self._confirmed_review_id,
+                )
+                if persisted_eligibility.result_digest != review_result_digest(result):
+                    # A newer same-head result cannot lend this older report
+                    # authority to mutate threads, even when its own index is valid.
+                    self._pending_thread_cleanup = lambda: (
+                        "thread_resolution_unconfirmed"
+                    )
             if (
                 complete_inventory
                 and identity_states
@@ -4363,6 +4501,14 @@ class ReviewPublisher:
                     "visible_prose": [],
                 },
                 allow_start=allow_human_inventory_start,
+            )
+            self.finalizer._attach_authenticated_human_inventory(
+                human_inventory_store,
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
             )
             if needs_human_inventory:
                 prospective_eligibility = replace(
@@ -4645,10 +4791,10 @@ class ReviewPublisher:
         if status == 200 and isinstance(payload, dict):
             review_id = payload.get("id")
             if isinstance(review_id, int):
-                self._supersede_replaced_threads(
+                self._schedule_thread_cleanup(
                     token=token,
                     threads=suppression.superseded_threads,
-                    confirmed_review_id=review_id,
+                    review_id=review_id,
                     repository=repository,
                     repository_id=repository_id,
                     pull_request=pull_request,
@@ -4889,7 +5035,7 @@ class ReviewPublisher:
         app_slug: str,
         eligibility: ReviewApprovalEligibility,
         replacements: Sequence[tuple[ReviewComment, str, str, str]],
-    ) -> None:
+    ) -> str | None:
         from .thread_resolution import FindingThreadResolver
 
         replacement_concerns = {item[1] for item in replacements}
@@ -4903,7 +5049,7 @@ class ReviewPublisher:
             or type(confirmed_review_id) is not int
             or confirmed_review_id < 1
         ):
-            return
+            return None
         try:
 
             def fence() -> bool:
@@ -4942,7 +5088,7 @@ class ReviewPublisher:
                     and not live.app_authored
                 )
 
-            FindingThreadResolver(self.http).resolve(
+            resolution = FindingThreadResolver(self.http).resolve(
                 token=token,
                 repository=repository,
                 repository_id=repository_id,
@@ -4953,9 +5099,12 @@ class ReviewPublisher:
                 instances=frozenset(),
                 supersede=matching,
                 fence=fence,
+                skip_resolved=True,
+                cleanup_budget=getattr(self.http, "publication_budget", None),
             )
-        except (GitHubHTTPError, GitHubPublicationError):
-            return
+            return resolution.diagnostic
+        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+            return "thread_resolution_unconfirmed"
 
     def _published_finding_suppression(
         self,
@@ -5494,6 +5643,9 @@ class ReviewPublisher:
                             base_sha=base_sha,
                             result_digest=result_digest,
                         )
+                        identifier = review.get("id")
+                        if type(identifier) is int and identifier > 0:
+                            self._confirmed_review_id = identifier
         eligibility = self.finalizer._eligibility_from_reviews(
             payload,
             head_sha=head_sha,

@@ -773,6 +773,19 @@ class GitHubIssueCommentSessionLedger:
         collected: list[Any] = []
         page_size_index = 0
         while len(collected) <= MAX_PAGINATION_ITEMS:
+            hint_path = self._comments_path(identity)
+            if since is not None:
+                hint_path += "?since=" + quote(since, safe="")
+            hint = self.http.pagination_page_size(hint_path, len(collected))
+            page_size_index = next(
+                (
+                    index
+                    for index in range(page_size_index, len(_COMMENT_PAGE_SIZES))
+                    if _COMMENT_PAGE_SIZES[index] <= hint
+                    and len(collected) % _COMMENT_PAGE_SIZES[index] == 0
+                ),
+                page_size_index,
+            )
             page_size = _COMMENT_PAGE_SIZES[page_size_index]
             if len(collected) % page_size:
                 raise ReviewInputError("partition metadata enumeration is unavailable")
@@ -844,6 +857,18 @@ class GitHubIssueCommentSessionLedger:
         page_size_index = 0
         used = 0
         while used < limit and len(collected) < MAX_PAGINATION_ITEMS:
+            hint = self.http.pagination_page_size(
+                self._comments_path(identity), len(collected)
+            )
+            page_size_index = next(
+                (
+                    index
+                    for index in range(page_size_index, len(_COMMENT_PAGE_SIZES))
+                    if _COMMENT_PAGE_SIZES[index] <= hint
+                    and len(collected) % _COMMENT_PAGE_SIZES[index] == 0
+                ),
+                page_size_index,
+            )
             page_size = _COMMENT_PAGE_SIZES[page_size_index]
             if len(collected) % page_size:
                 raise ReviewInputError("partition metadata enumeration is unavailable")

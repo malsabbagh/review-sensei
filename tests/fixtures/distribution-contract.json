@@ -72,6 +72,7 @@
         "tests/test_evidence_capacity.py",
         "tests/test_default_human_inventory_cli.py",
         "tests/test_default_human_inventory_publisher.py",
+        "tests/test_publication_pagination_budget.py",
         "tests/test_default_human_reader_binding.py",
         "tests/test_default_human_rescan.py",
         "tests/test_schema5_public_contract.py",

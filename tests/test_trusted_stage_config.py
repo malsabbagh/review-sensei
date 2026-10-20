@@ -197,6 +197,9 @@ class CallerRunnerInputContractTests(unittest.TestCase):
         invocation_inputs = {
             "mode",
             "operation",
+            "recover_publication",
+            "recovery_policy_commit",
+            "recovery_expected_head",
             "repository",
             "repository_id",
             "pull_request_number",

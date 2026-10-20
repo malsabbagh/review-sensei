@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
+from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
 
 from .errors import GitHubHTTPError, GitHubPublicationError
@@ -237,6 +238,7 @@ class FindingThreadResolver:
         records: Sequence[Mapping[str, Any]] = (),
         supersede: Mapping[str, str] | None = None,
         skip_resolved: bool = False,
+        cleanup_budget: EvidenceReadBudget | None = None,
     ) -> ThreadResolutionResult:
         from .publication import (
             finding_fingerprint_from_body,
@@ -337,7 +339,13 @@ class FindingThreadResolver:
         resolved, unconfirmed = [], []
         found = {instance for _, _, instance, old in candidates if not old}
         unconfirmed.extend(sorted(instances - found))
-        for node, root, instance, old in candidates:
+        unconfirmed.extend(
+            sorted(
+                set(supersede or {})
+                - {node["id"] for node, _, _, old in candidates if old}
+            )
+        )
+        for position, (node, root, instance, old) in enumerate(candidates):
             identity = node["id"] if old else instance
             assert isinstance(identity, str)
             if skip_resolved and node["isResolved"]:
@@ -347,6 +355,11 @@ class FindingThreadResolver:
                 resolved.append(identity)
                 continue
             try:
+                if cleanup_budget is not None:
+                    # Root + replacement scan + eligibility + PR, then mutation
+                    # and its one possible readback. Paginated fences may need
+                    # more read-only work; no mutation is admitted until they end.
+                    cleanup_budget.preflight(6)
                 # Re-read the root, decision, and PR immediately before each mutation.
                 status, live_root = self.http.request(
                     "GET",
@@ -380,6 +393,8 @@ class FindingThreadResolver:
                         raise GitHubPublicationError("resolution source changed")
                 if not fence():
                     raise GitHubPublicationError("thread resolution authority changed")
+                if cleanup_budget is not None:
+                    cleanup_budget.preflight(2)
                 if not node["isResolved"] and not self._resolve_confirmed(
                     token=token, thread_id=node["id"]
                 ):
@@ -387,10 +402,18 @@ class FindingThreadResolver:
                         "thread resolution mutation is unconfirmed"
                     )
                 resolved.append(identity)
+            except ReviewInputError:
+                if cleanup_budget is None:
+                    unconfirmed.append(identity)
+                    continue
+                for n, _, item, previous in candidates[position:]:
+                    pending = n["id"] if previous else item
+                    assert isinstance(pending, str)
+                    unconfirmed.append(pending)
+                break
             except (
                 GitHubHTTPError,
                 GitHubPublicationError,
-                ReviewInputError,
                 AttributeError,
                 TypeError,
             ):

@@ -119,6 +119,162 @@ class DefaultHumanInventoryPublisherTests(unittest.TestCase):
         arguments.update(overrides)
         return self.publisher.publish(**arguments)
 
+    def test_scoped_reader_reuses_admitted_store_under_remaining_original_budget(self):
+        from review_sensei_github.default_human_reader import (
+            DefaultHumanInventoryReader,
+        )
+
+        def reader_factory(**scope):
+            return DefaultHumanInventoryReader(
+                http=self.http, ledger=self.ledger, **scope
+            )
+
+        self.publisher.finalizer.human_inventory_reader_factory = reader_factory
+        self.assertEqual(self.publish().status, "published")
+        # Leave exactly the fresh review, authority, complete intent/parts,
+        # mutable checkpoint/head and visible-prose dispatch allowance.
+        while self.budget.calls < 54:
+            self.budget.consume()
+        before = len(self.state.calls)
+        eligibility = self.publisher.finalizer.load_eligibility(
+            token="synthetic",
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            head_sha=HEAD,
+            app_slug=APP,
+            require_valid=True,
+        )
+        self.assertEqual(len(eligibility.human_review.pending), 77)
+        self.assertEqual(self.budget.calls, 60)
+        self.assertEqual(len(self.state.calls) - before, 6)
+
+    def _published_scoped_handoff(self):
+        from review_sensei_github.default_human_reader import (
+            DefaultHumanInventoryReader,
+        )
+
+        self.publisher.finalizer.human_inventory_reader_factory = lambda **scope: (
+            DefaultHumanInventoryReader(http=self.http, ledger=self.ledger, **scope)
+        )
+        self.assertEqual(self.publish().status, "published")
+        return self.store.authenticated_reference
+
+    def _read_scoped_eligibility(self):
+        return self.publisher.finalizer.load_eligibility(
+            token="synthetic",
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            head_sha=HEAD,
+            app_slug=APP,
+            require_valid=True,
+        )
+
+    def test_handoff_refuses_different_transport_budget_token_and_head(self):
+        from review_sensei_github.default_human_reader import (
+            DefaultHumanInventoryReader,
+        )
+        from review_sensei_github.http import GitHubHttp
+
+        self._published_scoped_handoff()
+        before = len(self.state.calls)
+        for changed in (
+            {"http": GitHubHttp(opener=self.state.http.opener)},
+            {"budget": EvidenceReadBudget()},
+            {"token": "another-synthetic-token"},
+            {"head_sha": "f" * 40},
+        ):
+            with self.subTest(changed=tuple(changed)):
+                scope = dict(
+                    http=self.http,
+                    ledger=self.ledger,
+                    token="synthetic",
+                    repository=IDENTITY.repository,
+                    pull_request=IDENTITY.pull_request,
+                    head_sha=HEAD,
+                    app_slug=APP,
+                    budget=self.budget,
+                )
+                scope.update(changed)
+                with self.assertRaises((ReviewInputError, GitHubPublicationError)):
+                    reader = DefaultHumanInventoryReader(**scope)
+                    reader.attach_authenticated_store(self.store)
+        self.assertEqual(len(self.state.calls), before)
+
+    def test_handoff_refuses_changed_valid_original_intent(self):
+        import json
+
+        from review_sensei_github.default_human_inventory import INTENT_MARKER
+        from review_sensei_github.operation_host import (
+            comment_payload,
+            render_marked_comment,
+        )
+
+        self._published_scoped_handoff()
+        intent = next(
+            item for item in self.state.parts if INTENT_MARKER in item["body"]
+        )
+        payload = json.loads(comment_payload(intent["body"]))
+        payload["owner"] = "f" * 32
+        intent["body"] = render_marked_comment(INTENT_MARKER, payload)
+        before = len(self.state.reviews)
+        with self.assertRaises(GitHubPublicationError):
+            self._read_scoped_eligibility()
+        self.assertEqual(len(self.state.reviews), before)
+
+    def test_handoff_refuses_changed_parts(self):
+        from review_sensei_github.operation_host import RESULT_COMMENT_MARKER
+
+        self._published_scoped_handoff()
+        part = next(
+            item for item in self.state.parts if RESULT_COMMENT_MARKER in item["body"]
+        )
+        part["body"] = "malformed changed part"
+        with self.assertRaises(GitHubPublicationError):
+            self._read_scoped_eligibility()
+
+    def test_handoff_refuses_duplicate_intent(self):
+        from copy import deepcopy
+
+        from review_sensei_github.default_human_inventory import INTENT_MARKER
+
+        self._published_scoped_handoff()
+        intent = deepcopy(
+            next(item for item in self.state.parts if INTENT_MARKER in item["body"])
+        )
+        intent["id"] += 100_000
+        self.state.parts.append(intent)
+        with self.assertRaises(GitHubPublicationError):
+            self._read_scoped_eligibility()
+
+    def test_handoff_refuses_changed_transaction(self):
+        self._published_scoped_handoff()
+        self.ledger.replace(
+            IDENTITY,
+            lambda record: record.evolve(
+                transaction=replace(record.transaction, result_sha256="0" * 64)
+            ),
+        )
+        with self.assertRaises(GitHubPublicationError):
+            self._read_scoped_eligibility()
+
+    def test_handoff_refuses_changed_current_head(self):
+        self._published_scoped_handoff()
+        self.state.head = "f" * 40
+        with self.assertRaises(GitHubPublicationError):
+            self._read_scoped_eligibility()
+
+    def test_handoff_refuses_changed_owned_root_prose(self):
+        self._published_scoped_handoff()
+        self.state.inline[0]["body"] = "removed visible explanation"
+        with self.assertRaises(GitHubPublicationError):
+            self._read_scoped_eligibility()
+
+    def test_handoff_refuses_changed_owned_root_identity(self):
+        self._published_scoped_handoff()
+        self.state.reviews[-1]["user"]["id"] += 1
+        with self.assertRaises(GitHubPublicationError):
+            self._read_scoped_eligibility()
+
     def test_large_admitted_inventory_stages_then_publishes_pending_schema5(self):
         outcome = self.publish()
         self.assertEqual(outcome.status, "published")

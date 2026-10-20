@@ -17,7 +17,14 @@ from review_sensei.models import ReviewResult
 
 class PublicationCliRecoveryTests(unittest.TestCase):
     def invoke(
-        self, *, retained=False, artifact=False, policy="complete", operation="enabled"
+        self,
+        *,
+        retained=False,
+        artifact=False,
+        policy="complete",
+        operation="enabled",
+        thread_resolution=None,
+        diagnostic=None,
     ):
         import review_sensei_github as github
 
@@ -36,7 +43,11 @@ class PublicationCliRecoveryTests(unittest.TestCase):
 
             def publish_review(self, **kwargs):
                 calls.append(("publish", kwargs))
-                return SimpleNamespace(status="published")
+                return SimpleNamespace(
+                    status="published",
+                    thread_resolution=thread_resolution,
+                    diagnostic=diagnostic,
+                )
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -83,8 +94,11 @@ class PublicationCliRecoveryTests(unittest.TestCase):
                 str(root / "context.json"),
                 "--allow-write",
                 "--enable-review",
+                "--outcome",
+                str(root / "outcome.json"),
             ]
             stderr = StringIO()
+            stdout = StringIO()
             with (
                 patch.dict(
                     os.environ, {"GITHUB_TOKEN": "fixture-metadata"}, clear=True
@@ -102,11 +116,17 @@ class PublicationCliRecoveryTests(unittest.TestCase):
                     "socket.socket.connect",
                     side_effect=AssertionError("network forbidden"),
                 ),
-                redirect_stdout(StringIO()),
+                redirect_stdout(stdout),
                 redirect_stderr(stderr),
             ):
                 code = main(arguments)
             self.stderr = stderr.getvalue()
+            self.stdout = stdout.getvalue()
+            self.outcome = (
+                json.loads((root / "outcome.json").read_text())
+                if (root / "outcome.json").exists()
+                else None
+            )
         return code, calls
 
     def test_trusted_config_reaches_actual_publication_options(self):
@@ -130,6 +150,32 @@ class PublicationCliRecoveryTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(calls, [])
         self.assertIn("does not accept publication profile settings", self.stderr)
+
+    def test_unconfirmed_cleanup_reports_publication_only_retry_without_changing_outcome(
+        self,
+    ):
+        message = (
+            "review-sensei: old-thread cleanup is unconfirmed or incomplete; retry "
+            "the same publication-only result for this exact head and base; "
+            "no inference is needed.\n"
+        )
+        for diagnostic in ("required_fixes_open", "human_adjudication_open"):
+            for resolution in (None, "resolved", "unconfirmed", "untrusted\ntext"):
+                with self.subTest(diagnostic=diagnostic, resolution=resolution):
+                    code, calls = self.invoke(
+                        diagnostic=diagnostic, thread_resolution=resolution
+                    )
+                    self.assertEqual(code, 0)
+                    self.assertEqual([name for name, _ in calls], ["publish"])
+                    self.assertEqual(self.stdout, "published\n")
+                    self.assertEqual(self.outcome["status"], "partial")
+                    self.assertEqual(self.outcome["diagnostic"], diagnostic)
+                    self.assertNotIn("thread_resolution", self.outcome)
+                    self.assertEqual(
+                        self.stderr,
+                        f"review-sensei: partial: {diagnostic}\n"
+                        + (message if resolution == "unconfirmed" else ""),
+                    )
 
 
 if __name__ == "__main__":

@@ -156,34 +156,29 @@ ReviewBaseline -------------> IncrementalReviewPlan + late classification
                                (C4 verification scope; C2 admits)
 ```
 
-`ReviewService.run` always emits a versioned `RunOutcome`. Hard resource budgets
-cap provider calls, transport retries, prompt/output bytes, and elapsed time.
-One structural-correction retry remains distinct from transport retry. Opt-in
-`RecoveryArtifact` values can republish a validated result without invoking a
-model or rewriting trusted learnings or configuration. See
+`ReviewService.run` emits versioned `RunOutcome`. Hard budgets cap provider calls,
+transport retries, prompt/output bytes and elapsed time. One structural-correction
+retry differs from transport retry. Opt-in `RecoveryArtifact` republishes
+validated results without models or trusted learnings/configuration changes. See
 [ADR 0043](adr/0043-structured-run-outcomes-budgets-and-publication-recovery.md).
 
 An operator-ledger analysis checkpoint commits the logical review round before
 GitHub publication. An identical retry whose publication is pending or failed
 reports `publication_recovery_required` without another provider call or ledger
 charge. It requires the original validated result and trusted admission contexts;
-the ledger's baseline and digests cannot reconstruct them. Reusable runners
-publish a newly produced or independently validated retained result and retain
-an explicitly enabled diagnostics bundle after publication failure. That bundle includes the reviewed diff and
-trusted configuration/admission contexts, retains the existing seven-day limit,
-and remains disabled for `artifacts: none`. Local analysis-only sessions retain
-their existing duplicate behavior. See the PR223 amendment to
+ledger baseline/digests cannot reconstruct them. Reusable runners publish
+new or independently validated retained results. Opt-in publication-failure
+diagnostics retain reviewed diff and trusted configuration/admission contexts up to seven
+days, disabled by `artifacts: none`. Local analysis-only duplicates remain unchanged.
+PR223 amendment to
 [ADR 0052](adr/0052-logical-review-transaction-across-analysis-and-publication.md).
 
-Explicit manual caller recovery can reconstruct the canonical caller's original
-contexts from an independently frozen trusted policy checkout, exact base/head
-diff and authenticated prior baseline. Recomputed configuration, evidence, policy
-and reservation identities must match the committed transaction before retained
-publication. Unavailable original admission evidence refuses. Both reusable lanes
-skip provider credentials and inference and retain one shared publication read
-budget, the existing broker/accepted-result/ledger/head guards and writer slot.
-The flag defaults off; ordinary retries keep their refusal. See
-[ADR 0097](adr/0097-explicit-trusted-publication-recovery.md).
+Opt-in recovery binds original trusted policy, exact base/head diff and authenticated
+prior baseline. Configuration/evidence/policy/reservation must match committed
+transaction. Missing admission/ordinary retries refuse. Both lanes skip provider
+credentials/inference; retain one read budget, broker/accepted-result/ledger/head
+guards and writer slot.
+See [ADR 0097](adr/0097-explicit-trusted-publication-recovery.md).
 
 The review service owns the business invariants. Provider adapters own protocol,
 authentication, timeout, and response-envelope details. Publishers own GitHub
@@ -1150,3 +1145,7 @@ within their existing read, item and response-byte limits. Prepaid ledger plans
 fix the selected fence size before activation. The retry rules and finite
 qualification matrix are in [ADR 0096](adr/0096-bounded-hosted-history-readers.md)
 and [hosted history acceptance](validation/hosted-history-readers.md).
+
+Same-operation inventory handoff must retain budget/transport/token/scope,
+fresh complete intent/parts reads and fresh ledger/Bot/PR/root/index/full-prose fences.
+Canonical admission is evidence only; see ADR 0098.

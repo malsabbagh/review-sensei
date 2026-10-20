@@ -421,6 +421,9 @@ class GitHubApplication:
         publication_budget: EvidenceReadBudget | None = None,
     ) -> PublicationResult:
         reviewer = self.reviewer
+        resume_thread_cleanup = (
+            isinstance(reviewer, ReviewPublisher) and options.complete_inventory
+        )
         broker = self.broker
         if not options.github_writes or not options.auto_review:
             return PublicationResult(status="disabled")
@@ -587,6 +590,7 @@ class GitHubApplication:
                 if (
                     transaction_record.transaction is not None
                     and transaction_record.transaction.phase == "publication_succeeded"
+                    and not resume_thread_cleanup
                     and not options.github_session_ledger
                 ):
                     return PublicationResult(
@@ -651,6 +655,7 @@ class GitHubApplication:
             if (
                 transaction_record.transaction is not None
                 and transaction_record.transaction.phase == "publication_succeeded"
+                and not resume_thread_cleanup
             ):
                 return PublicationResult(
                     status="already_published",
@@ -672,6 +677,7 @@ class GitHubApplication:
             if (
                 transaction_record.transaction is not None
                 and transaction_record.transaction.phase == "publication_succeeded"
+                and not resume_thread_cleanup
             ):
                 return PublicationResult(
                     status="already_published",
@@ -699,6 +705,7 @@ class GitHubApplication:
             transaction_record is not None
             and transaction_record.transaction is not None
             and transaction_record.transaction.phase == "publication_succeeded"
+            and not resume_thread_cleanup
         ):
             return PublicationResult(
                 status="already_published",
@@ -1165,12 +1172,20 @@ class GitHubApplication:
                         admitted_record.transaction is not None
                         and admitted_record.transaction.phase == "publication_succeeded"
                     ):
-                        return PublicationResult(
-                            status="already_published",
-                            diagnostic="transaction-publication-complete",
-                            transaction_id=admitted_record.transaction.transaction_id,
-                            generation=admitted_record.generation,
-                        )
+                        if (
+                            not isinstance(reviewer, ReviewPublisher)
+                            or not options.complete_inventory
+                        ):
+                            return PublicationResult(
+                                status="already_published",
+                                diagnostic="transaction-publication-complete",
+                                transaction_id=admitted_record.transaction.transaction_id,
+                                generation=admitted_record.generation,
+                            )
+                        # A terminal result may still have optional old-thread work.
+                        # Reconcile the complete native report before resuming it.
+                        no_progress = False
+                        flags["no_progress"] = False
                     if no_progress:
                         return _with_shadow(
                             PublicationResult(
@@ -1301,6 +1316,9 @@ class GitHubApplication:
                     continuation_digest=continuation_digest,
                     source_guard=source_guard,
                 )
+            if isinstance(reviewer, ReviewPublisher) and ledger is not None:
+                reviewer = copy(reviewer)
+                reviewer._defer_thread_cleanup = True
             publisher_started = True
             publication = (
                 PublicationResult(
@@ -1441,6 +1459,8 @@ class GitHubApplication:
                 prepared,
                 published=publication.status == "published",
             )
+        if isinstance(reviewer, ReviewPublisher):
+            publication = reviewer._finish_thread_cleanup(publication)
         if (
             isinstance(result, ReviewResult)
             and result.coverage_only_partial

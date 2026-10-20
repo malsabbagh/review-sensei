@@ -373,6 +373,9 @@ class HumanInventoryStore:
         self.http = publication_http(http, context.budget)
         self.token = token
         self.ledger = publication_session_ledger(ledger, context.budget)
+        self._authenticated_snapshot: (
+            tuple[HumanInventoryReference, bytes, bytes] | None
+        ) = None
         self.port = GitHubIssueCommentOperationPort(
             self.http,
             token=token,
@@ -381,6 +384,46 @@ class HumanInventoryStore:
             app_user_id=context.producer_id,
             strict_association=True,
         )
+
+    @property
+    def authenticated_reference(self) -> HumanInventoryReference | None:
+        """A prior complete read in this store, never caller-supplied authority."""
+        snapshot = self._authenticated_snapshot
+        return snapshot[0] if snapshot is not None else None
+
+    def _remember_snapshot(
+        self, reference: HumanInventoryReference, payload: bytes, intent: dict[str, Any]
+    ) -> dict[str, object]:
+        document = self._restore(payload)
+        self._authenticated_snapshot = (reference, payload, canonical_bytes(intent))
+        return document
+
+    def read_authenticated_snapshot(
+        self, reference: HumanInventoryReference
+    ) -> dict[str, object]:
+        """Reuse admitted bytes only after fresh complete mutable storage fences.
+
+        Parts and intent can be edited or duplicated. A fresh full enumeration
+        and ordinary read detect those changes; the prior payload supplies no
+        authority. Reusing this store avoids reconstructing its independently
+        selected context in the same finite operation.
+        """
+        snapshot = self._authenticated_snapshot
+        if snapshot is None or snapshot[0] != reference:
+            raise ReviewInputError(
+                "default human inventory authenticated snapshot missing"
+            )
+        try:
+            self.read(reference)
+            if self._authenticated_snapshot != snapshot:
+                raise ReviewInputError(
+                    "default human inventory authenticated snapshot changed"
+                )
+        finally:
+            # A failed handoff cannot replace the original authenticated intent
+            # with the changed live bytes for a subsequent retry.
+            self._authenticated_snapshot = snapshot
+        return self._restore(snapshot[1])
 
     def _authority(self) -> None:
         _transaction(self.ledger, self.context)
@@ -583,7 +626,7 @@ class HumanInventoryStore:
                 raise ReviewInputError(
                     "default human inventory write outcome unknown; retain original intent and parts"
                 )
-            self._restore(available[1])
+            self._remember_snapshot(reference, available[1], intent)
             return reference
         if available is not None:
             raise ReviewInputError(
@@ -664,7 +707,7 @@ class HumanInventoryStore:
         )
         if ensure_result_part_capacity(len(payload)) != intent["part_count"]:
             raise ReviewInputError("default human inventory part count conflicts")
-        return reference, self._restore(payload)
+        return reference, self._remember_snapshot(reference, payload, intent)
 
     def read(self, reference: HumanInventoryReference) -> dict[str, object]:
         try:
@@ -694,4 +737,4 @@ class HumanInventoryStore:
         )
         if ensure_result_part_capacity(len(payload)) != intent["part_count"]:
             raise ReviewInputError("default human inventory part count conflicts")
-        return self._restore(payload)
+        return self._remember_snapshot(reference, payload, intent)

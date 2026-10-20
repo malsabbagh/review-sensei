@@ -1129,7 +1129,9 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             "base_sha": args.base_sha,
             "head_sha": args.head_sha,
         }
-        if (args.recover_from or args.recover_retained) and args.enable_learning_prs:
+        if (
+            args.recover_from or args.recover_retained or args.reconstruct_contexts
+        ) and args.enable_learning_prs:
             outcome = RunOutcome(
                 "publication_failed",
                 diagnostic="recovery_learning_prs_refused",
@@ -1522,6 +1524,13 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             review_outcome, review_result=result, **identity
         )
         emit_host_outcome(outcome, output_path=args.outcome)
+        if getattr(review_outcome, "thread_resolution", None) == "unconfirmed":
+            print(
+                "review-sensei: old-thread cleanup is unconfirmed or incomplete; "
+                "retry the same publication-only result for this exact head and base; "
+                "no inference is needed.",
+                file=sys.stderr,
+            )
         statuses = [review_outcome.status]
         statuses.extend(item.status for item in learning_outcomes)
         print(" ".join(statuses))
