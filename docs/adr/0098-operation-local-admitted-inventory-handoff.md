@@ -68,3 +68,30 @@ so sufficiently rich history can still exhaust the allowance. Disable attachment
 to restore independent reader construction; existing stored formats and readers
 remain compatible. This decision does not authorize cleanup ordering, releases,
 deployment, permissions or inference retries.
+
+## Explicit metadata recovery co-read
+
+Trusted context reconstruction and raw retained-result recovery can share one
+explicit read-only metadata phase. That phase starts only from a fresh, unprimed
+GitHub ledger with the same metadata token, underlying transport, repository/PR,
+base/head, configured App and original finite budget. Local/custom ledgers keep
+the existing path; an explicitly unsupported phase refuses before dispatch.
+
+The phase performs one fresh complete ten-request-bounded raw enumeration. Its
+original records, including malformed values and duplicate IDs, are detached
+canonically and supplied both to the existing ledger/context parser and the raw
+result part parser. The ledger's filtered/deduplicated cache cannot supply this
+list. All raw part association, numeric Bot ownership, framing, duplicate,
+canonical-result and content-integrity checks still execute. Recovery retains
+its fresh initial/final ledger checks and Bot/current-PR fences. Neither result
+bytes nor references supply expected configuration or evidence context.
+
+The raw snapshot is one-use, same-phase evidence. A foreign token, transport,
+budget, ledger or scope, or a second recovery claim, refuses. The phase blocks
+writes and destroys its raw snapshot and unused one-shot priming on success or
+failure. Its adapted metadata ledger can remain for later ordinary fresh loads,
+using only its existing parser state and normal mutable root/tail validation;
+it cannot replace a separately selected publication/session capability. Later
+accepted-operation and publication-token retention scans remain independent and
+fresh, including storage corruption and duplicate checks. No persisted schema,
+permission, inference allowance, deadline or request cap changes.

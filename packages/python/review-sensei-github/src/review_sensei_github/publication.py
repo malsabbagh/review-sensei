@@ -3491,6 +3491,7 @@ class ReviewPublisher:
         self.finalizer = ReviewApprovalFinalizer(http=http)
         self.checks = ReviewCheckPublisher(http=http)
         self._defer_thread_cleanup = False
+        self._confirmed_publication_only = False
         self._pending_thread_cleanup: Callable[[], str | None] | None = None
         self._confirmed_review_id: int | None = None
 
@@ -4243,6 +4244,13 @@ class ReviewPublisher:
                     result_digest=review_result_digest(result),
                 )
             )
+            if self._confirmed_publication_only and (
+                not result_states or self._confirmed_review_id is None
+            ):
+                raise GitHubPublicationError(
+                    "confirmed publication complete native review is unavailable; "
+                    "cleanup cannot recreate it"
+                )
             if (
                 result_states
                 and complete_review is not None
@@ -4738,6 +4746,30 @@ class ReviewPublisher:
                 != retained_eligibility
             ):
                 return PublicationResult(status="skipped_stale_head")
+
+        def schedule_reconciled_cleanup() -> None:
+            # Exact complete reconciliation selects the native review id. A
+            # legacy marker alone cannot authorize old-thread mutations.
+            if self._confirmed_review_id is None:
+                if suppression.superseded_threads and prepared_comments:
+                    self._pending_thread_cleanup = lambda: (
+                        "thread_resolution_unconfirmed"
+                    )
+                return
+            self._schedule_thread_cleanup(
+                token=token,
+                threads=suppression.superseded_threads,
+                review_id=self._confirmed_review_id,
+                repository=repository,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                app_slug=app_slug,
+                eligibility=eligibility,
+                replacements=prepared_comments,
+            )
+
         try:
             status, payload = self.http.request(
                 "POST",
@@ -4766,6 +4798,7 @@ class ReviewPublisher:
                 base_sha=base_sha,
                 result_digest=review_result_digest(result),
             ):
+                schedule_reconciled_cleanup()
                 return self._finalize_after_publication(
                     token=token,
                     repository=repository,
@@ -4884,6 +4917,7 @@ class ReviewPublisher:
                     status="publication_incomplete",
                     diagnostic="publication_ambiguous",
                 )
+            schedule_reconciled_cleanup()
             return self._finalize_after_publication(
                 token=token,
                 repository=repository,
@@ -4911,6 +4945,7 @@ class ReviewPublisher:
                 base_sha=base_sha,
                 result_digest=review_result_digest(result),
             ):
+                schedule_reconciled_cleanup()
                 return self._finalize_after_publication(
                     token=token,
                     repository=repository,

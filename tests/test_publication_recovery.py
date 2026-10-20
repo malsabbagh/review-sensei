@@ -261,6 +261,8 @@ class SupersessionState(RetentionState):
             and "comments" in body
         ):
             review_id = self.reviews[-1]["id"]
+            if body["event"] == "REQUEST_CHANGES":
+                self.reviews[-1]["state"] = "CHANGES_REQUESTED"
             for value in body["comments"]:
                 identifier = 2000 + len(self.inline)
                 root = {
@@ -898,6 +900,404 @@ class PublicationRecoveryTests(unittest.TestCase):
             self.assertEqual(outcome.thread_resolution, "unconfirmed")
             self.assertEqual(len(state.reviews), 2)
             self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+
+    def test_confirmed_lost_or_rejected_review_response_still_schedules_cleanup(self):
+        for response in ("lost", 422, 409, 429, 500):
+            with (
+                self.subTest(response=response),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                ledger = LocalSessionLedger(Path(directory))
+                result, key = checkpoint(ledger, count=1, line=1, blocking=True)
+                candidate = derive_blocker_candidate(
+                    result.comments[0],
+                    on_changed_path=True,
+                    evidence_locations_validated=True,
+                    has_failure_condition=True,
+                    has_actionable_remedy=True,
+                    has_specific_violation=True,
+                )
+                state = SupersessionState(result, old_count=1)
+                original = state.http.opener
+
+                def uncertain(request, timeout):
+                    reply = original(request, timeout)
+                    if request.method == "POST" and urlparse(
+                        request.full_url
+                    ).path.endswith("/reviews"):
+                        if response == "lost":
+                            raise URLError("synthetic lost acknowledgement")
+                        return json_response({}, response)
+                    return reply
+
+                state.http.opener = uncertain
+                budget = EvidenceReadBudget()
+                outcome = publish(
+                    application(state, ledger),
+                    result,
+                    key,
+                    publication_budget=budget,
+                    blocker_candidates=(candidate,),
+                    options=GitHubWriteOptions(
+                        auto_review=True, github_writes=True, complete_inventory=True
+                    ),
+                )
+                self.assertEqual(outcome.status, "already_published")
+                self.assertEqual(
+                    ledger.load(IDENTITY).record.transaction.phase,
+                    "publication_succeeded",
+                )
+                self.assertEqual(state.resolved, ["OLD_0"])
+                self.assertEqual(state.mutation_attempts, ["OLD_0"])
+                self.assertIsNone(outcome.thread_resolution)
+                self.assertEqual(len(state.reviews), 1)
+                self.assertEqual(len(state.inline), 1)
+                self.assertEqual(
+                    sum(
+                        m == "POST" and p.endswith("/reviews")
+                        for m, p, _ in state.calls
+                    ),
+                    1,
+                )
+                self.assertEqual(outcome.diagnostic, "required_fixes_open")
+                self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+                self.assertEqual(budget.calls, len(state.calls))
+                self.assertLessEqual(budget.calls, 60)
+
+    def test_lost_review_response_cannot_borrow_changed_owner_or_inline_prose(self):
+        for fault in ("owner", "inline"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                ledger = LocalSessionLedger(Path(directory))
+                result, key = checkpoint(ledger, count=1, line=1, blocking=True)
+                candidate = derive_blocker_candidate(
+                    result.comments[0],
+                    on_changed_path=True,
+                    evidence_locations_validated=True,
+                    has_failure_condition=True,
+                    has_actionable_remedy=True,
+                    has_specific_violation=True,
+                )
+                state = SupersessionState(result, old_count=1)
+                original = state.http.opener
+
+                def uncertain(request, timeout):
+                    reply = original(request, timeout)
+                    if request.method == "POST" and urlparse(
+                        request.full_url
+                    ).path.endswith("/reviews"):
+                        if fault == "owner":
+                            state.reviews[0]["user"] = {"login": APP, "type": "User"}
+                        else:
+                            state.inline[0]["body"] += "\nChanged live prose"
+                        raise URLError("synthetic lost acknowledgement")
+                    return reply
+
+                state.http.opener = uncertain
+                with self.assertRaises(GitHubPublicationError):
+                    publish(
+                        application(state, ledger),
+                        result,
+                        key,
+                        publication_budget=EvidenceReadBudget(),
+                        blocker_candidates=(candidate,),
+                        options=GitHubWriteOptions(
+                            auto_review=True,
+                            github_writes=True,
+                            complete_inventory=True,
+                        ),
+                    )
+                self.assertEqual(state.resolved, [])
+                self.assertEqual(state.mutation_attempts, [])
+                self.assertEqual(len(state.reviews), 1)
+                self.assertEqual(len(state.inline), 1)
+                self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+
+    def test_terminal_native_cleanup_does_not_retain_raw_parts_or_rewrite_success(self):
+        from review_sensei_github.session_ledger import (
+            GitHubIssueCommentSessionLedger,
+            render_session_comment,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            seed = LocalSessionLedger(Path(directory))
+            result, key = checkpoint(seed, count=1, line=1, blocking=True)
+            candidate = derive_blocker_candidate(
+                result.comments[0],
+                on_changed_path=True,
+                evidence_locations_validated=True,
+                has_failure_condition=True,
+                has_actionable_remedy=True,
+                has_specific_violation=True,
+            )
+            state = SupersessionState(result, old_count=9)
+            state.session_comment = {
+                "id": 600,
+                "body": render_session_comment(
+                    repository_id=1, pull_request=1, record=seed.load(IDENTITY).record
+                ),
+                "user": state.app_user,
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/1",
+            }
+            ledger = GitHubIssueCommentSessionLedger(
+                state.http, token="read", app_slug=APP
+            )
+            options = GitHubWriteOptions(
+                auto_review=True, github_writes=True, complete_inventory=True
+            )
+            publish(
+                application(state, ledger),
+                result,
+                key,
+                publication_budget=EvidenceReadBudget(),
+                blocker_candidates=(candidate,),
+                options=options,
+            )
+            original_record = ledger.load(IDENTITY).record
+            old_resolved = len(state.resolved)
+            original_body = state.session_comment["body"]
+            # Once the exact native report is complete, cleanup of that report
+            # must not depend on raw result backup bytes or recreate them.
+            raw = [
+                part
+                for part in state.parts
+                if RESULT_COMMENT_MARKER in part["body"]
+                and json.loads(comment_payload(part["body"]))["event_key"]
+                == state.retention_fault_event
+            ]
+            self.assertTrue(raw)
+            state.parts = [part for part in state.parts if part not in raw]
+            part_posts = state.part_requests.count("POST")
+            state.calls.clear()
+            budget = EvidenceReadBudget()
+            outcome = publish(
+                application(state, ledger),
+                result,
+                key,
+                publication_budget=budget,
+                blocker_candidates=(candidate,),
+                options=options,
+            )
+            self.assertEqual(outcome.status, "already_published")
+            self.assertGreater(len(state.resolved), old_resolved)
+            self.assertEqual(state.session_comment["body"], original_body)
+            # The operator admission marker keeps its existing CAS. The
+            # already-completed publication transition must not add a second.
+            self.assertEqual(
+                sum(
+                    m == "PATCH" and p.endswith("/issues/comments/600")
+                    for m, p, _ in state.calls
+                ),
+                1,
+            )
+            self.assertEqual(state.part_requests.count("POST"), part_posts)
+            self.assertEqual(len(state.reviews), 1)
+            self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+            self.assertEqual(outcome.diagnostic, "required_fixes_open")
+            current = ledger.load(IDENTITY).record
+            self.assertEqual(current.transaction, original_record.transaction)
+            self.assertEqual(current.generation, original_record.generation)
+            self.assertEqual(budget.calls, len(state.calls) - 1)
+            self.assertLessEqual(budget.calls, 60)
+
+    def test_terminal_cleanup_requires_fresh_unchanged_terminal_transaction(self):
+        for fault in ("transaction", "phase", "generation", "result"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                ledger = LocalSessionLedger(Path(directory))
+                result, key = checkpoint(ledger, count=1, line=1, blocking=True)
+                candidate = derive_blocker_candidate(
+                    result.comments[0],
+                    on_changed_path=True,
+                    evidence_locations_validated=True,
+                    has_failure_condition=True,
+                    has_actionable_remedy=True,
+                    has_specific_violation=True,
+                )
+                state = SupersessionState(result, old_count=9)
+                options = GitHubWriteOptions(
+                    auto_review=True, github_writes=True, complete_inventory=True
+                )
+                publish(
+                    application(state, ledger),
+                    result,
+                    key,
+                    publication_budget=EvidenceReadBudget(),
+                    blocker_candidates=(candidate,),
+                    options=options,
+                )
+                previous = tuple(state.resolved)
+                changed = []
+
+                def race(host, method, path, body):
+                    if method not in {"POST", "PATCH"} or "check-runs" not in path:
+                        return
+                    host.hook = None
+
+                    def competing(record):
+                        transaction = record.transaction
+                        edits = {"generation": transaction.generation + 1}
+                        if fault == "transaction":
+                            edits["reservation_id"] = "e" * 64
+                            edits["transaction_id"] = ReviewTransaction.derive_id(
+                                repository=transaction.repository,
+                                pull_request=transaction.pull_request,
+                                base_sha=transaction.base_sha,
+                                head_sha=transaction.head_sha,
+                                policy_digest=transaction.policy_digest,
+                                configuration_digest=transaction.configuration_digest,
+                                evidence_digest=transaction.evidence_digest,
+                                reservation_id="e" * 64,
+                            )
+                        elif fault == "phase":
+                            edits["phase"] = "publication_failed"
+                        elif fault == "result":
+                            edits["result_sha256"] = "e" * 64
+                        record_edits = {}
+                        if fault == "transaction":
+                            record_edits["last_committed_reservation_id"] = "e" * 64
+                        updated = record.evolve(
+                            generation=record.generation + 1,
+                            transaction=replace(transaction, **edits),
+                            **record_edits,
+                        )
+                        changed.append(updated)
+                        return updated
+
+                    ledger.replace(IDENTITY, competing)
+
+                state.hook = race
+                with self.assertRaises(GitHubPublicationError):
+                    publish(
+                        application(state, ledger),
+                        result,
+                        key,
+                        publication_budget=EvidenceReadBudget(),
+                        blocker_candidates=(candidate,),
+                        options=options,
+                    )
+                self.assertTrue(changed)
+                self.assertEqual(tuple(state.resolved), previous)
+                self.assertEqual(ledger.load(IDENTITY).record, changed[0])
+                self.assertEqual(len(state.reviews), 1)
+                self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+
+    def test_terminal_cleanup_cannot_recreate_a_missing_complete_native_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = LocalSessionLedger(Path(directory))
+            result, key = checkpoint(ledger, count=1, line=2, blocking=True)
+            candidate = derive_blocker_candidate(
+                result.comments[0],
+                on_changed_path=True,
+                evidence_locations_validated=True,
+                has_failure_condition=True,
+                has_actionable_remedy=True,
+                has_specific_violation=True,
+            )
+            state = SupersessionState(result, old_count=0)
+            options = GitHubWriteOptions(
+                auto_review=True, github_writes=True, complete_inventory=True
+            )
+            publish(
+                application(state, ledger),
+                result,
+                key,
+                publication_budget=EvidenceReadBudget(),
+                blocker_candidates=(candidate,),
+                options=options,
+            )
+            self.assertEqual(
+                ledger.load(IDENTITY).record.transaction.phase, "publication_succeeded"
+            )
+            state.reviews.clear()
+            state.calls.clear()
+            part_posts = state.part_requests.count("POST")
+            with self.assertRaises(GitHubPublicationError):
+                publish(
+                    application(state, ledger),
+                    result,
+                    key,
+                    publication_budget=EvidenceReadBudget(),
+                    blocker_candidates=(candidate,),
+                    options=options,
+                )
+            self.assertFalse(
+                any(m == "POST" and p.endswith("/reviews") for m, p, _ in state.calls)
+            )
+            self.assertEqual(state.part_requests.count("POST"), part_posts)
+            self.assertEqual(
+                ledger.load(IDENTITY).record.transaction.phase, "publication_succeeded"
+            )
+
+    def test_terminal_publication_refusal_does_not_rewrite_completed_ledger(self):
+        from review_sensei_github.session_ledger import (
+            GitHubIssueCommentSessionLedger,
+            render_session_comment,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            seed = LocalSessionLedger(Path(directory))
+            result, key = checkpoint(seed, count=1, line=2, blocking=True)
+            candidate = derive_blocker_candidate(
+                result.comments[0],
+                on_changed_path=True,
+                evidence_locations_validated=True,
+                has_failure_condition=True,
+                has_actionable_remedy=True,
+                has_specific_violation=True,
+            )
+            state = SupersessionState(result, old_count=1)
+            state.session_comment = {
+                "id": 600,
+                "body": render_session_comment(
+                    repository_id=1, pull_request=1, record=seed.load(IDENTITY).record
+                ),
+                "user": state.app_user,
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/1",
+            }
+            ledger = GitHubIssueCommentSessionLedger(
+                state.http, token="read", app_slug=APP
+            )
+            options = GitHubWriteOptions(
+                auto_review=True, github_writes=True, complete_inventory=True
+            )
+            publish(
+                application(state, ledger),
+                result,
+                key,
+                publication_budget=EvidenceReadBudget(),
+                blocker_candidates=(candidate,),
+                options=options,
+            )
+            original = ledger.load(IDENTITY).record
+            original_body = state.session_comment["body"]
+            state.reviews.clear()
+            state.calls.clear()
+            resolved = tuple(state.resolved)
+            with self.assertRaisesRegex(
+                GitHubPublicationError, "complete native review is unavailable"
+            ):
+                publish(
+                    application(state, ledger),
+                    result,
+                    key,
+                    publication_budget=EvidenceReadBudget(),
+                    blocker_candidates=(candidate,),
+                    options=options,
+                )
+            # Admission retains its existing CAS; refusal must add no terminal
+            # completion/failure PATCH and cannot revoke completed publication.
+            self.assertEqual(
+                sum(
+                    m == "PATCH" and p.endswith("/issues/comments/600")
+                    for m, p, _ in state.calls
+                ),
+                1,
+            )
+            self.assertEqual(ledger.load(IDENTITY).record, original)
+            self.assertEqual(state.session_comment["body"], original_body)
+            self.assertEqual(tuple(state.resolved), resolved)
+            self.assertFalse(
+                any(m == "POST" and p.endswith("/reviews") for m, p, _ in state.calls)
+            )
 
     def test_configured_bot_login_case_preserves_numeric_owned_publication(self):
         for configured in (

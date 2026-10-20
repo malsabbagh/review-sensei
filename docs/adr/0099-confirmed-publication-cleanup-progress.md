@@ -20,6 +20,11 @@ record publication success before running optional old-thread supersession.
 Direct publisher calls still perform cleanup, after their mandatory finalizer.
 Only a confirmed publication can schedule cleanup; failed or stale publication
 results grant no cleanup authority. Mandatory failures remain failures.
+An exactly reconciled lost, rejected or transient review-create response schedules
+the same cleanup as a directly acknowledged publication. Reconciliation must
+prove the complete native root, index and inline explanations before using its
+review identity; a legacy marker alone grants no thread mutation. Unconfirmed
+ownership or prose keeps the old thread open and cannot duplicate the review.
 
 An explicit same-head publication-only retry of the retained complete-inventory
 result checks
@@ -45,7 +50,19 @@ clears those facts. A published result may report `thread_resolution=unconfirmed
 and require a later explicit same-head publication-only retry of that exact
 retained result and base. Publication CLI stderr must surface that pending work
 without replacing a required-fix/decision or check-failure diagnostic. This retry
-is not inference, `verify`, or a new full review. No single-invocation completion is promised
+is not inference, `verify`, or a new full review. A freshly authenticated original
+`publication_succeeded` transaction may omit raw-result backup retention and its
+redundant ledger reload on that retry. Admission inventory, accepted-operation,
+configured Bot, current PR, exact native root/index/full prose and normal
+check/approval fences still run. Immediately before the completion no-op, a
+fresh ledger read must prove the identical original terminal transaction,
+result/context and generation. It replaces only the identical publication
+completion PATCH; existing admission-marker CAS behavior remains intact. A
+competing writer or absent complete native root refuses cleanup; terminal
+cleanup cannot recreate an unavailable review or raw backup parts. Refusing that
+optional retry preserves the original terminal publication without a success or
+failure completion write. Pending and failed publication retention semantics are
+unchanged. No single-invocation completion is promised
 for a backlog larger than the existing allowance. A repeated identical state is
 not evidence of progress. Independent actual-history full-lifecycle qualification
 remains required before any live attempt; partial cleanup is not authorization.

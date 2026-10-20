@@ -11,9 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from contextlib import contextmanager
 from copy import copy
 from dataclasses import replace
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 from weakref import WeakKeyDictionary
 
@@ -235,6 +236,184 @@ def publication_session_ledger(
     return copied
 
 
+class _RecoveryReadHttp(GitHubHttp):
+    """Only metadata GETs are permitted while the explicit phase is active."""
+
+    def __init__(self, transport: GitHubHttp, phase: PublicationRecoveryReadPhase):
+        super().__init__(api_url=transport.api_url, timeout=transport.timeout)
+        self.transport, self.phase = transport, phase
+
+    def request(self, method, path, *, token, body=None, timeout_seconds=None):
+        if not self.phase.active or method != "GET" or token != self.phase._token:
+            raise ReviewInputError("publication recovery phase is read-only or closed")
+        self.phase._budget.check()
+        return self.transport.request(
+            method, path, token=token, body=body, timeout_seconds=timeout_seconds
+        )
+
+
+class PublicationRecoveryReadPhase:
+    """One lossless complete list for context selection and raw result parsing.
+
+    This is a short read-only phase, not publication authority. Its list is never
+    obtained from the ledger's filtered/deduplicated cache and is destroyed on
+    exit. Ordinary mutable ledger fences remain fresh; later publication uses
+    its separately selected grant/token and fresh storage scans.
+    """
+
+    def __init__(
+        self,
+        *,
+        http: GitHubHttp,
+        token: str,
+        ledger: SessionLedger,
+        identity: SessionIdentity,
+        base_sha: str,
+        head_sha: str,
+        app_slug: str,
+        budget: EvidenceReadBudget,
+    ) -> None:
+        from .session_ledger import GitHubIssueCommentSessionLedger
+
+        if type(ledger) is not GitHubIssueCommentSessionLedger:
+            raise ReviewInputError(
+                "publication recovery phase requires a fresh GitHub ledger"
+            )
+        if (
+            not isinstance(budget, EvidenceReadBudget)
+            or ledger.evidence_budget not in (None, budget)
+            or ledger.token != token
+            or not isinstance(token, str)
+            or not token.strip()
+            or _publication_transport(ledger.http) is not _publication_transport(http)
+            or ledger.app_slug is None
+            or ledger.app_slug.casefold() != app_slug.casefold()
+            or ledger._broker is not None
+            or ledger._request_started
+            or ledger._inventory_complete
+            or ledger._comments_by_id
+            or ledger._verified_parts
+            or ledger._activation_ticket is not None
+            or ledger._tail_preparing
+            or ledger._history_reading
+            or identity.repository_id is None
+        ):
+            raise ReviewInputError(
+                "publication recovery phase ledger or scope conflicts"
+            )
+        self._path = http.repository_path(
+            identity.repository, f"/issues/{identity.pull_request}/comments"
+        )
+        if any(
+            self._path in owner.primed_issue_comments
+            for owner in (http, ledger.http, _publication_transport(http))
+        ):
+            raise ReviewInputError(
+                "publication recovery phase cannot use primed comments"
+            )
+        if (
+            re.fullmatch(r"[a-f0-9]{40}", base_sha) is None
+            or re.fullmatch(r"[a-f0-9]{40}", head_sha) is None
+            or re.fullmatch(r"[A-Za-z0-9_-]+\[bot\]", app_slug, re.I | re.ASCII) is None
+        ):
+            raise ReviewInputError("publication recovery phase scope is invalid")
+        self._budget, self._token = budget, token
+        self._transport = _publication_transport(http)
+        self._scope = (identity, base_sha, head_sha, app_slug.casefold())
+        self._accounted_http = publication_http(http, budget)
+        adapted = publication_session_ledger(ledger, budget)
+        assert isinstance(adapted, GitHubIssueCommentSessionLedger)
+        self.ledger = adapted
+        self._normal_http = self.ledger.http
+        self._snapshot: bytes | None = None
+        self._claimed = False
+        self.active = True
+        self._read_http = _RecoveryReadHttp(self._transport, self)
+        self.ledger.http = self._read_http
+
+    def _acquire(self) -> None:
+        self._budget.check()
+        records = self._accounted_http.paginate(
+            path=self._path,
+            token=self._token,
+            page_sizes=(100, 50, 20, 10, 5, 1),
+            max_requests=10,
+            timeout_seconds=60,
+        )
+        # Preserve every original item and duplicate identity. No ledger cache
+        # projection, partial prefix, or ID-based normalization supplies this.
+        self._snapshot = canonical_bytes(records)
+        self._read_http.primed_issue_comments[self._path] = json.loads(self._snapshot)
+
+    def _claim(
+        self,
+        *,
+        http: GitHubHttp,
+        token: str,
+        ledger: SessionLedger,
+        identity: SessionIdentity,
+        base_sha: str,
+        head_sha: str,
+        app_slug: str,
+        budget: EvidenceReadBudget,
+    ) -> list[Any]:
+        self._budget.check()
+        if (
+            not self.active
+            or self._snapshot is None
+            or self._claimed
+            or budget is not self._budget
+            or token != self._token
+            or ledger is not self.ledger
+            or self.ledger.http is not self._read_http
+            or _publication_transport(http) is not self._transport
+            or (identity, base_sha, head_sha, app_slug.casefold()) != self._scope
+            or getattr(ledger, "evidence_budget", None) is not budget
+            or getattr(ledger, "token", None) != token
+        ):
+            raise ReviewInputError("publication recovery phase is spent or conflicts")
+        self._claimed = True
+        return json.loads(self._snapshot)
+
+    def close(self) -> None:
+        self.active = False
+        self._snapshot = None
+        self._read_http.primed_issue_comments.clear()
+        # Existing parser state may survive only through the ordinary metadata
+        # ledger. Its next load performs normal fresh root/tail validation.
+        self.ledger.http = self._normal_http
+
+
+@contextmanager
+def publication_recovery_read_phase(
+    *,
+    http: GitHubHttp,
+    token: str,
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    base_sha: str,
+    head_sha: str,
+    app_slug: str,
+    budget: EvidenceReadBudget,
+) -> Iterator[PublicationRecoveryReadPhase]:
+    """Explicit supported phase; generic/local ledgers retain their usual path."""
+    phase = PublicationRecoveryReadPhase(
+        http=http,
+        token=token,
+        ledger=ledger,
+        identity=identity,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        app_slug=app_slug,
+        budget=budget,
+    )
+    try:
+        phase._acquire()
+        yield phase
+    finally:
+        phase.close()
+
+
 def _payload(result: ReviewResult) -> bytes:
     document = result.to_dict()
     validate_public_document(document, "review-result")
@@ -276,6 +455,7 @@ def _store(
     app_slug: str,
     base_sha: str,
     head_sha: str,
+    primed_comments: list[Any] | None = None,
 ) -> ResultPartStore:
     if (
         not isinstance(app_slug, str)
@@ -329,6 +509,8 @@ def _store(
         app_user_id=user_id,
         strict_association=True,
     )
+    if primed_comments is not None:
+        port.prime(primed_comments)
     return ResultPartStore(port, app_user_id=user_id)
 
 
@@ -381,15 +563,30 @@ def recover_retained_review_result(
     evidence_context: Mapping[str, object],
     convergence_policy: ReviewConvergencePolicy | None = None,
     budget: EvidenceReadBudget | None = None,
+    recovery_phase: PublicationRecoveryReadPhase | None = None,
 ) -> ReviewResult:
     """Recover exact owned bytes using an independently selected durable checkpoint."""
     try:
         budget = budget or EvidenceReadBudget()
         budget.check()
-        ledger = publication_session_ledger(ledger, budget)
         identity = SessionIdentity(
             repository, pull_request, repository_id=repository_id
         )
+        primed_comments = None
+        if recovery_phase is not None:
+            if type(recovery_phase) is not PublicationRecoveryReadPhase:
+                raise ReviewInputError("publication recovery phase is invalid")
+            primed_comments = recovery_phase._claim(
+                http=http,
+                token=token,
+                ledger=ledger,
+                identity=identity,
+                base_sha=base_sha,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                budget=budget,
+            )
+        ledger = publication_session_ledger(ledger, budget)
         loaded = ledger.load(identity)
         if loaded.status not in {"ok", "migrated"} or loaded.record is None:
             raise ReviewInputError("retention ledger is unavailable")
@@ -408,6 +605,7 @@ def recover_retained_review_result(
             app_slug=app_slug,
             base_sha=base_sha,
             head_sha=head_sha,
+            primed_comments=primed_comments,
         )
         available = store.read_available(event_key=_event_key(identity, transaction))
         if available is None:

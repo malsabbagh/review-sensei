@@ -362,6 +362,7 @@ class GitHubApplication:
         evidence_context: Mapping[str, object],
         convergence_policy: ReviewConvergencePolicy | None = None,
         budget: EvidenceReadBudget | None = None,
+        recovery_phase: Any | None = None,
     ) -> ReviewResult:
         """Load exact same-PR bytes without inference or acceptance fabrication.
 
@@ -385,6 +386,7 @@ class GitHubApplication:
             evidence_context=evidence_context,
             convergence_policy=convergence_policy,
             budget=budget,
+            recovery_phase=recovery_phase,
         )
 
     def publish_review(
@@ -711,6 +713,20 @@ class GitHubApplication:
                 status="already_published",
                 diagnostic="transaction-publication-complete",
             )
+        terminal_cleanup_owner: tuple[ReviewTransaction, int] | None = None
+        if (
+            resume_thread_cleanup
+            and options.operation_entry == "enabled"
+            and transaction_record is not None
+            and transaction_record.transaction is not None
+            and transaction_record.transaction.phase == "publication_succeeded"
+        ):
+            # Only the independently selected ledger can establish this owner.
+            # Native root/index/prose and all mutable authority fences still run.
+            terminal_cleanup_owner = (
+                transaction_record.transaction,
+                transaction_record.generation,
+            )
         prepared = None
         reservation = session_reservation_id(
             repository=repository,
@@ -940,13 +956,16 @@ class GitHubApplication:
         publisher_started = False
         admission_recovery_held = False
         try:
-            retention_required = (
+            retention_context_required = (
                 validated_transaction_recovery
                 and options.operation_entry == "enabled"
                 and self.http is not None
             )
+            retention_required = (
+                retention_context_required and terminal_cleanup_owner is None
+            )
             if self.http is not None and (
-                retention_required or publication_budget is not None
+                retention_context_required or publication_budget is not None
             ):
                 from .publication_recovery import publication_http
 
@@ -991,7 +1010,7 @@ class GitHubApplication:
                     result = replace(result, transaction=transaction_record.transaction)
             admitted_inventory_store = None
             if (
-                retention_required
+                retention_context_required
                 and ledger is not None
                 and budget is not None
                 and result.transaction is not None
@@ -1319,6 +1338,9 @@ class GitHubApplication:
             if isinstance(reviewer, ReviewPublisher) and ledger is not None:
                 reviewer = copy(reviewer)
                 reviewer._defer_thread_cleanup = True
+                reviewer._confirmed_publication_only = (
+                    terminal_cleanup_owner is not None
+                )
             publisher_started = True
             publication = (
                 PublicationResult(
@@ -1364,7 +1386,11 @@ class GitHubApplication:
                 and isinstance(result, ReviewResult)
                 and result.transaction is not None
             ):
-                if not isinstance(publication_error, (KeyboardInterrupt, SystemExit)):
+                if terminal_cleanup_owner is None and not isinstance(
+                    publication_error, (KeyboardInterrupt, SystemExit)
+                ):
+                    # A refused optional retry cannot re-complete or fail the
+                    # independently authenticated terminal publication owner.
                     durable_transaction = (
                         transaction_record.transaction
                         if transaction_record is not None
@@ -1446,12 +1472,24 @@ class GitHubApplication:
                 raise GitHubPublicationError(
                     "identity-bound publication has no durable transaction"
                 )
-            complete_review_publication(
-                ledger,
-                identity,
-                durable_transaction,
-                published=publication.status in success_statuses,
-            )
+            if terminal_cleanup_owner is not None:
+                # No identical success PATCH: spend a fresh authority read instead.
+                # A competing writer cannot lend a cached terminal grant to cleanup.
+                fresh_terminal = load_transaction(ledger)
+                if (
+                    fresh_terminal.transaction != terminal_cleanup_owner[0]
+                    or fresh_terminal.generation != terminal_cleanup_owner[1]
+                ):
+                    raise GitHubPublicationError(
+                        "confirmed publication cleanup transaction changed"
+                    )
+            else:
+                complete_review_publication(
+                    ledger,
+                    identity,
+                    durable_transaction,
+                    published=publication.status in success_statuses,
+                )
         elif ledger is not None and prepared is not None:
             complete_session_round(
                 ledger,

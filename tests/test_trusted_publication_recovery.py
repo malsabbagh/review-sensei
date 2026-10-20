@@ -7,11 +7,12 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import review_sensei_github as github
 from review_sensei_github.cli import main as github_main
@@ -142,6 +143,7 @@ class TrustedPublicationRecoveryTests(unittest.TestCase):
         reconstruct=False,
         result_source=False,
         actions=False,
+        remote=False,
         extra=(),
     ):
         arguments = [
@@ -167,13 +169,16 @@ class TrustedPublicationRecoveryTests(unittest.TestCase):
             APP,
             "--diff",
             str(root / "review.patch"),
-            "--session-ledger",
-            str(root / "ledger"),
             "--config",
             str(root / ".reviewsensei.yml"),
             "--outcome",
             str(root / "publication-outcome.json"),
         ]
+        arguments += (
+            ["--github-session-ledger"]
+            if remote
+            else ["--session-ledger", str(root / "ledger")]
+        )
         if reconstruct:
             arguments += (
                 ["--result", str(root / "result.json")]
@@ -320,6 +325,129 @@ class TrustedPublicationRecoveryTests(unittest.TestCase):
                 )
                 self.assertEqual(state.calls, [])
                 self.assertEqual(ledger.load(IDENTITY).record, before)
+
+    def test_remote_reconstruction_and_raw_recovery_share_one_read_phase(self):
+        from review_sensei_github import (
+            publication_context_recovery,
+            publication_recovery,
+        )
+        from review_sensei_github.application import GitHubApplication
+        from review_sensei_github.session_ledger import render_session_comment
+
+        for fault in (None, "source", "missing_parts"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                root, state = Path(directory), _FailedPublication()
+                self.original_analysis(root)
+                self.assertEqual(self.invoke(root, state)[0], 1)
+                record = LocalSessionLedger(root / "ledger").load(IDENTITY).record
+                state.session_comment = {
+                    "id": 600,
+                    "body": render_session_comment(
+                        repository_id=1, pull_request=1, record=record
+                    ),
+                    "user": state.app_user,
+                    "issue_url": "https://api.github.test/repos/owner/repo/issues/1",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                }
+                for item in state.parts:
+                    item["updated_at"] = "2026-01-01T00:00:00Z"
+                before = state.session_comment["body"]
+                if fault == "source":
+                    configuration = root / ".reviewsensei.yml"
+                    configuration.write_text(
+                        configuration.read_text().replace("qwen3.5:4b", "other-model")
+                    )
+                if fault == "missing_parts":
+                    state.parts = [
+                        item
+                        for item in state.parts
+                        if journey_fixture.RESULT_COMMENT_MARKER not in item["body"]
+                    ]
+                state.calls.clear()
+                phases, builders, recoveries, publications, walks = [], [], [], [], []
+                original_phase = publication_recovery.publication_recovery_read_phase
+                original_builder = (
+                    publication_context_recovery.reconstruct_publication_contexts
+                )
+                original_recover = GitHubApplication.recover_retained_review_result
+
+                @contextmanager
+                def phase_factory(**kwargs):
+                    queries = []
+                    original_open = state.http.opener
+
+                    def observe(request, timeout):
+                        parsed = urlparse(request.full_url)
+                        if request.method == "GET" and parsed.path.endswith(
+                            "/issues/1/comments"
+                        ):
+                            queries.append(parse_qs(parsed.query))
+                        return original_open(request, timeout)
+
+                    with patch.object(state.http, "opener", new=observe):
+                        with original_phase(**kwargs) as phase:
+                            phases.append((phase, kwargs))
+                            try:
+                                yield phase
+                            finally:
+                                walks.append(
+                                    sum("since" not in query for query in queries)
+                                )
+
+                def builder(**kwargs):
+                    builders.append(kwargs)
+                    return original_builder(**kwargs)
+
+                def recover(application, **kwargs):
+                    recoveries.append(kwargs)
+                    return original_recover(application, **kwargs)
+
+                def publish(application, **kwargs):
+                    self.assertIsNone(application.session_ledger)
+                    publications.append(kwargs)
+                    return SimpleNamespace(status="published")
+
+                with (
+                    patch.object(
+                        publication_recovery,
+                        "publication_recovery_read_phase",
+                        side_effect=phase_factory,
+                    ),
+                    patch.object(
+                        publication_context_recovery,
+                        "reconstruct_publication_contexts",
+                        side_effect=builder,
+                    ),
+                    patch.object(
+                        GitHubApplication, "recover_retained_review_result", new=recover
+                    ),
+                    patch.object(GitHubApplication, "publish_review", new=publish),
+                ):
+                    code, _, error = self.invoke(
+                        root, state, reconstruct=True, remote=True
+                    )
+                self.assertEqual(code, 0 if fault is None else 1, error)
+                self.assertEqual(len(phases), 1)
+                self.assertEqual(walks, [1])
+                phase, arguments = phases[0]
+                self.assertIsNot(phase.ledger, arguments["ledger"])
+                self.assertIs(arguments["ledger"].http, state.http)
+                self.assertIs(builders[0]["ledger"], phase.ledger)
+                if fault != "source":
+                    self.assertEqual(len(recoveries), 1)
+                    self.assertIs(recoveries[0]["ledger"], phase.ledger)
+                    self.assertIs(recoveries[0]["recovery_phase"], phase)
+                    self.assertIs(recoveries[0]["budget"], arguments["budget"])
+                self.assertEqual(len(publications), 1 if fault is None else 0)
+                if publications:
+                    self.assertIs(
+                        publications[0]["publication_budget"], arguments["budget"]
+                    )
+                self.assertEqual(state.session_comment["body"], before)
+                self.assertTrue(all(method == "GET" for method, _, _ in state.calls))
+                calls = len(state.calls)
+                self.assertEqual(phase.ledger.load(IDENTITY).status, "ok")
+                self.assertGreater(len(state.calls), calls)
 
     def test_stale_head_missing_source_and_changed_diff_refuse_without_mutations(self):
         for fault in ("head", "source", "diff"):

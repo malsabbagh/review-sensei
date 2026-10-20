@@ -326,6 +326,7 @@ class GitHubIssueCommentSessionLedger:
         self._reservation_owner = reservation_owner
         self._actions_read_token = actions_read_token
         self._actions_token_provider = actions_token_provider
+        self._request_started = False
         self.evidence_budget = evidence_budget
         self.enable_partition_writes = enable_partition_writes
         self.enable_history_graph = enable_history_graph
@@ -1044,6 +1045,7 @@ class GitHubIssueCommentSessionLedger:
         *,
         body: dict[str, object] | None = None,
     ) -> tuple[int, dict[str, Any] | list[Any] | None]:
+        self._request_started = True
         try:
             if self.evidence_budget is not None:
                 if self._activation_ticket is not None:

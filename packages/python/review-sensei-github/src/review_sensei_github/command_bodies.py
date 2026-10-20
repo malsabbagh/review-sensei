@@ -1319,21 +1319,27 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 raise ReviewInputError(
                     "retained result recovery requires a session ledger"
                 )
-            if args.reconstruct_contexts:
-                from review_sensei.session import SessionIdentity
-                from review_sensei_github.publication_context_recovery import (
-                    reconstruct_publication_contexts,
-                )
+            from contextlib import nullcontext
+
+            from review_sensei.session import SessionIdentity
+            from review_sensei_github.session_ledger import (
+                GitHubIssueCommentSessionLedger,
+            )
+
+            recovery_read: Any = nullcontext(None)
+            if (
+                args.reconstruct_contexts
+                and args.recover_retained
+                and isinstance(recovery_ledger, GitHubIssueCommentSessionLedger)
+            ):
                 from review_sensei_github.publication_recovery import (
-                    publication_session_ledger,
+                    publication_recovery_read_phase,
                 )
 
-                reconstructed = reconstruct_publication_contexts(
-                    source_root=args.trusted_context_root,
-                    diff=diff,
-                    ledger=publication_session_ledger(
-                        recovery_ledger, publication_budget
-                    ),
+                recovery_read = publication_recovery_read_phase(
+                    http=http,
+                    token=metadata_token.strip(),
+                    ledger=recovery_ledger,
                     identity=SessionIdentity(
                         args.repository,
                         args.pull_request,
@@ -1341,32 +1347,69 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     ),
                     base_sha=args.base_sha,
                     head_sha=args.head_sha,
-                    policy=convergence_policy,
+                    app_slug=args.app_slug,
+                    budget=publication_budget,
                 )
-                configuration_context = reconstructed.configuration
-                evidence_context = reconstructed.evidence
-                admission_baseline = reconstructed.baseline
-                admission_current_key = reconstructed.current_key
-            if configuration_context is None or evidence_context is None:
-                raise ReviewInputError(
-                    "retained result recovery requires trusted configuration and evidence contexts"
-                )
-        if args.recover_retained:
-            result = application.recover_retained_review_result(
-                token=metadata_token.strip(),
-                repository=args.repository,
-                repository_id=args.repository_id,
-                pull_request=args.pull_request,
-                base_sha=args.base_sha,
-                head_sha=args.head_sha,
-                app_slug=args.app_slug,
-                ledger=recovery_ledger,
-                configuration_context=configuration_context,
-                evidence_context=evidence_context,
-                convergence_policy=convergence_policy,
-                budget=publication_budget,
-            )
-        else:
+            with recovery_read as recovery_phase:
+                if recovery_phase is not None:
+                    recovery_ledger = recovery_phase.ledger
+                if args.reconstruct_contexts:
+                    from review_sensei_github.publication_context_recovery import (
+                        reconstruct_publication_contexts,
+                    )
+                    from review_sensei_github.publication_recovery import (
+                        publication_session_ledger,
+                    )
+
+                    reconstructed = reconstruct_publication_contexts(
+                        source_root=args.trusted_context_root,
+                        diff=diff,
+                        ledger=(
+                            recovery_phase.ledger
+                            if recovery_phase is not None
+                            else publication_session_ledger(
+                                recovery_ledger, publication_budget
+                            )
+                        ),
+                        identity=SessionIdentity(
+                            args.repository,
+                            args.pull_request,
+                            repository_id=args.repository_id,
+                        ),
+                        base_sha=args.base_sha,
+                        head_sha=args.head_sha,
+                        policy=convergence_policy,
+                    )
+                    configuration_context = reconstructed.configuration
+                    evidence_context = reconstructed.evidence
+                    admission_baseline = reconstructed.baseline
+                    admission_current_key = reconstructed.current_key
+                if configuration_context is None or evidence_context is None:
+                    raise ReviewInputError(
+                        "retained result recovery requires trusted configuration and evidence contexts"
+                    )
+                if args.recover_retained:
+                    recovery_options = (
+                        {"recovery_phase": recovery_phase}
+                        if recovery_phase is not None
+                        else {}
+                    )
+                    result = application.recover_retained_review_result(
+                        token=metadata_token.strip(),
+                        repository=args.repository,
+                        repository_id=args.repository_id,
+                        pull_request=args.pull_request,
+                        base_sha=args.base_sha,
+                        head_sha=args.head_sha,
+                        app_slug=args.app_slug,
+                        ledger=recovery_ledger,
+                        configuration_context=configuration_context,
+                        evidence_context=evidence_context,
+                        convergence_policy=convergence_policy,
+                        budget=publication_budget,
+                        **recovery_options,
+                    )
+        if not args.recover_retained:
             result = ReviewResult.from_dict(
                 json.loads(
                     read_bounded_utf8(args.result, maximum=2_097_152, label="result")

@@ -30,6 +30,7 @@ import test_default_human_rescan  # noqa: E402
 import test_feedback_fence_budget  # noqa: E402
 import test_local_partition_read_cache  # noqa: E402
 import test_publication_pagination_budget  # noqa: E402
+import test_publication_recovery_phase  # noqa: E402
 import test_schema5_public_contract  # noqa: E402
 
 
@@ -89,6 +90,12 @@ class InstalledLocalPartitionReadCacheTests(
 
 class InstalledPublicationPaginationBudgetTests(
     test_publication_pagination_budget.PublicationPaginationBudgetTests
+):
+    pass
+
+
+class InstalledPublicationRecoveryReadPhaseTests(
+    test_publication_recovery_phase.PublicationRecoveryReadPhaseTests
 ):
     pass
 
