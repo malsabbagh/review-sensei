@@ -32,6 +32,31 @@ Replace overall Release success with successful latest executions of the
 source, Python build, docs, draft, PyPI publication and GitHub finalizer jobs.
 Never mask a newer failed execution with an older success.
 
+### Re-exposed publisher execution amendment
+
+GitHub can assign a successful ancestor job a new job ID, record creation time
+and `run_attempt` during a finalizer-only retry, preserving its original runner,
+execution timestamps and complete step inventory. The current run attempt is
+not necessarily the publisher's OIDC invocation attempt. The validator compares
+authenticated GitHub API job facts, independently of certificate contents, to
+recover that original execution and job ID before constructing the verification
+plan. The signed invocation claim is still checked exactly against that plan.
+
+A successful record created after its execution completed needs one unique
+earlier original record created before or at execution start. Both records bind
+the same run, source, ref, workflow/job names, execution start/end, runner ID,
+runner name, runner group, labels and complete numbered step names, conclusions
+and timestamps. Observed GitHub-hosted default group IDs `0` and explicit `null`
+are equivalent with the exact `GitHub Actions` group name; the remaining runner
+facts still match. Missing fields, malformed times or steps, duplicate IDs,
+multiple origins and unmatched aliases block qualification. A genuinely new
+successful execution keeps its new attempt. A later failed, incomplete or
+distinct execution blocks an older success even if GitHub later re-exposes that
+success. The existing latest-job prerequisite and fresh-run recheck remain.
+
+This comparison does not trust raw certificate claims, weaken Sigstore policy,
+alter artifact/ref/environment bindings or authorize any retry or publication.
+
 Independently read both engine and hosted PyPI wheels and sdists. Require exact
 inventory, sizes, digests and unyanked metadata. Verify PyPI publication
 attestation signatures and transparency through pinned pypi-attestations and
@@ -87,6 +112,15 @@ source/signing/GitHub release, npm recovery and downstream tests remain required
 Read-only qualification against existing public Python artifacts exercises the
 real cryptographic verifier; it does not authorize or perform a promotion.
 
+The execution amendment has public `publication_run` regression fixtures from
+the captured engine 0.8.6 run, including actual build re-exposure across
+attempts 1 and 2 and publisher re-exposure from attempt 2 under attempt 3.
+Tests cover the actual publisher's attempt 2, synthetic new attempt 3 success
+and failure, changed runner/timestamp/step facts, missing or ambiguous origins,
+intervening executions and an independent `verify_plan` invocation-claim
+acceptance/refusal pair. Signature verification stays in the existing verifier;
+the policy fixture does not claim a new live retry or cryptographic receipt.
+
 ## Rollout and rollback
 
 Review and merge this policy PR through normal exact-head CI. Use it with the
@@ -95,10 +129,25 @@ next newly prepared release; do not change or duplicate the active 0.8.4 /
 workflow-reader/writer drain, exact old-object lease and downstream validation.
 Tag movement and publishing require their own authorization.
 
+The later execution amendment can ship as a normally reviewed validator repair
+on protected main without changing an immutable released package. The major
+gate checks out protected default-branch validation code and records
+`validator_sha`; installed lanes and final recheck use that exact validator
+commit. Its eleven released source-data inputs exclude the verifier scripts.
+Keep that validator identity distinct from immutable release `source_sha`,
+signed tag objects and package/provenance digests. Publication/finalizer success,
+all provenance checks and the four installed lanes still precede channel
+acceptance. This local candidate is not a deployed validator or a promotion.
+
 Revert before preparing a later release to restore the npm prerequisites.
 Recover any partial distribution using its original run and artifacts, without
 retagging, deleting published versions or overwriting signed evidence. An
 already-promoted channel requires an explicitly authorized signed rollback.
+
+Reverting the execution amendment restores conservative refusal when a reused
+job record disagrees with the original attested invocation. It does not justify
+republishing, moving immutable tags, guessing an attempt or waiving a failed
+finalizer. Missing execution evidence remains an explicit qualification hold.
 
 ## Follow-up work
 

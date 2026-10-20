@@ -672,23 +672,25 @@ larger or more verbose inventories can still exceed inline bounds. Full finding
   downgraded or ambiguously rediscovered concerns remain uncertain, make the
   review partial and retain the prior durable baseline until resolved.
 
-OpenRouter approval remains withheld until retained qualification evidence is
-bound to independently expected effective review identities. The GitHub
-publisher and result-facts builder do not accept profile/caller status strings
-or the historical `not-required` default as that evidence; replay preserves the
-withheld facts. Other providers and permitted review events keep their policy.
+OpenRouter approval stays withheld until retained qualification evidence binds
+independently expected effective review identities. GitHub publisher/result-facts
+reject profile/caller status strings and historical `not-required` defaults;
+replay preserves withholding. Other providers and permitted review events keep
+their policy.
 
-Accepted operation results additionally bind their replay to complete immutable
-inventory, original result/facts, source identity and exact evidence. Replays
-may retain accumulated resolutions, but cannot reuse decisions after another
-source, evidence or authority change. The adapter revalidates complete evidence
-and skips only already-persisted resolved IDs; it does not weaken the inventory
-application boundary or grant another provider allowance. Unbound older accepted
-payloads require a new authorized mention. See the replay amendment in
-[ADR 0061](adr/0061-human-reply-reassessment.md) and the finite source matrix in
-[large lifecycle qualification](validation/large-lifecycle.md).
+Accepted replay binds complete immutable inventory, original result/facts,
+source identity and exact evidence; accumulated resolutions may persist.
+Source/evidence/authority changes forbid decision reuse. The adapter revalidates
+complete evidence, skips only persisted resolved IDs and preserves the inventory
+application boundary and provider allowances. Unbound older accepted payloads
+need a new authorized mention. See [ADR 0061](adr/0061-human-reply-reassessment.md)
+and the [finite source matrix](validation/large-lifecycle.md).
 
 Only confirmed owned replies or a complete empty comment list permit fallback.
 Genuine top-level legacy findings retain their exact-head inventory authority.
 Unknown, malformed, conflicting or unreadable roots refuse fallback.
 The metadata walk retains one shared ten-request, sixty-second bound.
+
+Publisher aliases must match original run/source/ref, runner and complete steps.
+Missing/ambiguous execution facts block qualification; re-exposed success never
+masks a newer distinct publisher execution.

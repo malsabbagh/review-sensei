@@ -667,6 +667,13 @@ distribution with its own protected approval and integrity readback. Overall
 Release/npm success remains a Pages condition, outside v5 admission. See
 [ADR 0095](adr/0095-pypi-qualified-major-channel.md).
 
+Publisher aliases must match original run/source/ref, runner and complete steps.
+Missing/ambiguous execution facts block qualification; re-exposed success never
+masks a newer distinct publisher execution.
+The current API attempt and original publishing attempt are separate receipt
+identities. Validation code comes from the recorded protected default-branch
+commit; the signed release source supplies the frozen workflow and manifest data.
+
 Release operations, PyPI registration, signed-tag ownership, verification,
 rollback/yank, and compromised-release response are documented in
 `docs/releasing.md`. The workflow cannot reserve the PyPI project or decide
@@ -838,11 +845,11 @@ resolve from trusted configuration, not this infrastructure input.
 Older setup-v4 callers remain recognized as managed content and migrate through
 the existing reviewable setup PR path.
 
-OpenRouter approval remains withheld until retained qualification evidence is
-bound to independently expected effective review identities. The GitHub
-publisher and result-facts builder do not accept profile/caller status strings
-or the historical `not-required` default as that evidence; replay preserves the
-withheld facts. Other providers and permitted review events keep their policy.
+OpenRouter approval stays withheld until retained qualification evidence binds
+independently expected effective review identities. GitHub publisher/result-facts
+reject profile/caller status strings and historical `not-required` defaults;
+replay preserves withholding. Other providers and permitted review events keep
+their policy.
 The positive runtime evidence path and legacy standalone-finalizer binding
 remain open under #115; see [the runtime boundary](openrouter-qualification.md#runtime-approval-boundary-115)
 and [ADR 0045](adr/0045-openrouter-trusted-configuration.md).
@@ -986,15 +993,13 @@ finalizer without another inference or reassessment review. All other eligibilit
 facts, current authorization, live thread checks and approval markers remain
 authoritative.
 
-Accepted operation results additionally bind their replay to complete immutable
-inventory, original result/facts, source identity and exact evidence. Replays
-may retain accumulated resolutions, but cannot reuse decisions after another
-source, evidence or authority change. The adapter revalidates complete evidence
-and skips only already-persisted resolved IDs; it does not weaken the inventory
-application boundary or grant another provider allowance. Unbound older accepted
-payloads require a new authorized mention. See the replay amendment in
-[ADR 0061](adr/0061-human-reply-reassessment.md) and the finite source matrix in
-[large lifecycle qualification](validation/large-lifecycle.md).
+Accepted replay binds complete immutable inventory, original result/facts,
+source identity and exact evidence; accumulated resolutions may persist.
+Source/evidence/authority changes forbid decision reuse. The adapter revalidates
+complete evidence, skips only persisted resolved IDs and preserves the inventory
+application boundary and provider allowances. Unbound older accepted payloads
+need a new authorized mention. See [ADR 0061](adr/0061-human-reply-reassessment.md)
+and the [finite source matrix](validation/large-lifecycle.md).
 
 The default reassessment path prioritizes the complete supplied current patches for validated
 pending paths within the existing 12 KiB budget. Missing, conflicting or

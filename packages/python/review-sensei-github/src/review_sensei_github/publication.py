@@ -4052,7 +4052,7 @@ class ReviewPublisher:
             qualification=qualification,
             retained_eligibility=retained_eligibility,
         )
-        # Only legacy single-piece capacity may select the new default store.
+        # Legacy inventory or complete framed-body capacity may select the store.
         # A fixed-width placeholder qualifies every authority/body allocation
         # before the first inventory, check, or review write. No reference or
         # caller-supplied hash can authorize a new staging attempt.
@@ -4179,11 +4179,7 @@ class ReviewPublisher:
             reserve = _disposition_frame_reserve(
                 preflight_document, preflight_review.index_entries
             )
-            for compact in (False, True):
-                if compact:
-                    preflight_review = replace(
-                        preflight_review, compact_references=True
-                    )
+            while True:
                 try:
                     fit_assembled_review(
                         preflight_review,
@@ -4207,9 +4203,39 @@ class ReviewPublisher:
                         reserved_bytes=reserve,
                         preserve_explanations=human_inventory is not None,
                     )
-                except PublicationLimitError:
-                    if preflight_review.compact_references:
-                        raise
+                except PublicationLimitError as exc:
+                    if not preflight_review.compact_references:
+                        preflight_review = replace(
+                            preflight_review, compact_references=True
+                        )
+                        continue
+                    if (
+                        exc.check == "framed-review-body"
+                        and not needs_human_inventory
+                        and stage_human_inventory
+                        and human_inventory is not None
+                    ):
+                        # The inventory may fit alone while its legacy marker
+                        # crowds out the complete body. Qualify the same v5
+                        # reference and future receipt before staging anything.
+                        prospective_eligibility = replace(
+                            prospective_eligibility,
+                            human_inventory_reference=HumanInventoryReference(
+                                context.event_key, "0" * 64
+                            ),
+                        )
+                        preflight_document = replace(
+                            preflight_document,
+                            human_inventory_reference=(
+                                prospective_eligibility.human_inventory_reference
+                            ),
+                        )
+                        reserve = _disposition_frame_reserve(
+                            preflight_document, preflight_review.index_entries
+                        )
+                        needs_human_inventory = True
+                        continue
+                    raise
                 else:
                     break
             if complete_inventory:
