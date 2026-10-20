@@ -148,7 +148,7 @@ class PortTests(unittest.TestCase):
         )
         self.assertEqual(
             [item[:2] for item in calls],
-            [(100, 1), (20, 1), (10, 1), (10, 2)],
+            [(100, 1), (50, 1), (20, 1), (10, 1), (10, 2)],
         )
         self.assertEqual(port.requests, budget.calls)
         self.assertEqual(port.requests, len(calls))
@@ -168,7 +168,7 @@ class PortTests(unittest.TestCase):
             max_requests=10,
         )
         self.assertEqual([item["id"] for item in second], list(range(1, 19)))
-        self.assertEqual([item[0] for item in calls[4:]], [10, 10])
+        self.assertEqual([item[0] for item in calls[5:]], [10, 10])
         self.assertEqual(wrapped.requests, 2)
         self.assertEqual(budget.calls, len(calls))
 
@@ -197,7 +197,7 @@ class PortTests(unittest.TestCase):
         )
         with self.assertRaises(GitHubHTTPResponseTooLargeError):
             port.list_comments()
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), 6)
         self.assertIn("per_page=1&", calls[-1])
 
     def test_later_oversized_page_preserves_exact_offset_at_smaller_size(self):
@@ -231,7 +231,7 @@ class PortTests(unittest.TestCase):
         )
         observed = port.list_comments()
         self.assertEqual([item.comment_id for item in observed], list(range(1, 51)))
-        self.assertEqual(calls[:4], [(100, 1), (20, 1), (20, 2), (10, 3)])
+        self.assertEqual(calls[:5], [(100, 1), (50, 1), (20, 1), (20, 2), (10, 3)])
         self.assertEqual(calls[-1], (10, 6))
         self.assertEqual(port.requests, len(calls))
         self.assertLessEqual(port.requests, 10)

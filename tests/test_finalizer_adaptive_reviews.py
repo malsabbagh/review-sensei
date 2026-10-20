@@ -83,9 +83,9 @@ class FinalizerAdaptiveReviewsTests(unittest.TestCase):
         self.assertEqual(pages.load(budget=budget, require_valid=True), latest)
         self.assertEqual(
             pages.offsets,
-            [(0, 100), (0, 50), (0, 25), (0, 5), (5, 5), (10, 5), (15, 5), (20, 5)],
+            [(0, 100), (0, 50), (0, 25), (0, 10), (10, 10), (20, 10)],
         )
-        self.assertEqual(budget.calls, 8)
+        self.assertEqual(budget.calls, 6)
 
     def test_late_malformed_or_unsupported_owned_root_never_reveals_clean_one(self):
         for body in (
@@ -133,7 +133,9 @@ class FinalizerAdaptiveReviewsTests(unittest.TestCase):
         pages = ReviewPages([dict(root(1), body="x" * (512 * 1024))])
         with self.assertRaises(GitHubPublicationError):
             pages.load()
-        self.assertEqual(pages.offsets, [(0, 100), (0, 50), (0, 25), (0, 5), (0, 1)])
+        self.assertEqual(
+            pages.offsets, [(0, 100), (0, 50), (0, 25), (0, 10), (0, 5), (0, 1)]
+        )
         pages = ReviewPages([])
         pages.override = {"not": "a complete list"}
         with self.assertRaises(GitHubPublicationError):

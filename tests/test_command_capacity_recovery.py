@@ -822,7 +822,7 @@ class CommandCapacityRecoveryTests(unittest.TestCase):
             )
         self.assertEqual(result.diagnostic, "command_body_capacity_unverifiable")
         self.assertEqual(
-            state.comment_pages, [(1, size) for size in (100, 50, 25, 5, 1)]
+            state.comment_pages, [(1, size) for size in (100, 50, 25, 10, 5, 1)]
         )
         self.assertEqual(state.reviews[0]["body"], original)
         self.assertEqual(len(retained), 21)

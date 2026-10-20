@@ -78,7 +78,12 @@
         "tests/test_local_partition_read_cache.py",
         "tests/test_authenticated_partitions.py",
         "tests/test_command_capacity_recovery.py",
-        "tests/test_publication_future_capacity.py"
+        "tests/test_publication_future_capacity.py",
+        "tests/test_hosted_history_readers.py",
+        "tests/fixtures/regressions/pr316-history-shape.json",
+        "tests/test_activation_tail.py",
+        "tests/test_assessment_queue_storage.py",
+        "tests/test_hosted_history_independent_acceptance.py"
       ],
       "description": "Runs after pip install dist/*.whl from a directory that cannot import checkout src/. Tests load only packaged or generated assets."
     },

@@ -1132,3 +1132,11 @@ than treating a mention plus a keyword anywhere in prose as authority. Current
 CLI/web setup generators share that grammar; exact frozen prior caller bytes
 permit managed upgrades while operator edits fail closed. See
 [ADR 0080](adr/0080-explicit-incomplete-review-rescans.md).
+
+## Bounded hosted history readers
+
+Hosted REST lists and review-thread GraphQL queries use adaptive page sizes
+within their existing read, item and response-byte limits. Prepaid ledger plans
+fix the selected fence size before activation. The retry rules and finite
+qualification matrix are in [ADR 0096](adr/0096-bounded-hosted-history-readers.md)
+and [hosted history acceptance](validation/hosted-history-readers.md).

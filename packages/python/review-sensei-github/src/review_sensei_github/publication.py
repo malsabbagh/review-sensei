@@ -87,7 +87,12 @@ from .errors import (
     GitHubPublicationError,
     GitHubPublicationTransientError,
 )
-from .http import MAX_PAGINATION_PAGES, GitHubHttp
+from .http import (
+    HISTORY_PAGE_SIZES,
+    MAX_PAGINATION_PAGES,
+    BoundedGraphQLPages,
+    GitHubHttp,
+)
 from .thread_resolution import graphql_app_author
 
 if TYPE_CHECKING:
@@ -124,10 +129,10 @@ RESERVED_RECONCILIATION_READS = 4
 ORDINARY_EVIDENCE_READ_LIMIT = MAX_PART_READS - RESERVED_RECONCILIATION_READS
 
 _REVIEW_THREADS_QUERY = """
-query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
+query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String, $first: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
-      reviewThreads(first: 100, after: $after) {
+      reviewThreads(first: $first, after: $after) {
         nodes {
           id
           isResolved
@@ -1628,7 +1633,7 @@ class ReviewApprovalFinalizer:
                 repository, f"/pulls/{pull_request}/reviews"
             ),
             token=token,
-            page_sizes=(100, 50, 25, 5, 1),
+            page_sizes=HISTORY_PAGE_SIZES,
             max_requests=64,
             timeout_seconds=60,
         )
@@ -2189,7 +2194,7 @@ class ReviewApprovalFinalizer:
                         f"/pulls/{pull_request}/comments",
                     ),
                     token=token,
-                    page_sizes=(100, 50, 25, 5, 1),
+                    page_sizes=HISTORY_PAGE_SIZES,
                 )
                 inline = [
                     item
@@ -2266,7 +2271,7 @@ class ReviewApprovalFinalizer:
                         f"/pulls/{pull_request}/comments",
                     ),
                     token=token,
-                    page_sizes=(100, 50, 25, 5, 1),
+                    page_sizes=HISTORY_PAGE_SIZES,
                 )
                 fresh_inline = [
                     item
@@ -3041,9 +3046,10 @@ class ReviewApprovalFinalizer:
         after: str | None = None
         open_blocking = False
         resolved_instances: set[str] = set()
+        pages = BoundedGraphQLPages(self.http, max_requests=MAX_REVIEW_THREAD_PAGES)
         for _ in range(MAX_REVIEW_THREAD_PAGES):
             try:
-                status, payload = self.http.request(
+                status, payload = pages.request(
                     "POST",
                     "/graphql",
                     token=token,
@@ -3080,7 +3086,11 @@ class ReviewApprovalFinalizer:
                 raise GitHubPublicationError(
                     "review thread response was invalid"
                 ) from exc
-            if not isinstance(nodes, list) or not isinstance(page_info, dict):
+            if (
+                not isinstance(nodes, list)
+                or len(nodes) > pages.page_size
+                or not isinstance(page_info, dict)
+            ):
                 raise GitHubPublicationError("review thread response was invalid")
             for node in nodes:
                 if not isinstance(node, dict) or not isinstance(
@@ -4974,9 +4984,10 @@ class ReviewPublisher:
         by_instance: dict[str, PublishedInstance] = {}
         superseded: list[tuple[str, str]] = []
         after: str | None = None
+        pages = BoundedGraphQLPages(self.http, max_requests=MAX_REVIEW_THREAD_PAGES)
         for _ in range(MAX_REVIEW_THREAD_PAGES):
             try:
-                status, payload = self.http.request(
+                status, payload = pages.request(
                     "POST",
                     "/graphql",
                     token=token,
@@ -5022,7 +5033,11 @@ class ReviewPublisher:
                 raise GitHubPublicationError(
                     "review thread response was invalid"
                 ) from exc
-            if not isinstance(nodes, list) or not isinstance(page_info, dict):
+            if (
+                not isinstance(nodes, list)
+                or len(nodes) > pages.page_size
+                or not isinstance(page_info, dict)
+            ):
                 raise GitHubPublicationError("review thread response was invalid")
             for node in nodes:
                 if not isinstance(node, dict):
@@ -5565,7 +5580,7 @@ class ReviewPublisher:
                 repository, f"/pulls/{pull_request}/reviews/{review_id}/comments"
             ),
             token=token,
-            page_sizes=(100, 50, 25, 5, 1),
+            page_sizes=HISTORY_PAGE_SIZES,
             max_requests=MAX_PAGINATION_PAGES,
             timeout_seconds=60,
         )
@@ -5636,6 +5651,7 @@ class ReviewPublisher:
         if not separator or not owner or not name:
             raise GitHubPublicationError("review thread repository is invalid")
         after: str | None = None
+        pages = BoundedGraphQLPages(self.http, max_requests=MAX_REVIEW_THREAD_PAGES)
         for _ in range(MAX_REVIEW_THREAD_PAGES):
             variables: dict[str, object] = {
                 "owner": owner,
@@ -5644,7 +5660,7 @@ class ReviewPublisher:
                 "after": after,
             }
             try:
-                status, payload = self.http.request(
+                status, payload = pages.request(
                     "POST",
                     "/graphql",
                     token=token,
@@ -5683,7 +5699,7 @@ class ReviewPublisher:
             if not isinstance(threads, dict):
                 raise GitHubPublicationError("review thread response was invalid")
             nodes = threads.get("nodes")
-            if not isinstance(nodes, list):
+            if not isinstance(nodes, list) or len(nodes) > pages.page_size:
                 raise GitHubPublicationError("review thread response was invalid")
             for node in nodes:
                 if not isinstance(node, dict) or not isinstance(
