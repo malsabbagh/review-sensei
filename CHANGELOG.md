@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.8.6 - 2026-10-20
+
+Changes since [v0.8.5](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.5), from [fb2352791caa993bcb34cd64b867af02c07c8f82](https://github.com/malsabbagh/review-sensei/commit/fb2352791caa993bcb34cd64b867af02c07c8f82) through [83f5f5a0d27e2542b8feef6a8822fb16cc6bee4b](https://github.com/malsabbagh/review-sensei/commit/83f5f5a0d27e2542b8feef6a8822fb16cc6bee4b).
+
+Previous annotated tag object: `48c972a11cfd9393c7e967a215f2b0bb7db3c2ec`.
+
+- docs: record released v0.8.5 ([82381eefa5783ac22b65016533f03bfb793a494d](https://github.com/malsabbagh/review-sensei/commit/82381eefa5783ac22b65016533f03bfb793a494d)).
+- fix: select inventory reference when complete review frame overflows \(\#334\) ([83f5f5a0d27e2542b8feef6a8822fb16cc6bee4b](https://github.com/malsabbagh/review-sensei/commit/83f5f5a0d27e2542b8feef6a8822fb16cc6bee4b)).
+
+## review-sensei-github 0.3.6 - 2026-10-20
+
+- Pin `review-sensei==0.8.6`.
+
 ## 0.8.5 - 2026-10-20
 
 - Recover oversized installed hosted startup, cleanup, operation replay and review
