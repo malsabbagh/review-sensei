@@ -4,7 +4,7 @@ Status: Proposed
 Date: 2026-10-20
 Owners/Reviewers: Maintainers
 Linked GitHub Issue: User-requested next-release policy; no separate issue
-Linked PR: Pending creation
+Linked PR: [#330](https://github.com/malsabbagh/review-sensei/pull/330)
 
 ## Context
 
