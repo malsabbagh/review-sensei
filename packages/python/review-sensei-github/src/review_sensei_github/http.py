@@ -26,6 +26,9 @@ from .errors import (
 MAX_GITHUB_RESPONSE_BYTES = 512 * 1024
 MAX_PAGINATION_PAGES = 10
 MAX_PAGINATION_ITEMS = MAX_PAGINATION_PAGES * 100
+# Ten-item pages avoid repeated five-item rescans for histories clustered near
+# GitHub's individual comment/review body limit. Fifty still admits long lists.
+HISTORY_PAGE_SIZES = (100, 50, 10, 5, 1)
 _SAFE_SEGMENT = re.compile(r"[A-Za-z0-9._-]+")
 
 Opener = Callable[..., Any]
@@ -270,7 +273,7 @@ class GitHubHttp:
         # pages. Keep that physical allowance when recovering oversized pages.
         # Explicit adaptive callers retain their separately owned envelopes.
         if page_sizes is None:
-            page_sizes = (100, 50, 25, 5, 1)
+            page_sizes = HISTORY_PAGE_SIZES
             if max_requests is None:
                 max_requests = MAX_PAGINATION_PAGES
         if not page_sizes or any(

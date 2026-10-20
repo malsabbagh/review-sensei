@@ -20,6 +20,8 @@ CONTRACTS = (
     "test_default_human_inventory_contract",
     "test_override_metadata_contract",
     "test_hosted_history_readers_contract",
+    "test_hosted_history_independent_contract",
+    "test_hosted_graphql_qualification",
 )
 
 

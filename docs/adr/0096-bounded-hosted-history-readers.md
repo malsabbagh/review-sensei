@@ -23,6 +23,10 @@ pages. Every failed physical read counts against the original ten-request walk;
 the 1,000-item and 512 KiB per-response bounds stay unchanged. Explicit adaptive
 callers retain their own existing envelopes. Operation admission uses this reader;
 operation replay adds an aligned 50-item candidate within its existing ten reads.
+Conversation and finalizer scans share the same REST history policy, including a
+ten-item candidate. This avoids pinning repeated large-body scans at five items
+and permits the combined captured comment/review history to finish within the
+original composed budget.
 Review-thread GraphQL queries retry the same opaque cursor with smaller `first`
 values within one ten-request walk. Only typed response-size failures trigger
 fallback. Status, shape, author, snapshot, cursor and completeness checks remain

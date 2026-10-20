@@ -87,7 +87,12 @@ from .errors import (
     GitHubPublicationError,
     GitHubPublicationTransientError,
 )
-from .http import MAX_PAGINATION_PAGES, BoundedGraphQLPages, GitHubHttp
+from .http import (
+    HISTORY_PAGE_SIZES,
+    MAX_PAGINATION_PAGES,
+    BoundedGraphQLPages,
+    GitHubHttp,
+)
 from .thread_resolution import graphql_app_author
 
 if TYPE_CHECKING:
@@ -1628,7 +1633,7 @@ class ReviewApprovalFinalizer:
                 repository, f"/pulls/{pull_request}/reviews"
             ),
             token=token,
-            page_sizes=(100, 50, 25, 5, 1),
+            page_sizes=HISTORY_PAGE_SIZES,
             max_requests=64,
             timeout_seconds=60,
         )
@@ -2189,7 +2194,7 @@ class ReviewApprovalFinalizer:
                         f"/pulls/{pull_request}/comments",
                     ),
                     token=token,
-                    page_sizes=(100, 50, 25, 5, 1),
+                    page_sizes=HISTORY_PAGE_SIZES,
                 )
                 inline = [
                     item
@@ -2266,7 +2271,7 @@ class ReviewApprovalFinalizer:
                         f"/pulls/{pull_request}/comments",
                     ),
                     token=token,
-                    page_sizes=(100, 50, 25, 5, 1),
+                    page_sizes=HISTORY_PAGE_SIZES,
                 )
                 fresh_inline = [
                     item
@@ -5575,7 +5580,7 @@ class ReviewPublisher:
                 repository, f"/pulls/{pull_request}/reviews/{review_id}/comments"
             ),
             token=token,
-            page_sizes=(100, 50, 25, 5, 1),
+            page_sizes=HISTORY_PAGE_SIZES,
             max_requests=MAX_PAGINATION_PAGES,
             timeout_seconds=60,
         )
