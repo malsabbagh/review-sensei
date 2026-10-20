@@ -953,15 +953,12 @@ finalizer without another inference or reassessment review. All other eligibilit
 facts, current authorization, live thread checks and approval markers remain
 authoritative.
 
-Accepted operation results additionally bind their replay to complete immutable
-inventory, original result/facts, source identity and exact evidence. Replays
-may retain accumulated resolutions, but cannot reuse decisions after another
-source, evidence or authority change. The adapter revalidates complete evidence
-and skips only already-persisted resolved IDs; it does not weaken the inventory
-application boundary or grant another provider allowance. Unbound older accepted
-payloads require a new authorized mention. See the replay amendment in
-[ADR 0061](adr/0061-human-reply-reassessment.md) and the finite source matrix in
-[large lifecycle qualification](validation/large-lifecycle.md).
+Accepted replay binds complete immutable inventory, original result/facts,
+source and exact evidence. Resolutions may accumulate; changed source/evidence/
+authority blocks reuse. Revalidate full evidence; skip only durable resolved
+IDs. No inventory bypass or provider refill. Unbound old payloads need a new
+authorized mention. See ADR 0061 and
+[the finite source matrix](validation/large-lifecycle.md).
 
 The default reassessment path prioritizes the complete supplied current patches for validated
 pending paths within the existing 12 KiB budget. Missing, conflicting or
@@ -1127,3 +1124,8 @@ instead of loading unused generic discussion context. Its compact report path
 uses exact owned POST-ID readback followed by the complete report scan; the
 ordinary conversation route remains available. See
 [Proposed ADR 0087](adr/0087-selected-assessment-context-and-owned-page-readback.md).
+
+Broker control prepays original liability, gates fetches and JWKS waits by its
+deadline, and refuses redirects/bad receipts. V2 scope/deadline match; request
+state is isolated. No refund or new authority/durability; legacy behavior is
+unchanged. See proposed ADR 0088.

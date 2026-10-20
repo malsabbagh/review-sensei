@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0088](0088-broker-physical-dispatch-control.md) | Proposed | Enforce caller-funded broker internal liability and original deadline | #240, #242, #243, #244, #245, #269 | Explicit opt-in receipt; unchanged legacy protocol; no CLI activation or deployment |
 | [0087](0087-selected-assessment-context-and-owned-page-readback.md) | Proposed | Explicit selected assessment preparation and exact owned page readback before complete report confirmation | #240, #242, #244, #269 | Cold local-library 100 findings with 0/100/250 discussion comments; original budgets and all final fences |
 | [0086](0086-original-selected-operation-context.md) | Proposed | Expose original hosted operation context with bounded wall time | #240, #242, #243, #244, #245, #269 | Actual retained handles and complete identity; selected CLI/control accounting remain unqualified |
 | [0085](0085-bounded-complete-selected-feedback-reports.md) | Proposed | Bound complete selected-feedback reports with explicit shared guidance and exact-inventory queue references | #240, #242, #243, #244, #269 | Trusted-library opt-ins, unchanged budgets and no deployed activation |

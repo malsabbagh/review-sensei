@@ -1,3 +1,4 @@
+import type { BrokerDispatchControl } from "./broker-dispatch-control";
 const MAX_TOKEN_BYTES = 64 * 1024;
 const MAX_JWKS_BYTES = 256 * 1024;
 const JWT_PART = /^[A-Za-z0-9_-]+$/;
@@ -50,6 +51,7 @@ export interface OidcValidationOptions {
   audience?: string;
   now?: number;
   clockSkewSeconds?: number;
+  dispatchControl?: BrokerDispatchControl;
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -101,10 +103,12 @@ function positiveId(value: unknown): number {
   return parsed;
 }
 
-async function fetchJwks(issuer: string): Promise<Record<string, unknown>> {
+async function fetchJwks(issuer: string, control?: BrokerDispatchControl): Promise<Record<string, unknown>> {
   const response = await fetch(`${issuer}/.well-known/jwks`, {
     headers: { accept: "application/json" },
+    ...(control === undefined ? {} : { signal: control.beforeDispatch(), redirect: "manual" }),
   });
+  await control?.checkResponse(response);
   if (!response.ok) {
     throw new Error("oidc_jwks_unavailable");
   }
@@ -143,7 +147,7 @@ async function fetchJwks(issuer: string): Promise<Record<string, unknown>> {
   }
 }
 
-async function cachedJwks(issuer: string): Promise<Record<string, unknown>> {
+async function cachedJwks(issuer: string, control?: BrokerDispatchControl): Promise<Record<string, unknown>> {
   const now = Date.now();
   if (jwksCache?.issuer === issuer && jwksCache.expiresAt > now) {
     return jwksCache.value;
@@ -151,7 +155,7 @@ async function cachedJwks(issuer: string): Promise<Record<string, unknown>> {
   if (jwksInFlight?.issuer === issuer) {
     return await jwksInFlight.promise;
   }
-  const promise = fetchJwks(issuer);
+  const promise = fetchJwks(issuer, control);
   jwksInFlight = { issuer, promise };
   try {
     const value = await promise;
@@ -254,7 +258,10 @@ export async function verifyOidcAssertion(
     throw new Error("oidc_time_invalid");
   }
 
-  const jwks = await cachedJwks(issuer);
+  const pendingJwks = cachedJwks(issuer, options.dispatchControl);
+  const jwks = options.dispatchControl === undefined
+    ? await pendingJwks : await options.dispatchControl.waitFor(pendingJwks);
+  options.dispatchControl?.check();
   const keys = jwks.keys;
   if (!Array.isArray(keys)) {
     throw new Error("oidc_jwks_invalid");

@@ -20,6 +20,7 @@ CONTRACTS = (
     "test_large_public_lifecycle_contract",
     "test_public_feedback_continuation_contract",
     "test_original_operation_context_contract",
+    "test_broker_dispatch_control_contract",
     "test_openrouter_metadata_contract",
     "test_openrouter_runtime_qualification_contract",
 )

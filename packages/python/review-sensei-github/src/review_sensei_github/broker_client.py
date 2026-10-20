@@ -10,10 +10,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
+from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.broker_diagnostics import parse_broker_diagnostic
 
+from .broker_control import BrokerDispatchAccounting
 from .errors import GitHubBrokerClientError, GitHubHTTPTransientError
 from .feedback_attestation import parse_feedback_attestation
 
@@ -70,6 +72,12 @@ _SESSION_ATTESTATION_GRANT_KEYS = _SESSION_ATTESTATION_REQUEST_KEYS | frozenset(
 )
 
 
+class _RefuseRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        fp.close()
+        raise GitHubBrokerClientError("Controlled broker redirects are refused")
+
+
 class BrokerClient:
     """Exchange one Actions OIDC token for one capability token.
 
@@ -84,6 +92,7 @@ class BrokerClient:
         opener: Opener = urlopen,
         timeout: int = 30,
         before_request: Callable[[], float] | None = None,
+        control: BrokerDispatchAccounting | None = None,
     ) -> None:
         if (
             not isinstance(broker_url, str)
@@ -98,7 +107,24 @@ class BrokerClient:
         self.timeout = timeout
         if before_request is not None and not callable(before_request):
             raise GitHubBrokerClientError("Broker request accounting is invalid")
+        if control is not None:
+            if not isinstance(control, BrokerDispatchAccounting):
+                raise GitHubBrokerClientError("Broker control configuration is invalid")
+            if before_request is not None and (
+                getattr(before_request, "__self__", None) is not control.budget
+                or getattr(before_request, "__func__", None)
+                is not EvidenceReadBudget.consume
+            ):
+                raise GitHubBrokerClientError(
+                    "Broker accounting is not the original budget"
+                )
+            before_request = control.budget.consume
+            if opener is urlopen:
+                # Each physical caller request has one prepaid dispatch. The
+                # ordinary urllib handler could silently follow several hops.
+                self.opener = build_opener(_RefuseRedirects()).open
         self.before_request = before_request
+        self.control = control
 
     def _request_timeout(self) -> float:
         if self.before_request is None:
@@ -146,6 +172,8 @@ class BrokerClient:
         value = parsed.get("value")
         if not isinstance(value, str) or not value.strip():
             raise GitHubBrokerClientError("OIDC token response was invalid")
+        if self.control is not None:
+            self.control.budget.check()
         return value
 
     def exchange(self, oidc_token: str, *, capability: str | None = None) -> str:
@@ -455,6 +483,12 @@ class BrokerClient:
     ) -> dict[str, Any]:
         """Post one bounded capability request and return a validated object."""
 
+        control_request = None
+        if self.control is not None:
+            control_request = self.control.admit(
+                verification=url is not None and url.endswith("/session-grant")
+            )
+            payload = {**payload, "control_budget": control_request}
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         request = Request(
             url or self.broker_url,
@@ -488,4 +522,6 @@ class BrokerClient:
             raise GitHubBrokerClientError("Broker token request failed") from exc
         if not isinstance(parsed, dict):
             raise GitHubBrokerClientError("Broker token response was invalid")
+        if self.control is not None and control_request is not None:
+            self.control.verify(parsed.get("control_receipt"), control_request)
         return parsed

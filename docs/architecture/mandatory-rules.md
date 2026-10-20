@@ -633,15 +633,12 @@ and exact-head/result receipt. Every finalizer requires matching App-owned
 eligibility readback and rechecks configured OpenRouter authority. Legacy facts
 remain readable without exemption; other providers' new reviews keep their policy.
 
-Accepted operation results additionally bind their replay to complete immutable
-inventory, original result/facts, source identity and exact evidence. Replays
-may retain accumulated resolutions, but cannot reuse decisions after another
-source, evidence or authority change. The adapter revalidates complete evidence
-and skips only already-persisted resolved IDs; it does not weaken the inventory
-application boundary or grant another provider allowance. Unbound older accepted
-payloads require a new authorized mention. See the replay amendment in
-[ADR 0061](adr/0061-human-reply-reassessment.md) and the finite source matrix in
-[large lifecycle qualification](validation/large-lifecycle.md).
+Accepted replay binds complete immutable inventory, original result/facts,
+source and exact evidence. Resolutions may accumulate; changed source/evidence/
+authority blocks reuse. Revalidate full evidence; skip only durable resolved
+IDs. No inventory bypass or provider refill. Unbound old payloads need a new
+authorized mention. See ADR 0061 and
+[the finite source matrix](validation/large-lifecycle.md).
   OpenRouter preserves requested model, observed model/upstream and reported
   fingerprint independently; optional `ProviderTokenUsage` contains only three
   bounded provider-reported counters. Invalid optional protocol metadata stays
@@ -686,3 +683,8 @@ Restored handles bind operation/inventory/source and original clock/charges.
 Replay never reexecutes; unknown work never publishes. Time/generation bounds,
 expiry/rollback hold. No CLI/grant activation or broker funding. See proposed
 ADR 0086.
+
+Broker control prepays original liability, gates fetches and JWKS waits by its
+deadline, and refuses redirects/bad receipts. V2 scope/deadline match; request
+state is isolated. No refund or new authority/durability; legacy behavior is
+unchanged. See proposed ADR 0088.

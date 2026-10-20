@@ -61,7 +61,9 @@
         "tests/test_operation_host.py",
         "tests/test_operation_wall_clock.py",
         "tests/test_handle_aware_operation_entry.py",
-        "tests/test_review_work.py"
+        "tests/test_review_work.py",
+        "tests/test_broker_dispatch_control.py",
+        "tests/test_github_broker_client.py"
       ],
       "description": "Runs after pip install dist/*.whl from a directory that cannot import checkout src/. Tests load only packaged or generated assets."
     },
