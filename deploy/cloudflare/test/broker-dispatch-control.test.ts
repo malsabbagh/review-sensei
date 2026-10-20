@@ -8,7 +8,13 @@ const control = (maximum = 20) => ({
   deadline_unix_ms: Date.now() + 60_000, max_dispatches: maximum,
 });
 
-afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); resetOidcJwksCacheForTesting(); });
+afterEach(() => {
+  if (vi.isFakeTimers()) vi.clearAllTimers();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  resetOidcJwksCacheForTesting();
+});
 
 describe("opt-in broker physical dispatch control", () => {
   it("refuses every redirect status without spending another dispatch", async () => {
@@ -112,21 +118,80 @@ describe("opt-in broker physical dispatch control", () => {
     expect(fixture.transportRequests.length).toBe(wide.value.control_receipt!.dispatched + 1);
   });
 
-  it("cancels a waiting physical fetch at the original absolute deadline", async () => {
+  it("refuses an exchange whose original deadline expired during fixture setup before fetch", async () => {
     const fixture = await consumingBroker();
     const request = fixture.configureFeedback();
-    request.mutation.read_accounting.deadline_unix_ms = Date.now() + 30;
-    let aborted = false;
-    vi.stubGlobal("fetch", (_input: unknown, init?: RequestInit) => new Promise((_resolve, reject) => {
-      expect(init?.signal).toBeInstanceOf(AbortSignal);
-      init!.signal!.addEventListener("abort", () => { aborted = true; reject(init!.signal!.reason); });
-    }));
+    let clock = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
+    const deadline = clock + 30;
+    request.mutation.read_accounting.deadline_unix_ms = deadline;
+    const oidcToken = await fixture.oidcToken();
+    // Signing/setup can consume the entire window; this is a refusal oracle,
+    // not evidence that an already waiting physical request was cancelled.
+    clock = deadline;
+    const fetch = vi.fn(fixture.transport);
+    vi.stubGlobal("fetch", fetch);
     await expect(fixture.broker.exchange({
-      oidc_token: await fixture.oidcToken(), capability: "review_session",
+      oidc_token: oidcToken, capability: "review_session",
       session: { repository_id: 987654321, pull_request: 7, head_sha: SHA }, session_attestation: request,
-      control_budget: { ...control(), operation_id: request.mutation.operation_id, deadline_unix_ms: request.mutation.read_accounting.deadline_unix_ms },
-    })).rejects.toThrow();
+      control_budget: { ...control(), operation_id: request.mutation.operation_id, deadline_unix_ms: deadline },
+    })).rejects.toThrow("broker_control_invalid");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("cancels a waiting physical fetch at the original absolute deadline", async () => {
+    const fixture = await consumingBroker();
+    const oidcToken = await fixture.oidcToken();
+    let clock = Date.now();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
+    const request = fixture.configureFeedback();
+    const deadline = clock + 30;
+    request.mutation.read_accounting.deadline_unix_ms = deadline;
+    const timeouts: { start: number; delay: number }[] = [];
+    // Native AbortSignal.timeout uses Node's internal timers. Drive only its
+    // timer wiring here, retaining real AbortController/AbortSignal delivery.
+    // The production-broker IPC suite separately retains actual HTTP/80ms
+    // native cancellation; this deterministic unit never replaces that proof.
+    vi.spyOn(AbortSignal, "timeout").mockImplementation(delay => {
+      timeouts.push({ start: Date.now(), delay });
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException("Original deadline expired", "TimeoutError")), delay);
+      return controller.signal;
+    });
+    let started!: () => void;
+    const dispatchStarted = new Promise<void>(resolve => { started = resolve; });
+    let aborted = false;
+    let settled = false;
+    const fetch = vi.fn((_input: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      expect(signal).toBeInstanceOf(AbortSignal);
+      if (!signal) throw new Error("physical dispatch signal is missing");
+      expect(signal.aborted).toBe(false);
+      signal.addEventListener("abort", () => { aborted = true; reject(signal.reason); }, { once: true });
+      started();
+    }));
+    vi.stubGlobal("fetch", fetch);
+    const outcome = fixture.broker.exchange({
+      oidc_token: oidcToken, capability: "review_session",
+      session: { repository_id: 987654321, pull_request: 7, head_sha: SHA }, session_attestation: request,
+      control_budget: { ...control(), operation_id: request.mutation.operation_id, deadline_unix_ms: deadline },
+    }).then(value => { settled = true; return { status: "fulfilled" as const, value }; },
+      error => { settled = true; return { status: "rejected" as const, error }; });
+    await dispatchStarted;
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(timeouts[0]).toEqual({ start: clock, delay: 30 });
+    clock += 29;
+    await vi.advanceTimersByTimeAsync(29);
+    expect(aborted).toBe(false);
+    expect(settled).toBe(false);
+    clock += 1;
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await outcome).status).toBe("rejected");
     expect(aborted).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(timeouts.every(({ start, delay }) => start + delay === deadline)).toBe(true);
+    expect(request.mutation.read_accounting.deadline_unix_ms).toBe(deadline);
   });
 
   it("bounds a wait on another request's existing JWKS fetch without canceling its owner", async () => {

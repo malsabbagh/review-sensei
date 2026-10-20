@@ -22,6 +22,7 @@ CONTRACTS = (
     "test_original_operation_context_contract",
     "test_broker_dispatch_control_contract",
     "test_initial_assessment_tail_contract",
+    "test_rich_public_writer_contract",
     "test_openrouter_metadata_contract",
     "test_default_publication_recovery_contract",
     "test_default_human_inventory_contract",

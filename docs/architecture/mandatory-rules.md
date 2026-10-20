@@ -86,16 +86,12 @@ clean review. Candidate text and snapshot contents remain untrusted data.
 evaluation loader and `FixtureProvider` into the unchanged `ReviewService`.
 Reports retain only aggregate, non-monetary metrics. Live endpoints are
 
-The repository quality boundary is deterministic and provider-independent. The
-`quality` CI job runs Ruff formatting/linting, mypy, compileall, and branch
-coverage; the `schemas` job validates the three packaged Draft 2020-12
-contracts and immutable GitHub Action pins; the `package` job builds both
-distributions, records SHA-256 digests, and runs the packaged dist-safe and
-downstream suites from an unpacked sdist after installing only the wheel
-outside the checkout; CodeQL analyzes Python and JavaScript/TypeScript and its
-deterministic SARIF findings gate is the enforcement surface. Checkout-only
-tests that need `scripts/`, `.github/`, `packages/`, or `deploy/` remain in the
-compatibility and quality jobs. All workflow permissions default to
+Deterministic, provider-independent CI gates Ruff format/lint, mypy, compileall,
+branch coverage, three packaged Draft 2020-12 contracts and immutable Action pins.
+Build both distributions/SHA-256s; run unpacked-sdist dist-safe/downstream against
+installed wheels outside checkout. CodeQL Python/JS/TS findings use deterministic SARIF.
+Checkout-only scripts/.github/packages/deploy tests stay in compatibility/quality jobs.
+All workflow permissions default to
 
 The public JSON schemas are structural contracts only. They reject malformed
 
@@ -649,3 +645,8 @@ Reject redirects/bad or v2 scope/deadline-mismatched receipts. Isolate requests;
 no refunds/new authority/durability; legacy unchanged (ADR 0088).
 
 `admit_with_tail` joins reservation/admission; owned readback precedes inference (ADR 0090).
+
+Opt-in partitioned publication binds independent result/snapshot/policy/configuration/
+producer, original budget, conditional generation and owned numeric root readback.
+Full prose/capacity remain; defaults are unchanged. No late-flow or approval
+qualification (ADR 0089).

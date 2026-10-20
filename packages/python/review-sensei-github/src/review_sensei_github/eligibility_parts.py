@@ -1,4 +1,4 @@
-"""Reader-first eligibility v4 prototype; no remote root activation is enabled."""
+"""Explicit v4 readers; root activation requires a separate trusted host."""
 
 from __future__ import annotations
 
@@ -65,6 +65,27 @@ class VisibleReader(Protocol):
 
 
 @dataclass(frozen=True)
+class PartitionedEligibilityAllocation:
+    """Independent host allocation; no numeric root identity or authority."""
+
+    max_root_bytes: int
+    framing_bytes: int
+    future_lifecycle_bytes: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.max_root_bytes) is not int
+            or not 1 <= self.max_root_bytes <= MAX_PARTITIONED_ELIGIBILITY_BYTES
+            or any(
+                type(value) is not int
+                or not 0 <= value <= MAX_PARTITIONED_ELIGIBILITY_BYTES
+                for value in (self.framing_bytes, self.future_lifecycle_bytes)
+            )
+        ):
+            raise ReviewInputError("partition eligibility actual allocation is invalid")
+
+
+@dataclass(frozen=True)
 class PartitionedEligibilityContext:
     """Independent authenticated host/result/lifecycle inputs, never root-derived.
 
@@ -99,16 +120,9 @@ class PartitionedEligibilityContext:
             or not 0 < self.owned_root_id <= 2**63 - 1
         ):
             raise ReviewInputError("partition eligibility trusted context is invalid")
-        if (
-            type(self.max_root_bytes) is not int
-            or not 1 <= self.max_root_bytes <= MAX_PARTITIONED_ELIGIBILITY_BYTES
-            or any(
-                type(value) is not int
-                or not 0 <= value <= MAX_PARTITIONED_ELIGIBILITY_BYTES
-                for value in (self.framing_bytes, self.future_lifecycle_bytes)
-            )
-        ):
-            raise ReviewInputError("partition eligibility actual allocation is invalid")
+        PartitionedEligibilityAllocation(
+            self.max_root_bytes, self.framing_bytes, self.future_lifecycle_bytes
+        )
         object.__setattr__(self, "binding", MappingProxyType(checked))
 
 
@@ -204,7 +218,7 @@ def _visible_from_document(
 def _preflight(
     value: dict[str, object],
     *,
-    context: PartitionedEligibilityContext,
+    context: PartitionedEligibilityContext | PartitionedEligibilityAllocation,
     inventory: PendingHumanReview,
 ) -> None:
     fully_resolved = HumanInventoryResolution(

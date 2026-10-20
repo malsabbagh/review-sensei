@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://reviewsensei.dev/schemas/v1/eligibility-v4.schema.json",
   "title": "Proposed reader-first result-bound eligibility v4",
-  "description": "Structural validation only; authenticated host context, exact digests/counts/ownership, fresh all-part readback and framed future root allocation remain runtime requirements. Writers remain disabled.",
+  "description": "Structural validation only; authenticated host context, exact digests/counts/ownership, fresh all-part readback and framed future root allocation remain runtime requirements. Default writers remain disabled; an explicit trusted-host library writer is separately qualified.",
   "type": "object",
   "additionalProperties": false,
   "required": [

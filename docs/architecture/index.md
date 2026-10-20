@@ -41,6 +41,7 @@ transport calls; future GitHub publishers consume only validated
 
 | Integration | Direction | Contract | Notes |
 | --- | --- | --- | --- |
+| [`0089`](../adr/0089-trusted-host-partitioned-review-publication.md) | Proposed | Explicit trusted-host partitioned review publication | Complete initial rich250 local profile; later resolution and default deployment remain separate |
 | Ollama API | Outbound | `src/review_sensei/providers/ollama.py` | Local and cloud endpoints share the adapter contract |
 | Future publisher | Outbound | Validated `ReviewResult` | No GitHub SDK dependency exists in the core |
 | GitHub learning pull requests | Outbound GitHub REST Git-object and pull-request reconciliation | `src/review_sensei/hosting/github/learning_pr.py` | One draft per source PR while open; merged generations and unsafe/manual artifacts are handled deterministically |
