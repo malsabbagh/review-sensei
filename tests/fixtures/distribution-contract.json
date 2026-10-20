@@ -63,6 +63,7 @@
         "tests/test_checkpoint_publication_acceptance.py",
         "tests/test_publication_cli_recovery.py",
         "tests/test_default_publication_cli_journey.py",
+        "tests/test_trusted_publication_recovery.py",
         "tests/test_override_metadata_integration.py",
         "tests/default_human_inventory_contract.py",
         "tests/test_default_human_inventory.py",
@@ -71,6 +72,8 @@
         "tests/test_evidence_capacity.py",
         "tests/test_default_human_inventory_cli.py",
         "tests/test_default_human_inventory_publisher.py",
+        "tests/test_publication_pagination_budget.py",
+        "tests/test_publication_recovery_phase.py",
         "tests/test_default_human_reader_binding.py",
         "tests/test_default_human_rescan.py",
         "tests/test_schema5_public_contract.py",
@@ -103,7 +106,8 @@
         "tests/test_npm_distribution.py",
         "tests/test_publication.py",
         "tests/test_release.py",
-        "tests/test_security_gates.py"
+        "tests/test_security_gates.py",
+        "tests/test_trusted_recovery_workflow.py"
       ]
     }
   },

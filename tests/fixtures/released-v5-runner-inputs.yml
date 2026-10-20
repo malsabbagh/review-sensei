@@ -1,0 +1,78 @@
+# Exact workflow_call.inputs bytes from the released v5 runner.
+# Source commit: fb2352791caa993bcb34cd64b867af02c07c8f82
+# Workflow SHA-256: 8379af1aabb7d5fff2a1b1b738b9246fdd5b8ffd1280855040b5a145971e8dbb
+on:
+  workflow_call:
+    inputs:
+      mode:
+        # automatic: an eligible host event may start a review, subject to the
+        # plan's github.automatic_reviews. manual: an explicit dispatch, which
+        # stays independently available. Both are invocation data, not a
+        # second configuration hierarchy.
+        required: true
+        type: string
+      operation:
+        required: false
+        default: review
+        type: string
+      hosted_runner:
+        description: Single Linux runner label for hosted jobs; empty uses ubuntu-latest
+        required: false
+        default: ubuntu-latest
+        type: string
+      repository:
+        required: true
+        type: string
+      repository_id:
+        required: true
+        type: string
+      pull_request_number:
+        required: false
+        type: string
+      base_ref:
+        required: true
+        type: string
+      base_sha:
+        required: false
+        type: string
+      head_ref:
+        required: true
+        type: string
+      head_repository:
+        required: false
+        type: string
+      head_sha:
+        required: false
+        type: string
+      source_kind:
+        required: false
+        default: issue
+        type: string
+      source_comment_id:
+        required: false
+        type: string
+      source_updated_at:
+        required: false
+        type: string
+      root_comment_id:
+        required: false
+        type: string
+      comment_body:
+        required: false
+        default: ''
+        type: string
+      comment_actor:
+        required: false
+        default: ''
+        type: string
+      comment_actor_type:
+        # No default: a command caller must state the actor type explicitly so
+        # an omitted value fails the maintainer gate instead of silently
+        # satisfying it.
+        required: false
+        default: ''
+        type: string
+      comment_association:
+        required: false
+        default: ''
+        type: string

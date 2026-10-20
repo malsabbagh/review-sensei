@@ -156,24 +156,29 @@ ReviewBaseline -------------> IncrementalReviewPlan + late classification
                                (C4 verification scope; C2 admits)
 ```
 
-`ReviewService.run` always emits a versioned `RunOutcome`. Hard resource budgets
-cap provider calls, transport retries, prompt/output bytes, and elapsed time.
-One structural-correction retry remains distinct from transport retry. Opt-in
-`RecoveryArtifact` values can republish a validated result without invoking a
-model or rewriting trusted learnings or configuration. See
+`ReviewService.run` emits versioned `RunOutcome`. Hard budgets cap provider calls,
+transport retries, prompt/output bytes and elapsed time. One structural-correction
+retry differs from transport retry. Opt-in `RecoveryArtifact` republishes
+validated results without models or trusted learnings/configuration changes. See
 [ADR 0043](adr/0043-structured-run-outcomes-budgets-and-publication-recovery.md).
 
 An operator-ledger analysis checkpoint commits the logical review round before
 GitHub publication. An identical retry whose publication is pending or failed
 reports `publication_recovery_required` without another provider call or ledger
 charge. It requires the original validated result and trusted admission contexts;
-the ledger's baseline and digests cannot reconstruct them. Reusable runners
-publish a newly produced or independently validated retained result and retain
-an explicitly enabled diagnostics bundle after publication failure. That bundle includes the reviewed diff and
-trusted configuration/admission contexts, retains the existing seven-day limit,
-and remains disabled for `artifacts: none`. Local analysis-only sessions retain
-their existing duplicate behavior. See the PR223 amendment to
+ledger baseline/digests cannot reconstruct them. Reusable runners publish
+new or independently validated retained results. Opt-in publication-failure
+diagnostics retain reviewed diff and trusted configuration/admission contexts up to seven
+days, disabled by `artifacts: none`. Local analysis-only duplicates remain unchanged.
+PR223 amendment to
 [ADR 0052](adr/0052-logical-review-transaction-across-analysis-and-publication.md).
+
+Opt-in recovery binds original trusted policy, exact base/head diff and authenticated
+prior baseline. Configuration/evidence/policy/reservation must match committed
+transaction. Missing admission/ordinary retries refuse. Both lanes skip provider
+credentials/inference; retain one read budget, broker/accepted-result/ledger/head
+guards and writer slot.
+See [ADR 0097](adr/0097-explicit-trusted-publication-recovery.md).
 
 The review service owns the business invariants. Provider adapters own protocol,
 authentication, timeout, and response-envelope details. Publishers own GitHub
@@ -662,9 +667,9 @@ distribution with its own protected approval and integrity readback. Overall
 Release/npm success remains a Pages condition, outside v5 admission. See
 [ADR 0095](adr/0095-pypi-qualified-major-channel.md).
 
-Publisher aliases must match the original run/source/ref, runner and complete
-step identity; missing or ambiguous execution facts block qualification.
-A re-exposed success must never mask a newer distinct publisher execution.
+Publisher aliases must match original run/source/ref, runner and complete steps.
+Missing/ambiguous execution facts block qualification; re-exposed success never
+masks a newer distinct publisher execution.
 The current API attempt and original publishing attempt are separate receipt
 identities. Validation code comes from the recorded protected default-branch
 commit; the signed release source supplies the frozen workflow and manifest data.
@@ -840,11 +845,11 @@ resolve from trusted configuration, not this infrastructure input.
 Older setup-v4 callers remain recognized as managed content and migrate through
 the existing reviewable setup PR path.
 
-OpenRouter approval remains withheld until retained qualification evidence is
-bound to independently expected effective review identities. The GitHub
-publisher and result-facts builder do not accept profile/caller status strings
-or the historical `not-required` default as that evidence; replay preserves the
-withheld facts. Other providers and permitted review events keep their policy.
+OpenRouter approval stays withheld until retained qualification evidence binds
+independently expected effective review identities. GitHub publisher/result-facts
+reject profile/caller status strings and historical `not-required` defaults;
+replay preserves withholding. Other providers and permitted review events keep
+their policy.
 The positive runtime evidence path and legacy standalone-finalizer binding
 remain open under #115; see [the runtime boundary](openrouter-qualification.md#runtime-approval-boundary-115)
 and [ADR 0045](adr/0045-openrouter-trusted-configuration.md).
@@ -988,15 +993,13 @@ finalizer without another inference or reassessment review. All other eligibilit
 facts, current authorization, live thread checks and approval markers remain
 authoritative.
 
-Accepted operation results additionally bind their replay to complete immutable
-inventory, original result/facts, source identity and exact evidence. Replays
-may retain accumulated resolutions, but cannot reuse decisions after another
-source, evidence or authority change. The adapter revalidates complete evidence
-and skips only already-persisted resolved IDs; it does not weaken the inventory
-application boundary or grant another provider allowance. Unbound older accepted
-payloads require a new authorized mention. See the replay amendment in
-[ADR 0061](adr/0061-human-reply-reassessment.md) and the finite source matrix in
-[large lifecycle qualification](validation/large-lifecycle.md).
+Accepted replay binds complete immutable inventory, original result/facts,
+source identity and exact evidence; accumulated resolutions may persist.
+Source/evidence/authority changes forbid decision reuse. The adapter revalidates
+complete evidence, skips only persisted resolved IDs and preserves the inventory
+application boundary and provider allowances. Unbound older accepted payloads
+need a new authorized mention. See [ADR 0061](adr/0061-human-reply-reassessment.md)
+and the [finite source matrix](validation/large-lifecycle.md).
 
 The default reassessment path prioritizes the complete supplied current patches for validated
 pending paths within the existing 12 KiB budget. Missing, conflicting or
@@ -1147,3 +1150,7 @@ within their existing read, item and response-byte limits. Prepaid ledger plans
 fix the selected fence size before activation. The retry rules and finite
 qualification matrix are in [ADR 0096](adr/0096-bounded-hosted-history-readers.md)
 and [hosted history acceptance](validation/hosted-history-readers.md).
+
+Same-operation inventory handoff must retain budget/transport/token/scope,
+fresh complete intent/parts reads and fresh ledger/Bot/PR/root/index/full-prose fences.
+Canonical admission is evidence only; see ADR 0098.

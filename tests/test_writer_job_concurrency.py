@@ -16,7 +16,7 @@ import re
 import unittest
 from pathlib import Path
 
-from review_sensei_github.setup import _tagged_workflow
+from review_sensei_github.setup import _prepared_recovery_workflow, _tagged_workflow
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_WORKFLOW = ROOT / ".github" / "workflows" / "review-sensei-run.yml"
@@ -87,14 +87,18 @@ class WriterJobConcurrencyTests(unittest.TestCase):
                 self.assertIn("cancel-in-progress: false", body)
 
         generated = _tagged_workflow("v5")
+        prepared = _prepared_recovery_workflow("v5")
         copies = {
             "generated": generated,
+            "prepared": prepared,
             "repository": CALLERS[0].read_text(encoding="utf-8"),
             "example": CALLERS[1].read_text(encoding="utf-8"),
         }
         for name, text in copies.items():
             with self.subTest(caller=name):
-                self.assertEqual(text, generated)
+                self.assertEqual(
+                    text, prepared if name in {"prepared", "example"} else generated
+                )
                 found = {
                     job_id: body
                     for job_id, body in _job_bodies(text).items()
@@ -115,9 +119,11 @@ class WriterJobConcurrencyTests(unittest.TestCase):
         self.assertIn("pull-requests: read", command)
         self.assertIn("review_session", command)
 
-        for path in CALLERS:
-            text = path.read_text(encoding="utf-8")
-            with self.subTest(path=path.name):
+        copies = {str(path): path.read_text(encoding="utf-8") for path in CALLERS}
+        copies["generated"] = _tagged_workflow("v5")
+        copies["prepared"] = _prepared_recovery_workflow("v5")
+        for name, text in copies.items():
+            with self.subTest(caller=name):
                 self.assertNotIn("--result", text)
                 self.assertNotRegex(text, r"(?m)^[ ]+result:")
                 self.assertIn("contents: read", text)

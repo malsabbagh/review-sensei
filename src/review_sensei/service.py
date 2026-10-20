@@ -260,6 +260,31 @@ def _retain_comment(comment: ReviewComment, analysis: DiffAnalysis) -> ReviewCom
     return comment
 
 
+def review_work_policy_digest(
+    work_budgets: ReviewWorkBudgets,
+    budget: ResourceBudget,
+    capabilities: ProviderCapabilities | None = None,
+) -> str | None:
+    """Compute review configuration identity without constructing a provider."""
+
+    if work_budgets.mode != "unified":
+        return None
+    from .evidence import evidence_digest
+    from .hunk_subdivision import HUNK_SUBDIVISION_POLICY
+
+    return evidence_digest(
+        {
+            "mechanism": "unified:v1",
+            "hunk_subdivision_policy": HUNK_SUBDIVISION_POLICY,
+            "shared_document_prompt_format": SHARED_DOCUMENT_PROMPT_FORMAT,
+            "prompt_context_policy": PROMPT_CONTEXT_POLICY,
+            "budgets": asdict(work_budgets),
+            "resource_budget": asdict(budget),
+            "capabilities": asdict(capabilities) if capabilities else None,
+        }
+    )
+
+
 class ReviewService:
     """Run and validate a review independently of GitHub and model vendors.
 
@@ -269,23 +294,8 @@ class ReviewService:
 
     @property
     def work_policy_digest(self) -> str | None:
-        if self.work_budgets.mode != "unified":
-            return None
-        from .evidence import evidence_digest
-        from .hunk_subdivision import HUNK_SUBDIVISION_POLICY
-
-        return evidence_digest(
-            {
-                "mechanism": "unified:v1",
-                "hunk_subdivision_policy": HUNK_SUBDIVISION_POLICY,
-                "shared_document_prompt_format": SHARED_DOCUMENT_PROMPT_FORMAT,
-                "prompt_context_policy": PROMPT_CONTEXT_POLICY,
-                "budgets": asdict(self.work_budgets),
-                "resource_budget": asdict(self.budget),
-                "capabilities": asdict(self.capabilities)
-                if self.capabilities
-                else None,
-            }
+        return review_work_policy_digest(
+            self.work_budgets, self.budget, self.capabilities
         )
 
     def __init__(

@@ -11,6 +11,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -3802,13 +3803,17 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 raise ReviewInputError(
                     "recovery artifacts require --base-sha and --head-sha"
                 )
+            artifact_created_at = datetime.now(timezone.utc)
             artifact = RecoveryArtifact.create(
                 repository=args.repository,
                 pull_request_number=args.pull_request,
                 base_sha=outcome.base_sha,
                 head_sha=outcome.head_sha,
                 result=result.to_dict(),
-                expires_at=recovery_expires_at(ttl_seconds=args.recovery_ttl_seconds),
+                expires_at=recovery_expires_at(
+                    ttl_seconds=args.recovery_ttl_seconds, now=artifact_created_at
+                ),
+                now=artifact_created_at,
             )
             args.recovery_artifact.write_text(
                 json.dumps(artifact.to_dict(), indent=2) + "\n",

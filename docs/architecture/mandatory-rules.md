@@ -1,3 +1,7 @@
+Same-operation inventory handoff must retain budget/transport/token/scope,
+fresh complete intent/parts reads and fresh ledger/Bot/PR/root/index/full-prose fences.
+Canonical admission is evidence only; see ADR 0098.
+
 ## Default human inventory references
 
 Complete publication may use closed eligibility schema 5 when the admitted human
@@ -96,19 +100,23 @@ tag or replacing a tarball. See [ADR 0031](adr/0031-npm-launcher-and-standalone-
 
 (fixture adapter: test-only seam, omitted from production map)
 
-`ReviewService.run` always emits a versioned `RunOutcome`. Hard resource budgets
-cap provider calls, transport retries, prompt/output bytes, and elapsed time.
-One structural-correction retry remains distinct from transport retry. Opt-in
-`RecoveryArtifact` values can republish a validated result without invoking a
-model or rewriting trusted learnings or configuration. See
+`ReviewService.run` emits versioned `RunOutcome`. Hard budgets cap provider calls,
+transport retries, prompt/output bytes and elapsed time. One structural-correction
+retry differs from transport retry. Opt-in `RecoveryArtifact` republishes
+validated results without models or trusted learnings/configuration changes. See
 [ADR 0043](adr/0043-structured-run-outcomes-budgets-and-publication-recovery.md).
 
-the ledger's baseline and digests cannot reconstruct them. Reusable runners
-publish a newly produced or independently validated retained result and retain
-an explicitly enabled diagnostics bundle after publication failure. That bundle includes the reviewed diff and
-trusted configuration/admission contexts, retains the existing seven-day limit,
-and remains disabled for `artifacts: none`. Local analysis-only sessions retain
-their existing duplicate behavior. See the PR223 amendment to
+ledger baseline/digests cannot reconstruct them. Reusable runners publish
+new or independently validated retained results. Opt-in publication-failure
+diagnostics retain reviewed diff and trusted configuration/admission contexts up to seven
+days, disabled by `artifacts: none`. Local analysis-only duplicates remain unchanged.
+PR223 amendment to
+
+Opt-in recovery binds original trusted policy, exact base/head diff and authenticated
+prior baseline. Configuration/evidence/policy/reservation must match committed
+transaction. Missing admission/ordinary retries refuse. Both lanes skip provider
+credentials/inference; retain one read budget, broker/accepted-result/ledger/head
+guards and writer slot.
 
 API authentication and comment/review delivery. `prepare_publishable_review`
 sits between a validated `ReviewResult` and any publisher: `legacy` keeps
@@ -664,27 +672,25 @@ larger or more verbose inventories can still exceed inline bounds. Full finding
   downgraded or ambiguously rediscovered concerns remain uncertain, make the
   review partial and retain the prior durable baseline until resolved.
 
-OpenRouter approval remains withheld until retained qualification evidence is
-bound to independently expected effective review identities. The GitHub
-publisher and result-facts builder do not accept profile/caller status strings
-or the historical `not-required` default as that evidence; replay preserves the
-withheld facts. Other providers and permitted review events keep their policy.
+OpenRouter approval stays withheld until retained qualification evidence binds
+independently expected effective review identities. GitHub publisher/result-facts
+reject profile/caller status strings and historical `not-required` defaults;
+replay preserves withholding. Other providers and permitted review events keep
+their policy.
 
-Accepted operation results additionally bind their replay to complete immutable
-inventory, original result/facts, source identity and exact evidence. Replays
-may retain accumulated resolutions, but cannot reuse decisions after another
-source, evidence or authority change. The adapter revalidates complete evidence
-and skips only already-persisted resolved IDs; it does not weaken the inventory
-application boundary or grant another provider allowance. Unbound older accepted
-payloads require a new authorized mention. See the replay amendment in
-[ADR 0061](adr/0061-human-reply-reassessment.md) and the finite source matrix in
-[large lifecycle qualification](validation/large-lifecycle.md).
+Accepted replay binds complete immutable inventory, original result/facts,
+source identity and exact evidence; accumulated resolutions may persist.
+Source/evidence/authority changes forbid decision reuse. The adapter revalidates
+complete evidence, skips only persisted resolved IDs and preserves the inventory
+application boundary and provider allowances. Unbound older accepted payloads
+need a new authorized mention. See [ADR 0061](adr/0061-human-reply-reassessment.md)
+and the [finite source matrix](validation/large-lifecycle.md).
 
 Only confirmed owned replies or a complete empty comment list permit fallback.
 Genuine top-level legacy findings retain their exact-head inventory authority.
 Unknown, malformed, conflicting or unreadable roots refuse fallback.
 The metadata walk retains one shared ten-request, sixty-second bound.
 
-Publisher aliases must match the original run/source/ref, runner and complete
-step identity; missing or ambiguous execution facts block qualification.
-A re-exposed success must never mask a newer distinct publisher execution.
+Publisher aliases must match original run/source/ref, runner and complete steps.
+Missing/ambiguous execution facts block qualification; re-exposed success never
+masks a newer distinct publisher execution.

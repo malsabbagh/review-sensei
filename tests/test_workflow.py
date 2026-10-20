@@ -69,6 +69,9 @@ class WorkflowValidationTests(unittest.TestCase):
             [
                 "mode",
                 "operation",
+                "recover_publication",
+                "recovery_policy_commit",
+                "recovery_expected_head",
                 "hosted_runner",
                 "repository",
                 "repository_id",

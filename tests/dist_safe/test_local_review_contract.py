@@ -16,8 +16,9 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 _TESTS_ROOT = Path(__file__).resolve().parents[1]
 if str(_TESTS_ROOT) not in sys.path:
@@ -185,6 +186,50 @@ class LocalReviewContractTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertTrue(stdout)
         self.assertNotIn("reason=", stderr)
+
+    def test_recovery_artifact_ttl_survives_clock_second_rollover(self):
+        before = datetime(2026, 10, 20, 12, 0, 0, 999999, tzinfo=timezone.utc)
+        after = before + timedelta(microseconds=1)
+        for ttl in (1, 86400):
+            with self.subTest(ttl=ttl):
+                clock = Mock(wraps=datetime)
+                clock.now.side_effect = (before, after)
+                artifact_path = self.root / f"recovery-{ttl}.json"
+                # Both timestamp consumers see the same advancing wall clock.
+                # The CLI must use one instant for the whole artifact window.
+                with (
+                    patch("review_sensei.outcomes.datetime", clock),
+                    patch("review_sensei.cli.datetime", clock, create=True),
+                ):
+                    status, stdout, stderr = self.run_review(
+                        *self.base_arguments(CLEAN_RESPONSE),
+                        "--repository",
+                        "example/repository",
+                        "--pull-request",
+                        7,
+                        "--base-sha",
+                        "a" * 40,
+                        "--head-sha",
+                        "b" * 40,
+                        "--recovery-artifact",
+                        artifact_path,
+                        "--recovery-ttl-seconds",
+                        ttl,
+                        "--format",
+                        "json",
+                        environment=self.clean_environment(),
+                    )
+                self.assertEqual(status, 0, stderr)
+                result = json.loads(stdout)
+                validate_public_document(result, "review-result")
+                self.assertEqual(result["review_status"], "complete")
+                artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+                validate_public_document(artifact, "recovery-artifact")
+                created = datetime.fromisoformat(artifact["created_at"])
+                expires = datetime.fromisoformat(artifact["expires_at"])
+                self.assertEqual(created, before.replace(microsecond=0))
+                self.assertEqual(expires - created, timedelta(seconds=ttl))
+                self.assertEqual(artifact["result"], result)
 
     def test_unified_private_receipts_reuse_installed_wheel_without_inference(self):
         from review_sensei.providers.fixture import FixtureProvider

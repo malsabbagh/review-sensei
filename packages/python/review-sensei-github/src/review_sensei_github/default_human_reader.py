@@ -148,16 +148,65 @@ class DefaultHumanInventoryReader:
         self.head_sha = head_sha
         self.app_slug = app_slug
         self.budget = budget
+        self._admitted_store: HumanInventoryStore | None = None
         self.store: HumanInventoryStore | None = None
         self.document: dict[str, object] | None = None
         self.reference: HumanInventoryReference | None = None
         self.inventory: PendingHumanReview | None = None
+
+    def attach_authenticated_store(self, store: HumanInventoryStore) -> bool:
+        """Accept only the original same-operation store's complete admission."""
+        from .publication_recovery import _publication_transport
+
+        if type(store) is not HumanInventoryStore:
+            raise ReviewInputError("default human inventory handoff owner conflicts")
+        context = store.context
+        if (
+            context.budget is not self.budget
+            or store.token != self.token
+            or _publication_transport(store.http)
+            is not _publication_transport(self.http)
+            or (
+                context.repository,
+                context.pull_request,
+                context.head_sha,
+                context.app_slug.casefold(),
+            )
+            != (
+                self.repository,
+                self.pull_request,
+                self.head_sha,
+                self.app_slug.casefold(),
+            )
+        ):
+            raise ReviewInputError("default human inventory handoff scope conflicts")
+        if store.authenticated_reference is None:
+            return False
+        if self.reference is not None and (
+            self.reference != store.authenticated_reference or self.store is not store
+        ):
+            raise ReviewInputError(
+                "default human inventory handoff reference conflicts"
+            )
+        self._admitted_store = store
+        return True
 
     def __call__(self, reference: HumanInventoryReference) -> PendingHumanReview:
         if self.reference is not None:
             if reference != self.reference or self.inventory is None:
                 raise ReviewInputError("default human inventory reference conflicts")
             return self.inventory
+        admitted = self._admitted_store
+        if admitted is not None:
+            document = admitted.read_authenticated_snapshot(reference)
+            inventory = inventory_from_result_document(
+                document["human_inventory"],
+                result_digest=admitted.context.publication_digest,
+                base_sha=admitted.context.base_sha,
+            )
+            self.store, self.document = admitted, document
+            self.reference, self.inventory = reference, inventory
+            return inventory
         status, pr = self.http.request(
             "GET",
             self.http.repository_path(self.repository, f"/pulls/{self.pull_request}"),
