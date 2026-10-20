@@ -53,8 +53,12 @@ not reset at each read or publication step.
 
 ### Explicit manual reusable-caller recovery
 
-The canonical setup-v5 caller has an optional `recover_publication` input,
-defaulting to false. Select it only for an original committed result whose
+The explicitly prepared recovery caller in
+`examples/github-actions/review-sensei-review.yml` has an optional
+`recover_publication` input, defaulting to false. Default Python/Worker setup
+emission and the installed repository caller remain at exact released
+pre-recovery bytes until the compatible callable channel is verified. Select it
+only for an original committed result whose
 publication is pending or failed. Supply `recovery_policy_commit` (the full
 original trusted default-branch policy commit) and `recovery_expected_head`
 (the full original PR head). The caller still uses `operation: review`; it
@@ -96,14 +100,53 @@ Recovery keeps broker OIDC, the broker-selected comment ledger, accepted-result
 checks, ownership, exact-head checks, replay fencing and limits enabled. A large
 history can still exhaust its budget and refuse. No learning PR is generated.
 
-The canonical caller source and packaged/Worker installer templates must reach
-their normal reviewed rollout before this optional input is available to a
-repository. Moving the reusable `v5` tag alone does not add dispatch inputs to an
-already installed caller. Exact pre-recovery managed callers can receive the
-updated caller through normal setup reconciliation; operator edits remain owned
-and are not overwritten. An older deployed installer continues producing its
-older caller until its separately qualified rollout. No broker capability,
-permission or secret changes are required.
+Release and validate in this order:
+
+1. Qualify and release the additive reusable runner and matching runtime.
+2. Independently verify the callable `v5` channel's exact immutable source and
+   declared input types. The released runner at `fb235279` has 19 inputs and
+   rejects all three new recovery keys, including false/empty values. A package
+   release or same-source template parity does not establish channel compatibility.
+3. After that verification, make a normal reviewed upgrade of the installed
+   caller and default Python/Worker emitters. The prepared Python/Worker recovery
+   template and example are the later activation target, not current defaults.
+
+Moving `v5` alone cannot add dispatch inputs to an installed caller. Exact managed
+callers can receive the later upgrade through ordinary setup reconciliation;
+operator edits and future setup versions remain owned and are not overwritten.
+An older deployed installer keeps its older caller until its separately qualified
+rollout. No broker capability, permission or secret changes are required.
+
+### Bounded publication and optional cleanup continuation
+
+Publication success and approval eligibility are separate. A completed COMMENT
+review may correctly retain required fixes, human decisions or partial-baseline
+facts. Optional removal of superseded old threads runs only after durable
+publication success, with fresh ownership, head, native root, full prose and
+latest-eligibility fences. Current human threads are never cleanup targets.
+
+An exact captured-history qualification at PR316's original base/head measured
+three canonical retained-recovery invocations under the unchanged 60 ordinary /
+64 total request limit: the first retained one complete native review but refused
+before the success-ledger write; the second reused that review and committed
+success without duplicates or inference; the third retained success but had no
+headroom for optional old-thread cleanup. This is bounded recovery over multiple
+invocations, not a claim of first-invocation completion or arbitrary-history
+capacity. A failure with no durable progress must not be repeated blindly.
+
+When canonical retained recovery has committed success but reports incomplete
+cleanup, use the existing `publish --result ORIGINAL_RESULT.json
+--reconstruct-contexts --trusted-context-root ORIGINAL_POLICY` route with all the
+same repository/base/head, trusted diff, original policy and broker options. The
+file must contain the exact original result, obtained from the original artifact
+or independently integrity-verified retained parts; a baseline or edited result
+cannot substitute. The normal accepted-result guard remains enabled. This route
+avoids repeated retained-result discovery, without removing fresh publication or
+mutation fences. In the same captured state it used 58 calls and resolved one old
+thread, preserving the terminal ledger and every current obligation. Five-step
+terminal controls also demonstrated one old-thread resolution per invocation.
+These finite observations do not establish completion of every old thread or
+authorize new inference, current-thread resolution or approval.
 
 Missing, duplicate, malformed, foreign-owned, foreign-PR, stale-head, mismatching
 configuration or digest parts refuse. A failed/interrupted initial write can
@@ -151,6 +194,7 @@ future inference authorization afterward.
 | #246: idempotent review replay | Exact transaction/content marker plus authenticated full prose readback | Bounded publisher lost-ack, body/inline replay and unrelated-root cases | Old transaction-hash or omitted-prose roots cannot be silently adopted. |
 | #267: read/deadline bounds | Shared publication transport and EvidenceReadBudget | Publication recovery budget/deadline methods and public finalizer charge test | No budget refill; long histories can remain blocked. This does not qualify the earlier whole-provider P1 dispatch profile. |
 | #246: accepted decisions / stale authority | Existing acceptance guard plus independent transaction validation | `test_checkpoint_publication_acceptance` | Original accepted content survives checkpoint-envelope changes; changed content/context/scope still refuses. |
+| #238, #246: native replay approval authority | Complete native index plus actual persisted eligibility | `test_publication_recovery.NativeReplayAuthorityTests` and installed selection | Missing, malformed or unbound authority refuses with a non-passing check. Persisted approval opt-out cannot be reconstructed away; valid retained authority and current obligations keep their existing policy. |
 | Caller/configuration compatibility | Configuration parser, hosted plan, both workflow publication lanes, actual CLI | `test_hosted_plan`, `test_publication_cli_recovery`, `test_default_publication_cli_journey` | Default emission stays 64 pending separately authorized reader-first rollout. |
 | Installed / post-package workflows | Extracted sdist contract against installed engine and adapter | `dist_safe/test_default_publication_recovery_contract.py`; published CLI `lifecycle.py` | Runtime imports must match installed artifacts; no checkout source fallback. |
 | #313, #314, provider/configuration #115–123/#146 | Separate baseline, provider-deadline and provider-contract changes | Separate PR acceptance matrices | This focused repair does not claim deployment or live-provider qualification. |

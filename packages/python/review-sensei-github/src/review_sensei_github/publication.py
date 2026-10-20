@@ -216,6 +216,10 @@ class _FindingIndexError(GitHubPublicationError):
         super().__init__(message)
 
 
+class _NativeReplayAuthorityError(GitHubPublicationError):
+    """Complete native replay cannot establish its retained approval authority."""
+
+
 def finding_index_marker(
     *,
     repository_id: int,
@@ -4367,6 +4371,16 @@ class ReviewPublisher:
                             persisted_eligibility=persisted_eligibility,
                         )
                     return PublicationResult(status="already_published")
+        except _NativeReplayAuthorityError:
+            self._complete_failed_check(
+                check_token=check_token,
+                repository=repository,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                policy=effective_policy,
+                transient=False,
+            )
+            raise
         except GitHubHTTPTransientError as exc:
             raise GitHubPublicationTransientError(
                 "review reconciliation failed temporarily"
@@ -5681,16 +5695,29 @@ class ReviewPublisher:
                         identifier = review.get("id")
                         if type(identifier) is int and identifier > 0:
                             self._confirmed_review_id = identifier
-        eligibility = self.finalizer._eligibility_from_reviews(
-            payload,
-            head_sha=head_sha,
-            app_slug=app_slug,
-            require_valid=True,
-            token=token,
-            repository=repository,
-            pull_request=pull_request,
-        )
+        try:
+            eligibility = self.finalizer._eligibility_from_reviews(
+                payload,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                require_valid=True,
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
+            )
+        except GitHubPublicationTransientError:
+            raise
+        except GitHubPublicationError as exc:
+            if repository_id is not None:
+                raise _NativeReplayAuthorityError(str(exc)) from exc
+            raise
         if repository_id is not None:
+            if result_states and eligibility is None:
+                # Complete native replay needs retained authority. Inferring it
+                # from result bytes could discard a persisted approval veto.
+                raise _NativeReplayAuthorityError(
+                    "complete publication approval eligibility is missing"
+                )
             # A complete-inventory replay must validate the retained inventory
             # before the already-published path updates checks or finalizes.
             try:
@@ -5703,9 +5730,11 @@ class ReviewPublisher:
                     eligibility=eligibility,
                 )
             except ReviewInputError:
-                raise GitHubPublicationError(
+                raise _NativeReplayAuthorityError(
                     "persisted finding index is invalid"
                 ) from None
+            except GitHubPublicationError as exc:
+                raise _NativeReplayAuthorityError(str(exc)) from exc
         return frozenset(identity_states), frozenset(result_states), eligibility
 
     def _verify_complete_review(

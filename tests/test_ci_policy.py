@@ -1606,6 +1606,8 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("pip check", job)
 
     def test_dogfood_caller_matches_generated_setup_template(self):
+        from review_sensei_github.setup import _prepared_recovery_workflow
+
         repo_root = Path(__file__).resolve().parents[1]
         dogfood = (
             repo_root / ".github" / "workflows" / "review-sensei-review.yml"
@@ -1613,7 +1615,8 @@ class ActionPinPolicyTests(unittest.TestCase):
         example = (
             repo_root / "examples" / "github-actions" / "review-sensei-review.yml"
         ).read_text(encoding="utf-8")
-        self.assertEqual(example, dogfood)
+        self.assertEqual(example, _prepared_recovery_workflow("v5"))
+        self.assertNotEqual(example, dogfood)
         self.assertEqual(dogfood, _tagged_workflow("v5"))
         self.assertIn(
             "uses: malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",

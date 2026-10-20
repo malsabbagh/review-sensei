@@ -1,6 +1,8 @@
 """Manual recovery stays explicit in both canonical reusable runner lanes."""
 
+import hashlib
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -11,6 +13,7 @@ from pathlib import Path
 from review_sensei_github.setup import (
     WORKFLOW_PATH,
     _looks_like_managed_v5_setup,
+    _prepared_recovery_workflow,
     _tagged_workflow,
 )
 
@@ -23,6 +26,62 @@ WORKFLOW = ROOT / ".github/workflows/review-sensei-run.yml"
 
 
 class TrustedRecoveryWorkflowTests(unittest.TestCase):
+    def test_default_setup_and_installed_caller_use_exact_released_bytes(self):
+        from review_sensei_github.setup import SetupPlanBuilder
+
+        old = (
+            ROOT
+            / "packages/python/review-sensei-github/src/review_sensei_github/fixtures/released-v5-pre-recovery-caller.yml"
+        ).read_text()
+        self.assertEqual(SetupPlanBuilder().build("owner/repo").files[0].content, old)
+        self.assertEqual(
+            (ROOT / ".github/workflows/review-sensei-review.yml").read_text(), old
+        )
+
+    def test_default_caller_matches_selected_released_runner_input_types(self):
+        from tests.test_trusted_stage_config import caller_reusable_with_keys
+
+        fixture = (ROOT / "tests/fixtures/released-v5-runner-inputs.yml").read_text()
+        self.assertEqual(
+            hashlib.sha256(fixture.encode()).hexdigest(),
+            "5596051e9270010ac5e8a13b207ead0b88c06b3b3dbebf7e4c7ac43c972245e0",
+        )
+
+        def input_types(text):
+            block = text.split("  workflow_call:\n", 1)[1].split("    secrets:", 1)[0]
+            return dict(
+                re.findall(
+                    r"^      ([a-z_]+):(?:\n.*?)*?\n        type: (string|boolean|number)$",
+                    block,
+                    re.M,
+                )
+            )
+
+        released = input_types(fixture)
+        prepared = input_types(WORKFLOW.read_text())
+        self.assertEqual(len(released), 19)
+        self.assertEqual(set(released.values()), {"string"})
+        self.assertEqual({name: prepared[name] for name in released}, released)
+        self.assertEqual(
+            {name: value for name, value in prepared.items() if name not in released},
+            {
+                "recover_publication": "boolean",
+                "recovery_policy_commit": "string",
+                "recovery_expected_head": "string",
+            },
+        )
+        for caller in (
+            _tagged_workflow("v5"),
+            (ROOT / ".github/workflows/review-sensei-review.yml").read_text(),
+        ):
+            passed = caller_reusable_with_keys(caller)
+            self.assertEqual(len(passed), 18)
+            self.assertLessEqual(passed, released.keys())
+            self.assertEqual(
+                {name: released[name] for name in passed},
+                {name: prepared[name] for name in passed},
+            )
+
     def test_both_lanes_publish_explicit_retained_recovery_and_skip_inference(self):
         text = WORKFLOW.read_text()
         for lane in ("hosted", "local"):
@@ -83,7 +142,7 @@ class TrustedRecoveryWorkflowTests(unittest.TestCase):
                 self.assertEqual(result.returncode == 0, allowed, result.stderr)
 
     def test_canonical_caller_exposes_opt_in_without_changing_normal_operation(self):
-        text = _tagged_workflow("v5")
+        text = _prepared_recovery_workflow("v5")
         self.assertIn("      recover_publication:\n", text)
         self.assertIn("      recovery_policy_commit:\n", text)
         self.assertIn("      recovery_expected_head:\n", text)

@@ -155,8 +155,9 @@ class PublicationCliRecoveryTests(unittest.TestCase):
         self,
     ):
         message = (
-            "review-sensei: old-thread cleanup is unconfirmed or incomplete; retry "
-            "the same publication-only result for this exact head and base; "
+            "review-sensei: old-thread cleanup is unconfirmed or incomplete; "
+            "use --result with the exact original result and trusted contexts "
+            "for this head and base to continue cleanup; "
             "no inference is needed.\n"
         )
         for diagnostic in ("required_fixes_open", "human_adjudication_open"):

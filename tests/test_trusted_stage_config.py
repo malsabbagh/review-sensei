@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from review_sensei_github.setup import (
+    _prepared_recovery_workflow,
     _provider_parity_workflow,
     _tagged_workflow,
 )
@@ -247,7 +248,7 @@ class CallerRunnerInputContractTests(unittest.TestCase):
             "generated-stable": _tagged_workflow("stable"),
             "historical-parity": _provider_parity_workflow("v4"),
         }
-        self.assertEqual(callers["example"], callers["generated"])
+        self.assertEqual(callers["example"], _prepared_recovery_workflow("v5"))
         self.assertIn(
             "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@v5",
             callers["repo"],
@@ -257,8 +258,15 @@ class CallerRunnerInputContractTests(unittest.TestCase):
                 passed = caller_reusable_with_keys(callers[name])
                 self.assertEqual(
                     passed,
-                    invocation_inputs,
-                    f"{name} does not pass exactly the declared invocation inputs",
+                    invocation_inputs
+                    if name == "example"
+                    else invocation_inputs
+                    - {
+                        "recover_publication",
+                        "recovery_policy_commit",
+                        "recovery_expected_head",
+                    },
+                    f"{name} does not match its explicit installed/prepared invocation stage",
                 )
                 # The scoped credentials are forwarded as optional secrets,
                 # never as inputs and never inline.

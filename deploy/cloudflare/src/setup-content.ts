@@ -822,6 +822,7 @@ export function senseiOnlyV5WorkflowTemplate(publicWorkflowTag: string): string 
  * repository variables and carries no policy expression.
  */
 
+/** Prepared recovery caller; default setup waits for callable-channel validation. */
 function resolveTriggerWorkflowTemplate(publicWorkflowTag: string): string {
   const tag = validatePublicWorkflowTag(publicWorkflowTag);
   return String.raw`# ReviewSensei setup version: 5
@@ -1876,13 +1877,15 @@ export function buildPinnedV4SetupFiles(
   ];
 }
 
-/** Current setup-v5 output: the public git tag is the only workflow ref. */
+export { resolveTriggerWorkflowTemplate as preparedRecoveryWorkflowTemplate };
+
+/** Released-compatible setup-v5 output, pending runner-first recovery activation. */
 export function buildTaggedV4SetupFiles(
   publicWorkflowTag: string,
 ): readonly SetupFile[] {
   const tag = validatePublicWorkflowTag(publicWorkflowTag);
   return [
-    { path: SETUP_WORKFLOW_PATH, content: resolveTriggerWorkflowTemplate(tag) },
+    { path: SETUP_WORKFLOW_PATH, content: preRecoveryV5WorkflowTemplate(tag) },
     {
       path: SETUP_UNINSTALL_WORKFLOW_PATH,
       content: currentUninstallWorkflow(),

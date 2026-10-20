@@ -313,6 +313,7 @@ def _looks_like_managed_v5_setup(path: str, content: str) -> bool:
                 _sensei_only_v5_workflow(tag_matches[0]),
                 _keyword_rescan_v5_workflow(tag_matches[0]),
                 _pre_recovery_v5_workflow(tag_matches[0]),
+                _prepared_recovery_workflow(tag_matches[0]),
             }
         except GitHubSetupError:
             return False
@@ -1277,8 +1278,10 @@ jobs:
 
 
 def _resolve_trigger_workflow(public_workflow_tag: str) -> str:
-    """Return the current setup-v5 caller.
+    """Return the prepared recovery caller, pending callable-channel validation.
 
+    Default setup emission remains at exact released pre-recovery bytes. This
+    prepared template is retained for explicit qualification and later activation.
     The caller is invocation-only: it resolves the event into the reusable
     workflow's declared inputs, states the read-only permissions and the
     optional OIDC scope that workflow needs, and names the three optional
@@ -1578,10 +1581,18 @@ jobs:
 """.replace("__PUBLIC_WORKFLOW_TAG__", tag)
 
 
-def _tagged_workflow(public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> str:
-    """Return the current setup-v5 caller following the public git tag."""
+def _prepared_recovery_workflow(
+    public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG,
+) -> str:
+    """Explicit next caller; activate only after the selected runner is validated."""
 
     return _resolve_trigger_workflow(public_workflow_tag)
+
+
+def _tagged_workflow(public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> str:
+    """Emit released-compatible setup-v5 bytes until runner-first activation."""
+
+    return _pre_recovery_v5_workflow(public_workflow_tag)
 
 
 def _merge_focused_v4_caller_bytes() -> str:

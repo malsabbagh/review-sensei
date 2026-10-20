@@ -408,6 +408,211 @@ def recover(app, ledger, *, app_slug=APP, **kwargs):
     )
 
 
+class NativeReplayAuthorityTests(unittest.TestCase):
+    def _terminal_clean(self, ledger, *, auto_approve):
+        result, key = checkpoint(ledger, count=0)
+        state = RetentionState()
+        state.reviews = []
+        outcome = publish(
+            application(state, ledger),
+            result,
+            key,
+            publication_budget=EvidenceReadBudget(),
+            options=GitHubWriteOptions(
+                auto_review=True,
+                auto_approve=auto_approve,
+                github_writes=True,
+                complete_inventory=True,
+            ),
+        )
+        self.assertEqual(outcome.status, "published")
+        self.assertEqual(
+            ledger.load(IDENTITY).record.transaction.phase, "publication_succeeded"
+        )
+        return result, key, state
+
+    def _assert_replay_check_blocked(self, state):
+        self.assertTrue(state.check_runs)
+        check = state.check_runs[-1]
+        self.assertEqual(check["conclusion"], "action_required")
+        self.assertEqual(check["output"]["title"], "Review publication failed")
+        self.assertIn("could not publish", check["output"]["summary"])
+
+    def test_complete_native_replay_rejects_missing_disabled_authority(self):
+        for fault in ("missing", "invalid", "head", "result"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                ledger = LocalSessionLedger(Path(directory))
+                result, key, state = self._terminal_clean(ledger, auto_approve=False)
+                root = state.reviews[0]
+                eligibility = approval_eligibility_from_body(root["body"])
+                self.assertIsNotNone(eligibility)
+                self.assertFalse(eligibility.facts.enabled)
+                marker = approval_eligibility_marker(eligibility)
+                replacement = ""
+                if fault == "invalid":
+                    replacement = marker.replace(marker.split()[2], "not-base64")
+                elif fault == "head":
+                    replacement = approval_eligibility_marker(
+                        replace(eligibility, head_sha="f" * 40)
+                    )
+                elif fault == "result":
+                    replacement = approval_eligibility_marker(
+                        replace(eligibility, result_digest="f" * 64)
+                    )
+                root["body"] = root["body"].replace(marker, replacement)
+                state.calls.clear()
+                with self.assertRaises(GitHubPublicationError):
+                    publish(
+                        application(state, ledger),
+                        result,
+                        key,
+                        publication_budget=EvidenceReadBudget(),
+                        options=GitHubWriteOptions(
+                            auto_review=True,
+                            github_writes=True,
+                            complete_inventory=True,
+                        ),
+                    )
+                self.assertFalse(
+                    any(
+                        method == "POST" and path.endswith("/reviews")
+                        for method, path, _ in state.calls
+                    )
+                )
+                self._assert_replay_check_blocked(state)
+                self.assertEqual(
+                    ledger.load(IDENTITY).record.transaction.phase,
+                    "publication_succeeded",
+                )
+
+    def test_complete_native_replay_rejects_missing_dismissed_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = LocalSessionLedger(Path(directory))
+            result, key, state = self._terminal_clean(ledger, auto_approve=True)
+            approvals = [r for r in state.reviews if r["state"] == "APPROVED"]
+            self.assertEqual(len(approvals), 1)
+            approvals[0]["state"] = "DISMISSED"
+            root = state.reviews[0]
+            eligibility = approval_eligibility_from_body(root["body"])
+            self.assertIsNotNone(eligibility)
+            root["body"] = root["body"].replace(
+                approval_eligibility_marker(eligibility), ""
+            )
+            state.calls.clear()
+            with self.assertRaises(GitHubPublicationError):
+                publish(
+                    application(state, ledger),
+                    result,
+                    key,
+                    publication_budget=EvidenceReadBudget(),
+                    options=GitHubWriteOptions(
+                        auto_review=True, github_writes=True, complete_inventory=True
+                    ),
+                )
+            self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+            self.assertEqual(len(state.reviews), 2)
+            self._assert_replay_check_blocked(state)
+
+    def test_complete_native_replay_with_retained_authority_can_approve(self):
+        for enabled in (False, True):
+            with (
+                self.subTest(enabled=enabled),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                ledger = LocalSessionLedger(Path(directory))
+                result, key, state = self._terminal_clean(ledger, auto_approve=enabled)
+                for review in state.reviews:
+                    if review["state"] == "APPROVED":
+                        review["state"] = "DISMISSED"
+                state.calls.clear()
+                outcome = publish(
+                    application(state, ledger),
+                    result,
+                    key,
+                    publication_budget=EvidenceReadBudget(),
+                    options=GitHubWriteOptions(
+                        auto_review=True, github_writes=True, complete_inventory=True
+                    ),
+                )
+                self.assertEqual(outcome.status, "already_published")
+                new_reviews = [
+                    body
+                    for method, path, body in state.calls
+                    if method == "POST" and path.endswith("/reviews")
+                ]
+                self.assertEqual(
+                    [body["event"] for body in new_reviews],
+                    ["APPROVE"] if enabled else [],
+                )
+                self.assertEqual(len(state.reviews), 3 if enabled else 1)
+                retained = approval_eligibility_from_body(state.reviews[0]["body"])
+                self.assertIsNotNone(retained)
+                self.assertEqual(retained.facts.enabled, enabled)
+                self.assertEqual(state.check_runs[-1]["conclusion"], "success")
+
+    def test_complete_native_replay_missing_authority_preserves_blockers(self):
+        for line, human in ((1, False), (2, False), (1, True)):
+            with (
+                self.subTest(line=line, human=human),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                ledger = LocalSessionLedger(Path(directory))
+                result, key = checkpoint(ledger, count=1, line=line, blocking=True)
+                candidate = derive_blocker_candidate(
+                    result.comments[0],
+                    on_changed_path=True,
+                    evidence_locations_validated=True,
+                    has_failure_condition=True,
+                    has_actionable_remedy=True,
+                    has_specific_violation=True,
+                )
+                if human:
+                    candidate = replace(candidate, needs_human=True)
+                state = SupersessionState(result, old_count=1)
+                options = GitHubWriteOptions(
+                    auto_review=True, github_writes=True, complete_inventory=True
+                )
+                publish(
+                    application(state, ledger),
+                    result,
+                    key,
+                    publication_budget=EvidenceReadBudget(),
+                    blocker_candidates=(candidate,),
+                    options=options,
+                )
+                root = state.reviews[0]
+                eligibility = approval_eligibility_from_body(root["body"])
+                self.assertIsNotNone(eligibility)
+                retained_index = parse_finding_index(
+                    root["body"], repository_id=1, pull_request=1, head_sha=HEAD
+                )
+                self.assertIsNotNone(retained_index)
+                previous = tuple(state.resolved)
+                root["body"] = root["body"].replace(
+                    approval_eligibility_marker(eligibility), ""
+                )
+                state.calls.clear()
+                with self.assertRaises(GitHubPublicationError):
+                    publish(
+                        application(state, ledger),
+                        result,
+                        key,
+                        publication_budget=EvidenceReadBudget(),
+                        blocker_candidates=(candidate,),
+                        options=options,
+                    )
+                self.assertEqual(tuple(state.resolved), previous)
+                self.assertEqual(len(state.reviews), 1)
+                self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+                self._assert_replay_check_blocked(state)
+                self.assertEqual(
+                    parse_finding_index(
+                        root["body"], repository_id=1, pull_request=1, head_sha=HEAD
+                    ),
+                    retained_index,
+                )
+
+
 class PublicationRecoveryTests(unittest.TestCase):
     def test_optional_supersession_cannot_starve_durable_completion(self):
         from review_sensei_github.session_ledger import (

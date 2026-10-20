@@ -4,8 +4,12 @@
 
 - Add explicit manual publication-only recovery from the original trusted policy,
   exact transaction context and retained result, without another provider call.
+- Stage recovery-capable caller templates behind runner-first rollout; default
+  setup and the installed caller retain the released compatible input contract.
 - Complete durable publication before optional superseded-thread cleanup; resume
   bounded cleanup on exact retries while preserving current approval obligations.
+- Require retained native approval authority on complete-review replay; missing or
+  invalid authority keeps the check non-passing instead of reconstructing approval.
 - Share scoped pagination observations and authenticated inventory context within
   one publication budget, retaining fresh ownership, storage and prose fences.
 - Use one clock sample for recovery-artifact creation and expiry so the minimum

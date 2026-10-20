@@ -48,11 +48,20 @@ checks. No analysis round is reserved or charged and no learning PR is emitted.
 Mutable publication phase/generation reconciliation retains the existing logical
 transaction identity rules; changed source/base/head is never rebound.
 
-Canonical Python and Worker setup templates remain byte-equivalent. Freeze the
-exact previously released caller for managed recognition, accepting no operator
-edits to it. Existing callers need their own normal managed source update; a
-reusable-tag move cannot add missing dispatch inputs. Worker template source
-parity does not deploy a Worker or change broker issuance policy.
+Default Python/Worker setup emission and the installed repository caller remain
+at exact released pre-recovery bytes. The selected released `v5` runner at
+`fb2352791caa993bcb34cd64b867af02c07c8f82` declares 19 inputs; passing the three
+new recovery keys fails workflow validation even when false or empty. The
+recovery-capable Python/Worker templates and example remain explicitly prepared,
+byte-equivalent qualification targets, separate from default emission. Exact
+released and prepared managed bytes remain recognized; operator edits and future
+setup versions remain owned and are not overwritten.
+
+Rollout releases the additive runner/runtime first, then independently verifies
+the selected callable `v5` channel's immutable source and input types. Only then
+may a normal reviewed caller/default-emitter upgrade expose recovery dispatch.
+A reusable-tag move cannot add inputs to installed callers. This source change
+neither moves a channel nor deploys a Worker or changes broker issuance policy.
 
 ## Alternatives
 

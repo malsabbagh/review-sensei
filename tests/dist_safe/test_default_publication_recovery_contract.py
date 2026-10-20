@@ -59,6 +59,12 @@ class InstalledPublicationRecoveryTests(
     pass
 
 
+class InstalledNativeReplayAuthorityTests(
+    test_publication_recovery.NativeReplayAuthorityTests
+):
+    pass
+
+
 class InstalledTrustedPublicationRecoveryTests(
     test_trusted_publication_recovery.TrustedPublicationRecoveryTests
 ):

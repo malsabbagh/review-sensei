@@ -1570,7 +1570,8 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         if getattr(review_outcome, "thread_resolution", None) == "unconfirmed":
             print(
                 "review-sensei: old-thread cleanup is unconfirmed or incomplete; "
-                "retry the same publication-only result for this exact head and base; "
+                "use --result with the exact original result and trusted contexts "
+                "for this head and base to continue cleanup; "
                 "no inference is needed.",
                 file=sys.stderr,
             )
