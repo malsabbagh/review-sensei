@@ -30,6 +30,20 @@
   Permit the evaluator's existing skipped-case status in its report schema.
   Actual live quality remains independently required for qualification.
 
+## 0.8.4 - 2026-10-20
+
+Changes since [v0.8.3](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.3), from [3dd5ec537bec429a4d0b280b2c2b0e9ac203f4a6](https://github.com/malsabbagh/review-sensei/commit/3dd5ec537bec429a4d0b280b2c2b0e9ac203f4a6) through [e02665a6e08ae1ec1c839e0051bf390b528c4f82](https://github.com/malsabbagh/review-sensei/commit/e02665a6e08ae1ec1c839e0051bf390b528c4f82).
+
+Previous annotated tag object: `021871fe43b1e44b0e9ef18b89f1f19f72a732cf`.
+
+- docs: record released v0.8.3 ([c09d7fc2c7ce176be747bc38a1164f40305bf858](https://github.com/malsabbagh/review-sensei/commit/c09d7fc2c7ce176be747bc38a1164f40305bf858)).
+- config: enable complete publication inventories \(\#328\) ([7f943d58a436155c4f5283abff4177d17b3fc711](https://github.com/malsabbagh/review-sensei/commit/7f943d58a436155c4f5283abff4177d17b3fc711)).
+- Bound complete inline review reconciliation with adaptive pages \(\#329\) ([e02665a6e08ae1ec1c839e0051bf390b528c4f82](https://github.com/malsabbagh/review-sensei/commit/e02665a6e08ae1ec1c839e0051bf390b528c4f82)).
+
+## review-sensei-github 0.3.4 - 2026-10-20
+
+- Pin `review-sensei==0.8.4`.
+
 ## 0.8.3 - 2026-10-19
 
 Changes since [v0.8.2](https://github.com/malsabbagh/review-sensei/releases/tag/v0.8.2), from [279b5f76992eb84e297e8bfc1063da6f1145a371](https://github.com/malsabbagh/review-sensei/commit/279b5f76992eb84e297e8bfc1063da6f1145a371) through [8059defabed5396ca9ecc25fcbb3981c98338f97](https://github.com/malsabbagh/review-sensei/commit/8059defabed5396ca9ecc25fcbb3981c98338f97).

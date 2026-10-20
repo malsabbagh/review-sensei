@@ -91,6 +91,23 @@ class DefaultHumanReaderBindingTests(unittest.TestCase):
                     self.assertEqual(len(current.human_review.pending), 77)
                     self.assertIsNotNone(current.human_inventory_reference)
 
+    def test_large_inline_metadata_preserves_complete_pending_human_gate(self):
+        if self.windows_hold():
+            return
+        with tempfile.TemporaryDirectory() as directory:
+            state, path = self.published(directory)
+            for item in state.inline:
+                item["diff_hunk"] = "x" * 9000
+            self.assertGreater(len(json.dumps(state.inline).encode()), 512 * 1024)
+            before = len(state.calls)
+            current = self.load(state, path)
+            self.assertEqual(len(current.human_review.pending), 77)
+            self.assertIsNotNone(current.human_inventory_reference)
+            self.assertTrue(
+                all(method == "GET" for method, _, _ in state.calls[before:])
+            )
+            self.assertNotIn("APPROVE", state.events())
+
     def test_latest_digest_mismatch_holds_full_and_metadata_without_older_fallback(
         self,
     ):

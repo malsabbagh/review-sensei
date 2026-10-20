@@ -294,6 +294,7 @@ class DefaultHumanInventoryReader:
                 f"/pulls/{self.pull_request}/reviews/{original['id']}/comments",
             ),
             token=self.token,
+            page_sizes=(100, 50, 25, 5, 1),
             max_requests=64,
             timeout_seconds=60,
         )
