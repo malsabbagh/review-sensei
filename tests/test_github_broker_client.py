@@ -23,6 +23,55 @@ class FakeResponse(io.BytesIO):
 
 
 class BrokerClientTests(unittest.TestCase):
+    def test_oidc_late_read_never_returns_assertion_after_transport_timeout(self):
+        client = BrokerClient(
+            opener=lambda *args, **kwargs: FakeResponse(b'{"value":"secret"}')
+        )
+        with (
+            mock.patch.dict(
+                "os.environ",
+                {
+                    "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic",
+                    "ACTIONS_ID_TOKEN_REQUEST_URL": "https://fixture.invalid?fixture=1",
+                },
+                clear=True,
+            ),
+            mock.patch(
+                "review_sensei_github.broker_client.time.monotonic",
+                side_effect=[0, 31, 31],
+            ),
+        ):
+            with self.assertRaises(GitHubBrokerClientError) as caught:
+                client.request_oidc_token()
+        self.assertIn("broker.transport_failure=timeout", str(caught.exception))
+        self.assertIn("broker.post_outcome=not_applicable", str(caught.exception))
+        self.assertNotIn("secret", str(caught.exception))
+
+    def test_oidc_late_read_rechecks_original_uncontrolled_budget(self):
+        clock = [0.0]
+        budget = EvidenceReadBudget(clock=lambda: clock[0])
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(request)
+            clock[0] = 60.0
+            return FakeResponse(b'{"value":"secret"}')
+
+        client = BrokerClient(opener=opener, before_request=budget.consume)
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic",
+                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://fixture.invalid?fixture=1",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(GitHubBrokerClientError) as caught:
+                client.request_oidc_token()
+        self.assertIsInstance(caught.exception.__cause__, ReviewInputError)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(budget.calls, 1)
+
     def test_exhausted_admission_preserves_broker_error_and_never_dispatches(self):
         budget = EvidenceReadBudget(clock=lambda: 0)
         for _ in range(60):
@@ -99,8 +148,9 @@ class BrokerClientTests(unittest.TestCase):
             return FakeResponse(b'{"token":"must-not-return"}')
 
         client = BrokerClient(opener=opener, before_request=budget.consume)
-        with self.assertRaises(ReviewInputError):
+        with self.assertRaises(GitHubBrokerClientError) as caught:
             client.exchange("assertion")
+        self.assertIsInstance(caught.exception.__cause__, ReviewInputError)
         self.assertEqual(len(calls), 1)
         self.assertEqual(budget.calls, 1)
         self.assertEqual(

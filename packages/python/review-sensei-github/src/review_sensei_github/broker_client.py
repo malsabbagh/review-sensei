@@ -210,6 +210,42 @@ class BrokerClient:
             raise GitHubBrokerClientError("Broker request allowance is exhausted")
         return min(self.timeout, remaining)
 
+    def _check_completed_request(
+        self,
+        started: float,
+        timeout: float,
+        *,
+        post: bool,
+        status: int | None,
+        ray: str | None,
+    ) -> None:
+        if time.monotonic() - started >= timeout:
+            raise GitHubBrokerClientError(
+                (
+                    "Broker token request failed; "
+                    if post
+                    else "OIDC token request failed; "
+                )
+                + _transport_message(
+                    TimeoutError(),
+                    "response_read",
+                    started,
+                    timeout,
+                    post=post,
+                    status=status,
+                    ray=ray,
+                )
+            )
+        original_budget = getattr(self.before_request, "__self__", None)
+        if isinstance(original_budget, EvidenceReadBudget):
+            try:
+                original_budget.check()
+            except ReviewInputError as exc:
+                raise GitHubBrokerClientError(
+                    "Broker response exceeded the original budget; "
+                    f"broker.post_outcome={'unknown' if post else 'not_applicable'}"
+                ) from exc
+
     def request_oidc_token(self) -> str:
         """Request the standard GitHub Actions OIDC token from env claims."""
 
@@ -251,6 +287,9 @@ class BrokerClient:
                     exc, phase, started, timeout, post=False, status=status, ray=ray
                 )
             ) from exc
+        self._check_completed_request(
+            started, timeout, post=False, status=status, ray=ray
+        )
         if not isinstance(parsed, dict):
             raise GitHubBrokerClientError("OIDC token response was invalid")
         value = parsed.get("value")
@@ -622,21 +661,9 @@ class BrokerClient:
                     exc, phase, started, timeout, post=True, status=status, ray=ray
                 )
             ) from exc
-        if time.monotonic() - started >= timeout:
-            raise GitHubBrokerClientError(
-                "Broker token request failed; "
-                + _transport_message(
-                    TimeoutError(),
-                    "response_read",
-                    started,
-                    timeout,
-                    post=True,
-                    status=status,
-                    ray=ray,
-                )
-            )
-        if isinstance(original_budget, EvidenceReadBudget):
-            original_budget.check()
+        self._check_completed_request(
+            started, timeout, post=True, status=status, ray=ray
+        )
         if not isinstance(parsed, dict):
             raise GitHubBrokerClientError("Broker token response was invalid")
         if self.control is not None and control_request is not None:
