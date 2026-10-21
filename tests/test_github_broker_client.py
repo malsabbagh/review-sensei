@@ -181,6 +181,34 @@ class BrokerClientTests(unittest.TestCase):
         self.assertEqual(budget.snapshot(), original)
         self.assertEqual(calls, [])
 
+    def test_failure_metrics_distinguish_preparation_socket_and_total_elapsed(self):
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(timeout)
+            raise TimeoutError("PRIVATE-TOKEN-AND-REPOSITORY-CONTENT")
+
+        client = BrokerClient(opener=opener, before_request=lambda: 1)
+        with mock.patch(
+            "review_sensei_github.broker_client.time.monotonic",
+            side_effect=[0.25, 0.75, 1.0],
+        ):
+            with self.assertRaises(GitHubBrokerClientError) as raised:
+                client.exchange("PRIVATE-TOKEN-AND-REPOSITORY-CONTENT")
+        message = str(raised.exception)
+        for field in (
+            "broker.elapsed_ms=750",
+            "broker.elapsed_scope=request_with_preparation",
+            "broker.admitted_timeout_ms=1000",
+            "broker.preparation_ms=500",
+            "broker.socket_timeout_ms=500",
+            "broker.retry_count=0",
+            "broker.post_outcome=unknown",
+        ):
+            self.assertIn(field, message)
+        self.assertNotIn("PRIVATE-TOKEN", message)
+        self.assertEqual(calls, [0.5])
+
     def test_transport_failures_name_phase_without_remote_text_or_post_retry(self):
         class ReadFailure(FakeResponse):
             def read(self, size=-1):

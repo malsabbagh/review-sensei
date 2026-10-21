@@ -106,6 +106,7 @@ def _transport_message(
     timeout: float,
     *,
     post: bool,
+    admitted_timeout: float,
     status: int | None = None,
     ray: str | None = None,
 ) -> str:
@@ -132,6 +133,10 @@ def _transport_message(
     return (
         f"broker.transport_phase={phase} broker.transport_failure={failure} "
         f"broker.elapsed_ms={elapsed} broker.timeout_seconds={timeout:g} "
+        f"broker.elapsed_scope=request_with_preparation "
+        f"broker.admitted_timeout_ms={int(admitted_timeout * 1000)} "
+        f"broker.preparation_ms={max(0, int((admitted_timeout - timeout) * 1000))} "
+        f"broker.socket_timeout_ms={int(timeout * 1000)} broker.retry_count=0 "
         f"broker.post_outcome={'unknown' if post else 'not_applicable'}{metadata}"
     )
 
@@ -250,6 +255,7 @@ class BrokerClient:
                     started,
                     dispatch_timeout,
                     post=post,
+                    admitted_timeout=timeout,
                     status=status,
                     ray=ray,
                 )
@@ -312,6 +318,7 @@ class BrokerClient:
                     started,
                     dispatch_timeout,
                     post=False,
+                    admitted_timeout=timeout,
                     status=status,
                     ray=ray,
                 )
@@ -699,6 +706,7 @@ class BrokerClient:
                     started,
                     dispatch_timeout,
                     post=True,
+                    admitted_timeout=timeout,
                     status=status,
                     ray=ray,
                 )

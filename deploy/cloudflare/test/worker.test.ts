@@ -307,3 +307,27 @@ describe("broker diagnostic response contract", () => {
     });
   });
 });
+
+
+describe("bounded broker operation telemetry", () => {
+  it("emits one safe success or refusal observation without request or token content", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const secret = "PRIVATE-TOKEN-AND-REPOSITORY-CONTENT";
+      broker.exchange.mockResolvedValueOnce({ token: secret, capability: "issue_reply" });
+      const accepted = await worker.fetch(request({ oidc_token: secret }, { "cf-ray": "a4dd3d310f874964-LAX" }), env);
+      expect(accepted.status).toBe(200);
+      broker.exchange.mockRejectedValueOnce(new Error(secret));
+      const refused = await worker.fetch(request({ oidc_token: secret }), env);
+      expect(refused.status).toBe(403);
+      const events = log.mock.calls.filter(call => call[0] === "github_broker_observation");
+      expect(events).toHaveLength(2);
+      expect(events[0][1]).toMatchObject({ version: 1, operation: "exchange", outcome: "success", retries: 0, correlation_id: "a4dd3d310f874964-LAX" });
+      expect(events[1][1]).toMatchObject({ outcome: "refused", code: "broker_unknown", retries: 0 });
+      expect(JSON.stringify(log.mock.calls)).not.toContain(secret);
+      expect(JSON.stringify(errorLog.mock.calls)).not.toContain(secret);
+      expect(broker.exchange).toHaveBeenCalledTimes(2);
+    } finally { log.mockRestore(); errorLog.mockRestore(); }
+  });
+});

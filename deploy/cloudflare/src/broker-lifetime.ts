@@ -1,3 +1,4 @@
+import type { BrokerObservation, BrokerSpan, BrokerStage } from "./broker-observation";
 import type { BrokerDispatchControl } from "./broker-dispatch-control";
 
 // Service ceilings, not an allowance, authority proof, or retry policy. Leave
@@ -13,7 +14,7 @@ export class BrokerLifetime {
   private control: BrokerDispatchControl | undefined;
   private deadlineCode = "broker_request_deadline_exhausted";
 
-  constructor(deadlineUnixMs?: number) {
+  constructor(deadlineUnixMs?: number, private readonly observation?: BrokerObservation) {
     if (deadlineUnixMs !== undefined) {
       if (!Number.isSafeInteger(deadlineUnixMs) || deadlineUnixMs <= 0) throw new Error("broker_request_deadline_invalid");
       this.deadline = Math.min(this.deadline, deadlineUnixMs);
@@ -54,12 +55,17 @@ export class BrokerLifetime {
     }
   }
 
-  async upstream<T>(operation: (scope: BrokerUpstream) => Promise<T>, control?: BrokerDispatchControl): Promise<T> {
-    this.constrain(control);
-    const paidSignal = control?.beforeDispatch(); // Exactly one existing debit.
-    const scope = new BrokerUpstream(this, this.controller.signal, paidSignal, control);
-    try { return await scope.wait(operation(scope)); }
-    finally { scope.close(); }
+  async upstream<T>(operation: (scope: BrokerUpstream) => Promise<T>, control?: BrokerDispatchControl, stage: BrokerStage = "github_read"): Promise<T> {
+    const span = this.observation?.start(stage);
+    try {
+      this.constrain(control);
+      const paidSignal = control?.beforeDispatch(); // Exactly one existing debit.
+      span?.admitted();
+      const scope = new BrokerUpstream(this, this.controller.signal, paidSignal, control, span);
+      try { return await scope.wait(operation(scope)); }
+      finally { scope.close(); }
+    } catch (error) { span?.failed(error); throw error; }
+    finally { span?.close(); }
   }
 }
 
@@ -82,7 +88,7 @@ export class BrokerUpstream {
   private readonly paidAbort = () => this.controller.abort(new Error("broker_control_deadline_exhausted"));
 
   constructor(private readonly lifetime: BrokerLifetime, private readonly parent: AbortSignal,
-    private readonly paid: AbortSignal | undefined, private readonly control?: BrokerDispatchControl) {
+    private readonly paid: AbortSignal | undefined, private readonly control?: BrokerDispatchControl, private readonly span?: BrokerSpan) {
     parent.addEventListener("abort", this.parentAbort, { once: true });
     paid?.addEventListener("abort", this.paidAbort, { once: true });
     if (parent.aborted) this.parentAbort();
@@ -106,12 +112,15 @@ export class BrokerUpstream {
 
   async fetch(url: string, init: RequestInit): Promise<Response> {
     this.check();
+    this.span?.dispatched();
     const pending = fetch(url, { ...init, signal: this.controller.signal });
     // A transport ignoring abort must not leave a late response body alive.
     void pending.then(response => {
       if (this.controller.signal.aborted) void response.body?.cancel().catch(() => {});
     }, () => {});
-    return await this.wait(pending);
+    const response = await this.wait(pending);
+    this.span?.response(response.status);
+    return response;
   }
 
   async read(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<ReadableStreamReadResult<Uint8Array>> {

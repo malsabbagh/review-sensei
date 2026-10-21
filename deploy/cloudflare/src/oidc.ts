@@ -145,7 +145,7 @@ async function fetchJwks(issuer: string, lifetime: BrokerLifetime, control?: Bro
     } catch {
       throw new Error("oidc_jwks_invalid");
     }
-  }, control);
+  }, control, "oidc_jwks");
 }
 
 async function cachedJwks(issuer: string, lifetime: BrokerLifetime, control?: BrokerDispatchControl): Promise<Record<string, unknown>> {

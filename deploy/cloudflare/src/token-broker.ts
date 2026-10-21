@@ -1,3 +1,4 @@
+import type { BrokerObservation } from "./broker-observation";
 import { BrokerLifetime } from "./broker-lifetime";
 import { BrokerDispatchControl, type BrokerControlReceipt } from "./broker-dispatch-control";
 import type { WorkerEnv } from "./env";
@@ -529,12 +530,12 @@ function validCommandReason(value: string): boolean {
 export class TokenBroker {
   private readonly github: GitHubApi;
 
-  constructor(private readonly env: WorkerEnv, github?: GitHubApi) {
+  constructor(private readonly env: WorkerEnv, github?: GitHubApi, private readonly observation?: BrokerObservation) {
     this.github = github ?? new GitHubApi(env);
   }
 
   async exchange(body: BrokerBody, sourceAddress?: string, deadlineUnixMs?: number) {
-    const lifetime = new BrokerLifetime(deadlineUnixMs);
+    const lifetime = new BrokerLifetime(deadlineUnixMs, this.observation);
     return await lifetime.run(() => this.exchangeWithinLifetime(body, sourceAddress, lifetime));
   }
 
@@ -701,7 +702,7 @@ export class TokenBroker {
 
   /** Verify an opaque broker grant before a hosted session-ledger mutation. */
   async verifySessionGrant(grant: unknown, attestation: unknown, control?: BrokerDispatchControl, deadlineUnixMs?: number): Promise<SessionAttestation> {
-    const lifetime = new BrokerLifetime(deadlineUnixMs);
+    const lifetime = new BrokerLifetime(deadlineUnixMs, this.observation);
     lifetime.constrain(control);
     return await lifetime.run(() => this.verifyGrantWithinLifetime(grant, attestation, lifetime, control));
   }

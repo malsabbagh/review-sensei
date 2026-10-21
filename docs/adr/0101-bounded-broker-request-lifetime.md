@@ -49,6 +49,44 @@ validated rate metadata actually supports a narrower interpretation. The client
 reports fixed open/read/decode/size failure classes, elapsed monotonic time,
 configured timeout and validated response status/correlation when available.
 
+## Operational observations
+
+Use the already enabled Workers Observability logs, without a new binding,
+service, permission or paid telemetry dependency. Each parsed broker operation
+emits one `github_broker_observation` aggregate after identity/admission handling:
+`exchange` or `session_grant`, success/refused, closed diagnostic code, monotonic
+operation duration, zero automatic retries, and at most seven fixed stage buckets.
+The operation duration starts after bounded HTTP body parsing; it is not total
+Worker invocation time. Buckets cover JWKS, public Git, workflow REST ref/tag,
+installation-token issuance and other GitHub reads/writes. Their counters record
+attempted scopes, admitted scopes, actual fetch dispatches, failures, timeouts and
+HTTP errors. An admitted scope means existing deadline/funding checks passed; it
+is not an authorization decision or a new allowance. HTTP status is observed
+independently of whether a higher-level operation ultimately succeeds. Public Git
+to REST fallback is separate stage acquisition, not an automatic POST retry.
+
+Counters saturate at 65,535, durations at 60,000 ms; bucket durations are aggregate
+elapsed time, not exclusive CPU time. No per-chunk events or unbounded lists are
+emitted. A validated correlation ID is a log join field only, never a metric
+label. Stage names and outcome/code enums are the only dimensions; URLs, refs,
+repository names, operation IDs, bodies, tokens and arbitrary exception text are
+excluded. Synchronous logging failure cannot replace the broker result; there
+are no awaited sinks, extra dispatches, refunds or retry paths.
+
+Operators can filter existing logs by event name and correlation ID, then compare
+operation refusal/code, stage failures/timeouts/HTTP errors, admitted versus actual
+dispatch counts and elapsed duration. Aggregate counters and duration distributions
+using only those fixed operation/stage/outcome dimensions. Log availability and
+retention remain those of the existing deployment; this change does not recover
+historical traces or establish a historical network cause.
+
+Client failure diagnostics retain `elapsed_ms` and explicitly label its scope as
+`request_with_preparation`. `admitted_timeout_ms`, `preparation_ms` and
+`socket_timeout_ms` distinguish the original admitted window, time subtracted
+before dispatch, and the actual clamped socket timeout. `retry_count=0` records
+that the client did not repeat the exchange. Transport/read failure still reports
+`post_outcome=unknown`; these counters never imply that a POST failed to execute.
+
 ## Alternatives and consequences
 
 A shared owner fetch plus independently cancelled waiters was considered. It

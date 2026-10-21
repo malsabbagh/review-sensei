@@ -510,7 +510,7 @@ export class GitHubApi {
         this.dispatchControl?.check();
         const metadata = lookupHeaders(response.headers);
         return { status: response.status, data, ...(Object.keys(metadata).length ? {lookupMetadata: metadata} : {}) };
-      }, this.dispatchControl);
+      }, this.dispatchControl, path.includes("/git/ref/") ? "workflow_ref" : path.includes("/git/tags/") ? "workflow_tag" : path.endsWith("/access_tokens") ? "installation_token" : method === "GET" ? "github_read" : "github_write");
     } catch (error) {
       if (error instanceof Error && /^(broker_control_|broker_request_)/.test(error.message)) throw error;
       if (observed) throw new GitHubResponseError(error instanceof Error && ["github_response_invalid", "github_response_too_large", "broker_upstream_timeout"].includes(error.message) ? error.message : "github_response_unavailable", observed.status, observed.metadata);
@@ -781,7 +781,7 @@ export class GitHubApi {
         }
         throw new Error("github_workflow_tag_invalid");
       }
-    }, this.dispatchControl);
+    }, this.dispatchControl, "workflow_git");
   }
 
   /**
