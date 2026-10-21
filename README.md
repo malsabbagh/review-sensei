@@ -111,8 +111,8 @@ provider-neutral `@reviewsensei/cli` launcher:
 
 <!-- release-installation:package-npm-1:start -->
 ```bash
-npx --yes @reviewsensei/cli@0.8.7 --version
-npx --yes @reviewsensei/cli@0.8.7 --help
+npx --yes @reviewsensei/cli@0.8.8 --version
+npx --yes @reviewsensei/cli@0.8.8 --help
 ```
 <!-- release-installation:package-npm-1:end -->
 

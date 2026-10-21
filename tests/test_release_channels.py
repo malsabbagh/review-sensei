@@ -19,7 +19,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 channels = importlib.import_module("release_channels")
 SOURCE = "a" * 40
 TAG_OBJECT = "b" * 40
-VERSION = "0.8.7"
+VERSION = "1.2.3"
+OTHER_VERSION = "1.2.4"
+RELEASE_DATE = "2026-01-02"
 TAG = "v" + VERSION
 
 
@@ -75,10 +77,22 @@ class ReleaseChannelTests(unittest.TestCase):
     def setUp(self):
         self.temp = self.enterContext(tempfile.TemporaryDirectory())
         self.root = Path(self.temp)
-        shutil.copy(ROOT / "pyproject.toml", self.root)
-        shutil.copy(ROOT / "CHANGELOG.md", self.root)
+        (self.root / "pyproject.toml").write_text(f'[project]\nversion = "{VERSION}"\n')
+        (self.root / "CHANGELOG.md").write_text(
+            f"# Changelog\n\n## {VERSION} - {RELEASE_DATE}\n\n- Fixture release.\n"
+        )
         shutil.copytree(ROOT / "packages/npm", self.root / "packages/npm")
-        shutil.copytree(ROOT / ".publication", self.root / ".publication")
+        for path in (self.root / "packages/npm").rglob("package.json"):
+            manifest = json.loads(path.read_text())
+            manifest["version"] = VERSION
+            if "optionalDependencies" in manifest:
+                manifest["optionalDependencies"] = {
+                    name: VERSION for name in manifest["optionalDependencies"]
+                }
+            path.write_text(json.dumps(manifest))
+        receipt = self.root / channels.prepare.RECEIPT
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text(json.dumps({"release_date": RELEASE_DATE}))
         self.enterContext(
             patch.object(
                 channels.docs, "tag_identity", return_value=(TAG_OBJECT, SOURCE)
@@ -284,7 +298,7 @@ class ReleaseChannelTests(unittest.TestCase):
         original = run()
         for key, value in (
             ("head_sha", "c" * 40),
-            ("head_branch", "v0.8.8"),
+            ("head_branch", "v" + OTHER_VERSION),
             ("event", "workflow_dispatch"),
             ("path", ".github/workflows/publish-npm.yml"),
             ("head_repository", {"full_name": "attacker/fork"}),
@@ -299,15 +313,18 @@ class ReleaseChannelTests(unittest.TestCase):
             ):
                 channels.qualify("python", self.root)
         self.runs["python"] = original
-        manifest = self.root / "packages/npm/cli/package.json"
-        metadata = json.loads(manifest.read_text())
-        metadata["version"] = "0.8.8"
-        manifest.write_text(json.dumps(metadata))
-        with (
-            patch.dict(os.environ, self.environment(), clear=True),
-            self.assertRaisesRegex(ValueError, "version"),
-        ):
-            channels.qualify("python", self.root)
+        for manifest in (self.root / "packages/npm").rglob("package.json"):
+            original_manifest = manifest.read_text()
+            metadata = json.loads(original_manifest)
+            metadata["version"] = OTHER_VERSION
+            manifest.write_text(json.dumps(metadata))
+            with (
+                self.subTest(manifest=manifest.relative_to(self.root)),
+                patch.dict(os.environ, self.environment(), clear=True),
+                self.assertRaisesRegex(ValueError, "version"),
+            ):
+                channels.qualify("python", self.root)
+            manifest.write_text(original_manifest)
 
     def test_drift_between_contract_reads_is_refused(self):
         with (
@@ -492,7 +509,7 @@ class ReleaseChannelTests(unittest.TestCase):
     def test_npm_bundle_source_or_version_mismatch_refuses_before_attestation(self):
         bundle = self.npm_bundle()
         for metadata in (
-            {"version": "0.8.8", "source_sha": SOURCE},
+            {"version": OTHER_VERSION, "source_sha": SOURCE},
             {"version": VERSION, "source_sha": "c" * 40},
         ):
             (bundle / "bundle-metadata.json").write_text(json.dumps(metadata))
@@ -598,7 +615,7 @@ class ReleaseChannelTests(unittest.TestCase):
             41,
             2,
             channels.prepare.released_notes(
-                (self.root / "CHANGELOG.md").read_text(), VERSION, "2026-10-20"
+                (self.root / "CHANGELOG.md").read_text(), VERSION, RELEASE_DATE
             ),
         )
         return contract, {
