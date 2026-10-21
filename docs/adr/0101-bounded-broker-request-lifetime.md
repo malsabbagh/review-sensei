@@ -79,5 +79,7 @@ explicit compatible Worker rollback; do not alter permission or trust settings.
 
 Before resuming PR #340, reconcile the original uncertain POST outcome and current
 review state, then require separate action-time authorization where applicable.
-Historical trace access and the independent npm publisher migration remain separate
-holds. This repair neither proves a historical timeout nor clears a review retry.
+Historical trace access remains an attribution limitation; fresh authoritative
+state can independently establish whether a new attempt is safe. The npm publisher
+migration is a separate activation hold. This repair does not prove a historical
+timeout or by itself clear a review retry.

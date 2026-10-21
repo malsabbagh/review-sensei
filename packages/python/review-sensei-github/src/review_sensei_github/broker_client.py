@@ -15,6 +15,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.broker_diagnostics import parse_broker_diagnostic
+from review_sensei.errors import ReviewInputError
 
 from .broker_control import BrokerDispatchAccounting
 from .errors import GitHubBrokerClientError, GitHubHTTPTransientError
@@ -192,7 +193,14 @@ class BrokerClient:
     def _request_timeout(self) -> float:
         if self.before_request is None:
             return self.timeout
-        remaining = self.before_request()
+        try:
+            remaining = self.before_request()
+        except ReviewInputError as exc:
+            # Admission is local: preserve the public broker error contract
+            # without labeling an unattempted POST as an uncertain dispatch.
+            raise GitHubBrokerClientError(
+                "Broker request allowance is exhausted"
+            ) from exc
         if (
             isinstance(remaining, bool)
             or not isinstance(remaining, (int, float))

@@ -23,6 +23,20 @@ class FakeResponse(io.BytesIO):
 
 
 class BrokerClientTests(unittest.TestCase):
+    def test_exhausted_admission_preserves_broker_error_and_never_dispatches(self):
+        budget = EvidenceReadBudget(clock=lambda: 0)
+        for _ in range(60):
+            budget.consume()
+        original = budget.snapshot()
+        client, calls = self.make_client(
+            (b'{"token":"must-not-return"}', 200), before_request=budget.consume
+        )
+        with self.assertRaises(GitHubBrokerClientError) as caught:
+            client.exchange("assertion")
+        self.assertIsInstance(caught.exception.__cause__, ReviewInputError)
+        self.assertEqual(budget.snapshot(), original)
+        self.assertEqual(calls, [])
+
     def test_transport_failures_name_phase_without_remote_text_or_post_retry(self):
         class ReadFailure(FakeResponse):
             def read(self, size=-1):
