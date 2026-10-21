@@ -46,6 +46,9 @@ Preserve bounded registry retries, exact SRI, existing-byte refusal and
 platform-first/launcher-last publication.
 
 Order npm publication after the matching **published** stable Python release.
+Require the original Python run's terminal success, including its result
+recorder, before approving npm. Latest successful package jobs and public assets
+alone do not admit an active, cancelled or failed Python channel run.
 Verify the unique matching Python run's latest source/build/docs/draft/PyPI/
 finalizer jobs, exact reviewed notes, signed source/tag/run binding and four
 assets. Even visible drafts fail validation. The read-only metadata route is

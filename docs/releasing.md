@@ -120,11 +120,14 @@ All six tarballs plus source metadata must have verified GitHub attestations
 for this workflow, signed ref/source, GitHub-hosted runner and original build
 run/attempt. Publisher-only retries reuse the original successful assembly
 attempt, rather than guessing the current publishing attempt. npm publication
-requires the matching **published** stable Python release, successful latest
-source/build/docs/draft/PyPI/finalizer jobs, exact reviewed notes/source/run
+requires the matching **published** stable Python release, a terminal-success
+Python channel run, successful latest source/build/docs/draft/PyPI/finalizer
+jobs, exact reviewed notes/source/run
 binding and four assets. npm never downloads Python's build artifact.
 
-This intentionally orders npm publication after Python finalization. Native/npm
+Approve npm only after the original Python run reaches terminal success,
+including its result recorder. This intentionally orders npm publication after
+Python finalization and recording. Native/npm
 builds can run concurrently with Python. If npm reaches verification first,
 missing publication or failed/pending finalization holds that publisher; after
 Python recovery succeeds, retry the original npm publisher with its retained

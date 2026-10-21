@@ -144,6 +144,8 @@ def latest_jobs(run: dict) -> list[dict]:
 def verify_python_release(root: Path, contract: dict) -> None:
     """Read the verified public Python release without draft/write authority."""
     run = matching_run("python", contract["tag"], contract["source_sha"])
+    if run.get("status") != "completed" or run.get("conclusion") != "success":
+        raise ValueError("matching Python channel run must reach terminal success")
     jobs = latest_jobs(run)
     for name in (
         releases.BUILD_JOBS | releases.PUBLISH_JOBS | {"Create GitHub release assets"}

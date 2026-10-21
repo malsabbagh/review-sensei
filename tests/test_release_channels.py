@@ -132,6 +132,78 @@ class ReleaseChannelTests(unittest.TestCase):
         self.assertEqual(contracts[0]["version"], VERSION)
         self.assertEqual(self.prepared.call_count, 2)
 
+    def test_qualifier_cli_emits_all_outputs_from_workspace_or_source_checkout(self):
+        other = Path(self.enterContext(tempfile.TemporaryDirectory())) / "source"
+        shutil.copytree(self.root, other)
+        output = self.root / "outputs.txt"
+        for root in (self.root, other):
+            output.write_text("")
+            with (
+                self.subTest(root=root),
+                patch.dict(
+                    os.environ,
+                    {
+                        **self.environment(),
+                        "GITHUB_OUTPUT": str(output),
+                        "EXPECTED_TAG_OBJECT": TAG_OBJECT,
+                    },
+                    clear=True,
+                ),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "release_channels.py",
+                        "qualify",
+                        "--channel",
+                        "python",
+                        "--root",
+                        str(root),
+                    ],
+                ),
+            ):
+                self.assertEqual(channels.main(), 0)
+                self.assertEqual(
+                    dict(
+                        line.split("=", 1) for line in output.read_text().splitlines()
+                    ),
+                    {
+                        "tag_object": TAG_OBJECT,
+                        "source_sha": SOURCE,
+                        "version": VERSION,
+                    },
+                )
+                self.prepared.assert_called_with(root, TAG)
+        for expected in ("", "c" * 40):
+            output.write_text("")
+            with (
+                self.subTest(expected=expected),
+                patch.dict(
+                    os.environ,
+                    {
+                        **self.environment(),
+                        "GITHUB_OUTPUT": str(output),
+                        "EXPECTED_TAG_OBJECT": expected,
+                    },
+                    clear=True,
+                ),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "release_channels.py",
+                        "qualify",
+                        "--channel",
+                        "python",
+                        "--root",
+                        str(other),
+                    ],
+                ),
+                patch("sys.stderr", new_callable=io.StringIO),
+            ):
+                self.assertEqual(channels.main(), 1)
+                self.assertEqual(output.read_text(), "")
+
     def test_npm_waiting_or_failure_does_not_enter_python_retry_or_qualification(self):
         for status, conclusion in (
             ("waiting", None),
@@ -495,6 +567,7 @@ class ReleaseChannelTests(unittest.TestCase):
                 channels.verify_attestation(self.root / "package.tgz", contract, 1)
 
     def published_python_fixture(self):
+        self.runs["python"].update(status="completed", conclusion="success")
         self.jobs = [
             {
                 "name": name,
@@ -607,6 +680,23 @@ class ReleaseChannelTests(unittest.TestCase):
                     self.assertRaisesRegex(ValueError, "prerequisite"),
                 ):
                     channels.verify_python_release(self.root, contract)
+
+    def test_public_python_release_with_non_successful_run_is_refused(self):
+        contract, release = self.published_python_fixture()
+        for status, conclusion in (
+            ("in_progress", None),
+            ("completed", "failure"),
+            ("completed", "cancelled"),
+        ):
+            self.runs["python"].update(status=status, conclusion=conclusion)
+            with (
+                self.subTest(status=status, conclusion=conclusion),
+                patch.object(channels.releases, "find_release", return_value=release),
+                patch.object(channels.major, "published_assets") as assets,
+                self.assertRaisesRegex(ValueError, "terminal success"),
+            ):
+                channels.verify_python_release(self.root, contract)
+            assets.assert_not_called()
 
     def test_npm_retry_after_python_finalization_reuses_original_attested_bundle(self):
         bundle = self.npm_bundle()

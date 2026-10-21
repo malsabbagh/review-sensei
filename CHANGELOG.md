@@ -11,6 +11,8 @@
   read-only token needs no draft visibility or broader permission.
   Retain script-free npm CLI installation and disabled implicit tool caching;
   pin approval/dependency and same-run recovery guarantees in regression tests.
+  Hold npm until the original Python channel run reaches terminal success,
+  including its independent result recording.
 
 ## 0.8.7 - 2026-10-20
 
