@@ -443,5 +443,25 @@
     "stage": "request_validation",
     "action": "check_request",
     "hint": "The controlled broker endpoint redirected. Preserve original charges and pending obligations; inspect the configured endpoint before retrying. Redirects cannot spend another dispatch or renew this attempt."
+  },
+  "broker_request_deadline_exhausted": {
+    "stage": "request_execution",
+    "action": "inspect_attempt",
+    "hint": "The bounded broker operation did not complete. Preserve the original attempt and pending obligations; its POST outcome may be uncertain. Inspect the retained evidence before an explicitly authorized retry."
+  },
+  "broker_request_clock_regressed": {
+    "stage": "request_validation",
+    "action": "check_request",
+    "hint": "The bounded broker operation did not complete. Preserve the original attempt and pending obligations; its POST outcome may be uncertain. Inspect the retained evidence before an explicitly authorized retry."
+  },
+  "broker_upstream_timeout": {
+    "stage": "upstream_request",
+    "action": "inspect_attempt",
+    "hint": "The bounded broker operation did not complete. Preserve the original attempt and pending obligations; its POST outcome may be uncertain. Inspect the retained evidence before an explicitly authorized retry."
+  },
+  "broker_request_deadline_invalid": {
+    "stage": "request_validation",
+    "action": "check_request",
+    "hint": "The downward-only request deadline was invalid. Inspect the original request without extending or retrying it automatically."
   }
 }

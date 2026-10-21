@@ -1,3 +1,4 @@
+import { BrokerDispatchControl } from "../src/broker-dispatch-control";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetOidcJwksCacheForTesting, verifyOidcAssertion } from "../src/oidc";
 
@@ -100,7 +101,7 @@ describe("GitHub Actions OIDC validation", () => {
     expect(result.actor_id).toBe(12345678);
     expect(result.repository).toBe("acme/widgets");
     expect(fetchMock).toHaveBeenCalledWith(`${ISSUER}/.well-known/jwks`, {
-      headers: { accept: "application/json" },
+      headers: { accept: "application/json" }, redirect: "manual", signal: expect.any(AbortSignal),
     });
   });
 
@@ -173,4 +174,66 @@ describe("GitHub Actions OIDC validation", () => {
       "oidc_claims_invalid",
     );
   });
+  it("isolates simultaneous JWKS misses, cancels only the expired caller and fences late cache writes", async () => {
+    const assertion = await token(claims());
+    vi.useFakeTimers();
+    const pending: {signal: AbortSignal, resolve: (value: Response) => void}[] = [];
+    const fetchMock = vi.fn((_url, init) => new Promise<Response>(resolve => pending.push({signal: init.signal, resolve})));
+    vi.stubGlobal("fetch", fetchMock);
+    const control = new BrokerDispatchControl({schema_version: "1.0", operation_id: "a".repeat(64), request_id: "b".repeat(64), deadline_unix_ms: Date.now()+30, max_dispatches: 1});
+    const first = verifyOidcAssertion(assertion, {now: NOW, dispatchControl: control}).then(() => "accepted", error => error.message);
+    const second = verifyOidcAssertion(assertion, {now: NOW});
+    try {
+      await vi.advanceTimersByTimeAsync(30);
+      await expect(first).resolves.toBe("broker_control_deadline_exhausted");
+      expect(pending).toHaveLength(2);
+      expect(pending[0].signal.aborted).toBe(true);
+      expect(pending[1].signal.aborted).toBe(false);
+      pending[1].resolve(new Response(JSON.stringify({keys: [jwk]})));
+      await expect(second).resolves.toMatchObject({repository: "acme/widgets"});
+      const lateCancel = vi.fn();
+      pending[0].resolve(new Response(new ReadableStream({cancel: lateCancel})));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(lateCancel).toHaveBeenCalledOnce();
+      await expect(verifyOidcAssertion(assertion, {now: NOW})).resolves.toMatchObject({repository: "acme/widgets"});
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {vi.useRealTimers();}
+  });
+
+  it("aborts stalled JWKS headers and permits a fresh successful cache miss", async () => {
+    const assertion = await token(claims());
+    vi.useFakeTimers();
+    let signal!: AbortSignal;
+    const fetchMock = vi.fn((_url, init) => {signal=init.signal; return new Promise<Response>(() => {});});
+    vi.stubGlobal("fetch", fetchMock);
+    const first = verifyOidcAssertion(assertion, {now: NOW}).then(() => "accepted", error => error.message);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expect(first).resolves.toBe("broker_upstream_timeout");
+    expect(signal.aborted).toBe(true);
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify({keys: [jwk]})));
+    await expect(verifyOidcAssertion(assertion, {now: NOW})).resolves.toMatchObject({repository: "acme/widgets"});
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it("cancels stalled JWKS bodies, keeps completed TTL and refreshes after expiry", async () => {
+    const assertion = await token(claims());
+    vi.useFakeTimers();
+    const cancel=vi.fn();
+    const fetchMock=vi.fn(async () => new Response(new ReadableStream({cancel})));
+    vi.stubGlobal("fetch", fetchMock);
+    const first=verifyOidcAssertion(assertion,{now:NOW}).then(() => "accepted",error => error.message);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expect(first).resolves.toBe("broker_upstream_timeout");
+    expect(cancel).toHaveBeenCalledOnce();
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify({keys:[jwk]})));
+    await verifyOidcAssertion(assertion,{now:NOW});
+    await verifyOidcAssertion(assertion,{now:NOW});
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(300_001);
+    await verifyOidcAssertion(assertion,{now:NOW});
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    vi.useRealTimers();
+  });
+
 });

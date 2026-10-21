@@ -1,3 +1,4 @@
+import { BrokerLifetime } from "../src/broker-lifetime";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const oidc = vi.hoisted(() => ({ verify: vi.fn() }));
@@ -91,6 +92,7 @@ function harness(publicWorkflowTag: string = TAG) {
     capabilityToken: vi.fn(async () => "ghs_scoped_token"),
     sessionAlreadyKnown: vi.fn(async () => false),
   };
+  Object.assign(github, { withRequestLifetime: vi.fn(() => github) });
   const broker = new TokenBroker(env, github as never);
   return { broker, github, env };
 }
@@ -101,6 +103,40 @@ beforeEach(() => {
 });
 
 describe("token broker authorization", () => {
+  it("bounds an uncontrolled exchange and refuses late continuation before minting", async () => {
+    vi.useFakeTimers();
+    const {env}=harness();
+    const broker=new TokenBroker({...env,GITHUB_APP_ID:"123",GITHUB_APP_PRIVATE_KEY:"unused"});
+    const fetchMock=vi.spyOn(globalThis,"fetch").mockRejectedValue(new Error("must not dispatch"));
+    let release!: (value: ReturnType<typeof claims>) => void;
+    oidc.verify.mockImplementationOnce(() => new Promise(resolve => {release=resolve;}));
+    const result=broker.exchange({oidc_token:"signed",capability:"issue_reply"}).then(() => "accepted",error => error.message);
+    try {
+      await vi.advanceTimersByTimeAsync(25_000);
+      await expect(result).resolves.toBe("broker_request_deadline_exhausted");
+      expect(fetchMock).not.toHaveBeenCalled();
+      release(claims()); await vi.advanceTimersByTimeAsync(0);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {fetchMock.mockRestore();vi.useRealTimers();}
+  });
+
+  it("accepts only a downward client deadline and never mints after expiry", async () => {
+    vi.useFakeTimers();
+    const {broker,github}=harness();
+    const past=Date.now()-1;
+    await expect(broker.exchange({oidc_token:"signed"},undefined,past)).rejects.toThrow("broker_request_deadline_exhausted");
+    expect(oidc.verify).not.toHaveBeenCalled();
+    expect(github.capabilityToken).not.toHaveBeenCalled();
+    for (const deadline of [Date.now()+30,Date.now()+60_000]) {
+      oidc.verify.mockImplementationOnce(() => new Promise(() => {}));
+      const result=broker.exchange({oidc_token:"signed"},undefined,deadline).then(() => "accepted",error=>error.message);
+      await vi.advanceTimersByTimeAsync(deadline-Date.now() > 25_000 ? 25_000 : 30);
+      await expect(result).resolves.toBe("broker_request_deadline_exhausted");
+      expect(github.capabilityToken).not.toHaveBeenCalled();
+    }
+    vi.useRealTimers();
+  });
+
   it("binds a full Unicode feedback selection to live canonical sources and OIDC numeric actor", async () => {
     const { broker, github } = harness();
     const live = feedbackFixture.selection.sources;
@@ -208,7 +244,7 @@ describe("token broker authorization", () => {
       GITHUB_APP_PRIVATE_KEY: "unused-by-test",
       GITHUB_API_URL: "https://api.example.test",
     });
-    vi.spyOn(github as never, "appJwt" as never).mockResolvedValue("app-jwt");
+    vi.spyOn(GitHubApi.prototype as never, "appJwt" as never).mockResolvedValue("app-jwt");
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const path = new URL(String(input)).pathname;
       let data: unknown;
@@ -260,6 +296,7 @@ describe("token broker authorization", () => {
       expect(oidc.verify).toHaveBeenCalledWith("signed-jwt", {
         audience: "sts.reviewsensei.dev",
         issuer: "https://token.actions.githubusercontent.com",
+        dispatchControl: undefined, requestLifetime: expect.any(BrokerLifetime),
       });
       expect(fetchMock).toHaveBeenCalledTimes(5);
     } finally {

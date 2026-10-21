@@ -65,7 +65,7 @@ describe("session-grant verification route", () => {
       session_attestation: { repository_id: 987654321, pull_request: 7 },
     });
     expect(broker.verifySessionGrant).toHaveBeenCalledWith(
-      "a".repeat(43), { version: 1 },
+      "a".repeat(43), { version: 1 }, undefined, undefined,
     );
   });
 
@@ -135,6 +135,17 @@ describe("session-grant verification route", () => {
 });
 
 describe("token route response security", () => {
+  it("forwards only a validated downward deadline without an authority grant", async () => {
+    const deadline=Date.now()+30;
+    await worker.fetch(request(undefined,{"x-reviewsensei-deadline-unix-ms":String(deadline)}),env);
+    expect(broker.exchange).toHaveBeenCalledWith({oidc_token:"signed-jwt"},undefined,deadline);
+    broker.exchange.mockClear();
+    const rejected=await worker.fetch(request(undefined,{"x-reviewsensei-deadline-unix-ms":"secret untrusted deadline"}),env);
+    expect(rejected.status).toBe(403);
+    expect(broker.exchange).not.toHaveBeenCalled();
+    expect(JSON.stringify(await rejected.json())).not.toContain("secret");
+  });
+
   it("returns a successful exchange with no-store and no CORS exposure", async () => {
     const result = await worker.fetch(request(), env);
     expect(result.status).toBe(200);
@@ -294,5 +305,29 @@ describe("broker diagnostic response contract", () => {
       error: "session_grant_not_verified",
       diagnostic: brokerDiagnostic(new Error("broker_session_grant_invalid"), "0123456789abcdef-YYZ"),
     });
+  });
+});
+
+
+describe("bounded broker operation telemetry", () => {
+  it("emits one safe success or refusal observation without request or token content", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const secret = "PRIVATE-TOKEN-AND-REPOSITORY-CONTENT";
+      broker.exchange.mockResolvedValueOnce({ token: secret, capability: "issue_reply" });
+      const accepted = await worker.fetch(request({ oidc_token: secret }, { "cf-ray": "a4dd3d310f874964-LAX" }), env);
+      expect(accepted.status).toBe(200);
+      broker.exchange.mockRejectedValueOnce(new Error(secret));
+      const refused = await worker.fetch(request({ oidc_token: secret }), env);
+      expect(refused.status).toBe(403);
+      const events = log.mock.calls.filter(call => call[0] === "github_broker_observation");
+      expect(events).toHaveLength(2);
+      expect(events[0][1]).toMatchObject({ version: 1, operation: "exchange", outcome: "success", retries: 0, correlation_id: "a4dd3d310f874964-LAX" });
+      expect(events[1][1]).toMatchObject({ outcome: "refused", code: "broker_unknown", retries: 0 });
+      expect(JSON.stringify(log.mock.calls)).not.toContain(secret);
+      expect(JSON.stringify(errorLog.mock.calls)).not.toContain(secret);
+      expect(broker.exchange).toHaveBeenCalledTimes(2);
+    } finally { log.mockRestore(); errorLog.mockRestore(); }
   });
 });

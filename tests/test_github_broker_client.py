@@ -10,6 +10,9 @@ from review_sensei_github import (
     GitHubHTTPTransientError,
 )
 
+from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.errors import ReviewInputError
+
 
 class FakeResponse(io.BytesIO):
     def __init__(self, body=b"", status=200):
@@ -20,6 +23,296 @@ class FakeResponse(io.BytesIO):
 
 
 class BrokerClientTests(unittest.TestCase):
+    def test_expired_admission_latency_never_opens_oidc_or_post_request(self):
+        for operation in ("oidc", "post"):
+            with self.subTest(operation=operation):
+                clock = [0.0]
+                admissions = []
+                dispatches = []
+
+                def admit():
+                    admissions.append(True)
+                    clock[0] = 2.0
+                    return 1.0
+
+                def opener(request, timeout):
+                    dispatches.append(request)
+                    return FakeResponse(b'{"value":"assertion","token":"scoped"}')
+
+                client = BrokerClient(opener=opener, timeout=1, before_request=admit)
+                with (
+                    mock.patch.dict(
+                        "os.environ",
+                        {
+                            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic",
+                            "ACTIONS_ID_TOKEN_REQUEST_URL": "https://fixture.invalid?fixture=1",
+                        },
+                        clear=True,
+                    ),
+                    mock.patch(
+                        "review_sensei_github.broker_client.time.monotonic",
+                        side_effect=lambda: clock[0],
+                    ),
+                    mock.patch(
+                        "review_sensei_github.broker_client.time.time",
+                        side_effect=lambda: 1000 + clock[0],
+                    ),
+                ):
+                    with self.assertRaises(GitHubBrokerClientError):
+                        client.request_oidc_token() if operation == "oidc" else client.exchange(
+                            "assertion"
+                        )
+                self.assertEqual(len(admissions), 1)
+                self.assertEqual(dispatches, [])
+
+    def test_partial_admission_latency_uses_only_the_remaining_original_window(self):
+        for operation in ("oidc", "post"):
+            with self.subTest(operation=operation):
+                clock = [0.0]
+                admissions = []
+                dispatches = []
+
+                def admit():
+                    admissions.append(True)
+                    clock[0] = 0.25
+                    return 1.0
+
+                def opener(request, timeout):
+                    dispatches.append((request, timeout))
+                    return FakeResponse(b'{"value":"assertion","token":"scoped"}')
+
+                client = BrokerClient(opener=opener, timeout=1, before_request=admit)
+                with (
+                    mock.patch.dict(
+                        "os.environ",
+                        {
+                            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic",
+                            "ACTIONS_ID_TOKEN_REQUEST_URL": "https://fixture.invalid?fixture=1",
+                        },
+                        clear=True,
+                    ),
+                    mock.patch(
+                        "review_sensei_github.broker_client.time.monotonic",
+                        side_effect=lambda: clock[0],
+                    ),
+                    mock.patch(
+                        "review_sensei_github.broker_client.time.time",
+                        side_effect=lambda: 1000 + clock[0],
+                    ),
+                ):
+                    result = (
+                        client.request_oidc_token()
+                        if operation == "oidc"
+                        else client.exchange("assertion")
+                    )
+                self.assertIn(result, ("assertion", "scoped"))
+                self.assertEqual(len(admissions), 1)
+                self.assertEqual(len(dispatches), 1)
+                self.assertEqual(dispatches[0][1], 0.75)
+                if operation == "post":
+                    self.assertEqual(
+                        dispatches[0][0].headers["X-reviewsensei-deadline-unix-ms"],
+                        "1001000",
+                    )
+                    self.assertEqual(
+                        json.loads(dispatches[0][0].data), {"oidc_token": "assertion"}
+                    )
+
+    def test_oidc_late_read_never_returns_assertion_after_transport_timeout(self):
+        client = BrokerClient(
+            opener=lambda *args, **kwargs: FakeResponse(b'{"value":"secret"}')
+        )
+        with (
+            mock.patch.dict(
+                "os.environ",
+                {
+                    "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic",
+                    "ACTIONS_ID_TOKEN_REQUEST_URL": "https://fixture.invalid?fixture=1",
+                },
+                clear=True,
+            ),
+            mock.patch(
+                "review_sensei_github.broker_client.time.monotonic",
+                side_effect=[0, 0, 31, 31],
+            ),
+        ):
+            with self.assertRaises(GitHubBrokerClientError) as caught:
+                client.request_oidc_token()
+        self.assertIn("broker.transport_failure=timeout", str(caught.exception))
+        self.assertIn("broker.post_outcome=not_applicable", str(caught.exception))
+        self.assertNotIn("secret", str(caught.exception))
+
+    def test_oidc_late_read_rechecks_original_uncontrolled_budget(self):
+        clock = [0.0]
+        budget = EvidenceReadBudget(clock=lambda: clock[0])
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(request)
+            clock[0] = 60.0
+            return FakeResponse(b'{"value":"secret"}')
+
+        client = BrokerClient(opener=opener, before_request=budget.consume)
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic",
+                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://fixture.invalid?fixture=1",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(GitHubBrokerClientError) as caught:
+                client.request_oidc_token()
+        self.assertIsInstance(caught.exception.__cause__, ReviewInputError)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(budget.calls, 1)
+
+    def test_exhausted_admission_preserves_broker_error_and_never_dispatches(self):
+        budget = EvidenceReadBudget(clock=lambda: 0)
+        for _ in range(60):
+            budget.consume()
+        original = budget.snapshot()
+        client, calls = self.make_client(
+            (b'{"token":"must-not-return"}', 200), before_request=budget.consume
+        )
+        with self.assertRaises(GitHubBrokerClientError) as caught:
+            client.exchange("assertion")
+        self.assertIsInstance(caught.exception.__cause__, ReviewInputError)
+        self.assertEqual(budget.snapshot(), original)
+        self.assertEqual(calls, [])
+
+    def test_failure_metrics_distinguish_preparation_socket_and_total_elapsed(self):
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(timeout)
+            raise TimeoutError("PRIVATE-TOKEN-AND-REPOSITORY-CONTENT")
+
+        client = BrokerClient(opener=opener, before_request=lambda: 1)
+        with mock.patch(
+            "review_sensei_github.broker_client.time.monotonic",
+            side_effect=[0.25, 0.75, 1.0],
+        ):
+            with self.assertRaises(GitHubBrokerClientError) as raised:
+                client.exchange("PRIVATE-TOKEN-AND-REPOSITORY-CONTENT")
+        message = str(raised.exception)
+        for field in (
+            "broker.elapsed_ms=750",
+            "broker.elapsed_scope=request_with_preparation",
+            "broker.admitted_timeout_ms=1000",
+            "broker.preparation_ms=500",
+            "broker.socket_timeout_ms=500",
+            "broker.retry_count=0",
+            "broker.post_outcome=unknown",
+        ):
+            self.assertIn(field, message)
+        self.assertNotIn("PRIVATE-TOKEN", message)
+        self.assertEqual(calls, [0.5])
+
+    def test_transport_failures_name_phase_without_remote_text_or_post_retry(self):
+        class ReadFailure(FakeResponse):
+            def read(self, size=-1):
+                raise TimeoutError("secret read body")
+
+        cases = [
+            (TimeoutError("secret open"), "request_open", "timeout"),
+            (URLError("secret URL"), "request_open", "transport"),
+            (ReadFailure(), "response_read", "timeout"),
+            (FakeResponse(b"bad json secret"), "response_decode", "invalid_json"),
+            (FakeResponse(bytes([255])), "response_decode", "invalid_utf8"),
+            (FakeResponse(b"x" * (256 * 1024 + 1)), "response_size", "oversized"),
+        ]
+        for response, phase, failure in cases:
+            with self.subTest(phase=phase, failure=failure):
+                calls = []
+
+                def opener(request, timeout):
+                    calls.append((request, timeout))
+                    if isinstance(response, Exception):
+                        raise response
+                    return response
+
+                client = BrokerClient(opener=opener)
+                with mock.patch(
+                    "review_sensei_github.broker_client.time.monotonic", return_value=0
+                ):
+                    with self.assertRaises(GitHubBrokerClientError) as raised:
+                        client.exchange("secret assertion")
+                message = str(raised.exception)
+                self.assertIn("broker.transport_phase=" + phase, message)
+                self.assertIn("broker.transport_failure=" + failure, message)
+                self.assertIn("broker.post_outcome=unknown", message)
+                self.assertNotIn("secret", message)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0][1], 30)
+
+    def test_bootstrap_header_only_shortens_admitted_time_without_new_control(self):
+        client, calls = self.make_client(
+            (b'{"token":"scoped"}', 200), before_request=lambda: 1.5
+        )
+        with mock.patch(
+            "review_sensei_github.broker_client.time.time", return_value=1000
+        ):
+            self.assertEqual(
+                client.exchange("assertion", capability="issue_reply"), "scoped"
+            )
+        self.assertEqual(calls[0][2]["X-reviewsensei-deadline-unix-ms"], "1001500")
+        self.assertEqual(
+            json.loads(calls[0][3]),
+            {"oidc_token": "assertion", "capability": "issue_reply"},
+        )
+
+    def test_late_success_keeps_original_budget_and_never_returns_credential(self):
+        clock = [0.0]
+        budget = EvidenceReadBudget(clock=lambda: clock[0])
+        before = budget.snapshot()
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(request)
+            clock[0] = 60.0
+            return FakeResponse(b'{"token":"must-not-return"}')
+
+        client = BrokerClient(opener=opener, before_request=budget.consume)
+        with self.assertRaises(GitHubBrokerClientError) as caught:
+            client.exchange("assertion")
+        self.assertIsInstance(caught.exception.__cause__, ReviewInputError)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(budget.calls, 1)
+        self.assertEqual(
+            budget.snapshot()["deadline_unix_ms"], before["deadline_unix_ms"]
+        )
+
+    def test_bootstrap_header_never_extends_original_wall_deadline(self):
+        budget = EvidenceReadBudget(clock=lambda: 0, wall_clock=lambda: 1000)
+        client, calls = self.make_client(
+            (b'{"token":"scoped"}', 200), before_request=budget.consume
+        )
+        with mock.patch(
+            "review_sensei_github.broker_client.time.time", return_value=1040
+        ):
+            self.assertEqual(client.exchange("assertion"), "scoped")
+        self.assertEqual(calls[0][2]["X-reviewsensei-deadline-unix-ms"], "1060000")
+        self.assertEqual(budget.calls, 1)
+        self.assertEqual(budget.wall_deadline_ms, 1060000)
+
+    def test_transport_time_fence_retains_only_valid_status_and_correlation(self):
+        response = FakeResponse(b'{"token":"must-not-return"}')
+        response.headers = {"cf-ray": "0123456789abcdef-YYZ", "authorization": "secret"}
+        client = BrokerClient(opener=lambda *args, **kwargs: response)
+        with mock.patch(
+            "review_sensei_github.broker_client.time.monotonic",
+            side_effect=[0, 0, 31, 31],
+        ):
+            with self.assertRaises(GitHubBrokerClientError) as raised:
+                client.exchange("assertion")
+        text = str(raised.exception)
+        self.assertIn("broker.transport_failure=timeout", text)
+        self.assertIn("broker.response_status=200", text)
+        self.assertIn("broker.correlation_id=0123456789abcdef-YYZ", text)
+        self.assertIn("broker.post_outcome=unknown", text)
+        self.assertNotIn("secret", text)
+
     def make_client(self, responses, **kwargs):
         calls = []
 

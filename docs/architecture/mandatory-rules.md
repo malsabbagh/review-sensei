@@ -425,12 +425,12 @@ is superseded for now. The Cloudflare package is only an optional installation
 bootstrap ingress; customer Actions still own review execution and provider
 compute. A hosted review service would require a new ADR and a fresh issue set.
 
-The optional OIDC installation-token broker is a narrow boundary outside the
-provider-neutral review core: `oidc.py` verifies GitHub Actions identity and
-`broker.py` applies workflow policy before reusing `GitHubAppAuth`. The App
-private key remains in managed storage, the broker receives no diff or provider response,
-and forks, missing or suspended installations, rate limits, and verification
-or GitHub failures are rejected fail-closed.
+Optional OIDC brokers stay outside review logic. `oidc.py` verifies Actions identity;
+`broker.py` gates `GitHubAppAuth`. Keys stay managed; no diffs/provider output.
+Reject forks, missing/suspended installations, rate limits and failed evidence.
+Worker exchanges/upstreams stop at 25s/10s or earlier caller/control deadlines.
+Abort I/O; cache completed JWKS only. No POST replay; allowlisted diagnostics only,
+never secrets or remote text.
 
         -> audit (non-secret metadata only)
 

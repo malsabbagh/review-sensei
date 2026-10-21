@@ -1,3 +1,5 @@
+import { BrokerObservation } from "./broker-observation";
+import { WorkflowLookupError } from "./broker-lookup-diagnostic";
 import { BrokerDispatchControl } from "./broker-dispatch-control";
 import type { WorkerEnv, WorkerExecution } from "./env";
 import { TokenBroker } from "./token-broker";
@@ -176,18 +178,28 @@ async function token(request: Request, env: WorkerEnv): Promise<Response> {
   } catch {
     return response({ error: "invalid_request", diagnostic: brokerDiagnostic(new Error("broker_invalid_request"), brokerRayId(request)) }, 400, true);
   }
+  const observation = new BrokerObservation("exchange", brokerRayId(request));
+  let failure: unknown;
+  let outcome: "success" | "refused" = "success";
   try {
-    const result = await new TokenBroker(env).exchange(
+    const deadlineHeader = request.headers.get("x-reviewsensei-deadline-unix-ms");
+    if (deadlineHeader !== null && !/^[0-9]{1,13}$/.test(deadlineHeader)) throw new Error("broker_request_deadline_invalid");
+    const result = await new TokenBroker(env, undefined, observation).exchange(
       body as Record<string, unknown>,
       request.headers.get("cf-connecting-ip") ?? undefined,
+      deadlineHeader === null ? undefined : Number(deadlineHeader),
     );
     return response(result, 200, true);
   } catch (error) {
+    failure = error;
+    outcome = "refused";
     const message = error instanceof Error ? error.message : "";
     const status = message === "configuration_unavailable" ? 503 : 403;
     const rayId = brokerRayId(request);
     const diagnostic = brokerDiagnostic(error, rayId);
+    const lookup = error instanceof WorkflowLookupError ? error.lookup : undefined;
     console.error("github_broker_failed", {
+      ...(lookup === undefined ? {} : {lookup}),
       error_code: diagnostic.code,
       stage: diagnostic.stage,
       action: diagnostic.action,
@@ -198,8 +210,8 @@ async function token(request: Request, env: WorkerEnv): Promise<Response> {
     const errorCode = message === "configuration_unavailable"
       ? "configuration_unavailable"
       : "capability_not_issued";
-    return response({ error: errorCode, diagnostic }, status, true);
-  }
+    return response({ error: errorCode, diagnostic, ...(lookup === undefined ? {} : {lookup}) }, status, true);
+  } finally { observation.finish(outcome, failure); }
 }
 
 /**
@@ -231,6 +243,9 @@ async function sessionGrant(request: Request, env: WorkerEnv): Promise<Response>
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return response({ error: "invalid_request", diagnostic: brokerDiagnostic(new Error("broker_invalid_request"), brokerRayId(request)) }, 400, true);
   }
+  const observation = new BrokerObservation("session_grant", brokerRayId(request));
+  let failure: unknown;
+  let outcome: "success" | "refused" = "success";
   try {
     const values = body as Record<string, unknown>;
     const bodyKeys = Object.keys(values);
@@ -239,18 +254,24 @@ async function sessionGrant(request: Request, env: WorkerEnv): Promise<Response>
       !Object.hasOwn(values, "session_grant") ||
       !Object.hasOwn(values, "session_attestation")
     ) {
+      outcome = "refused";
+      failure = new Error("broker_invalid_request");
       return response({ error: "invalid_request", diagnostic: brokerDiagnostic(new Error("broker_invalid_request"), brokerRayId(request)) }, 400, true);
     }
     const control = values.control_budget === undefined ? undefined : new BrokerDispatchControl(values.control_budget);
-    const broker = new TokenBroker(env);
-    const attestation = control === undefined
-      ? await broker.verifySessionGrant(values.session_grant, values.session_attestation)
-      : await broker.verifySessionGrant(values.session_grant, values.session_attestation, control);
+    const deadlineHeader = request.headers.get("x-reviewsensei-deadline-unix-ms");
+    if (deadlineHeader !== null && !/^[0-9]{1,13}$/.test(deadlineHeader)) throw new Error("broker_request_deadline_invalid");
+    const broker = new TokenBroker(env, undefined, observation);
+    const attestation = await broker.verifySessionGrant(values.session_grant, values.session_attestation, control, deadlineHeader === null ? undefined : Number(deadlineHeader));
     return response({ session_attestation: attestation, ...(control === undefined ? {} : { control_receipt: control.receipt() }) }, 200, true);
   } catch (error) {
+    failure = error;
+    outcome = "refused";
     const rayId = brokerRayId(request);
     const diagnostic = brokerDiagnostic(error, rayId);
+    const lookup = error instanceof WorkflowLookupError ? error.lookup : undefined;
     console.error("github_session_grant_failed", {
+      ...(lookup === undefined ? {} : {lookup}),
       error_code: diagnostic.code,
       stage: diagnostic.stage,
       action: diagnostic.action,
@@ -260,8 +281,8 @@ async function sessionGrant(request: Request, env: WorkerEnv): Promise<Response>
     const unavailable = error instanceof Error && error.message === "configuration_unavailable";
     const status = unavailable ? 503 : 403;
     const errorCode = unavailable ? "configuration_unavailable" : "session_grant_not_verified";
-    return response({ error: errorCode, diagnostic }, status, true);
-  }
+    return response({ error: errorCode, diagnostic, ...(lookup === undefined ? {} : {lookup}) }, status, true);
+  } finally { observation.finish(outcome, failure); }
 }
 
 function appId(value: string | undefined): number | null {
