@@ -4,7 +4,7 @@
 - Date: 2026-10-21
 - Decision owner / reviewers: ReviewSensei maintainers; independent Astra review
 - Linked GitHub Issue: not configured; maintainer-authorized PR #340 repair
-- Linked PR: pending creation
+- Linked PR: [#341](https://github.com/malsabbagh/review-sensei/pull/341)
 
 ## Context
 
