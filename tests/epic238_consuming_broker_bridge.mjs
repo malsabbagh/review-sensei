@@ -76,7 +76,18 @@ async function redirectProbe(site, blocked = false) {
   });
   const previousFetch = globalThis.fetch;
   const control = new BrokerDispatchControl({ schema_version: "1.0", operation_id: "c".repeat(64), request_id: "d".repeat(64), deadline_unix_ms: Date.now() + (blocked ? 80 : 60_000), max_dispatches: 1 });
-  globalThis.fetch = (input, init) => physicalFetch(`http://127.0.0.1:${server.address().port}/redirect`, init);
+  const deadline = control.request.deadline_unix_ms;
+  const started = Date.now();
+  const beforeDispatch = control.beforeDispatch.bind(control);
+  let dispatches = 0;
+  let signal;
+  let aborted = false;
+  let elapsed;
+  control.beforeDispatch = () => { const value = beforeDispatch(); dispatches += 1; return value; };
+  globalThis.fetch = (input, init) => {
+    signal = init?.signal;
+    return physicalFetch(`http://127.0.0.1:${server.address().port}/redirect`, init);
+  };
   let category = "accepted";
   try {
     const api = new GitHubApi({ GITHUB_API_URL: site === "git" ? "https://api.github.com" : `http://127.0.0.1:${server.address().port}` }, control);
@@ -87,13 +98,17 @@ async function redirectProbe(site, blocked = false) {
       await verifyOidcAssertion(await fixture.oidcToken(), { dispatchControl: control });
     } else throw new Error("invalid probe site");
   } catch (error) {
+    aborted = signal?.aborted === true;
+    elapsed = Date.now() - started;
     category = error instanceof Error && /^(broker|github|oidc)_[a-z0-9_]+$/.test(error.message) ? error.message : "transport_refused";
   } finally {
     globalThis.fetch = previousFetch;
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
   }
-  return { requests, category };
+  return { requests, category, aborted, elapsed_ms: elapsed, dispatches,
+    original_deadline: deadline, final_deadline: control.request.deadline_unix_ms,
+    deadline_expired: Date.now() >= deadline };
 }
 const lines = createInterface({ input: process.stdin });
 for await (const line of lines) {

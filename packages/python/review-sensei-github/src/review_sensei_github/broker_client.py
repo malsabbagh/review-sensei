@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Mapping
@@ -14,6 +15,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.broker_diagnostics import parse_broker_diagnostic
+from review_sensei.errors import ReviewInputError
 
 from .broker_control import BrokerDispatchAccounting
 from .errors import GitHubBrokerClientError, GitHubHTTPTransientError
@@ -70,6 +72,73 @@ _SESSION_ATTESTATION_REQUEST_KEYS = frozenset(
 _SESSION_ATTESTATION_GRANT_KEYS = _SESSION_ATTESTATION_REQUEST_KEYS | frozenset(
     {"actor", "actor_type", "association", "command_id", "command_digest"}
 )
+
+
+class _ResponseTooLarge(ValueError):
+    pass
+
+
+class _InvalidResponse(ValueError):
+    pass
+
+
+def _response_metadata(response: Any) -> tuple[int | None, str | None]:
+    status = None
+    ray = None
+    try:
+        value = getattr(response, "status", None)
+        if type(value) is int and 100 <= value <= 599:
+            status = value
+        value = response.headers.get("cf-ray")
+        if isinstance(value, str) and re.fullmatch(
+            r"[a-f0-9]{16,64}-[a-z]{3}", value, re.IGNORECASE
+        ):
+            ray = value
+    except Exception:
+        pass
+    return status, ray
+
+
+def _transport_message(
+    error: Exception,
+    phase: str,
+    started: float,
+    timeout: float,
+    *,
+    post: bool,
+    admitted_timeout: float,
+    status: int | None = None,
+    ray: str | None = None,
+) -> str:
+    if isinstance(error, TimeoutError) or (
+        isinstance(error, URLError) and isinstance(error.reason, TimeoutError)
+    ):
+        failure = "timeout"
+    elif isinstance(error, UnicodeDecodeError):
+        failure = "invalid_utf8"
+    elif isinstance(error, json.JSONDecodeError):
+        failure = "invalid_json"
+    elif isinstance(error, _ResponseTooLarge):
+        failure = "oversized"
+    elif isinstance(error, ValueError):
+        failure = "invalid_response"
+    else:
+        failure = "transport"
+    elapsed = min(
+        9_007_199_254_740_991, max(0, int((time.monotonic() - started) * 1000))
+    )
+    metadata = ("" if status is None else f" broker.response_status={status}") + (
+        "" if ray is None else f" broker.correlation_id={ray}"
+    )
+    return (
+        f"broker.transport_phase={phase} broker.transport_failure={failure} "
+        f"broker.elapsed_ms={elapsed} broker.timeout_seconds={timeout:g} "
+        f"broker.elapsed_scope=request_with_preparation "
+        f"broker.admitted_timeout_ms={int(admitted_timeout * 1000)} "
+        f"broker.preparation_ms={max(0, int((admitted_timeout - timeout) * 1000))} "
+        f"broker.socket_timeout_ms={int(timeout * 1000)} broker.retry_count=0 "
+        f"broker.post_outcome={'unknown' if post else 'not_applicable'}{metadata}"
+    )
 
 
 class _RefuseRedirects(HTTPRedirectHandler):
@@ -129,7 +198,14 @@ class BrokerClient:
     def _request_timeout(self) -> float:
         if self.before_request is None:
             return self.timeout
-        remaining = self.before_request()
+        try:
+            remaining = self.before_request()
+        except ReviewInputError as exc:
+            # Admission is local: preserve the public broker error contract
+            # without labeling an unattempted POST as an uncertain dispatch.
+            raise GitHubBrokerClientError(
+                "Broker request allowance is exhausted"
+            ) from exc
         if (
             isinstance(remaining, bool)
             or not isinstance(remaining, (int, float))
@@ -138,6 +214,65 @@ class BrokerClient:
         ):
             raise GitHubBrokerClientError("Broker request allowance is exhausted")
         return min(self.timeout, remaining)
+
+    def _dispatch_timeout(self, started: float, admitted: float) -> float:
+        """Spend preparation time inside the original window, without a debit."""
+        elapsed = time.monotonic() - started
+        if not math.isfinite(elapsed) or not 0 <= elapsed < admitted:
+            raise GitHubBrokerClientError(
+                "Broker request allowance expired before dispatch"
+            )
+        budget = getattr(self.before_request, "__self__", None)
+        if isinstance(budget, EvidenceReadBudget):
+            try:
+                budget.check()
+            except ReviewInputError as exc:
+                raise GitHubBrokerClientError(
+                    "Broker request allowance expired before dispatch"
+                ) from exc
+        return admitted - elapsed
+
+    def _check_completed_request(
+        self,
+        started: float,
+        timeout: float,
+        *,
+        post: bool,
+        status: int | None,
+        ray: str | None,
+        dispatch_timeout: float,
+    ) -> None:
+        if time.monotonic() - started >= timeout:
+            raise GitHubBrokerClientError(
+                (
+                    "Broker token request failed; "
+                    if post
+                    else "OIDC token request failed; "
+                )
+                + _transport_message(
+                    TimeoutError(),
+                    "response_read",
+                    started,
+                    dispatch_timeout,
+                    post=post,
+                    admitted_timeout=timeout,
+                    status=status,
+                    ray=ray,
+                )
+            )
+        original_budget = getattr(self.before_request, "__self__", None)
+        if isinstance(original_budget, EvidenceReadBudget):
+            try:
+                original_budget.check()
+            except ReviewInputError as exc:
+                if self.control is not None:
+                    # Existing controlled callers distinguish deadline
+                    # refusal from broker transport/configuration failure.
+                    raise
+                raise GitHubBrokerClientError(
+                    "Broker response exceeded the original budget; "
+                    f"broker.post_outcome={'unknown' if post else 'not_applicable'}"
+                ) from exc
 
     def request_oidc_token(self) -> str:
         """Request the standard GitHub Actions OIDC token from env claims."""
@@ -151,13 +286,22 @@ class BrokerClient:
             headers={"Authorization": f"Bearer {token}"},
             method="GET",
         )
+        started = time.monotonic()
+        phase = "request_open"
+        status, ray = None, None
+        timeout = self._request_timeout()
+        dispatch_timeout = self._dispatch_timeout(started, timeout)
         try:
-            with self.opener(request, timeout=self._request_timeout()) as response:
+            with self.opener(request, timeout=dispatch_timeout) as response:
+                status, ray = _response_metadata(response)
+                phase = "response_read"
                 raw = response.read(MAX_BROKER_BODY_BYTES + 1)
+                phase = "response_size"
                 if not isinstance(raw, (bytes, bytearray)):
-                    raise ValueError
+                    raise _InvalidResponse
                 if len(raw) > MAX_BROKER_BODY_BYTES:
-                    raise ValueError
+                    raise _ResponseTooLarge
+                phase = "response_decode"
                 parsed = json.loads(bytes(raw).decode("utf-8", errors="strict"))
         except HTTPError as exc:
             if exc.code == 429 or exc.code >= 500:
@@ -166,7 +310,27 @@ class BrokerClient:
                 ) from exc
             raise GitHubBrokerClientError("OIDC token request failed") from exc
         except (URLError, TimeoutError, OSError, UnicodeDecodeError, ValueError) as exc:
-            raise GitHubBrokerClientError("OIDC token request failed") from exc
+            raise GitHubBrokerClientError(
+                "OIDC token request failed; "
+                + _transport_message(
+                    exc,
+                    phase,
+                    started,
+                    dispatch_timeout,
+                    post=False,
+                    admitted_timeout=timeout,
+                    status=status,
+                    ray=ray,
+                )
+            ) from exc
+        self._check_completed_request(
+            started,
+            timeout,
+            post=False,
+            status=status,
+            ray=ray,
+            dispatch_timeout=dispatch_timeout,
+        )
         if not isinstance(parsed, dict):
             raise GitHubBrokerClientError("OIDC token response was invalid")
         value = parsed.get("value")
@@ -490,22 +654,37 @@ class BrokerClient:
             )
             payload = {**payload, "control_budget": control_request}
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        started = time.monotonic()
+        wall_started = time.time()
+        phase = "request_open"
+        status, ray = None, None
+        timeout = self._request_timeout()
+        original_budget = getattr(self.before_request, "__self__", None)
+        deadline_ms = int((wall_started + timeout) * 1000)
+        if isinstance(original_budget, EvidenceReadBudget):
+            deadline_ms = min(deadline_ms, original_budget.wall_deadline_ms)
         request = Request(
             url or self.broker_url,
             data=body,
             headers={
                 "Content-Type": "application/json",
                 "User-Agent": BROKER_USER_AGENT,
+                "X-ReviewSensei-Deadline-Unix-Ms": str(deadline_ms),
             },
             method="POST",
         )
+        dispatch_timeout = self._dispatch_timeout(started, timeout)
         try:
-            with self.opener(request, timeout=self._request_timeout()) as response:
+            with self.opener(request, timeout=dispatch_timeout) as response:
+                status, ray = _response_metadata(response)
+                phase = "response_read"
                 raw = response.read(MAX_BROKER_BODY_BYTES + 1)
+                phase = "response_size"
                 if not isinstance(raw, (bytes, bytearray)):
-                    raise ValueError
+                    raise _InvalidResponse
                 if len(raw) > MAX_BROKER_BODY_BYTES:
-                    raise ValueError
+                    raise _ResponseTooLarge
+                phase = "response_decode"
                 parsed = json.loads(bytes(raw).decode("utf-8", errors="strict"))
         except HTTPError as exc:
             diagnostic = parse_broker_diagnostic(exc)
@@ -519,7 +698,27 @@ class BrokerClient:
                 broker_diagnostic=diagnostic,
             ) from exc
         except (URLError, TimeoutError, OSError, UnicodeDecodeError, ValueError) as exc:
-            raise GitHubBrokerClientError("Broker token request failed") from exc
+            raise GitHubBrokerClientError(
+                "Broker token request failed; "
+                + _transport_message(
+                    exc,
+                    phase,
+                    started,
+                    dispatch_timeout,
+                    post=True,
+                    admitted_timeout=timeout,
+                    status=status,
+                    ray=ray,
+                )
+            ) from exc
+        self._check_completed_request(
+            started,
+            timeout,
+            post=True,
+            status=status,
+            ray=ray,
+            dispatch_timeout=dispatch_timeout,
+        )
         if not isinstance(parsed, dict):
             raise GitHubBrokerClientError("Broker token response was invalid")
         if self.control is not None and control_request is not None:

@@ -1,3 +1,5 @@
+import { WorkflowLookupError, lookupFailure, lookupHeaders, type LookupDiagnostic } from "./broker-lookup-diagnostic";
+import { BrokerLifetime, type BrokerUpstream } from "./broker-lifetime";
 import type { BrokerDispatchControl } from "./broker-dispatch-control";
 import type { WorkerEnv } from "./env";
 
@@ -36,6 +38,7 @@ export interface JsonObject {
 export interface GitHubApiResponse {
   status: number;
   data: unknown;
+  lookupMetadata?: Omit<LookupDiagnostic, "phase" | "failure" | "git_failure">;
 }
 
 /** Complete bounded history, restarting rather than mixing pagination offsets. */
@@ -67,6 +70,10 @@ export async function readBoundedHistory(
     }
   }
   throw new Error(invalidCode);
+}
+
+class GitHubResponseError extends Error {
+  constructor(message: string, readonly status: number, readonly metadata: ReturnType<typeof lookupHeaders>) { super(message); }
 }
 
 export interface InstallationToken {
@@ -286,7 +293,7 @@ function repositoryPath(repository: string, suffix = ""): string {
   return `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}${suffix}`;
 }
 
-async function boundedJson(response: Response): Promise<unknown> {
+async function boundedJson(response: Response, scope: BrokerUpstream): Promise<unknown> {
   const length = response.headers.get("content-length");
   if (length !== null && (!/^\d+$/.test(length) || Number(length) > MAX_RESPONSE_BYTES)) {
     await response.body?.cancel();
@@ -299,7 +306,7 @@ async function boundedJson(response: Response): Promise<unknown> {
   const chunks: Uint8Array[] = [];
   let total = 0;
   while (true) {
-    const next = await reader.read();
+    const next = await scope.read(reader);
     if (next.done) {
       break;
     }
@@ -326,7 +333,7 @@ async function boundedJson(response: Response): Promise<unknown> {
   }
 }
 
-async function boundedBytes(response: Response, maximum: number): Promise<Uint8Array> {
+async function boundedBytes(response: Response, maximum: number, scope: BrokerUpstream): Promise<Uint8Array> {
   const length = response.headers.get("content-length");
   if (length !== null && (!/^\d+$/.test(length) || Number(length) > maximum)) {
     throw new Error("github_response_too_large");
@@ -338,7 +345,7 @@ async function boundedBytes(response: Response, maximum: number): Promise<Uint8A
   const chunks: Uint8Array[] = [];
   let total = 0;
   while (true) {
-    const next = await reader.read();
+    const next = await scope.read(reader);
     if (next.done) {
       break;
     }
@@ -418,12 +425,12 @@ function advertisedTagSha(bytes: Uint8Array, tag: string): string {
   return advertisedTagShas(bytes, tag).commitSha;
 }
 
-/** Shared bounded App-authenticated GitHub adapter used only by the broker. */
+/** Bounded GitHub transport shared by the broker and setup adapters. */
 export class GitHubApi {
   private privateKey: Promise<CryptoKey> | undefined;
   private readonly apiUrl: string;
 
-  constructor(private readonly env: WorkerEnv, private readonly dispatchControl?: BrokerDispatchControl) {
+  constructor(private readonly env: WorkerEnv, private readonly dispatchControl?: BrokerDispatchControl, private readonly lifetime?: BrokerLifetime) {
     const apiUrl = (env.GITHUB_API_URL ?? "https://api.github.com").trim();
     if (!/^https:\/\//i.test(apiUrl) && !/^http:\/\/(?:127\.0\.0\.1|localhost)(?::|\/|$)/i.test(apiUrl)) {
       throw new Error("github_api_url_invalid");
@@ -432,7 +439,11 @@ export class GitHubApi {
   }
 
   withDispatchControl(control: BrokerDispatchControl): GitHubApi {
-    return new GitHubApi(this.env, control);
+    return new GitHubApi(this.env, control, this.lifetime);
+  }
+
+  withRequestLifetime(lifetime: BrokerLifetime, control?: BrokerDispatchControl): GitHubApi {
+    return new GitHubApi(this.env, control, lifetime);
   }
 
   private async key(): Promise<CryptoKey> {
@@ -478,22 +489,33 @@ export class GitHubApi {
     if (!path.startsWith("/") || /[\r\n]/.test(path)) {
       throw new Error("github_path_invalid");
     }
-    const response = await fetch(`${this.apiUrl}${path}`, {
-      method,
-      ...(this.dispatchControl === undefined ? {} : { signal: this.dispatchControl.beforeDispatch(), redirect: "manual" }),
-      headers: {
-        accept: "application/vnd.github+json",
-        ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
-        "user-agent": "ReviewSensei-GitHub-App/1.0 (+https://reviewsensei.dev)",
-        "x-github-api-version": "2022-11-28",
-        ...(body === undefined ? {} : { "content-type": "application/json" }),
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    await this.dispatchControl?.checkResponse(response);
-    const data = await boundedJson(response);
-    this.dispatchControl?.check();
-    return { status: response.status, data };
+    let observed: {status: number; metadata: ReturnType<typeof lookupHeaders>} | undefined;
+    try {
+      return await (this.lifetime ?? new BrokerLifetime()).upstream(async scope => {
+        const response = await scope.fetch(`${this.apiUrl}${path}`, {
+          method,
+          redirect: "manual",
+          headers: {
+            accept: "application/vnd.github+json",
+            ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+            "user-agent": "ReviewSensei-GitHub-App/1.0 (+https://reviewsensei.dev)",
+            "x-github-api-version": "2022-11-28",
+            ...(body === undefined ? {} : { "content-type": "application/json" }),
+          },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+        observed = {status: response.status, metadata: lookupHeaders(response.headers)};
+        await this.dispatchControl?.checkResponse(response);
+        const data = await boundedJson(response, scope);
+        this.dispatchControl?.check();
+        const metadata = lookupHeaders(response.headers);
+        return { status: response.status, data, ...(Object.keys(metadata).length ? {lookupMetadata: metadata} : {}) };
+      }, this.dispatchControl, path.includes("/git/ref/") ? "workflow_ref" : path.includes("/git/tags/") ? "workflow_tag" : path.endsWith("/access_tokens") ? "installation_token" : method === "GET" ? "github_read" : "github_write");
+    } catch (error) {
+      if (error instanceof Error && /^(broker_control_|broker_request_)/.test(error.message)) throw error;
+      if (observed) throw new GitHubResponseError(error instanceof Error && ["github_response_invalid", "github_response_too_large", "broker_upstream_timeout"].includes(error.message) ? error.message : "github_response_unavailable", observed.status, observed.metadata);
+      throw error;
+    }
   }
 
   async installationFor(repository: string): Promise<number | null> {
@@ -667,24 +689,32 @@ export class GitHubApi {
 
   async publicWorkflowRuntimeShas(tag: string): Promise<PublicWorkflowRuntimeShas> {
     const validatedTag = publicWorkflowTag(tag);
+    let gitFailure: LookupDiagnostic["git_failure"];
     if (this.apiUrl === "https://api.github.com") {
       try {
         return await this.publicWorkflowRuntimeShasFromGit(validatedTag);
       } catch (error) {
-        if (this.dispatchControl !== undefined && error instanceof Error && error.message.startsWith("broker_control_")) throw error;
+        if (error instanceof Error && /^(broker_control_|broker_request_)/.test(error.message)) throw error;
+        gitFailure = lookupFailure(error);
         // Fall back to the bounded REST resolver below when the public Git
         // endpoint is unavailable or returns an unsupported advertisement.
       }
     }
-    return await this.publicWorkflowRuntimeShasFromApi(validatedTag);
+    return await this.publicWorkflowRuntimeShasFromApi(validatedTag, gitFailure);
   }
 
-  private async publicWorkflowRuntimeShasFromApi(tag: string): Promise<PublicWorkflowRuntimeShas> {
-    let response = await this.request(
-      "GET",
-      `${repositoryPath(PUBLIC_WORKFLOW_REPOSITORY)}/git/ref/tags/${encodeURIComponent(tag)}`,
-      undefined,
-    );
+  private async publicWorkflowRuntimeShasFromApi(tag: string, gitFailure?: LookupDiagnostic["git_failure"]): Promise<PublicWorkflowRuntimeShas> {
+    const read = async (path: string, phase: "rest_ref" | "rest_tag") => {
+      let response: GitHubApiResponse;
+      try { response = await this.request("GET", path, undefined); }
+      catch (error) {
+        if (error instanceof Error && /^(broker_control_|broker_request_)/.test(error.message)) throw error;
+        throw new WorkflowLookupError({phase, failure: lookupFailure(error), ...(gitFailure ? {git_failure: gitFailure} : {}), ...(error instanceof GitHubResponseError ? error.metadata : {})}, error instanceof GitHubResponseError ? error.status : undefined);
+      }
+      if (response.status < 200 || response.status >= 300) throw new WorkflowLookupError({phase, failure: "http", ...(gitFailure ? {git_failure: gitFailure} : {}), ...response.lookupMetadata}, response.status);
+      return response;
+    };
+    let response = await read(`${repositoryPath(PUBLIC_WORKFLOW_REPOSITORY)}/git/ref/tags/${encodeURIComponent(tag)}`, "rest_ref");
     for (let depth = 0; depth <= MAX_TAG_DEREFERENCE_DEPTH; depth += 1) {
       if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
         throw new Error(`github_workflow_tag_unavailable_${response.status}`);
@@ -700,11 +730,7 @@ export class GitHubApi {
       if (object.type !== "tag" || depth === MAX_TAG_DEREFERENCE_DEPTH) {
         throw new Error("github_workflow_tag_invalid");
       }
-      response = await this.request(
-        "GET",
-        `${repositoryPath(PUBLIC_WORKFLOW_REPOSITORY)}/git/tags/${encodeURIComponent(object.sha)}`,
-        undefined,
-      );
+      response = await read(`${repositoryPath(PUBLIC_WORKFLOW_REPOSITORY)}/git/tags/${encodeURIComponent(object.sha)}`, "rest_tag");
       if (response.status < 200 || response.status >= 300 || !isObject(response.data)) {
         throw new Error(`github_workflow_tag_unavailable_${response.status}`);
       }
@@ -724,36 +750,38 @@ export class GitHubApi {
 
   /** Resolve a public tag without consuming GitHub's anonymous REST quota. */
   private async publicWorkflowRuntimeShasFromGit(tag: string): Promise<PublicWorkflowRuntimeShas> {
-    let response: Response;
-    try {
-      response = await fetch(
-        `${PUBLIC_WORKFLOW_GIT_URL}/info/refs?service=git-upload-pack`,
-        {
-          ...(this.dispatchControl === undefined ? {} : { signal: this.dispatchControl.beforeDispatch(), redirect: "manual" }),
-          headers: {
-            accept: "application/x-git-upload-pack-advertisement",
-            "user-agent": "ReviewSensei-GitHub-App/1.0 (+https://reviewsensei.dev)",
+    return await (this.lifetime ?? new BrokerLifetime()).upstream(async scope => {
+      let response: Response;
+      try {
+        response = await scope.fetch(
+          `${PUBLIC_WORKFLOW_GIT_URL}/info/refs?service=git-upload-pack`,
+          {
+            redirect: "manual",
+            headers: {
+              accept: "application/x-git-upload-pack-advertisement",
+              "user-agent": "ReviewSensei-GitHub-App/1.0 (+https://reviewsensei.dev)",
+            },
           },
-        },
-      );
-    } catch (error) {
-      if (this.dispatchControl !== undefined && error instanceof Error && error.message.startsWith("broker_control_")) throw error;
-      throw new Error("github_workflow_tag_unavailable");
-    }
-    await this.dispatchControl?.checkResponse(response);
-    if (!response.ok) {
-      throw new Error(`github_workflow_tag_unavailable_${response.status}`);
-    }
-    try {
-      const result = advertisedTagShas(await boundedBytes(response, MAX_PUBLIC_REF_BYTES), tag);
-      this.dispatchControl?.check();
-      return result;
-    } catch (error) {
-      if (error instanceof Error && /^github_workflow_tag_/.test(error.message)) {
-        throw error;
+        );
+      } catch (error) {
+        if (error instanceof Error && /^(broker_control_|broker_request_|broker_upstream_)/.test(error.message)) throw error;
+        throw new Error("github_workflow_tag_unavailable");
       }
-      throw new Error("github_workflow_tag_invalid");
-    }
+      await this.dispatchControl?.checkResponse(response);
+      if (!response.ok) {
+        throw new Error(`github_workflow_tag_unavailable_${response.status}`);
+      }
+      try {
+        const result = advertisedTagShas(await boundedBytes(response, MAX_PUBLIC_REF_BYTES, scope), tag);
+        this.dispatchControl?.check();
+        return result;
+      } catch (error) {
+        if (error instanceof Error && /^(github_workflow_tag_|github_response_too_large$|broker_control_|broker_request_|broker_upstream_)/.test(error.message)) {
+          throw error;
+        }
+        throw new Error("github_workflow_tag_invalid");
+      }
+    }, this.dispatchControl, "workflow_git");
   }
 
   /**

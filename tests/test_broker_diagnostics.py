@@ -56,6 +56,36 @@ def http_error(body, status=403, ray=RAY):
 
 
 class BrokerDiagnosticTests(unittest.TestCase):
+    def test_lookup_envelope_is_closed_and_does_not_replace_legacy_reason(self):
+        body = payload("github_workflow_tag_unavailable", upstream_status=403)
+        body["lookup"] = {
+            "phase": "rest_tag",
+            "failure": "http",
+            "git_failure": "timeout",
+            "request_id": "ABCD:1234",
+            "rate_limit_remaining": 0,
+            "rate_limit_resource": "core",
+        }
+        result = parse_broker_diagnostic(http_error(json.dumps(body).encode()))
+        self.assertEqual(result.code, "github_workflow_tag_unavailable")
+        self.assertEqual(result.metadata()["broker.lookup_phase"], "rest_tag")
+        self.assertEqual(result.metadata()["broker.lookup_rate_limit_remaining"], "0")
+        for key, value in [
+            ("authorization", SECRET),
+            ("request_id", SECRET + "\\n"),
+            ("rate_limit_remaining", True),
+            ("failure", SECRET),
+            ("phase", SECRET),
+        ]:
+            with self.subTest(key=key):
+                bad = {**body, "lookup": {**body["lookup"], key: value}}
+                diagnostic = parse_broker_diagnostic(
+                    http_error(json.dumps(bad).encode())
+                )
+                self.assertEqual(diagnostic.code, "github_workflow_tag_unavailable")
+                self.assertEqual(diagnostic.lookup, ())
+                self.assertNotIn(SECRET, diagnostic.message())
+
     def test_control_refusals_keep_original_accounting_actionable_without_remote_text(
         self,
     ):

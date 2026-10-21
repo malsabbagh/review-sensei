@@ -94,8 +94,13 @@ class BrokerControlQualification(unittest.TestCase):
 
     def test_real_http_wait_is_cancelled_at_original_control_deadline(self):
         result = self.bridge.call("redirect_probe", site="rest", blocked=True)["result"]
-        self.assertEqual(result["category"], "transport_refused")
+        self.assertEqual(result["category"], "broker_control_deadline_exhausted")
         self.assertEqual(result["requests"], ["/redirect"])
+        self.assertTrue(result["aborted"])
+        self.assertTrue(result["deadline_expired"])
+        self.assertEqual(result["dispatches"], 1)
+        self.assertEqual(result["original_deadline"], result["final_deadline"])
+        self.assertLess(result["elapsed_ms"], 10_000)
 
     def test_controlled_python_redirect_refusal_preserves_legacy_transport(self):
         requests = []

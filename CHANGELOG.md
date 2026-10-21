@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bound broker bootstrap exchanges and upstream reads, isolate pending JWKS work,
+  and report sanitized transport/lookup failure facts without automatic POST replay.
+
+
 ## 0.8.7 - 2026-10-20
 
 - Refuse missing native reviews on terminal retries in either entry mode; when

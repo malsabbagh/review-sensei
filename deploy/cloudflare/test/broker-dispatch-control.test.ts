@@ -194,14 +194,17 @@ describe("opt-in broker physical dispatch control", () => {
     expect(request.mutation.read_accounting.deadline_unix_ms).toBe(deadline);
   });
 
-  it("bounds a wait on another request's existing JWKS fetch without canceling its owner", async () => {
+  it("bounds each JWKS cache miss without canceling another request", async () => {
     const fixture = await consumingBroker();
     const request = fixture.configureFeedback();
-    let release: (() => void) | undefined;
+    const releases: (() => void)[] = [];
+    const signals: AbortSignal[] = [];
     vi.stubGlobal("fetch", (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
-      if (url.includes(".well-known/jwks")) return new Promise<Response>(resolve => {
-        release = () => { fixture.transport(input, init).then(resolve); };
+      if (url.includes(".well-known/jwks")) return new Promise<Response>((resolve, reject) => {
+        const signal = init?.signal as AbortSignal; signals.push(signal);
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        releases.push(() => { fixture.transport(input, init).then(resolve); });
       });
       return fixture.transport(input, init);
     });
@@ -216,8 +219,11 @@ describe("opt-in broker physical dispatch control", () => {
     try {
       await expect(fixture.broker.exchange({ ...body, oidc_token: await fixture.oidcToken(), session_attestation: selected, control_budget: bound })).rejects.toThrow("broker_control_deadline_exhausted");
       expect(fixture.transportRequests).toHaveLength(0);
+      expect(signals).toHaveLength(2);
+      expect(signals[0].aborted).toBe(false);
+      expect(signals[1].aborted).toBe(true);
     } finally {
-      release!();
+      releases[0]();
       await original;
     }
   });
