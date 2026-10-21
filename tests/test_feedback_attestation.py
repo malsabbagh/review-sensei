@@ -129,7 +129,8 @@ class FeedbackAttestationTests(unittest.TestCase):
                 with self.assertRaises(GitHubBrokerClientError):
                     parse_feedback_attestation(invalid)
 
-    def test_client_charges_each_oidc_issue_and_verify_before_dispatch(self):
+    @patch("review_sensei_github.broker_client.time.monotonic", return_value=0)
+    def test_client_charges_each_oidc_issue_and_verify_before_dispatch(self, _clock):
         request = self.fixture()["request"]
         grant = {
             **request,
