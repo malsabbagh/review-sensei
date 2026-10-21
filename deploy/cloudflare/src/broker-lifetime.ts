@@ -87,7 +87,13 @@ export class BrokerUpstream {
     paid?.addEventListener("abort", this.paidAbort, { once: true });
     if (parent.aborted) this.parentAbort();
     if (paid?.aborted) this.paidAbort();
-    this.timer = setTimeout(() => this.controller.abort(new Error("broker_upstream_timeout")), Math.min(BROKER_UPSTREAM_MS, lifetime.check()));
+    this.timer = setTimeout(() => {
+      // Preserve an original control/request deadline even if this timer wins
+      // the race with its AbortSignal (including direct adapter callers).
+      try { lifetime.check(); }
+      catch (error) { this.controller.abort(error); return; }
+      this.controller.abort(new Error("broker_upstream_timeout"));
+    }, Math.min(BROKER_UPSTREAM_MS, lifetime.check()));
   }
 
   check(): void {

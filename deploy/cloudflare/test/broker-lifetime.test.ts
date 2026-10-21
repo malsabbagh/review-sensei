@@ -8,6 +8,17 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(
 const env = { GITHUB_APP_ID: "123", GITHUB_APP_PRIVATE_KEY: "unused" } as WorkerEnv;
 
 describe("uncontrolled broker upstream lifetime", () => {
+  it("keeps the original control reason in a direct adapter's deadline timer", async () => {
+    vi.useFakeTimers();
+    const control = new BrokerDispatchControl({schema_version:"1.0",operation_id:"a".repeat(64),request_id:"b".repeat(64),deadline_unix_ms:Date.now()+40,max_dispatches:1});
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+    const result = new GitHubApi(env, control).request("GET", "/fixture", undefined).catch(error => error.message);
+    expect(control.receipt().dispatched).toBe(1);
+    await vi.advanceTimersByTimeAsync(40);
+    await expect(result).resolves.toBe("broker_control_deadline_exhausted");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("preserves controlled deadline precedence when the caller header is equal", async () => {
     vi.useFakeTimers();
     const deadline = Date.now() + 40;
