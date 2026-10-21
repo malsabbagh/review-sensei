@@ -309,7 +309,6 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_build_validation_provenance_and_release_steps_exist(self):
         for marker in (
             "check_release_version.py",
-            "write_bundle_metadata.py",
             "python -m build --sdist --wheel",
             "validate_release.py",
             'pip install --disable-pip-version-check "${wheels[0]}"',
@@ -328,13 +327,15 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.assertIn(marker, self.workflow)
 
     def test_tag_release_publishes_npm(self):
-        self.assertIn('tags:\n      - "v*.*.*"', self.workflow)
-        self.assertIn("group: publish-npm-${{ github.ref_name }}", self.workflow)
-        self.assertIn("cancel-in-progress: false", self.workflow)
+        npm_workflow = (ROOT / ".github/workflows/publish-npm.yml").read_text()
+        self.assertNotIn("  publish-npm:", self.workflow)
+        self.assertIn('tags:\n      - "v*.*.*"', npm_workflow)
+        self.assertIn("group: publish-npm-${{ github.ref_name }}", npm_workflow)
+        self.assertIn("cancel-in-progress: false", npm_workflow)
         for job in ("native-build", "assemble-npm", "publish-npm"):
             match = re.search(
                 rf"(?ms)^  {re.escape(job)}:\n(?P<body>.*?)(?=^  \w|\Z)",
-                self.workflow,
+                npm_workflow,
             )
             self.assertIsNotNone(match)
             assert match is not None
@@ -342,57 +343,55 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 "refs/heads/__disabled_npm_release__",
                 match.group("body"),
             )
-        self.assertIn("Publish npm packages with Trusted Publishing", self.workflow)
-        self.assertIn("environment:\n      name: npm", self.workflow)
-        self.assertIn("source/scripts/publish_npm_release.py preflight", self.workflow)
+        self.assertIn("Publish npm packages with Trusted Publishing", npm_workflow)
+        self.assertIn("environment:\n      name: npm", npm_workflow)
+        self.assertIn("source/scripts/publish_npm_release.py preflight", npm_workflow)
         self.assertIn(
-            "source/scripts/publish_npm_release.py publish-platforms", self.workflow
+            "source/scripts/publish_npm_release.py publish-platforms", npm_workflow
         )
         self.assertIn(
-            "source/scripts/publish_npm_release.py publish-launcher", self.workflow
+            "source/scripts/publish_npm_release.py publish-launcher", npm_workflow
         )
-        self.assertIn('--version "${GITHUB_REF_NAME#v}"', self.workflow)
-        self.assertIn('--bundle-dir "$GITHUB_WORKSPACE/release/npm"', self.workflow)
-        self.assertIn("persist-credentials: false", self.workflow)
+        self.assertIn('--version "${GITHUB_REF_NAME#v}"', npm_workflow)
+        self.assertIn('--bundle-dir "$GITHUB_WORKSPACE/release/npm"', npm_workflow)
+        self.assertIn("persist-credentials: false", npm_workflow)
         self.assertIn(
-            "Assert helper checkout matches attested build source", self.workflow
+            "Assert helper checkout matches attested build source", npm_workflow
         )
-        self.assertIn("Record attested source commit", self.workflow)
+        self.assertIn("Record attested source commit", npm_workflow)
         self.assertIn(
-            "SOURCE_SHA: ${{ needs.assemble-npm.outputs.source_sha }}", self.workflow
+            "SOURCE_SHA: ${{ needs.assemble-npm.outputs.source_sha }}", npm_workflow
         )
+        self.assertIn("ref: ${{ needs.assemble-npm.outputs.source_sha }}", npm_workflow)
+        self.assertIn("outputs:\n      source_sha:", npm_workflow)
+        self.assertNotIn('test "$SOURCE_SHA" = "$GITHUB_SHA"', npm_workflow)
+        self.assertIn("git -C source status --porcelain=v1", npm_workflow)
+        self.assertIn("test -f source/scripts/publish_npm_release.py", npm_workflow)
         self.assertIn(
-            "ref: ${{ needs.assemble-npm.outputs.source_sha }}", self.workflow
+            'test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"', npm_workflow
         )
-        self.assertIn("outputs:\n      source_sha:", self.workflow)
-        self.assertNotIn('test "$SOURCE_SHA" = "$GITHUB_SHA"', self.workflow)
-        self.assertIn("git -C source status --porcelain=v1", self.workflow)
-        self.assertIn("test -f source/scripts/publish_npm_release.py", self.workflow)
-        self.assertIn(
-            'test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"', self.workflow
-        )
-        self.assertIn("shell: bash", self.workflow)
+        self.assertIn("shell: bash", npm_workflow)
         self.assertLess(
-            self.workflow.index("Check out publish helper sources"),
-            self.workflow.index("Assert helper checkout matches attested build source"),
+            npm_workflow.index("Check out publish helper sources"),
+            npm_workflow.index("Assert helper checkout matches attested build source"),
         )
         self.assertLess(
-            self.workflow.index("Assert helper checkout matches attested build source"),
-            self.workflow.index("Verify registry state against attested tarballs"),
+            npm_workflow.index("Assert helper checkout matches attested build source"),
+            npm_workflow.index("Verify registry state against attested tarballs"),
         )
         self.assertLess(
-            self.workflow.index("Verify registry state against attested tarballs"),
-            self.workflow.index(
+            npm_workflow.index("Verify registry state against attested tarballs"),
+            npm_workflow.index(
                 "Publish platform packages first and read back integrity"
             ),
         )
         self.assertLess(
-            self.workflow.index(
+            npm_workflow.index(
                 "Publish platform packages first and read back integrity"
             ),
-            self.workflow.index("Publish launcher last and read back integrity"),
+            npm_workflow.index("Publish launcher last and read back integrity"),
         )
-        self.assertNotIn("remote_version=$(npm view", self.workflow)
+        self.assertNotIn("remote_version=$(npm view", npm_workflow)
 
     def test_workflow_is_tag_only(self):
         self.assertIn('"v*.*.*"', self.workflow)
@@ -574,7 +573,7 @@ pull_pinned_image "{image}"
                 self.assertFalse((Path(scratch) / "calls").exists())
 
     def test_both_publish_paths_build_linux_on_debian_12(self):
-        for workflow_name in ("release.yml", "publish-npm.yml"):
+        for workflow_name in ("publish-npm.yml",):
             with self.subTest(workflow=workflow_name):
                 workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(
                     encoding="utf-8"
@@ -635,198 +634,78 @@ pull_pinned_image "{image}"
 
 class NpmReleaseWorkflowTests(unittest.TestCase):
     def setUp(self):
-        self.workflow = (ROOT / ".github/workflows/publish-npm.yml").read_text(
-            encoding="utf-8"
-        )
+        self.workflow = (ROOT / ".github/workflows/publish-npm.yml").read_text()
 
-    def test_manual_lane_is_bound_to_the_public_default_branch_source(self):
-        self.assertIn("workflow_dispatch:", self.workflow)
-        self.assertNotIn("\n  push:", self.workflow)
-        self.assertIn("EXPECTED_REPOSITORY: malsabbagh/review-sensei", self.workflow)
-        self.assertIn(
-            'test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"', self.workflow
-        )
+    def test_only_marshal_signed_tag_can_start_npm_publication(self):
+        self.assertIn('tags:\n      - "v*.*.*"', self.workflow)
+        for retired in (
+            "workflow_dispatch",
+            "resume_bundle_run_id",
+            "inputs.version",
+            "NPM_TOKEN",
+            "secrets.",
+            "workflow_run",
+        ):
+            self.assertNotIn(retired, self.workflow)
         self.assertIn("ref: ${{ github.sha }}", self.workflow)
-        self.assertIn(
-            "ref: ${{ needs.verify-request.outputs.source_sha }}", self.workflow
-        )
-        self.assertIn(
-            "Assert helper checkout matches attested build source", self.workflow
-        )
-        self.assertIn(
-            'test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"', self.workflow
-        )
-        self.assertNotIn(
-            'test "$SOURCE_SHA" = "$GITHUB_SHA"',
-            self.workflow.split("Assert helper checkout matches attested build source")[
-                1
-            ].split("Configure bootstrap authentication when present")[0],
-        )
-        self.assertIn("git -C source status --porcelain=v1", self.workflow)
-        self.assertIn(
-            'python scripts/check_release_version.py --tag "v$VERSION"', self.workflow
-        )
+        self.assertIn("release_channels.py qualify --channel npm", self.workflow)
 
-    def test_npm_publish_is_protected_and_platform_first(self):
-        publish_section = self.workflow.split("  publish-npm:", maxsplit=1)[1]
-        publish_if_line = next(
-            line for line in publish_section.splitlines() if line.startswith("    if:")
-        )
-        self.assertIn("inputs.publish", publish_if_line)
-        self.assertIn(
-            "needs.verify-request.outputs.resume_mode != 'true' && needs.native-build.result == 'success' && needs.assemble-npm.result == 'success'",
-            publish_if_line,
-        )
-        self.assertIn(
-            "needs.verify-request.outputs.resume_mode == 'true' && needs.native-build.result == 'skipped' && needs.assemble-npm.result == 'skipped'",
-            publish_if_line,
-        )
+    def test_npm_publish_retains_approval_order_and_registry_readback(self):
         self.assertIn("environment:\n      name: npm", self.workflow)
         self.assertIn("id-token: write", self.workflow)
-        self.assertIn("group: publish-npm-v${{ inputs.version }}", self.workflow)
-        self.assertIn("bootstrap:", self.workflow)
-        self.assertIn("NPM_TOKEN: ${{ secrets.NPM_TOKEN }}", self.workflow)
-        self.assertIn(
-            'test "$VERSION" = "0.1.0"',
-            self.workflow,
-        )
-        self.assertIn(
-            "NPM_TOKEN is configured but bootstrap=false; remove the bootstrap secret",
-            self.workflow,
-        )
-        self.assertIn("Verify registry state against attested tarballs", self.workflow)
-        self.assertIn("source/scripts/publish_npm_release.py preflight", self.workflow)
-        self.assertIn('--bundle-dir "$GITHUB_WORKSPACE/release/npm"', self.workflow)
-        self.assertIn(
-            "source/scripts/publish_npm_release.py publish-platforms", self.workflow
-        )
-        self.assertIn(
-            "source/scripts/publish_npm_release.py publish-launcher", self.workflow
-        )
-        self.assertIn("persist-credentials: false", self.workflow)
-        self.assertIn("test -f source/scripts/publish_npm_release.py", self.workflow)
-        self.assertNotIn("remote_version=$(npm view", self.workflow)
+        self.assertIn("group: publish-npm-${{ github.ref_name }}", self.workflow)
+        self.assertIn("cancel-in-progress: false", self.workflow)
         self.assertLess(
-            self.workflow.index("Check out publish helper sources"),
-            self.workflow.index("Assert helper checkout matches attested build source"),
-        )
-        self.assertLess(
-            self.workflow.index("Assert helper checkout matches attested build source"),
-            self.workflow.index("Verify registry state against attested tarballs"),
-        )
-        self.assertLess(
-            self.workflow.index("Verify registry state against attested tarballs"),
-            self.workflow.index("Publish platform packages first"),
+            self.workflow.index("publish-platforms"),
+            self.workflow.index("publish-launcher"),
         )
         self.assertIn("Verify a clean Linux consumer installation", self.workflow)
-        self.assertIn(
-            "review-sensei command is not owned by the launcher package",
-            self.workflow,
-        )
         self.assertIn("npm audit signatures", self.workflow)
+        self.assertIn('--expected-source-sha "${GITHUB_SHA}"', self.workflow)
 
-    def test_partial_publish_can_resume_prior_attested_bundle(self):
-        self.assertIn("resume_bundle_run_id:", self.workflow)
-        self.assertIn("resume_mode=true", self.workflow)
-        self.assertIn("resume_mode=false", self.workflow)
+    def test_recovery_uses_exact_same_run_bundle_without_cross_run_dispatch(self):
         self.assertIn(
-            "run-name: publish-npm ${{ github.event.inputs.version }}", self.workflow
+            "artifact-ids: ${{ needs.assemble-npm.outputs.artifact_id }}", self.workflow
         )
-        self.assertIn("needs.verify-request.outputs.resume_mode", self.workflow)
+        self.assertIn("digest-mismatch: error", self.workflow)
+        self.assertIn("merge-multiple: true", self.workflow)
         self.assertIn(
-            "Download npm release bundle from prior workflow run", self.workflow
+            "BUNDLE_BUILD_ATTEMPT: ${{ needs.assemble-npm.outputs.build_attempt }}",
+            self.workflow,
         )
-        self.assertIn("gh run download", self.workflow)
-        self.assertIn("publish_npm_release.py verify-bundle", self.workflow)
-        resume_section = self.workflow.split(
-            "Download npm release bundle from prior workflow run", maxsplit=1
-        )[1].split("Verify downloaded npm tarball checksums", maxsplit=1)[0]
         self.assertIn(
-            'gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RESUME_BUNDLE_RUN_ID"',
-            resume_section,
+            "BUNDLE_ARTIFACT_DIGEST: ${{ needs.assemble-npm.outputs.artifact_digest }}",
+            self.workflow,
         )
-        self.assertNotIn("gh run view", resume_section)
-        self.assertIn("validate_npm_resume_run.py", resume_section)
-        self.assertIn("display_title", resume_section)
-        self.assertIn("resume_staging", resume_section)
-        self.assertIn("sha256sum --check SHA256SUMS", resume_section)
+        self.assertNotIn("gh run download", self.workflow)
+        self.assertNotIn("run-id:", self.workflow)
+        self.assertNotIn("overwrite: true", self.workflow)
+        self.assertIn("release_channels.py verify-npm", self.workflow)
         self.assertLess(
-            resume_section.index("sha256sum --check SHA256SUMS"),
-            resume_section.index("gh attestation verify"),
+            self.workflow.index("release_channels.py verify-npm"),
+            self.workflow.index("publish_npm_release.py preflight"),
         )
-        self.assertIn("list-attestation-subjects", resume_section)
-        self.assertNotIn("while read -r _ _ filename", resume_section)
-        self.assertIn("gh attestation verify", resume_section)
-        self.assertIn('--source-digest "$bundle_source_sha"', resume_section)
-        self.assertIn('--source-ref "refs/heads/$DEFAULT_BRANCH"', resume_section)
+
+    def test_channels_record_separate_results_and_cannot_cancel_each_other(self):
+        python = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertIn("name: Release npm", self.workflow)
         self.assertIn(
-            "verify-request did not produce a dispatch source SHA", resume_section
-        )
-        self.assertIn("DISPATCH_SOURCE_SHA", resume_section)
-        self.assertIn("--dispatch-source-sha", resume_section)
-        self.assertIn("checkout --detach", resume_section)
-        self.assertIn("test -f release/npm/integrity.jsonl", resume_section)
-        self.assertIn('--version "$VERSION"', resume_section)
-        self.assertIn('--expected-source-sha "$bundle_source_sha"', resume_section)
-        publish_section = self.workflow.split("  publish-npm:", maxsplit=1)[1]
-        publish_permissions = publish_section.split("    steps:", maxsplit=1)[0]
-        self.assertIn("actions: read", publish_permissions)
-        self.assertIn("attestations: read", publish_permissions)
-        publish_if = publish_section.split("    if:", maxsplit=1)[1].split(
-            "\n", maxsplit=1
-        )[0]
-        self.assertIn("needs.verify-request.outputs.resume_mode == 'true'", publish_if)
-        self.assertIn("needs.assemble-npm.result == 'skipped'", publish_if)
-        preflight_section = self.workflow.split(
-            "Verify registry state against attested tarballs", maxsplit=1
-        )[1].split("Publish platform packages first", maxsplit=1)[0]
-        self.assertIn("--expected-source-sha", preflight_section)
-        self.assertIn("RESUME_BUNDLE_RUN_ID", preflight_section)
-        self.assertIn(
-            "resume publish requires bundle_source_sha from resume-bundle step",
-            preflight_section,
-        )
-        self.assertIn("write_bundle_metadata.py", self.workflow)
-        self.assertIn("Check out repository for resumed run validation", self.workflow)
-        self.assertIn("resume-source", self.workflow)
-        native_section = self.workflow.split("  native-build:", maxsplit=1)[1].split(
-            "  assemble-npm:", maxsplit=1
-        )[0]
-        native_if = next(
-            line for line in native_section.splitlines() if line.startswith("    if:")
-        )
-        self.assertIn("needs.verify-request.outputs.resume_mode != 'true'", native_if)
-        assemble_section = self.workflow.split("  assemble-npm:", maxsplit=1)[1].split(
-            "  publish-npm:", maxsplit=1
-        )[0]
-        assemble_if = next(
-            line for line in assemble_section.splitlines() if line.startswith("    if:")
-        )
-        self.assertIn("needs.verify-request.outputs.resume_mode != 'true'", assemble_if)
-        self.assertIn(
-            "if: ${{ needs.verify-request.outputs.resume_mode == 'true' }}",
+            "release-npm-result-${{ github.run_id }}-${{ github.run_attempt }}",
             self.workflow,
         )
         self.assertIn(
-            "if: ${{ needs.verify-request.outputs.resume_mode != 'true' }}",
-            self.workflow,
+            "release-python-result-${{ github.run_id }}-${{ github.run_attempt }}",
+            python,
         )
-        verify_section = self.workflow.split(
-            "Verify resumed npm release bundle provenance", maxsplit=1
-        )[1].split("Configure bootstrap authentication when present", maxsplit=1)[0]
-        self.assertIn(
-            '--expected-source-sha "$bundle_source_sha"',
-            verify_section,
-        )
-        self.assertIn(
-            "python resume-source/scripts/publish_npm_release.py verify-bundle",
-            verify_section,
-        )
-        self.assertIn("list-attestation-subjects", verify_section)
-        self.assertIn("gh attestation verify", verify_section)
-        self.assertIn('--source-digest "$bundle_source_sha"', verify_section)
-        self.assertNotIn("env.BUNDLE_SOURCE_SHA", verify_section)
-        self.assertIn("id: resume-bundle", self.workflow)
+        self.assertNotIn("native-build", python)
+        self.assertNotIn("assemble-npm", python)
+        self.assertNotIn("publish-npm", python)
+        self.assertNotIn("cancel-in-progress: true", python + self.workflow)
+        for text in (python, self.workflow):
+            self.assertIn("always() && needs.qualify-source.result == 'success'", text)
+            self.assertNotIn("continue-on-error", text)
+            self.assertNotIn("actions: write", text)
+            self.assertIn("sign_release.py --check-publication-gates", text)
 
 
 class NpmResumeRunTests(unittest.TestCase):
@@ -888,7 +767,7 @@ class ReleaseDocumentationTests(unittest.TestCase):
             "Compromised-release response",
             "SHA256SUMS",
             "publish-npm.yml",
-            "NPM_TOKEN",
+            "Owner migration hold before activation",
         ):
             self.assertIn(marker, source)
 

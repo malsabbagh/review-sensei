@@ -637,17 +637,26 @@ scoped per job and third-party actions are pinned to full commit SHAs. Active
 workflow jobs use GitHub-hosted runners, including the full cross-platform
 compatibility matrix.
 
-The public repository publishes the standalone launcher and native platform
-packages from a version tag in `.github/workflows/release.yml` or from the
-manual `.github/workflows/publish-npm.yml` path. The manual path is pinned to
-the public default-branch SHA. Both paths build the five platform executables
-on native runners, validate and attest the exact tarballs, and publish platform
-packages before the launcher through the protected `npm` environment. Their
-publish jobs share a version-specific concurrency group.
-Package manifests name the same public repository so npm provenance remains
-auditable. A temporary environment-scoped token can bootstrap an entirely new
-package set; after the first release, npm Trusted Publishing binds each package
-to each authorized workflow, repository, and environment, eliminating the token.
+Release Marshal is the existing preparation workflow and dedicated signer,
+not a new service or dispatcher. Its App-token signed `vX.Y.Z` push fans out
+`release.yml` (Python) and `publish-npm.yml` (npm), each at the immutable signed
+source. Both independently verify the preparation receipt, exact source/CI,
+core/npm manifest version and unique original run. Separate workflow lifecycles
+allow Python finalizer retry while npm is waiting or reading registry state.
+The default-branch manual npm publisher is retired for future releases.
+
+npm keeps native builds/smoke tests, exact same-run artifact ID/digest,
+source metadata and tarball attestations, signed source/ref/workflow and exact
+original build invocation, protected approval, platform-first publication,
+bounded registry readback and clean consumer verification. It verifies the
+matching reviewed Python draft through authenticated metadata. Artifact selection
+binds the original run. Both channels record separate authenticated job/artifact
+result receipts. The Python publisher and build-attestation workflow identity
+remain `release.yml`; hosted identity/versioning remain independent. Moving
+npm publication to `publish-npm.yml` requires owner verification of all six
+Trusted Publishers before activation; this implementation changes no persistent
+trust, credentials or environment policy. Old immutable sources keep their
+original workflow. See [ADR 0100](adr/0100-independent-release-channel-runs.md).
 
 For the next release, Python/docs builds produce the verified GitHub draft
 without waiting for native/npm assembly; PyPI approval and publication release
@@ -656,8 +665,9 @@ and hosted PyPI wheel/sdist publication attestations against signed immutable
 source, publisher run/attempt and protected environments.
 Retain signed engine provenance, installed-CLI/downstream tests and workflow drain.
 npm remains an independently attested native-binary
-distribution with its own protected approval and integrity readback. Overall
-Release/npm success remains a Pages condition, outside v5 admission. See
+distribution with its own protected approval and integrity readback. Both
+complete successful channel runs at the same signed tag/source remain a Pages
+condition, outside v5 admission. See
 [ADR 0095](adr/0095-pypi-qualified-major-channel.md).
 
 Publisher aliases require original run/source/ref/runner/complete-step equality.

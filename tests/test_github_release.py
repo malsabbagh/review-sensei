@@ -590,11 +590,15 @@ class GitHubReleaseTests(unittest.TestCase):
         # No YAML dependency is added to the standard-library checkout lane.
         parts = re.split(r"(?m)^  ([a-z][a-z-]*):\n", text)
         jobs = dict(zip(parts[1::2], parts[2::2]))
-        self.assertIn("needs: [assemble-npm, draft-release]", jobs["publish-npm"])
-        self.assertIn("needs: [build, draft-release]", jobs["publish"])
-        self.assertIn("needs: [build, docs-build]", jobs["draft-release"])
+        self.assertNotIn("publish-npm", jobs)
+        self.assertNotIn("native-build", jobs)
+        self.assertNotIn("assemble-npm", jobs)
+        self.assertIn("needs: [qualify-source, build, draft-release]", jobs["publish"])
         self.assertIn(
-            "needs: [build, draft-release, publish]",
+            "needs: [qualify-source, build, docs-build]", jobs["draft-release"]
+        )
+        self.assertIn(
+            "needs: [qualify-source, build, draft-release, publish]",
             jobs["github-release"],
         )
         self.assertEqual(

@@ -173,6 +173,8 @@ jobs:
           permission-actions: read
           permission-metadata: read
           skip-token-revoke: false
+      # The one signed core tag push fans out Release and Release npm runs.
+      # No workflow dispatch or additional App permission coordinates the channels.
       - name: Requalify source, sign, locally verify, push once and require GitHub verification
         env:
           GH_TOKEN: ${{ steps.release-token.outputs.token }}

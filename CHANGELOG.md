@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Split core Python and npm publication into independently retryable workflow
+  runs started by the Release Marshal's single signed tag. Preserve matching
+  core versions/source, exact artifacts/provenance, protected approvals, npm
+  registry readback and Python-only v5 admission. Record each channel result;
+  require owner verification of all six npm publisher identities before use.
+
 ## 0.8.7 - 2026-10-20
 
 - Refuse missing native reviews on terminal retries in either entry mode; when

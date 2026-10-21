@@ -177,7 +177,9 @@ def tag_identity(tag: str) -> tuple[str, str]:
     return tag_sha, source_sha
 
 
-def validate_run(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
+def validate_run(
+    run: dict[str, Any], jobs: list[dict[str, Any]], *, split_npm: bool = False
+) -> None:
     if (
         run.get("path") != ".github/workflows/release.yml"
         or run.get("event") != "push"
@@ -191,7 +193,9 @@ def validate_run(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
     version_tuple(run.get("head_branch", ""))
     if not SHA.fullmatch(run.get("head_sha", "")):
         raise ValueError("invalid release source SHA")
-    for name in REQUIRED_JOBS:
+    for name in REQUIRED_JOBS - (
+        {"Publish npm packages with Trusted Publishing"} if split_npm else set()
+    ):
         matches = [job for job in jobs if job.get("name") == name]
         attempts = [job.get("run_attempt") for job in matches]
         if not attempts or any(
@@ -205,14 +209,98 @@ def validate_run(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
             raise ValueError(f"required release job did not succeed: {name}")
 
 
+def channel_run(workflow: str, tag: str, source: str) -> dict[str, Any]:
+    query = urlencode({"event": "push", "branch": tag})
+    runs = api_pages(f"actions/workflows/{workflow}/runs?{query}", "workflow_runs")
+    if len(runs) != 1:
+        raise ValueError("Pages requires one original run for each release channel")
+    run = runs[0]
+    if (
+        run.get("path") != f".github/workflows/{workflow}"
+        or run.get("event") != "push"
+        or run.get("head_branch") != tag
+        or run.get("head_sha") != source
+        or run.get("repository", {}).get("full_name") != REPOSITORY
+        or run.get("head_repository", {}).get("full_name") != REPOSITORY
+        or run.get("pull_requests")
+        or type(run.get("id")) is not int
+        or type(run.get("run_attempt")) is not int
+        or run["id"] < 1
+        or run["run_attempt"] < 1
+    ):
+        raise ValueError("Pages channel version/source identity differs")
+    return run
+
+
+def validate_channels(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
+    split = not any(
+        j.get("name") == "Publish npm packages with Trusted Publishing" for j in jobs
+    )
+    validate_run(run, jobs, split_npm=split)
+    if not split:
+        return  # Immutable historical combined runs retain their original policy.
+    npm = channel_run("publish-npm.yml", run["head_branch"], run["head_sha"])
+    if npm.get("status") != "completed" or npm.get("conclusion") != "success":
+        raise ValueError("Pages requires successful independent npm publication")
+    npm_jobs = api_pages(f"actions/runs/{npm['id']}/jobs?filter=all", "jobs")
+    required = {
+        "Qualify signed prepared source and exact-head CI",
+        "Assemble and validate npm package set",
+        "Publish npm packages with Trusted Publishing",
+        "Record independent npm channel result",
+        *(
+            f"Native standalone ({target})"
+            for target in (
+                "darwin-arm64",
+                "darwin-x64",
+                "linux-arm64-gnu",
+                "linux-x64-gnu",
+                "win32-x64",
+            )
+        ),
+    }
+    for name in required:
+        matches = [j for j in npm_jobs if j.get("name") == name]
+        attempts = [j.get("run_attempt") for j in matches]
+        if not attempts or any(
+            type(a) is not int or not 1 <= a <= npm["run_attempt"] for a in attempts
+        ):
+            raise ValueError("Pages npm prerequisite attempt is invalid")
+        latest = [j for j in matches if j["run_attempt"] == max(attempts)]
+        if (
+            len(latest) != 1
+            or latest[0].get("status") != "completed"
+            or latest[0].get("conclusion") != "success"
+        ):
+            raise ValueError("Pages npm prerequisite has not succeeded")
+
+
 def qualify(run_id: int) -> dict[str, Any]:
     run = api(f"actions/runs/{run_id}")
     if run.get("id") != run_id:
         raise ValueError("release run identity does not match the request")
+    # Either channel completion can wake Pages, but the selected docs artifact
+    # always belongs to the unique Python run at the same signed tag/source.
+    if run.get("path") == ".github/workflows/publish-npm.yml":
+        original = channel_run("publish-npm.yml", run["head_branch"], run["head_sha"])
+        identity = (
+            "id",
+            "run_attempt",
+            "path",
+            "event",
+            "head_sha",
+            "head_branch",
+            "status",
+            "conclusion",
+        )
+        if any(original.get(key) != run.get(key) for key in identity):
+            raise ValueError("Pages npm wake-up identity changed")
+        run = channel_run("release.yml", run["head_branch"], run["head_sha"])
+        run_id = run["id"]
     # A publisher-only retry does not rerun successful build/docs jobs. Read
     # all attempts and validate the newest execution of each required job.
     jobs = api_pages(f"actions/runs/{run_id}/jobs?filter=all", "jobs")
-    validate_run(run, jobs)
+    validate_channels(run, jobs)
     tag = run["head_branch"]
     tag_sha, source_sha = tag_identity(tag)
     if source_sha != run["head_sha"]:
@@ -262,7 +350,7 @@ def assert_latest(selection: dict[str, Any]) -> None:
             # A successful newer Release is a high-water mark even if its
             # artifact expired or its tag was subsequently moved/deleted.
             jobs = api_pages(f"actions/runs/{run['id']}/jobs?filter=all", "jobs")
-            validate_run(run, jobs)
+            validate_channels(run, jobs)
             raise ValueError(f"docs cannot replace newer successful release {tag}")
 
 

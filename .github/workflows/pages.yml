@@ -2,7 +2,7 @@ name: Deploy site to GitHub Pages
 
 on:
   workflow_run:
-    workflows: [Release]
+    workflows: [Release, Release npm]
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -62,7 +62,7 @@ jobs:
         with:
           artifact-ids: ${{ steps.selection.outputs.artifact_id }}
           merge-multiple: true
-          run-id: ${{ github.event.workflow_run.id || inputs.release_run_id }}
+          run-id: ${{ fromJSON(steps.selection.outputs.selection).release_run_id }}
           github-token: ${{ github.token }}
           digest-mismatch: error
           path: ${{ runner.temp }}/release-docs
