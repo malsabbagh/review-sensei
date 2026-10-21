@@ -119,10 +119,24 @@ ID/digest emitted by its own assembly job. Downloads fail on digest mismatch.
 All six tarballs plus source metadata must have verified GitHub attestations
 for this workflow, signed ref/source, GitHub-hosted runner and original build
 run/attempt. Publisher-only retries reuse the original successful assembly
-attempt, rather than guessing the current publishing attempt. A matching
-reviewed Python draft, its successful source/build/docs/draft jobs and four
-exact assets are still required before npm publication; a successful Python
-finalizer is not. npm never downloads Python's build artifact.
+attempt, rather than guessing the current publishing attempt. npm publication
+requires the matching **published** stable Python release, successful latest
+source/build/docs/draft/PyPI/finalizer jobs, exact reviewed notes/source/run
+binding and four assets. npm never downloads Python's build artifact.
+
+This intentionally orders npm publication after Python finalization. Native/npm
+builds can run concurrently with Python. If npm reaches verification first,
+missing publication or failed/pending finalization holds that publisher; after
+Python recovery succeeds, retry the original npm publisher with its retained
+attested bundle. No polling loop, rebuild or new run is introduced. Python
+finalization and qualification still do not wait for npm, and its run can become
+terminal and retry while the npm run is pending or failed.
+
+The existing `contents: read` grant is sufficient for public release metadata
+under GitHub's [published release API contract](https://docs.github.com/en/rest/releases/releases#list-releases).
+No draft-read ability is assumed: even a visible draft fails the strict
+published-release validator. The job does not gain Contents write, a new token
+or a cross-run artifact bridge to read unpublished state.
 
 The unchanged npm helper preflights all six packages, publishes missing
 platforms first, reads back exact SRI with bounded retry/backoff, then publishes

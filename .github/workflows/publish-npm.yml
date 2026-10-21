@@ -314,7 +314,7 @@ jobs:
 
       - name: Install pinned manifest validator
         run: python -m pip install --disable-pip-version-check jsonschema==4.26.0
-      - name: Requalify signed contract, exact artifact, provenance and reviewed draft
+      - name: Requalify signed contract, exact artifact, provenance and published Python release
         env:
           EXPECTED_TAG_OBJECT: ${{ needs.qualify-source.outputs.tag_object }}
           GH_TOKEN: ${{ github.token }}

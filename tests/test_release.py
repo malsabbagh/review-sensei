@@ -652,6 +652,11 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
 
     def test_npm_publish_retains_approval_order_and_registry_readback(self):
         self.assertIn("environment:\n      name: npm", self.workflow)
+        publisher = self.workflow.split("  publish-npm:\n", 1)[1].split(
+            "    steps:\n", 1
+        )[0]
+        self.assertIn("contents: read", publisher)
+        self.assertNotIn("contents: write", publisher)
         self.assertIn("id-token: write", self.workflow)
         self.assertIn("group: publish-npm-${{ github.ref_name }}", self.workflow)
         self.assertIn("cancel-in-progress: false", self.workflow)

@@ -141,29 +141,32 @@ def latest_jobs(run: dict) -> list[dict]:
     return result
 
 
-def verify_draft(root: Path, contract: dict) -> None:
-    """Retain npm's reviewed Python draft prerequisite without sharing a run."""
+def verify_python_release(root: Path, contract: dict) -> None:
+    """Read the verified public Python release without draft/write authority."""
     run = matching_run("python", contract["tag"], contract["source_sha"])
     jobs = latest_jobs(run)
-    for name in releases.BUILD_JOBS | {"Prepare draft GitHub release"}:
+    for name in (
+        releases.BUILD_JOBS | releases.PUBLISH_JOBS | {"Create GitHub release assets"}
+    ):
         found = [job for job in jobs if job["name"] == name]
         if len(found) != 1 or (
             found[0].get("status") != "completed"
             or found[0].get("conclusion") != "success"
         ):
-            raise ValueError("matching Python draft prerequisite has not succeeded")
+            raise ValueError(
+                "matching Python publication prerequisite has not succeeded"
+            )
     release = releases.find_release(contract["tag"])
     if release is None:
-        raise ValueError("matching reviewed Python draft is required")
+        raise ValueError("matching published Python release is required")
     binding = major.release_binding(
         release,
         contract["version"],
         contract["tag_object"],
         contract["source_sha"],
-        allow_draft=True,
     )
     if binding["run_id"] != run["id"]:
-        raise ValueError("draft belongs to another Python run")
+        raise ValueError("published release belongs to another Python run")
     receipt = json.loads((root / prepare.RECEIPT).read_text())
     notes = prepare.released_notes(
         (root / "CHANGELOG.md").read_text(),
@@ -268,7 +271,7 @@ def verify_npm(root: Path, bundle: Path) -> None:
         raise ValueError("unexpected npm bundle inventory")
     for name in subjects:
         verify_attestation(bundle / name, contract, build_attempt)
-    verify_draft(root, contract)
+    verify_python_release(root, contract)
     if event_contract("npm") != contract:
         raise ValueError("npm contract changed before publication")
 

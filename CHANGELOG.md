@@ -7,6 +7,8 @@
   core versions/source, exact artifacts/provenance, protected approvals, npm
   registry readback and Python-only v5 admission. Record each channel result;
   require owner verification of all six npm publisher identities before use.
+  Order npm publication after the verified public Python release so its existing
+  read-only token needs no draft visibility or broader permission.
 
 ## 0.8.7 - 2026-10-20
 

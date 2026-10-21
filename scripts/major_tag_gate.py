@@ -142,15 +142,14 @@ def source_file(source, relative):
     return raw
 
 
-def release_binding(release, version, tag_object, source, *, allow_draft=False):
+def release_binding(release, version, tag_object, source):
     tag = "v" + version
     if (
         type(release.get("id")) is not int
         or release["id"] < 1
         or release.get("tag_name") != tag
         or release.get("target_commitish") != source
-        or type(release.get("draft")) is not bool
-        or (release["draft"] and not allow_draft)
+        or release.get("draft") is not False
         or release.get("prerelease") is not False
         or release.get("name") != f"ReviewSensei {tag}"
     ):

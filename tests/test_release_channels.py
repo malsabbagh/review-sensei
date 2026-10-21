@@ -319,19 +319,19 @@ class ReleaseChannelTests(unittest.TestCase):
             "BUNDLE_BUILD_ATTEMPT": "1",
         }
 
-    def test_npm_retry_reuses_original_attempt_bundle_without_python_finalizer_success(
+    def test_npm_retry_reuses_original_attempt_bundle_with_published_python_gate(
         self,
     ):
         bundle = self.npm_bundle()
         with (
             patch.dict(os.environ, self.npm_env(), clear=True),
             patch.object(channels, "verify_attestation") as attest,
-            patch.object(channels, "verify_draft") as draft,
+            patch.object(channels, "verify_python_release") as publication,
         ):
             channels.verify_npm(self.root, bundle)
         self.assertEqual(attest.call_count, 7)
         self.assertTrue(all(c.args[2] == 1 for c in attest.call_args_list))
-        draft.assert_called_once()
+        publication.assert_called_once()
 
     def test_cross_run_artifact_wrong_digest_expiry_and_duplicate_artifact_refused(
         self,
@@ -436,7 +436,7 @@ class ReleaseChannelTests(unittest.TestCase):
             ):
                 channels.verify_attestation(self.root / "package.tgz", contract, 1)
 
-    def test_missing_failed_newer_or_cross_run_python_draft_refuses_npm(self):
+    def published_python_fixture(self):
         self.jobs = [
             {
                 "name": name,
@@ -444,7 +444,9 @@ class ReleaseChannelTests(unittest.TestCase):
                 "conclusion": "success",
                 "run_attempt": 1,
             }
-            for name in channels.releases.BUILD_JOBS | {"Prepare draft GitHub release"}
+            for name in channels.releases.BUILD_JOBS
+            | channels.releases.PUBLISH_JOBS
+            | {"Create GitHub release assets"}
         ]
         contract = {
             "tag": TAG,
@@ -468,56 +470,121 @@ class ReleaseChannelTests(unittest.TestCase):
                 (self.root / "CHANGELOG.md").read_text(), VERSION, "2026-10-20"
             ),
         )
-        release = {
+        return contract, {
             "id": 5,
             "tag_name": TAG,
             "target_commitish": SOURCE,
             "name": "ReviewSensei " + TAG,
-            "draft": True,
+            "draft": False,
             "prerelease": False,
             "body": channels.releases.release_body_inventory(context, assets),
         }
+
+    def test_npm_requires_published_python_release_and_exact_source_notes_run_assets(
+        self,
+    ):
+        contract, release = self.published_python_fixture()
         with (
             patch.object(channels.releases, "find_release", return_value=release),
             patch.object(channels.major, "published_assets") as verify,
         ):
-            channels.verify_draft(self.root, contract)
+            channels.verify_python_release(self.root, contract)
             verify.assert_called_once()
-            # A failed finalizer is irrelevant to npm; only the latest draft/build prerequisites apply.
+        for key, value in (
+            ("draft", True),
+            ("prerelease", True),
+            ("target_commitish", "c" * 40),
+            ("body", release["body"] + "edited"),
+            ("body", release["body"].replace('"run_id":41', '"run_id":99')),
+        ):
+            with (
+                self.subTest(key=key, value=value),
+                patch.object(
+                    channels.releases,
+                    "find_release",
+                    return_value={**release, key: value},
+                ),
+                patch.object(channels.major, "published_assets"),
+                self.assertRaises(ValueError),
+            ):
+                channels.verify_python_release(self.root, contract)
+        with (
+            patch.object(channels.releases, "find_release", return_value=None),
+            self.assertRaises(ValueError),
+        ):
+            channels.verify_python_release(self.root, contract)
+        with (
+            patch.object(channels.releases, "find_release", return_value=release),
+            patch.object(
+                channels.major,
+                "published_assets",
+                side_effect=ValueError("asset digest differs"),
+            ),
+            self.assertRaisesRegex(ValueError, "asset digest"),
+        ):
+            channels.verify_python_release(self.root, contract)
+
+    def test_npm_requires_latest_python_publisher_and_finalizer_success(self):
+        contract, release = self.published_python_fixture()
+        original = list(self.jobs)
+        for name in (
+            "Publish to PyPI with Trusted Publishing",
+            "Create GitHub release assets",
+        ):
+            for status, conclusion in (("completed", "failure"), ("waiting", None)):
+                self.jobs = original + [
+                    {
+                        "name": name,
+                        "status": status,
+                        "conclusion": conclusion,
+                        "run_attempt": 2,
+                    }
+                ]
+                with (
+                    self.subTest(name=name, status=status),
+                    patch.object(
+                        channels.releases, "find_release", return_value=release
+                    ),
+                    patch.object(channels.major, "published_assets"),
+                    self.assertRaisesRegex(ValueError, "prerequisite"),
+                ):
+                    channels.verify_python_release(self.root, contract)
+
+    def test_npm_retry_after_python_finalization_reuses_original_attested_bundle(self):
+        bundle = self.npm_bundle()
+        contract, release = self.published_python_fixture()
+        original = {
+            p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in bundle.iterdir()
+        }
+        with (
+            patch.dict(os.environ, self.npm_env(), clear=True),
+            patch.object(channels, "verify_attestation") as attest,
+            patch.object(channels.major, "published_assets"),
+            patch.object(
+                channels.releases, "find_release", side_effect=[None, release]
+            ),
+        ):
+            with self.assertRaises(ValueError):
+                channels.verify_npm(self.root, bundle)
+            self.runs["python"]["run_attempt"] = 3
             self.jobs.append(
                 {
                     "name": "Create GitHub release assets",
-                    "run_attempt": 2,
+                    "run_attempt": 3,
                     "status": "completed",
-                    "conclusion": "failure",
+                    "conclusion": "success",
                 }
             )
-            channels.verify_draft(self.root, contract)
-            self.jobs.append(
-                {
-                    "name": "Prepare draft GitHub release",
-                    "run_attempt": 2,
-                    "status": "completed",
-                    "conclusion": "failure",
-                }
-            )
-            with self.assertRaisesRegex(ValueError, "prerequisite"):
-                channels.verify_draft(self.root, contract)
-        self.jobs.pop()
-        foreign = {
-            **release,
-            "body": release["body"].replace('"run_id":41', '"run_id":99'),
-        }
-        with (
-            patch.object(channels.releases, "find_release", return_value=foreign),
-            self.assertRaisesRegex(ValueError, "another Python run"),
-        ):
-            channels.verify_draft(self.root, contract)
-        with (
-            patch.object(channels.releases, "find_release", return_value=None),
-            self.assertRaisesRegex(ValueError, "draft is required"),
-        ):
-            channels.verify_draft(self.root, contract)
+            channels.verify_npm(self.root, bundle)
+        self.assertEqual(attest.call_count, 14)
+        self.assertTrue(all(call.args[2] == 1 for call in attest.call_args_list))
+        self.assertEqual(
+            original,
+            {
+                p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in bundle.iterdir()
+            },
+        )
 
 
 if __name__ == "__main__":

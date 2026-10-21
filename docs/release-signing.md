@@ -101,8 +101,12 @@ the run fails rather than reporting success. Inspect the emitted public tag
 object/source SHA before recovery; cleanup never deletes a remote tag.
 
 Inspect exact source/tag SHA, GPG fingerprint and Release builds before
-approving the two publish jobs. Inspect the prepared GitHub Release draft and
-its reviewed changelog notes/assets before approving. The release becomes public
+approving publication. Inspect the prepared GitHub Release draft and its
+reviewed changelog notes/assets before PyPI approval. For npm approval, inspect
+the matching published Python release and exact attested npm bundle. npm
+publication follows successful Python finalization; an early npm publisher
+holds for an original-bundle retry, without draft-read or Contents write
+authority. The release becomes public
 after protected PyPI publication; successful Python and npm runs for the same
 signed source are both required for released docs/Pages. Inspect the independent
 channel result artifacts. Complete the [npm publisher identity migration

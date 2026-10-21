@@ -649,14 +649,19 @@ npm keeps native builds/smoke tests, exact same-run artifact ID/digest,
 source metadata and tarball attestations, signed source/ref/workflow and exact
 original build invocation, protected approval, platform-first publication,
 bounded registry readback and clean consumer verification. It verifies the
-matching reviewed Python draft through authenticated metadata. Artifact selection
+matching reviewed public Python release through authenticated metadata. Artifact selection
 binds the original run. Both channels record separate authenticated job/artifact
 result receipts. The Python publisher and build-attestation workflow identity
 remain `release.yml`; hosted identity/versioning remain independent. Moving
 npm publication to `publish-npm.yml` requires owner verification of all six
 Trusted Publishers before activation; this implementation changes no persistent
 trust, credentials or environment policy. Old immutable sources keep their
-original workflow. See [ADR 0100](adr/0100-independent-release-channel-runs.md).
+original workflow. npm publication follows successful Python finalization;
+the two build graphs and run/retry lifecycles stay independent. An early npm
+publisher holds until the public release is ready, then uses its original
+bundle on retry. Public release metadata fits the existing Contents read grant;
+draft visibility and Contents write are unnecessary. See
+[ADR 0100](adr/0100-independent-release-channel-runs.md).
 
 For the next release, Python/docs builds produce the verified GitHub draft
 without waiting for native/npm assembly; PyPI approval and publication release

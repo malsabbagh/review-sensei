@@ -45,13 +45,25 @@ original assembly invocation, independent of the later publishing attempt.
 Preserve bounded registry retries, exact SRI, existing-byte refusal and
 platform-first/launcher-last publication.
 
-Retain npm's reviewed Python draft prerequisite via read-only verification of
-the unique matching Python run's latest source/build/docs/draft jobs, exact
-reviewed notes, signed source/tag/run binding and four assets. npm does not
-wait for the Python finalizer and does not download Python artifacts. Python
-never reads npm state. Each channel records its own authenticated job/artifact
-facts and signed contract in a run/attempt-specific result artifact; those
-operational receipts do not replace cryptographic publication proofs.
+Order npm publication after the matching **published** stable Python release.
+Verify the unique matching Python run's latest source/build/docs/draft/PyPI/
+finalizer jobs, exact reviewed notes, signed source/tag/run binding and four
+assets. Even visible drafts fail validation. The read-only metadata route is
+supported by GitHub's [published release API contract](https://docs.github.com/en/rest/releases/releases#list-releases):
+public release metadata is available with Contents read. Draft listings have a
+different visibility boundary; no draft access or Contents write is assumed or
+added. Reuse the strict existing public `major_tag_gate.release_binding` policy;
+remove the earlier optional draft allowance from that helper.
+
+npm does not download Python artifacts, and Python never reads npm state. Both
+channels can build concurrently. npm publication holds if Python finalization
+has not succeeded; retry that original npm publisher with its original bundle
+after Python recovery. This is an explicit publication-order tradeoff rather
+than an assertion that both distributions can publish independently. Their run
+lifecycles, artifacts and retries remain independent. Each channel records its
+own authenticated job/artifact facts and signed contract in a run/attempt-specific
+result artifact; those operational receipts do not replace cryptographic
+publication proofs.
 
 Preserve ADR0095 and the exact PyPI publisher execution-origin verifier,
 including original job evidence for re-exposed ancestor records. v5 remains
@@ -71,9 +83,10 @@ or merge. Existing tagged workflows cannot be retrofitted.
 
 An npm approval, failed build or registry wait no longer holds a Python run
 open. Failed Python finalization can be retried after that channel is terminal,
-while npm remains visible and independently recoverable. npm's draft check
-fails closed if Python draft preparation has not succeeded; after preparation,
-retry only npm's original publisher with its retained bundle. A failed
+while npm remains visible and independently recoverable. npm publication now
+waits for verified public Python finalization; an early npm publisher holds
+without publishing and resumes through an original-job retry after that Python
+gate succeeds. Existing npm tarballs and original build invocation stay fixed. A failed
 qualifier produces an Actions failure, never a qualified channel result.
 Missing/expired/conflicting artifacts, duplicate runs or moved identities hold
 recovery for owner review.
@@ -86,14 +99,22 @@ recovery for owner review.
   The existing signed push already provides the common contract.
 - Move Python to a new workflow filename: forces PyPI identity and provenance
   migration and risks breaking existing qualification. Keep that identity stable.
-- Remove npm's draft prerequisite: loses the reviewed-draft approval boundary.
+- Grant npm Contents write to read drafts: expands authority solely for
+  visibility; rejected. No token or persistent permission change is necessary.
+- Add a signed cross-run draft receipt/artifact bridge: adds a new transfer and
+  attestation-selection contract when the established public release already
+  provides the reviewed source/run/asset binding. Deferred.
+- Remove the Python release prerequisite: loses the reviewed release and asset
+  boundary; requiring publication strengthens that existing boundary.
 
 ## Validation
 
 Credential-free tests exercise shared core identity, npm wait/failure isolation,
 independent graph/run/result boundaries, dispatch/fork/ref/duplicate rejection,
 version/source/tag drift, artifact ID/digest/run/expiry and original attestation
-invocation refusal, draft binding/latest execution and independent Pages
+invocation refusal, unpublished release/failed or pending finalizer refusal,
+source/notes/run/assets binding, original-bundle retry after Python recovery,
+and independent Pages
 success/refusal. Existing signed-source, finalizer, npm readback, PyPI/Sigstore
 and re-exposed publisher execution tests remain required. Action pinning,
 workflow lint, full checkout tests, source typing and package build remain gates.
