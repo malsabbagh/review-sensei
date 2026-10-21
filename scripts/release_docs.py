@@ -239,6 +239,15 @@ def validate_channels(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
     validate_run(run, jobs, split_npm=split)
     if not split:
         return  # Immutable historical combined runs retain their original policy.
+    # Every split path, including direct Python/manual selection and recheck,
+    # must freshly bind the unique original Python run. Historical combined
+    # runs returned above and retain their original admission policy.
+    original = channel_run("release.yml", run["head_branch"], run["head_sha"])
+    if any(
+        original.get(key) != run.get(key)
+        for key in ("id", "run_attempt", "status", "conclusion")
+    ):
+        raise ValueError("Pages Python channel identity changed")
     npm = channel_run("publish-npm.yml", run["head_branch"], run["head_sha"])
     if npm.get("status") != "completed" or npm.get("conclusion") != "success":
         raise ValueError("Pages requires successful independent npm publication")
