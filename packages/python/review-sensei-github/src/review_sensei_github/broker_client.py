@@ -259,6 +259,10 @@ class BrokerClient:
             try:
                 original_budget.check()
             except ReviewInputError as exc:
+                if self.control is not None:
+                    # Existing controlled callers distinguish deadline
+                    # refusal from broker transport/configuration failure.
+                    raise
                 raise GitHubBrokerClientError(
                     "Broker response exceeded the original budget; "
                     f"broker.post_outcome={'unknown' if post else 'not_applicable'}"
