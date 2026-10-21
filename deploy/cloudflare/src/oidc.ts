@@ -1,3 +1,4 @@
+import { BrokerLifetime } from "./broker-lifetime";
 import type { BrokerDispatchControl } from "./broker-dispatch-control";
 const MAX_TOKEN_BYTES = 64 * 1024;
 const MAX_JWKS_BYTES = 256 * 1024;
@@ -14,10 +15,7 @@ let jwksCache: {
   expiresAt: number;
   value: Record<string, unknown>;
 } | null = null;
-let jwksInFlight: {
-  issuer: string;
-  promise: Promise<Record<string, unknown>>;
-} | null = null;
+let latestJwksAttempt: object | null = null;
 
 export interface OidcClaims {
   iss: string;
@@ -52,6 +50,7 @@ export interface OidcValidationOptions {
   now?: number;
   clockSkewSeconds?: number;
   dispatchControl?: BrokerDispatchControl;
+  requestLifetime?: BrokerLifetime;
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -103,75 +102,70 @@ function positiveId(value: unknown): number {
   return parsed;
 }
 
-async function fetchJwks(issuer: string, control?: BrokerDispatchControl): Promise<Record<string, unknown>> {
-  const response = await fetch(`${issuer}/.well-known/jwks`, {
-    headers: { accept: "application/json" },
-    ...(control === undefined ? {} : { signal: control.beforeDispatch(), redirect: "manual" }),
-  });
-  await control?.checkResponse(response);
-  if (!response.ok) {
-    throw new Error("oidc_jwks_unavailable");
-  }
-  const length = response.headers.get("content-length");
-  if (length !== null && (!/^\d+$/.test(length) || Number(length) > MAX_JWKS_BYTES)) {
-    throw new Error("oidc_jwks_too_large");
-  }
-  if (response.body === null) {
-    throw new Error("oidc_jwks_invalid");
-  }
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const next = await reader.read();
-    if (next.done) {
-      break;
+async function fetchJwks(issuer: string, lifetime: BrokerLifetime, control?: BrokerDispatchControl): Promise<Record<string, unknown>> {
+  return await lifetime.upstream(async scope => {
+    const response = await scope.fetch(`${issuer}/.well-known/jwks`, {
+      headers: { accept: "application/json" },
+      redirect: "manual",
+    });
+    await control?.checkResponse(response);
+    if (!response.ok) {
+      throw new Error("oidc_jwks_unavailable");
     }
-    total += next.value.byteLength;
-    if (total > MAX_JWKS_BYTES) {
-      await reader.cancel();
+    const length = response.headers.get("content-length");
+    if (length !== null && (!/^\d+$/.test(length) || Number(length) > MAX_JWKS_BYTES)) {
       throw new Error("oidc_jwks_too_large");
     }
-    chunks.push(next.value);
-  }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  try {
-    return object(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
-  } catch {
-    throw new Error("oidc_jwks_invalid");
-  }
+    if (response.body === null) {
+      throw new Error("oidc_jwks_invalid");
+    }
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    while (true) {
+      const next = await scope.read(reader);
+      if (next.done) {
+        break;
+      }
+      total += next.value.byteLength;
+      if (total > MAX_JWKS_BYTES) {
+        await reader.cancel();
+        throw new Error("oidc_jwks_too_large");
+      }
+      chunks.push(next.value);
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    try {
+      return object(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
+    } catch {
+      throw new Error("oidc_jwks_invalid");
+    }
+  }, control);
 }
 
-async function cachedJwks(issuer: string, control?: BrokerDispatchControl): Promise<Record<string, unknown>> {
+async function cachedJwks(issuer: string, lifetime: BrokerLifetime, control?: BrokerDispatchControl): Promise<Record<string, unknown>> {
   const now = Date.now();
-  if (jwksCache?.issuer === issuer && jwksCache.expiresAt > now) {
-    return jwksCache.value;
-  }
-  if (jwksInFlight?.issuer === issuer) {
-    return await jwksInFlight.promise;
-  }
-  const promise = fetchJwks(issuer, control);
-  jwksInFlight = { issuer, promise };
-  try {
-    const value = await promise;
-    jwksCache = { issuer, value, expiresAt: now + JWKS_CACHE_TTL_MS };
-    return value;
-  } finally {
-    if (jwksInFlight?.promise === promise) {
-      jwksInFlight = null;
-    }
-  }
+  if (jwksCache?.issuer === issuer && jwksCache.expiresAt > now) return jwksCache.value;
+  // Share completed immutable public keys, never another request's pending I/O.
+  // Each miss owns its fetch, cancellation and original dispatch liability.
+  const attempt = {};
+  latestJwksAttempt = attempt;
+  const value = await fetchJwks(issuer, lifetime, control);
+  lifetime.check();
+  control?.check();
+  if (latestJwksAttempt === attempt) jwksCache = { issuer, value, expiresAt: now + JWKS_CACHE_TTL_MS };
+  return value;
 }
 
 /** Test isolation seam; production callers never need to clear public JWKS. */
 export function resetOidcJwksCacheForTesting(): void {
   jwksCache = null;
-  jwksInFlight = null;
+  latestJwksAttempt = null;
 }
 
 function equalAudience(value: unknown, expected: string): value is string | string[] {
@@ -224,10 +218,14 @@ function claimsFromPayload(
 }
 
 /** Validate a GitHub Actions RS256 assertion using the issuer JWKS. */
-export async function verifyOidcAssertion(
-  token: string,
-  options: OidcValidationOptions = {},
-): Promise<OidcClaims> {
+export async function verifyOidcAssertion(token: string, options: OidcValidationOptions = {}): Promise<OidcClaims> {
+  const lifetime = options.requestLifetime ?? new BrokerLifetime();
+  lifetime.constrain(options.dispatchControl);
+  const operation = () => verifyWithinLifetime(token, options, lifetime);
+  return options.requestLifetime === undefined ? await lifetime.run(operation) : await operation();
+}
+
+async function verifyWithinLifetime(token: string, options: OidcValidationOptions, lifetime: BrokerLifetime): Promise<OidcClaims> {
   const issuer = options.issuer ?? DEFAULT_ISSUER;
   const audience = options.audience ?? DEFAULT_AUDIENCE;
   const now = options.now ?? Date.now() / 1000;
@@ -258,9 +256,7 @@ export async function verifyOidcAssertion(
     throw new Error("oidc_time_invalid");
   }
 
-  const pendingJwks = cachedJwks(issuer, options.dispatchControl);
-  const jwks = options.dispatchControl === undefined
-    ? await pendingJwks : await options.dispatchControl.waitFor(pendingJwks);
+  const jwks = await cachedJwks(issuer, lifetime, options.dispatchControl);
   options.dispatchControl?.check();
   const keys = jwks.keys;
   if (!Array.isArray(keys)) {
@@ -300,5 +296,7 @@ export async function verifyOidcAssertion(
     }
     throw new Error("oidc_signature_invalid");
   }
+  lifetime.check();
+  options.dispatchControl?.check();
   return claims;
 }

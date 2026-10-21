@@ -10,6 +10,9 @@ from review_sensei_github import (
     GitHubHTTPTransientError,
 )
 
+from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.errors import ReviewInputError
+
 
 class FakeResponse(io.BytesIO):
     def __init__(self, body=b"", status=200):
@@ -20,6 +23,105 @@ class FakeResponse(io.BytesIO):
 
 
 class BrokerClientTests(unittest.TestCase):
+    def test_transport_failures_name_phase_without_remote_text_or_post_retry(self):
+        class ReadFailure(FakeResponse):
+            def read(self, size=-1):
+                raise TimeoutError("secret read body")
+
+        cases = [
+            (TimeoutError("secret open"), "request_open", "timeout"),
+            (URLError("secret URL"), "request_open", "transport"),
+            (ReadFailure(), "response_read", "timeout"),
+            (FakeResponse(b"bad json secret"), "response_decode", "invalid_json"),
+            (FakeResponse(bytes([255])), "response_decode", "invalid_utf8"),
+            (FakeResponse(b"x" * (256 * 1024 + 1)), "response_size", "oversized"),
+        ]
+        for response, phase, failure in cases:
+            with self.subTest(phase=phase, failure=failure):
+                calls = []
+
+                def opener(request, timeout):
+                    calls.append((request, timeout))
+                    if isinstance(response, Exception):
+                        raise response
+                    return response
+
+                client = BrokerClient(opener=opener)
+                with self.assertRaises(GitHubBrokerClientError) as raised:
+                    client.exchange("secret assertion")
+                message = str(raised.exception)
+                self.assertIn("broker.transport_phase=" + phase, message)
+                self.assertIn("broker.transport_failure=" + failure, message)
+                self.assertIn("broker.post_outcome=unknown", message)
+                self.assertNotIn("secret", message)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0][1], 30)
+
+    def test_bootstrap_header_only_shortens_admitted_time_without_new_control(self):
+        client, calls = self.make_client(
+            (b'{"token":"scoped"}', 200), before_request=lambda: 1.5
+        )
+        with mock.patch(
+            "review_sensei_github.broker_client.time.time", return_value=1000
+        ):
+            self.assertEqual(
+                client.exchange("assertion", capability="issue_reply"), "scoped"
+            )
+        self.assertEqual(calls[0][2]["X-reviewsensei-deadline-unix-ms"], "1001500")
+        self.assertEqual(
+            json.loads(calls[0][3]),
+            {"oidc_token": "assertion", "capability": "issue_reply"},
+        )
+
+    def test_late_success_keeps_original_budget_and_never_returns_credential(self):
+        clock = [0.0]
+        budget = EvidenceReadBudget(clock=lambda: clock[0])
+        before = budget.snapshot()
+        calls = []
+
+        def opener(request, timeout):
+            calls.append(request)
+            clock[0] = 60.0
+            return FakeResponse(b'{"token":"must-not-return"}')
+
+        client = BrokerClient(opener=opener, before_request=budget.consume)
+        with self.assertRaises(ReviewInputError):
+            client.exchange("assertion")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(budget.calls, 1)
+        self.assertEqual(
+            budget.snapshot()["deadline_unix_ms"], before["deadline_unix_ms"]
+        )
+
+    def test_bootstrap_header_never_extends_original_wall_deadline(self):
+        budget = EvidenceReadBudget(clock=lambda: 0, wall_clock=lambda: 1000)
+        client, calls = self.make_client(
+            (b'{"token":"scoped"}', 200), before_request=budget.consume
+        )
+        with mock.patch(
+            "review_sensei_github.broker_client.time.time", return_value=1040
+        ):
+            self.assertEqual(client.exchange("assertion"), "scoped")
+        self.assertEqual(calls[0][2]["X-reviewsensei-deadline-unix-ms"], "1060000")
+        self.assertEqual(budget.calls, 1)
+        self.assertEqual(budget.wall_deadline_ms, 1060000)
+
+    def test_transport_time_fence_retains_only_valid_status_and_correlation(self):
+        response = FakeResponse(b'{"token":"must-not-return"}')
+        response.headers = {"cf-ray": "0123456789abcdef-YYZ", "authorization": "secret"}
+        client = BrokerClient(opener=lambda *args, **kwargs: response)
+        with mock.patch(
+            "review_sensei_github.broker_client.time.monotonic", side_effect=[0, 31, 31]
+        ):
+            with self.assertRaises(GitHubBrokerClientError) as raised:
+                client.exchange("assertion")
+        text = str(raised.exception)
+        self.assertIn("broker.transport_failure=timeout", text)
+        self.assertIn("broker.response_status=200", text)
+        self.assertIn("broker.correlation_id=0123456789abcdef-YYZ", text)
+        self.assertIn("broker.post_outcome=unknown", text)
+        self.assertNotIn("secret", text)
+
     def make_client(self, responses, **kwargs):
         calls = []
 

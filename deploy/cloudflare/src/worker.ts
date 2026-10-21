@@ -1,3 +1,4 @@
+import { WorkflowLookupError } from "./broker-lookup-diagnostic";
 import { BrokerDispatchControl } from "./broker-dispatch-control";
 import type { WorkerEnv, WorkerExecution } from "./env";
 import { TokenBroker } from "./token-broker";
@@ -177,9 +178,12 @@ async function token(request: Request, env: WorkerEnv): Promise<Response> {
     return response({ error: "invalid_request", diagnostic: brokerDiagnostic(new Error("broker_invalid_request"), brokerRayId(request)) }, 400, true);
   }
   try {
+    const deadlineHeader = request.headers.get("x-reviewsensei-deadline-unix-ms");
+    if (deadlineHeader !== null && !/^[0-9]{1,13}$/.test(deadlineHeader)) throw new Error("broker_request_deadline_invalid");
     const result = await new TokenBroker(env).exchange(
       body as Record<string, unknown>,
       request.headers.get("cf-connecting-ip") ?? undefined,
+      deadlineHeader === null ? undefined : Number(deadlineHeader),
     );
     return response(result, 200, true);
   } catch (error) {
@@ -187,7 +191,9 @@ async function token(request: Request, env: WorkerEnv): Promise<Response> {
     const status = message === "configuration_unavailable" ? 503 : 403;
     const rayId = brokerRayId(request);
     const diagnostic = brokerDiagnostic(error, rayId);
+    const lookup = error instanceof WorkflowLookupError ? error.lookup : undefined;
     console.error("github_broker_failed", {
+      ...(lookup === undefined ? {} : {lookup}),
       error_code: diagnostic.code,
       stage: diagnostic.stage,
       action: diagnostic.action,
@@ -198,7 +204,7 @@ async function token(request: Request, env: WorkerEnv): Promise<Response> {
     const errorCode = message === "configuration_unavailable"
       ? "configuration_unavailable"
       : "capability_not_issued";
-    return response({ error: errorCode, diagnostic }, status, true);
+    return response({ error: errorCode, diagnostic, ...(lookup === undefined ? {} : {lookup}) }, status, true);
   }
 }
 
@@ -242,15 +248,17 @@ async function sessionGrant(request: Request, env: WorkerEnv): Promise<Response>
       return response({ error: "invalid_request", diagnostic: brokerDiagnostic(new Error("broker_invalid_request"), brokerRayId(request)) }, 400, true);
     }
     const control = values.control_budget === undefined ? undefined : new BrokerDispatchControl(values.control_budget);
+    const deadlineHeader = request.headers.get("x-reviewsensei-deadline-unix-ms");
+    if (deadlineHeader !== null && !/^[0-9]{1,13}$/.test(deadlineHeader)) throw new Error("broker_request_deadline_invalid");
     const broker = new TokenBroker(env);
-    const attestation = control === undefined
-      ? await broker.verifySessionGrant(values.session_grant, values.session_attestation)
-      : await broker.verifySessionGrant(values.session_grant, values.session_attestation, control);
+    const attestation = await broker.verifySessionGrant(values.session_grant, values.session_attestation, control, deadlineHeader === null ? undefined : Number(deadlineHeader));
     return response({ session_attestation: attestation, ...(control === undefined ? {} : { control_receipt: control.receipt() }) }, 200, true);
   } catch (error) {
     const rayId = brokerRayId(request);
     const diagnostic = brokerDiagnostic(error, rayId);
+    const lookup = error instanceof WorkflowLookupError ? error.lookup : undefined;
     console.error("github_session_grant_failed", {
+      ...(lookup === undefined ? {} : {lookup}),
       error_code: diagnostic.code,
       stage: diagnostic.stage,
       action: diagnostic.action,
@@ -260,7 +268,7 @@ async function sessionGrant(request: Request, env: WorkerEnv): Promise<Response>
     const unavailable = error instanceof Error && error.message === "configuration_unavailable";
     const status = unavailable ? 503 : 403;
     const errorCode = unavailable ? "configuration_unavailable" : "session_grant_not_verified";
-    return response({ error: errorCode, diagnostic }, status, true);
+    return response({ error: errorCode, diagnostic, ...(lookup === undefined ? {} : {lookup}) }, status, true);
   }
 }
 

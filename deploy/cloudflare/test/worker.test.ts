@@ -65,7 +65,7 @@ describe("session-grant verification route", () => {
       session_attestation: { repository_id: 987654321, pull_request: 7 },
     });
     expect(broker.verifySessionGrant).toHaveBeenCalledWith(
-      "a".repeat(43), { version: 1 },
+      "a".repeat(43), { version: 1 }, undefined, undefined,
     );
   });
 
@@ -135,6 +135,17 @@ describe("session-grant verification route", () => {
 });
 
 describe("token route response security", () => {
+  it("forwards only a validated downward deadline without an authority grant", async () => {
+    const deadline=Date.now()+30;
+    await worker.fetch(request(undefined,{"x-reviewsensei-deadline-unix-ms":String(deadline)}),env);
+    expect(broker.exchange).toHaveBeenCalledWith({oidc_token:"signed-jwt"},undefined,deadline);
+    broker.exchange.mockClear();
+    const rejected=await worker.fetch(request(undefined,{"x-reviewsensei-deadline-unix-ms":"secret untrusted deadline"}),env);
+    expect(rejected.status).toBe(403);
+    expect(broker.exchange).not.toHaveBeenCalled();
+    expect(JSON.stringify(await rejected.json())).not.toContain("secret");
+  });
+
   it("returns a successful exchange with no-store and no CORS exposure", async () => {
     const result = await worker.fetch(request(), env);
     expect(result.status).toBe(200);

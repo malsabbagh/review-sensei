@@ -1,3 +1,4 @@
+import { BrokerLifetime } from "./broker-lifetime";
 import { BrokerDispatchControl, type BrokerControlReceipt } from "./broker-dispatch-control";
 import type { WorkerEnv } from "./env";
 import { GitHubApi, type PublicWorkflowRuntimeShas } from "./github-api";
@@ -532,9 +533,15 @@ export class TokenBroker {
     this.github = github ?? new GitHubApi(env);
   }
 
-  async exchange(
+  async exchange(body: BrokerBody, sourceAddress?: string, deadlineUnixMs?: number) {
+    const lifetime = new BrokerLifetime(deadlineUnixMs);
+    return await lifetime.run(() => this.exchangeWithinLifetime(body, sourceAddress, lifetime));
+  }
+
+  private async exchangeWithinLifetime(
     body: BrokerBody,
-    _sourceAddress?: string,
+    _sourceAddress: string | undefined,
+    lifetime: BrokerLifetime,
   ): Promise<{
     token: string;
     capability: Capability;
@@ -554,7 +561,8 @@ export class TokenBroker {
       if (parsed.mutation.operation_id !== control.request.operation_id ||
         (parsed.mutation.read_accounting as Record<string, unknown>).deadline_unix_ms !== control.request.deadline_unix_ms) throw new Error("broker_control_binding_invalid");
     }
-    const github = control === undefined ? this.github : this.github.withDispatchControl(control);
+    lifetime.constrain(control);
+    const github = this.github.withRequestLifetime(lifetime, control);
     const receipt = () => control === undefined ? {} : { control_receipt: control.receipt() };
     const requested = capability(body.capability);
     if (requested !== "review_session" && body.session !== undefined) {
@@ -570,6 +578,7 @@ export class TokenBroker {
       audience: "sts.reviewsensei.dev",
       issuer: "https://token.actions.githubusercontent.com",
       dispatchControl: control,
+      requestLifetime: lifetime,
     });
     const configuredTag = validatePublicWorkflowTag(this.env.PUBLIC_WORKFLOW_TAG ?? "");
     const observedTag = authorizeObservedWorkflowTag(
@@ -691,9 +700,16 @@ export class TokenBroker {
   }
 
   /** Verify an opaque broker grant before a hosted session-ledger mutation. */
-  async verifySessionGrant(
+  async verifySessionGrant(grant: unknown, attestation: unknown, control?: BrokerDispatchControl, deadlineUnixMs?: number): Promise<SessionAttestation> {
+    const lifetime = new BrokerLifetime(deadlineUnixMs);
+    lifetime.constrain(control);
+    return await lifetime.run(() => this.verifyGrantWithinLifetime(grant, attestation, lifetime, control));
+  }
+
+  private async verifyGrantWithinLifetime(
     grant: unknown,
     attestation: unknown,
+    lifetime: BrokerLifetime,
     control?: BrokerDispatchControl,
   ): Promise<SessionAttestation> {
     if (typeof grant !== "string" || !/^sg1\.[1-9][0-9]{10,15}\.[A-Za-z0-9_-]{43}$/.test(grant)) {
@@ -708,7 +724,7 @@ export class TokenBroker {
       if (parsed.mutation.operation_id !== control.request.operation_id ||
         (parsed.mutation.read_accounting as Record<string, unknown>).deadline_unix_ms !== control.request.deadline_unix_ms) throw new Error("broker_control_binding_invalid");
     }
-    const github = control === undefined ? this.github : this.github.withDispatchControl(control);
+    const github = this.github.withRequestLifetime(lifetime, control);
     const repositoryId = value.repository_id;
     if (
       typeof repositoryId !== "number" ||

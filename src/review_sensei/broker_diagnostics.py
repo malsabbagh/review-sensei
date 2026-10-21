@@ -21,13 +21,48 @@ def _correlation(value: object) -> str | None:
     return value if isinstance(value, str) and _RAY.fullmatch(value) else None
 
 
+def _lookup(value: object) -> tuple[tuple[str, str | int], ...]:
+    if not isinstance(value, dict) or not {"phase", "failure"} <= value.keys():
+        return ()
+    enums = {
+        "phase": {"rest_ref", "rest_tag"},
+        "failure": {"http", "timeout", "transport", "malformed", "oversized"},
+        "git_failure": {"http", "timeout", "transport", "malformed", "oversized"},
+        "rate_limit_resource": {"core"},
+    }
+    numeric = {
+        "rate_limit_limit",
+        "rate_limit_remaining",
+        "rate_limit_reset",
+        "retry_after",
+    }
+    if value.keys() - enums.keys() - numeric - {"request_id"}:
+        return ()
+    for key, item in value.items():
+        if key in enums and (not isinstance(item, str) or item not in enums[key]):
+            return ()
+        if key in numeric and (
+            type(item) is not int or not 0 <= item <= 9_999_999_999_999
+        ):
+            return ()
+        if key == "request_id" and (
+            not isinstance(item, str)
+            or re.fullmatch(r"[A-Za-z0-9:-]{1,128}", item) is None
+        ):
+            return ()
+    return tuple(sorted(value.items()))
+
+
 @dataclass(frozen=True)
 class BrokerDiagnostic:
     code: str
     correlation_id: str | None = None
     upstream_status: int | None = None
+    lookup: tuple[tuple[str, str | int], ...] = ()
 
     def __post_init__(self) -> None:
+        if self.lookup and _lookup(dict(self.lookup)) != self.lookup:
+            raise ValueError("invalid broker lookup metadata")
         if not isinstance(self.code, str) or self.code not in _CATALOG:
             raise ValueError("unknown broker diagnostic")
         if (
@@ -65,6 +100,7 @@ class BrokerDiagnostic:
             values["correlation_id"] = self.correlation_id
         if self.upstream_status is not None:
             values["upstream_status"] = str(self.upstream_status)
+        values.update({"lookup_" + key: str(value) for key, value in self.lookup})
         return {f"broker.{key}": value for key, value in values.items()}
 
     def message(self) -> str:
@@ -128,7 +164,10 @@ def parse_broker_diagnostic(error: Any) -> BrokerDiagnostic:
         if "upstream_status" in value and value["upstream_status"] is None:
             return fallback
         return BrokerDiagnostic(
-            code, value.get("correlation_id", correlation), value.get("upstream_status")
+            code,
+            value.get("correlation_id", correlation),
+            value.get("upstream_status"),
+            _lookup(body.get("lookup")),
         )
     except Exception:  # Includes interrupted/truncated reads; never render the error.
         return fallback

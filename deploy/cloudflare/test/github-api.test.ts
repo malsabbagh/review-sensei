@@ -1,3 +1,4 @@
+import { WorkflowLookupError } from "../src/broker-lookup-diagnostic";
 import { describe, expect, it, vi } from "vitest";
 import type { WorkerEnv } from "../src/env";
 import { GitHubApi } from "../src/github-api";
@@ -53,6 +54,35 @@ describe("GitHubApi recovery evidence scope", () => {
 });
 
 describe("GitHubApi public workflow resolution", () => {
+  it.each(["rest_ref", "rest_tag"])("retains closed %s failure metadata without remote text", async phase => {
+    const github=new GitHubApi({GITHUB_APP_ID:"123",GITHUB_APP_PRIVATE_KEY:"unused"} as WorkerEnv);
+    const fetchMock=vi.spyOn(globalThis,"fetch").mockImplementation(async input => {
+      const url=String(input);
+      if(url.includes("git-upload-pack")) return new Response("secret Git refusal",{status:503});
+      if(phase==="rest_tag" && url.includes("/git/ref/")) return new Response(JSON.stringify({object:{type:"tag",sha:TAG_OBJECT_SHA}}));
+      return new Response(JSON.stringify({message:"secret upstream body"}),{status:403,headers:{"x-github-request-id":"AB12:CD34","x-ratelimit-remaining":"0","x-ratelimit-reset":"1800000000","retry-after":"2","x-ratelimit-resource":"core","authorization":"secret bearer","x-secret":"secret header"}});
+    });
+    try {
+      const error=await github.publicWorkflowRuntimeShas("v5").catch(error=>error);
+      expect(error).toBeInstanceOf(WorkflowLookupError);
+      expect(error.message).toBe("github_workflow_tag_unavailable_403");
+      expect(error.lookup).toEqual({phase,failure:"http",git_failure:"http",request_id:"AB12:CD34",rate_limit_remaining:0,rate_limit_reset:1800000000,retry_after:2,rate_limit_resource:"core"});
+      expect(JSON.stringify(error.lookup)).not.toContain("secret");
+      expect(fetchMock).toHaveBeenCalledTimes(phase==="rest_ref"?2:3);
+    } finally {fetchMock.mockRestore();}
+  });
+
+  it("keeps safe HTTP facts when a refusal body is malformed", async () => {
+    const github=api();
+    const fetchMock=vi.spyOn(globalThis,"fetch").mockResolvedValue(new Response("secret invalid JSON",{status:403,headers:{"x-github-request-id":"AB12:CD34","x-ratelimit-remaining":"secret"}}));
+    try {
+      const error=await github.publicWorkflowRuntimeShas("v5").catch(error=>error);
+      expect(error.message).toBe("github_workflow_tag_unavailable_403");
+      expect(error.lookup).toEqual({phase:"rest_ref",failure:"malformed",request_id:"AB12:CD34"});
+      expect(JSON.stringify(error.lookup)).not.toContain("secret");
+    } finally {fetchMock.mockRestore();}
+  });
+
   it("omits bearer authentication for public GitHub requests", async () => {
     const client = api();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
