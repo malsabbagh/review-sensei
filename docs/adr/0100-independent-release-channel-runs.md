@@ -4,7 +4,7 @@ Status: Proposed
 Date: 2026-10-21
 Owners/Reviewers: Maintainers
 Linked GitHub Issue: User-requested Release Marshal channel split; no separate issue
-Linked PR: Pending
+Linked PR: [#340](https://github.com/malsabbagh/review-sensei/pull/340)
 
 ## Context
 
