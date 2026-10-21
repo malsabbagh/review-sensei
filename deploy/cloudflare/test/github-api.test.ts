@@ -54,6 +54,20 @@ describe("GitHubApi recovery evidence scope", () => {
 });
 
 describe("GitHubApi public workflow resolution", () => {
+  it("retains oversized Git failure class across a REST refusal", async () => {
+    const github = new GitHubApi({GITHUB_APP_ID:"123",GITHUB_APP_PRIVATE_KEY:"unused"} as WorkerEnv);
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async input =>
+      String(input).includes("git-upload-pack")
+        ? new Response("secret Git body", {headers:{"content-length":"65537"}})
+        : new Response("{}", {status:403}));
+    try {
+      const error = await github.publicWorkflowRuntimeShas("v5").catch(error => error);
+      expect(error.lookup).toEqual({phase:"rest_ref",failure:"http",git_failure:"oversized"});
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(JSON.stringify(error.lookup)).not.toContain("secret");
+    } finally { fetchMock.mockRestore(); }
+  });
+
   it.each(["rest_ref", "rest_tag"])("retains closed %s failure metadata without remote text", async phase => {
     const github=new GitHubApi({GITHUB_APP_ID:"123",GITHUB_APP_PRIVATE_KEY:"unused"} as WorkerEnv);
     const fetchMock=vi.spyOn(globalThis,"fetch").mockImplementation(async input => {

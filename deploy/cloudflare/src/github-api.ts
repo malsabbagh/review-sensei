@@ -776,7 +776,7 @@ export class GitHubApi {
         this.dispatchControl?.check();
         return result;
       } catch (error) {
-        if (error instanceof Error && /^github_workflow_tag_/.test(error.message)) {
+        if (error instanceof Error && /^(github_workflow_tag_|github_response_too_large$|broker_control_|broker_request_|broker_upstream_)/.test(error.message)) {
           throw error;
         }
         throw new Error("github_workflow_tag_invalid");
