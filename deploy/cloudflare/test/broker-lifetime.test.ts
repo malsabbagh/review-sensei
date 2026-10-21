@@ -1,11 +1,30 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkerEnv } from "../src/env";
 import { GitHubApi } from "../src/github-api";
+import { BrokerLifetime } from "../src/broker-lifetime";
+import { BrokerDispatchControl } from "../src/broker-dispatch-control";
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 const env = { GITHUB_APP_ID: "123", GITHUB_APP_PRIVATE_KEY: "unused" } as WorkerEnv;
 
 describe("uncontrolled broker upstream lifetime", () => {
+  it("preserves controlled deadline precedence when the caller header is equal", async () => {
+    vi.useFakeTimers();
+    const deadline = Date.now() + 40;
+    const control = new BrokerDispatchControl({schema_version:"1.0",operation_id:"a".repeat(64),request_id:"b".repeat(64),deadline_unix_ms:deadline,max_dispatches:1});
+    const lifetime = new BrokerLifetime(deadline);
+    const beforeDispatch = vi.spyOn(control, "beforeDispatch");
+    let signal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn((_url, init) => { signal = init.signal; return new Promise(() => {}); }));
+    const result = lifetime.run(() => lifetime.upstream(scope => scope.fetch("https://fixture.invalid", {}), control)).catch(error => error.message);
+    expect(control.receipt().dispatched).toBe(1);
+    await vi.advanceTimersByTimeAsync(40);
+    await expect(result).resolves.toBe("broker_control_deadline_exhausted");
+    expect(signal?.aborted).toBe(true);
+    expect(beforeDispatch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("aborts a stalled Git fetch before one bounded REST fallback", async () => {
     vi.useFakeTimers();
     let release!: (value: Response) => void;

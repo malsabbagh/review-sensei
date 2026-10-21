@@ -22,7 +22,7 @@ export class BrokerLifetime {
 
   constrain(control: BrokerDispatchControl | undefined): void {
     this.control = control;
-    if (control && control.request.deadline_unix_ms < this.deadline) {
+    if (control && control.request.deadline_unix_ms <= this.deadline) {
       this.deadline = control.request.deadline_unix_ms;
       this.deadlineCode = "broker_control_deadline_exhausted";
       if (this.timer !== undefined) this.arm();
