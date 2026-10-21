@@ -651,10 +651,15 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("release_channels.py qualify --channel npm", self.workflow)
 
     def test_npm_publish_retains_approval_order_and_registry_readback(self):
-        self.assertIn("environment:\n      name: npm", self.workflow)
         publisher = self.workflow.split("  publish-npm:\n", 1)[1].split(
             "    steps:\n", 1
         )[0]
+        self.assertIn("needs: [qualify-source, assemble-npm]", publisher)
+        self.assertIn(
+            "if: needs.qualify-source.result == 'success' && needs.assemble-npm.result == 'success'",
+            publisher,
+        )
+        self.assertIn("environment:\n      name: npm", publisher)
         self.assertIn("contents: read", publisher)
         self.assertNotIn("contents: write", publisher)
         self.assertIn("id-token: write", self.workflow)
@@ -668,7 +673,30 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("npm audit signatures", self.workflow)
         self.assertIn('--expected-source-sha "${GITHUB_SHA}"', self.workflow)
 
+    def test_npm_tool_setup_disables_lifecycle_scripts_and_implicit_cache(self):
+        for job in ("assemble-npm", "publish-npm"):
+            with self.subTest(job=job):
+                body = self.workflow.split(f"  {job}:\n", 1)[1].split(
+                    "\n  channel-result:", 1
+                )[0]
+                if job == "assemble-npm":
+                    body = body.split("\n  publish-npm:", 1)[0]
+                self.assertIn("npm install --global --ignore-scripts npm@11.5.1", body)
+                node = body.split("uses: actions/setup-node@", 1)[1].split(
+                    "\n      - ", 1
+                )[0]
+                self.assertIn("package-manager-cache: false", node)
+
     def test_recovery_uses_exact_same_run_bundle_without_cross_run_dispatch(self):
+        publisher = self.workflow.split("  publish-npm:\n", 1)[1].split(
+            "\n  channel-result:", 1
+        )[0]
+        self.assertIn("needs: [qualify-source, assemble-npm]", publisher)
+        assembler = self.workflow.split("  assemble-npm:\n", 1)[1].split(
+            "\n  publish-npm:", 1
+        )[0]
+        for output in ("source_sha", "artifact_id", "artifact_digest", "build_attempt"):
+            self.assertRegex(assembler, rf"(?m)^      {output}: ")
         self.assertIn(
             "artifact-ids: ${{ needs.assemble-npm.outputs.artifact_id }}", self.workflow
         )
@@ -711,6 +739,21 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
             self.assertNotIn("continue-on-error", text)
             self.assertNotIn("actions: write", text)
             self.assertIn("sign_release.py --check-publication-gates", text)
+
+    def test_each_workflow_dependency_stays_with_its_channel(self):
+        python = (ROOT / ".github/workflows/release.yml").read_text()
+        for channel, workflow in (("python", python), ("npm", self.workflow)):
+            with self.subTest(channel=channel):
+                jobs = set(re.findall(r"(?m)^  ([\w-]+):$", workflow))
+                for needs in re.findall(r"(?m)^    needs: (.+)$", workflow):
+                    self.assertLessEqual(
+                        set(needs.strip("[]").replace(",", " ").split()), jobs
+                    )
+                self.assertIn(f"release-{channel}-result-", workflow)
+                other = "npm" if channel == "python" else "python"
+                self.assertNotIn(f"release-{other}-result-", workflow)
+        self.assertNotIn("github-release", self.workflow)
+        self.assertNotIn("draft-release", self.workflow)
 
 
 class NpmResumeRunTests(unittest.TestCase):

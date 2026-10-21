@@ -9,6 +9,8 @@
   require owner verification of all six npm publisher identities before use.
   Order npm publication after the verified public Python release so its existing
   read-only token needs no draft visibility or broader permission.
+  Retain script-free npm CLI installation and disabled implicit tool caching;
+  pin approval/dependency and same-run recovery guarantees in regression tests.
 
 ## 0.8.7 - 2026-10-20
 

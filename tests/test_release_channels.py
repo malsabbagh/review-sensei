@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import importlib
+import io
 import json
 import os
 import shutil
@@ -57,6 +58,20 @@ def environment(channel="python"):
 
 
 class ReleaseChannelTests(unittest.TestCase):
+    def test_missing_channel_is_a_usage_error_before_any_release_reads(self):
+        for command in ("qualify", "record"):
+            with (
+                self.subTest(command=command),
+                patch.object(sys, "argv", ["release_channels.py", command]),
+                patch("sys.stderr", new_callable=io.StringIO) as stderr,
+                patch.object(channels, "event_contract") as contract,
+            ):
+                with self.assertRaises(SystemExit) as error:
+                    channels.main()
+                self.assertEqual(error.exception.code, 2)
+                self.assertIn("--channel is required", stderr.getvalue())
+                contract.assert_not_called()
+
     def setUp(self):
         self.temp = self.enterContext(tempfile.TemporaryDirectory())
         self.root = Path(self.temp)
@@ -269,6 +284,49 @@ class ReleaseChannelTests(unittest.TestCase):
         self.assertEqual(receipt["source_sha"], SOURCE)
         self.assertEqual(receipt["jobs"][1]["conclusion"], "failure")
         self.assertEqual(receipt["artifacts"], self.artifacts)
+
+    def test_channel_result_requires_all_jobs_and_preserves_publisher_failures(self):
+        for channel in channels.WORKFLOWS:
+            self.jobs = [
+                {
+                    "id": index,
+                    "name": name,
+                    "run_attempt": 2,
+                    "status": "completed",
+                    "conclusion": "success",
+                }
+                for index, name in enumerate(sorted(channels.REQUIRED_JOBS[channel]), 1)
+            ]
+            self.jobs.append(
+                {
+                    "name": f"Record independent {channel} channel result",
+                    "run_attempt": 2,
+                    "status": "in_progress",
+                    "conclusion": None,
+                }
+            )
+            with (
+                self.subTest(channel=channel),
+                patch.dict(os.environ, self.environment(channel), clear=True),
+                patch.object(channels.docs, "api", return_value=run(channel)),
+            ):
+                self.assertTrue(channels.record(channel)["successful"])
+                publisher = next(j for j in self.jobs if "Publish" in j["name"])
+                for conclusion in ("failure", "cancelled", "skipped"):
+                    publisher["conclusion"] = conclusion
+                    receipt = channels.record(channel)
+                    self.assertFalse(receipt["successful"])
+                    self.assertIn(publisher, receipt["jobs"])
+                publisher["conclusion"] = "success"
+                self.jobs.append(
+                    {
+                        "name": "Additional channel check",
+                        "run_attempt": 2,
+                        "status": "completed",
+                        "conclusion": "failure",
+                    }
+                )
+                self.assertFalse(channels.record(channel)["successful"])
 
     def npm_bundle(self):
         bundle = self.root / "bundle"

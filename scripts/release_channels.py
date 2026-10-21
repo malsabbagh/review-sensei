@@ -277,6 +277,7 @@ def verify_npm(root: Path, bundle: Path) -> None:
 
 
 def record(channel: str) -> dict:
+    """Retain all non-recorder outcomes; any incomplete/failed job holds success."""
     contract = event_contract(channel)
     run = docs.api(f"actions/runs/{contract['run_id']}")
     jobs = [
@@ -313,6 +314,8 @@ def main() -> int:
     parser.add_argument("--bundle", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+    if args.command != "verify-npm" and args.channel is None:
+        parser.error("--channel is required for qualify and record")
     try:
         if args.command == "verify-npm":
             if args.bundle is None:
