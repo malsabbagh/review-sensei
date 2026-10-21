@@ -27,6 +27,8 @@ service ceiling. It carries no operation identity, authority or dispatch funding
 malformed or expired values refuse before upstream work. An existing controlled
 request retains its smaller original deadline, exact dispatch liability and
 receipt, redirect refusal and no-refund semantics. No cap or retry count rises.
+Admission and preparation latency consume that same client window: immediately
+before dispatch, shorten the transport timeout or refuse without another debit.
 
 The operation owns fetch abort signals and body-reader cancellation. Deadline
 checks fence every later dispatch, returned credential and cache commit, including
@@ -55,6 +57,9 @@ Completed-only caching instead makes simultaneous cold misses issue separate
 bounded reads; each actual fetch consumes its own original dispatch. No reusable
 caller ABI, App permission, secret, trust policy, feature opt-in or version tag
 changes. Source alone does not change the deployed Worker or installed client.
+The shared GitHub transport also bounds standalone setup reads to ten seconds per
+request; those callers do not acquire an aggregate exchange allowance. Broker
+entrypoints explicitly supply their one shared whole-exchange lifetime.
 
 ## Validation
 

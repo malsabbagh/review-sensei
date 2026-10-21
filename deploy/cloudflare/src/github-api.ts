@@ -425,7 +425,7 @@ function advertisedTagSha(bytes: Uint8Array, tag: string): string {
   return advertisedTagShas(bytes, tag).commitSha;
 }
 
-/** Shared bounded App-authenticated GitHub adapter used only by the broker. */
+/** Bounded GitHub transport shared by the broker and setup adapters. */
 export class GitHubApi {
   private privateKey: Promise<CryptoKey> | undefined;
   private readonly apiUrl: string;

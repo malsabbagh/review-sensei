@@ -23,6 +23,101 @@ class FakeResponse(io.BytesIO):
 
 
 class BrokerClientTests(unittest.TestCase):
+    def test_expired_admission_latency_never_opens_oidc_or_post_request(self):
+        for operation in ("oidc", "post"):
+            with self.subTest(operation=operation):
+                clock = [0.0]
+                admissions = []
+                dispatches = []
+
+                def admit():
+                    admissions.append(True)
+                    clock[0] = 2.0
+                    return 1.0
+
+                def opener(request, timeout):
+                    dispatches.append(request)
+                    return FakeResponse(b'{"value":"assertion","token":"scoped"}')
+
+                client = BrokerClient(opener=opener, timeout=1, before_request=admit)
+                with (
+                    mock.patch.dict(
+                        "os.environ",
+                        {
+                            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic",
+                            "ACTIONS_ID_TOKEN_REQUEST_URL": "https://fixture.invalid?fixture=1",
+                        },
+                        clear=True,
+                    ),
+                    mock.patch(
+                        "review_sensei_github.broker_client.time.monotonic",
+                        side_effect=lambda: clock[0],
+                    ),
+                    mock.patch(
+                        "review_sensei_github.broker_client.time.time",
+                        side_effect=lambda: 1000 + clock[0],
+                    ),
+                ):
+                    with self.assertRaises(GitHubBrokerClientError):
+                        client.request_oidc_token() if operation == "oidc" else client.exchange(
+                            "assertion"
+                        )
+                self.assertEqual(len(admissions), 1)
+                self.assertEqual(dispatches, [])
+
+    def test_partial_admission_latency_uses_only_the_remaining_original_window(self):
+        for operation in ("oidc", "post"):
+            with self.subTest(operation=operation):
+                clock = [0.0]
+                admissions = []
+                dispatches = []
+
+                def admit():
+                    admissions.append(True)
+                    clock[0] = 0.25
+                    return 1.0
+
+                def opener(request, timeout):
+                    dispatches.append((request, timeout))
+                    return FakeResponse(b'{"value":"assertion","token":"scoped"}')
+
+                client = BrokerClient(opener=opener, timeout=1, before_request=admit)
+                with (
+                    mock.patch.dict(
+                        "os.environ",
+                        {
+                            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic",
+                            "ACTIONS_ID_TOKEN_REQUEST_URL": "https://fixture.invalid?fixture=1",
+                        },
+                        clear=True,
+                    ),
+                    mock.patch(
+                        "review_sensei_github.broker_client.time.monotonic",
+                        side_effect=lambda: clock[0],
+                    ),
+                    mock.patch(
+                        "review_sensei_github.broker_client.time.time",
+                        side_effect=lambda: 1000 + clock[0],
+                    ),
+                ):
+                    result = (
+                        client.request_oidc_token()
+                        if operation == "oidc"
+                        else client.exchange("assertion")
+                    )
+                self.assertIn(result, ("assertion", "scoped"))
+                self.assertEqual(len(admissions), 1)
+                self.assertEqual(len(dispatches), 1)
+                self.assertEqual(dispatches[0][1], 0.75)
+                if operation == "post":
+                    self.assertEqual(
+                        dispatches[0][0].headers["X-reviewsensei-deadline-unix-ms"],
+                        "1001000",
+                    )
+                    self.assertEqual(
+                        json.loads(dispatches[0][0].data), {"oidc_token": "assertion"}
+                    )
+
     def test_oidc_late_read_never_returns_assertion_after_transport_timeout(self):
         client = BrokerClient(
             opener=lambda *args, **kwargs: FakeResponse(b'{"value":"secret"}')
@@ -38,7 +133,7 @@ class BrokerClientTests(unittest.TestCase):
             ),
             mock.patch(
                 "review_sensei_github.broker_client.time.monotonic",
-                side_effect=[0, 31, 31],
+                side_effect=[0, 0, 31, 31],
             ),
         ):
             with self.assertRaises(GitHubBrokerClientError) as caught:
@@ -110,8 +205,11 @@ class BrokerClientTests(unittest.TestCase):
                     return response
 
                 client = BrokerClient(opener=opener)
-                with self.assertRaises(GitHubBrokerClientError) as raised:
-                    client.exchange("secret assertion")
+                with mock.patch(
+                    "review_sensei_github.broker_client.time.monotonic", return_value=0
+                ):
+                    with self.assertRaises(GitHubBrokerClientError) as raised:
+                        client.exchange("secret assertion")
                 message = str(raised.exception)
                 self.assertIn("broker.transport_phase=" + phase, message)
                 self.assertIn("broker.transport_failure=" + failure, message)
@@ -175,7 +273,8 @@ class BrokerClientTests(unittest.TestCase):
         response.headers = {"cf-ray": "0123456789abcdef-YYZ", "authorization": "secret"}
         client = BrokerClient(opener=lambda *args, **kwargs: response)
         with mock.patch(
-            "review_sensei_github.broker_client.time.monotonic", side_effect=[0, 31, 31]
+            "review_sensei_github.broker_client.time.monotonic",
+            side_effect=[0, 0, 31, 31],
         ):
             with self.assertRaises(GitHubBrokerClientError) as raised:
                 client.exchange("assertion")

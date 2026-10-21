@@ -210,6 +210,23 @@ class BrokerClient:
             raise GitHubBrokerClientError("Broker request allowance is exhausted")
         return min(self.timeout, remaining)
 
+    def _dispatch_timeout(self, started: float, admitted: float) -> float:
+        """Spend preparation time inside the original window, without a debit."""
+        elapsed = time.monotonic() - started
+        if not math.isfinite(elapsed) or not 0 <= elapsed < admitted:
+            raise GitHubBrokerClientError(
+                "Broker request allowance expired before dispatch"
+            )
+        budget = getattr(self.before_request, "__self__", None)
+        if isinstance(budget, EvidenceReadBudget):
+            try:
+                budget.check()
+            except ReviewInputError as exc:
+                raise GitHubBrokerClientError(
+                    "Broker request allowance expired before dispatch"
+                ) from exc
+        return admitted - elapsed
+
     def _check_completed_request(
         self,
         started: float,
@@ -218,6 +235,7 @@ class BrokerClient:
         post: bool,
         status: int | None,
         ray: str | None,
+        dispatch_timeout: float,
     ) -> None:
         if time.monotonic() - started >= timeout:
             raise GitHubBrokerClientError(
@@ -230,7 +248,7 @@ class BrokerClient:
                     TimeoutError(),
                     "response_read",
                     started,
-                    timeout,
+                    dispatch_timeout,
                     post=post,
                     status=status,
                     ray=ray,
@@ -262,8 +280,9 @@ class BrokerClient:
         phase = "request_open"
         status, ray = None, None
         timeout = self._request_timeout()
+        dispatch_timeout = self._dispatch_timeout(started, timeout)
         try:
-            with self.opener(request, timeout=timeout) as response:
+            with self.opener(request, timeout=dispatch_timeout) as response:
                 status, ray = _response_metadata(response)
                 phase = "response_read"
                 raw = response.read(MAX_BROKER_BODY_BYTES + 1)
@@ -284,11 +303,22 @@ class BrokerClient:
             raise GitHubBrokerClientError(
                 "OIDC token request failed; "
                 + _transport_message(
-                    exc, phase, started, timeout, post=False, status=status, ray=ray
+                    exc,
+                    phase,
+                    started,
+                    dispatch_timeout,
+                    post=False,
+                    status=status,
+                    ray=ray,
                 )
             ) from exc
         self._check_completed_request(
-            started, timeout, post=False, status=status, ray=ray
+            started,
+            timeout,
+            post=False,
+            status=status,
+            ray=ray,
+            dispatch_timeout=dispatch_timeout,
         )
         if not isinstance(parsed, dict):
             raise GitHubBrokerClientError("OIDC token response was invalid")
@@ -614,11 +644,12 @@ class BrokerClient:
             payload = {**payload, "control_budget": control_request}
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         started = time.monotonic()
+        wall_started = time.time()
         phase = "request_open"
         status, ray = None, None
         timeout = self._request_timeout()
         original_budget = getattr(self.before_request, "__self__", None)
-        deadline_ms = int((time.time() + timeout) * 1000)
+        deadline_ms = int((wall_started + timeout) * 1000)
         if isinstance(original_budget, EvidenceReadBudget):
             deadline_ms = min(deadline_ms, original_budget.wall_deadline_ms)
         request = Request(
@@ -631,8 +662,9 @@ class BrokerClient:
             },
             method="POST",
         )
+        dispatch_timeout = self._dispatch_timeout(started, timeout)
         try:
-            with self.opener(request, timeout=timeout) as response:
+            with self.opener(request, timeout=dispatch_timeout) as response:
                 status, ray = _response_metadata(response)
                 phase = "response_read"
                 raw = response.read(MAX_BROKER_BODY_BYTES + 1)
@@ -658,11 +690,22 @@ class BrokerClient:
             raise GitHubBrokerClientError(
                 "Broker token request failed; "
                 + _transport_message(
-                    exc, phase, started, timeout, post=True, status=status, ray=ray
+                    exc,
+                    phase,
+                    started,
+                    dispatch_timeout,
+                    post=True,
+                    status=status,
+                    ray=ray,
                 )
             ) from exc
         self._check_completed_request(
-            started, timeout, post=True, status=status, ray=ray
+            started,
+            timeout,
+            post=True,
+            status=status,
+            ray=ray,
+            dispatch_timeout=dispatch_timeout,
         )
         if not isinstance(parsed, dict):
             raise GitHubBrokerClientError("Broker token response was invalid")
