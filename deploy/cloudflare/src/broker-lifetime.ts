@@ -89,6 +89,9 @@ export class BrokerUpstream {
 
   constructor(private readonly lifetime: BrokerLifetime, private readonly parent: AbortSignal,
     private readonly paid: AbortSignal | undefined, private readonly control?: BrokerDispatchControl, private readonly span?: BrokerSpan) {
+    // A refused constructor cannot be closed by its caller. Check before
+    // attaching listeners that would retain this otherwise unreachable scope.
+    const remaining = Math.min(BROKER_UPSTREAM_MS, lifetime.check());
     parent.addEventListener("abort", this.parentAbort, { once: true });
     paid?.addEventListener("abort", this.paidAbort, { once: true });
     if (parent.aborted) this.parentAbort();
@@ -99,7 +102,7 @@ export class BrokerUpstream {
       try { lifetime.check(); }
       catch (error) { this.controller.abort(error); return; }
       this.controller.abort(new Error("broker_upstream_timeout"));
-    }, Math.min(BROKER_UPSTREAM_MS, lifetime.check()));
+    }, remaining);
   }
 
   check(): void {

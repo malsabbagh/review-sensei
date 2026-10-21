@@ -8,6 +8,29 @@ afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(
 const env = { GITHUB_APP_ID: "123", GITHUB_APP_PRIVATE_KEY: "unused" } as WorkerEnv;
 
 describe("uncontrolled broker upstream lifetime", () => {
+  it("does not attach upstream listeners if the paid deadline expires during construction", async () => {
+    vi.useFakeTimers();
+    const deadline = Date.now() + 40;
+    const control = new BrokerDispatchControl({schema_version:"1.0",operation_id:"a".repeat(64),request_id:"b".repeat(64),deadline_unix_ms:deadline,max_dispatches:1});
+    const original = control.beforeDispatch.bind(control);
+    let paidListeners: ReturnType<typeof vi.spyOn> | undefined;
+    let dispatched: number | undefined;
+    const admission = vi.spyOn(control, "beforeDispatch").mockImplementation(() => {
+      const signal = original();
+      dispatched = control.receipt().dispatched;
+      paidListeners = vi.spyOn(signal, "addEventListener");
+      vi.setSystemTime(deadline);
+      return signal;
+    });
+    vi.stubGlobal("fetch", vi.fn());
+    const lifetime = new BrokerLifetime();
+    await expect(lifetime.run(() => lifetime.upstream(scope => scope.fetch("https://fixture.invalid", {}), control))).rejects.toThrow("broker_control_deadline_exhausted");
+    expect(admission).toHaveBeenCalledTimes(1);
+    expect(dispatched).toBe(1); // No refund or second admission after expiry.
+    expect(fetch).not.toHaveBeenCalled();
+    expect(paidListeners).not.toHaveBeenCalled();
+  });
+
   it("keeps the original control reason in a direct adapter's deadline timer", async () => {
     vi.useFakeTimers();
     const control = new BrokerDispatchControl({schema_version:"1.0",operation_id:"a".repeat(64),request_id:"b".repeat(64),deadline_unix_ms:Date.now()+40,max_dispatches:1});
