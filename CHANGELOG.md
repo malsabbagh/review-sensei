@@ -2,9 +2,14 @@
 
 ## Unreleased
 
+## 0.8.8 - 2026-10-21
+
 - Bound broker bootstrap exchanges and upstream reads, isolate pending JWKS work,
   and report sanitized transport/lookup failure facts without automatic POST replay.
 
+## review-sensei-github 0.3.8 - 2026-10-21
+
+- Pin `review-sensei==0.8.8`.
 
 ## 0.8.7 - 2026-10-20
 
