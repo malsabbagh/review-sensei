@@ -1,91 +1,49 @@
-name: Publish npm packages
+name: Release npm
 
-# Must stay byte-identical to the Python resume check: f"publish-npm {version}"
-run-name: publish-npm ${{ github.event.inputs.version }}
-
+# The existing Release Marshal pushes one signed core tag; both channels consume it.
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Exact npm package version, for example 0.1.0"
-        required: true
-        type: string
-        default: "0.6.15"
-      publish:
-        description: "Publish after validation (false prepares only the attested package bundle)"
-        required: true
-        type: boolean
-        default: false
-      bootstrap:
-        description: "Use the one-time NPM_TOKEN bootstrap for 0.1.0 only"
-        required: true
-        type: boolean
-        default: false
-      resume_bundle_run_id:
-        description: "Optional failed workflow run ID whose attested npm release bundle should be reused instead of rebuilding"
-        required: false
-        type: string
-        default: ""
+  push:
+    tags:
+      - "v*.*.*"
 
 permissions:
   contents: read
 
-concurrency:
-  # Matches release.yml's tag job group (publish-npm-vX.Y.Z).
-  group: publish-npm-v${{ inputs.version }}
-  cancel-in-progress: false
-
 jobs:
-  verify-request:
-    name: Verify public npm release request
+  qualify-source:
+    name: Qualify signed prepared source and exact-head CI
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     outputs:
-      source_sha: ${{ steps.source.outputs.sha }}
-      resume_mode: ${{ steps.source.outputs.resume_mode }}
+      tag_object: ${{ steps.contract.outputs.tag_object }}
+      source_sha: ${{ steps.contract.outputs.source_sha }}
+      version: ${{ steps.contract.outputs.version }}
     steps:
-      - name: Require the canonical public default branch
-        env:
-          EXPECTED_REPOSITORY: malsabbagh/review-sensei
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          BOOTSTRAP: ${{ inputs.bootstrap }}
-        run: |
-          set -euo pipefail
-          test "$GITHUB_REPOSITORY" = "$EXPECTED_REPOSITORY"
-          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
-          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
-          test "$BOOTSTRAP" = "true" || test "$BOOTSTRAP" = "false"
-
-      - name: Check out the immutable dispatch source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-
-      - name: Validate source and release version
-        id: source
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install pinned manifest validator
+        run: python -m pip install --disable-pip-version-check jsonschema==4.26.0
+      - name: Require the signed tag to bind the exact CI-qualified generated commit
+        id: contract
         env:
-          VERSION: ${{ inputs.version }}
-          RESUME_BUNDLE_RUN_ID: ${{ inputs.resume_bundle_run_id }}
-        run: |
-          set -euo pipefail
-          source_sha="$(git rev-parse HEAD)"
-          test "$source_sha" = "$GITHUB_SHA"
-          python scripts/check_release_version.py --tag "v$VERSION"
-          if [[ -n "$RESUME_BUNDLE_RUN_ID" ]]; then
-            if [[ ! "$RESUME_BUNDLE_RUN_ID" =~ ^[0-9]+$ ]]; then
-              echo "resume_bundle_run_id must be a numeric workflow run ID"
-              exit 1
-            fi
-            printf 'resume_mode=true\n' >> "$GITHUB_OUTPUT"
-          else
-            printf 'resume_mode=false\n' >> "$GITHUB_OUTPUT"
-          fi
-          printf 'sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release_channels.py qualify --channel npm --root "$GITHUB_WORKSPACE"
+      - name: Require unchanged Mo approval gates before release builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/sign_release.py --check-publication-gates
 
   native-build:
     name: Native standalone (${{ matrix.target }})
-    needs: verify-request
-    if: ${{ needs.verify-request.outputs.resume_mode != 'true' }}
+    needs: qualify-source
     strategy:
       fail-fast: false
       matrix:
@@ -104,30 +62,25 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Check out the verified source
+      - name: Check out tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.verify-request.outputs.source_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
-
       - name: Set up Python
         if: ${{ !startsWith(matrix.target, 'linux-') }}
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-
       - name: Install standalone smoke oracle
         if: ${{ !startsWith(matrix.target, 'linux-') }}
         run: python scripts/install_standalone_oracle.py --target "${{ matrix.target }}"
-
       - name: Install pinned PyInstaller
         if: ${{ !startsWith(matrix.target, 'linux-') }}
         run: python -m pip install --disable-pip-version-check -r packaging/standalone/requirements.txt
-
       - name: Build one-folder standalone executable
         if: ${{ !startsWith(matrix.target, 'linux-') }}
         run: python scripts/build_standalone.py --target "${{ matrix.target }}" --output "dist/standalone/${{ matrix.target }}"
-
       - name: Verify frozen Intel cryptography ABI
         if: ${{ matrix.target == 'darwin-x64' }}
         run: python scripts/check_standalone_crypto.py --bundle dist/standalone/darwin-x64/review-sensei
@@ -152,12 +105,10 @@ jobs:
             --fixture-response evaluation/v1/responses/off-by-one.json \
             --base-ref "$base_ref" \
             --head-ref "$head_ref"
-
       - name: Build and smoke Linux standalone on Debian 12
         if: ${{ startsWith(matrix.target, 'linux-') }}
         shell: bash
         run: bash scripts/build_linux_standalone_in_container.sh "${{ matrix.target }}"
-
       - name: Upload native bundle
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -167,35 +118,34 @@ jobs:
 
   assemble-npm:
     name: Assemble and validate npm package set
-    needs: [verify-request, native-build]
-    # Skipped on resume dispatches and when native-build did not succeed.
-    if: ${{ needs.verify-request.outputs.resume_mode != 'true' && needs.verify-request.result == 'success' && needs.native-build.result == 'success' }}
+    needs: native-build
     runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+      artifact_id: ${{ steps.bundle.outputs.artifact-id }}
+      artifact_digest: ${{ steps.bundle.outputs.artifact-digest }}
+      build_attempt: ${{ steps.source.outputs.attempt }}
     permissions:
       contents: read
       id-token: write
       attestations: write
     steps:
-      - name: Check out the verified source
+      - name: Check out tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.verify-request.outputs.source_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
-
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
           package-manager-cache: false
-
       - name: Install pinned npm pack CLI
         run: npm install --global --ignore-scripts npm@11.5.1
-
       - name: Download native bundles
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -203,7 +153,6 @@ jobs:
           pattern: review-sensei-standalone-*
           path: dist/native
           merge-multiple: false
-
       - name: Restore POSIX executable modes
         shell: bash
         run: |
@@ -214,11 +163,8 @@ jobs:
             test "${#payloads[@]}" -eq 1
             chmod u=rwx,go=rx "${payloads[0]}"
           done
-
       - name: Assemble six package directories
         shell: bash
-        env:
-          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           python scripts/prepare_npm_packages.py \
@@ -228,31 +174,31 @@ jobs:
             --bundle linux-arm64-gnu=dist/native/review-sensei-standalone-linux-arm64-gnu \
             --bundle linux-x64-gnu=dist/native/review-sensei-standalone-linux-x64-gnu \
             --bundle win32-x64=dist/native/review-sensei-standalone-win32-x64
-          python scripts/validate_npm_package.py dist/npm --expected-version "$VERSION"
-          python scripts/check_release_version.py --tag "v$VERSION"
-
+          python scripts/validate_npm_package.py dist/npm --expected-version "${GITHUB_REF_NAME#v}"
+          python scripts/check_release_version.py --tag "$GITHUB_REF_NAME"
       - name: Install standalone smoke oracle
         # The oracle runs the checkout source's `python -m review_sensei`; this
         # job validates the packaged launcher, so the installed distribution is
         # only the comparison baseline.
         run: python -m pip install --disable-pip-version-check .
-
       - name: Run native smoke harness where the runner can execute it
         shell: bash
         run: |
           set -euo pipefail
+          # The matrix already exercised the native executable. This check
+          # re-runs the documented local review contract for the assembled
+          # launcher package, including the clean-host, format, and exit-code
+          # cases; clean-machine registry smoke remains a maintainer-owned gate.
           python scripts/standalone_smoke.py \
             --executable dist/npm/linux-x64-gnu/bin/review-sensei \
             --repository "$GITHUB_WORKSPACE" \
             --diff evaluation/v1/diffs/off-by-one.patch \
             --fixture-response evaluation/v1/responses/off-by-one.json
-
       - name: Pack and validate exact npm tarballs
         shell: bash
-        env:
-          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          python scripts/check_release_version.py --tag "$GITHUB_REF_NAME"
           mkdir -p release/npm
           packages=(cli darwin-arm64 darwin-x64 linux-arm64-gnu linux-x64-gnu win32-x64)
           : > release/npm/SHA256SUMS
@@ -267,7 +213,7 @@ jobs:
           print(value[0]["filename"])
           PY
             )
-            python scripts/validate_npm_package.py "release/npm/$tarball" --expected-version "$VERSION"
+            python scripts/validate_npm_package.py "release/npm/$tarball" --expected-version "${GITHUB_REF_NAME#v}"
             python - "$package" "$tarball" <<'PY'
           import base64
           import hashlib
@@ -287,15 +233,14 @@ jobs:
           done
           python scripts/write_bundle_metadata.py \
             --bundle-dir release/npm \
-            --version "$VERSION" \
+            --tag "$GITHUB_REF_NAME" \
             --source-sha "$(git rev-parse HEAD)"
-
       - name: Attest exact npm tarballs
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-checksums: release/npm/SHA256SUMS
-
       - name: Upload exact npm release bundle
+        id: bundle
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: review-sensei-npm-release-bundle
@@ -305,14 +250,20 @@ jobs:
             release/npm/SHA256SUMS
             release/npm/integrity.jsonl
             release/npm/bundle-metadata.json
+      - name: Record attested source commit
+        id: source
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
 
   publish-npm:
-    name: Publish npm packages
-    # Resume dispatches are selected by verify-request resume_mode; assemble-npm must
-    # be skipped on that path so a fresh bundle was not assembled in this run.
-    needs: [verify-request, native-build, assemble-npm]
-    if: ${{ inputs.publish && always() && needs.verify-request.result == 'success' && ((needs.verify-request.outputs.resume_mode != 'true' && needs.native-build.result == 'success' && needs.assemble-npm.result == 'success') || (needs.verify-request.outputs.resume_mode == 'true' && needs.native-build.result == 'skipped' && needs.assemble-npm.result == 'skipped')) }}
+    name: Publish npm packages with Trusted Publishing
+    needs: [qualify-source, assemble-npm]
+    if: needs.qualify-source.result == 'success' && needs.assemble-npm.result == 'success'
     runs-on: ubuntu-latest
+    concurrency:
+      group: publish-npm-${{ github.ref_name }}
+      cancel-in-progress: false
     environment:
       name: npm
       url: https://www.npmjs.com/org/reviewsensei
@@ -328,210 +279,82 @@ jobs:
           node-version: "22"
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
-
       - name: Set up Python for release metadata checks
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
-
-      - name: Check out repository for resumed run validation
-        if: ${{ needs.verify-request.outputs.resume_mode == 'true' }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          path: resume-source
-          persist-credentials: false
-          show-progress: false
-
       - name: Install pinned npm Trusted Publishing CLI
         run: npm install --global --ignore-scripts npm@11.5.1
-
       - name: Download validated npm release bundle
-        if: ${{ needs.verify-request.outputs.resume_mode != 'true' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           # Single-artifact downloads still extract directly into path in v8.
-          name: review-sensei-npm-release-bundle
+          artifact-ids: ${{ needs.assemble-npm.outputs.artifact_id }}
+          merge-multiple: true
+          digest-mismatch: error
           path: release/npm
-
-      - name: Download npm release bundle from prior workflow run
-        id: resume-bundle
-        if: ${{ needs.verify-request.outputs.resume_mode == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RESUME_BUNDLE_RUN_ID: ${{ inputs.resume_bundle_run_id }}
-          VERSION: ${{ inputs.version }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          DISPATCH_SOURCE_SHA: ${{ needs.verify-request.outputs.source_sha }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${DISPATCH_SOURCE_SHA:-}" ]]; then
-            echo "verify-request did not produce a dispatch source SHA" >&2
-            exit 1
-          fi
-          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RESUME_BUNDLE_RUN_ID" --jq '{id,conclusion,path,event,head_branch,head_sha,repository:.repository.full_name,display_title}')"
-          bundle_source_sha="$(python3 resume-source/scripts/validate_npm_resume_run.py \
-            --run-id "$RESUME_BUNDLE_RUN_ID" \
-            --repository "$GITHUB_REPOSITORY" \
-            --default-branch "$DEFAULT_BRANCH" \
-            --version "$VERSION" \
-            --dispatch-source-sha "$DISPATCH_SOURCE_SHA" <<< "$run_json")"
-          git -C resume-source fetch origin "$bundle_source_sha"
-          git -C resume-source cat-file -e "$bundle_source_sha^{commit}"
-          git -C resume-source checkout --detach "$bundle_source_sha"
-          python resume-source/scripts/check_release_version.py --tag "v$VERSION"
-          resume_staging="$RUNNER_TEMP/resume-bundle-staging"
-          rm -rf "$resume_staging"
-          mkdir -p "$resume_staging"
-          gh run download "$RESUME_BUNDLE_RUN_ID" \
-            --repo "$GITHUB_REPOSITORY" \
-            --name review-sensei-npm-release-bundle \
-            --dir "$resume_staging"
-          python resume-source/scripts/publish_npm_release.py verify-bundle \
-            --bundle-dir "$resume_staging" \
-            --version "$VERSION" \
-            --expected-source-sha "$bundle_source_sha"
-          (
-            cd "$resume_staging"
-            sha256sum --check SHA256SUMS
-            while IFS= read -r filename; do
-              [[ -z "$filename" ]] && continue
-              gh attestation verify "$filename" \
-                --repo "$GITHUB_REPOSITORY" \
-                --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish-npm.yml" \
-                --source-ref "refs/heads/$DEFAULT_BRANCH" \
-                --source-digest "$bundle_source_sha"
-            done < <(
-              python resume-source/scripts/publish_npm_release.py list-attestation-subjects \
-                --bundle-dir "$resume_staging"
-            )
-          )
-          rm -rf release/npm
-          mkdir -p release/npm
-          cp -a "$resume_staging"/. release/npm/
-          test -f release/npm/integrity.jsonl
-          test -f release/npm/bundle-metadata.json
-          test -f release/npm/SHA256SUMS
-          echo "bundle_source_sha=$bundle_source_sha" >> "$GITHUB_OUTPUT"
-
       - name: Verify downloaded npm tarball checksums
         shell: bash
         working-directory: release/npm
         run: sha256sum --check SHA256SUMS
-
       - name: Check out publish helper sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.verify-request.outputs.source_sha }}
-          fetch-depth: 1
+          ref: ${{ needs.assemble-npm.outputs.source_sha }}
+          fetch-depth: 0
           path: source
           persist-credentials: false
           show-progress: false
-
       - name: Assert helper checkout matches attested build source
         shell: bash
         env:
-          SOURCE_SHA: ${{ needs.verify-request.outputs.source_sha }}
+          SOURCE_SHA: ${{ needs.assemble-npm.outputs.source_sha }}
         run: |
           set -euo pipefail
           test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
           test -z "$(git -C source status --porcelain=v1)"
           test -f source/scripts/publish_npm_release.py
 
-      - name: Verify resumed npm release bundle provenance
-        if: ${{ needs.verify-request.outputs.resume_mode == 'true' }}
+      - name: Install pinned manifest validator
+        run: python -m pip install --disable-pip-version-check jsonschema==4.26.0
+      - name: Requalify signed contract, exact artifact, provenance and published Python release
         env:
-          VERSION: ${{ inputs.version }}
+          EXPECTED_TAG_OBJECT: ${{ needs.qualify-source.outputs.tag_object }}
           GH_TOKEN: ${{ github.token }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          set -euo pipefail
-          bundle_source_sha="${{ steps.resume-bundle.outputs.bundle_source_sha }}"
-          test -n "$bundle_source_sha"
-          python resume-source/scripts/publish_npm_release.py verify-bundle \
-            --bundle-dir "$GITHUB_WORKSPACE/release/npm" \
-            --version "$VERSION" \
-            --expected-source-sha "$bundle_source_sha"
-          (
-            cd "$GITHUB_WORKSPACE/release/npm"
-            while IFS= read -r filename; do
-              [[ -z "$filename" ]] && continue
-              gh attestation verify "$filename" \
-                --repo "$GITHUB_REPOSITORY" \
-                --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish-npm.yml" \
-                --source-ref "refs/heads/$DEFAULT_BRANCH" \
-                --source-digest "$bundle_source_sha"
-            done < <(
-              python resume-source/scripts/publish_npm_release.py list-attestation-subjects \
-                --bundle-dir "$GITHUB_WORKSPACE/release/npm"
-            )
-          )
-
-      - name: Configure bootstrap authentication when present
-        shell: bash
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          BOOTSTRAP: ${{ inputs.bootstrap }}
-          VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          if [[ "$BOOTSTRAP" == "true" ]]; then
-            test "$VERSION" = "0.1.0"
-            test -n "$NPM_TOKEN"
-            npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN"
-          elif [[ -n "$NPM_TOKEN" ]]; then
-            echo "NPM_TOKEN is configured but bootstrap=false; remove the bootstrap secret before Trusted Publishing."
-            exit 1
-          else
-            echo "Using npm Trusted Publishing OIDC."
-          fi
+          BUNDLE_ARTIFACT_ID: ${{ needs.assemble-npm.outputs.artifact_id }}
+          BUNDLE_ARTIFACT_DIGEST: ${{ needs.assemble-npm.outputs.artifact_digest }}
+          BUNDLE_BUILD_ATTEMPT: ${{ needs.assemble-npm.outputs.build_attempt }}
+        run: >-
+          python source/scripts/release_channels.py verify-npm
+          --root "$GITHUB_WORKSPACE/source" --bundle "$GITHUB_WORKSPACE/release/npm"
 
       - name: Verify registry state against attested tarballs
         shell: bash
-        env:
-          VERSION: ${{ inputs.version }}
-          RESUME_SOURCE_SHA: ${{ steps.resume-bundle.outputs.bundle_source_sha }}
-          RESUME_BUNDLE_RUN_ID: ${{ inputs.resume_bundle_run_id }}
-        run: |
-          set -euo pipefail
-          args=(
-            python source/scripts/publish_npm_release.py preflight
-            --bundle-dir "$GITHUB_WORKSPACE/release/npm"
-            --version "$VERSION"
-          )
-          if [[ -n "${RESUME_BUNDLE_RUN_ID}" ]]; then
-            if [[ -z "${RESUME_SOURCE_SHA:-}" ]]; then
-              echo "resume publish requires bundle_source_sha from resume-bundle step" >&2
-              exit 1
-            fi
-            args+=(--expected-source-sha "$RESUME_SOURCE_SHA")
-          fi
-          "${args[@]}"
+        run: >-
+          python source/scripts/publish_npm_release.py preflight
+          --bundle-dir "$GITHUB_WORKSPACE/release/npm"
+          --version "${GITHUB_REF_NAME#v}"
+          --expected-source-sha "${GITHUB_SHA}"
 
       - name: Publish platform packages first and read back integrity
         shell: bash
-        env:
-          VERSION: ${{ inputs.version }}
         run: >-
           python source/scripts/publish_npm_release.py publish-platforms
           --bundle-dir "$GITHUB_WORKSPACE/release/npm"
-          --version "$VERSION"
+          --version "${GITHUB_REF_NAME#v}"
 
       - name: Publish launcher last and read back integrity
         shell: bash
-        env:
-          VERSION: ${{ inputs.version }}
         run: >-
           python source/scripts/publish_npm_release.py publish-launcher
           --bundle-dir "$GITHUB_WORKSPACE/release/npm"
-          --version "$VERSION"
+          --version "${GITHUB_REF_NAME#v}"
 
       - name: Verify a clean Linux consumer installation
         shell: bash
-        env:
-          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
           prefix="$(mktemp -d)"
           trap 'rm -rf "$prefix"' EXIT
           npm install --ignore-scripts --prefix "$prefix" "@reviewsensei/cli@$VERSION"
@@ -551,3 +374,33 @@ jobs:
           NODE
           "$prefix/node_modules/.bin/review-sensei" --help >/dev/null
           npm audit signatures --prefix "$prefix"
+
+  channel-result:
+    name: Record independent npm channel result
+    needs: [qualify-source, native-build, assemble-npm, publish-npm]
+    if: ${{ always() && needs.qualify-source.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Retain authenticated channel facts without changing failed job results
+        env:
+          EXPECTED_TAG_OBJECT: ${{ needs.qualify-source.outputs.tag_object }}
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/release_channels.py record --channel npm
+          --output "$RUNNER_TEMP/channel-result.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-npm-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/channel-result.json
+          if-no-files-found: error
+          retention-days: 90

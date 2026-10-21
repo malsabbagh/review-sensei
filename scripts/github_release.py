@@ -198,6 +198,10 @@ def release_body(context: Context, assets: dict[str, Path]) -> str:
         name: hashlib.sha256(path.read_bytes()).hexdigest()
         for name, path in sorted(assets.items())
     }
+    return release_body_inventory(context, inventory)
+
+
+def release_body_inventory(context: Context, inventory: dict[str, str]) -> str:
     binding = json.dumps(
         {
             "schema": 1,

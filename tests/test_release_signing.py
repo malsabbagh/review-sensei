@@ -743,10 +743,12 @@ class SigningWorkflowTests(unittest.TestCase):
         text = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertIn("sign_release.py --check-publication-gates", text)
         self.assertIn(
-            "needs: [build, draft-release, publish]",
+            "needs: [qualify-source, build, draft-release, publish]",
             text.split("  github-release:\n", 1)[1],
         )
-        self.assertIn("name: npm", text)
+        npm = (ROOT / ".github/workflows/publish-npm.yml").read_text()
+        self.assertIn("name: npm", npm)
+        self.assertNotIn("RELEASE_SIGNING_PRIVATE_KEY", npm)
         self.assertIn("name: pypi", text)
         self.assertNotIn("RELEASE_SIGNING_PRIVATE_KEY", text)
 

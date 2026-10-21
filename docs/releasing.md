@@ -1,12 +1,23 @@
 # Releasing ReviewSensei
 
-This runbook covers the first public package release and subsequent patch or
-minor releases. The tag-triggered workflow builds Python and npm artifacts
-from a version tag, validates and attests them, then publishes to PyPI, npm,
-and a GitHub release. The manual npm workflow is available for independent
-npm releases and recovery. Package publication is a maintainer operation;
-ordinary pull requests must not push
-tags or invoke a release workflow.
+The existing Release Marshal (`prepare-release.yml` and its dedicated
+`sign_release.py` signer) prepares one reviewed core version and immutable
+signed `vX.Y.Z` tag. Its existing App-token tag push starts **two workflow
+runs** from that exact source:
+
+- `release.yml` / **Release**: Python build, documentation, reviewed GitHub
+  draft, protected PyPI publication and GitHub finalization.
+- `publish-npm.yml` / **Release npm**: five native builds, six attested npm
+  tarballs and protected npm publication.
+
+Both qualify the prepared receipt, signed tag object, exact source/CI and
+matching core/npm version. The hosted adapter retains its independent version
+and `release-github.yml` / `pypi-github` identity. There is no new dispatcher,
+App permission or signing credential. See [ADR 0100](adr/0100-independent-release-channel-runs.md).
+
+This process applies only to newly prepared releases containing the split.
+Existing signed tags retain their original workflows. Package publication and
+workflow retries remain maintainer operations; an ordinary PR grants neither.
 
 For the next complete-evidence library and lasting unified repository pipeline,
 follow [the runtime rollout plan](review-runtime-rollout.md). Its next-version
@@ -23,7 +34,8 @@ harness, and documents the default-branch dispatch needed for historical targets
 
 Starting with the next release containing this policy, successful Python and
 docs builds prepare a **draft** GitHub Release before protected publication
-approval. Native/npm assembly runs independently. Notes come from that version's reviewed, dated changelog
+approval. Native/npm assembly runs in the separate **Release npm** run. Notes
+come from that version's reviewed, dated changelog
 section, with links to its exact source commit and Release run. The four assets
 are the validated wheel, source archive, `SHA256SUMS` and SPDX SBOM. Checksums
 cover all three payloads; their GitHub build attestations must bind the signed
@@ -34,7 +46,9 @@ own distribution channels. After the PyPI publisher succeeds, the final job
 publishes the verified draft without waiting for npm assembly or publication.
 A pending or failed npm lane stays visible and must be recovered independently;
 it is never marked successful to qualify the Python release.
-A draft or failed Release run cannot trigger released-docs Pages deployment.
+Pages requires both complete successful channel runs for the same signed
+tag/source.
+A draft or failed Python or npm channel cannot authorize released-docs Pages.
 No additional GitHub App, private key, rules bypass or registry credential is
 needed: the two GitHub Release jobs use their short-lived workflow token with
 Contents write, Actions read and Attestations read. They cannot approve the
@@ -87,130 +101,129 @@ apply; this policy grants no authority to promote a channel.
 npm is a Node launcher with optional platform packages containing frozen native
 engine binaries, rather than an installer of the PyPI package. Its exact
 six-tarball inventory, attestations, registry integrity readback and protected
-publication remain separately verified. Released Pages documentation continues
-to require the complete successful Release including npm; that separate docs
-policy is not a prerequisite for v5 validation.
+publication remain separately verified. Released Pages documentation requires both successful Python and npm runs;
+that separate docs policy is not a prerequisite for v5 validation.
 
-## npm release paths (issue #103)
+## Independent retry and npm publication (issue #103)
 
-The `Release` workflow's `publish-npm` job is the normal npm path for a
-`vX.Y.Z` tag. It publishes the attested platform tarballs before the launcher
-from the same tagged source. Its `npm` environment must allow a **tag** rule
-matching `v*.*.*`; a `main` **branch** rule does not admit a tag, even when
-that tag points to a commit on `main`. Keep the maintainer review gate. Register
-`.github/workflows/release.yml` as an npm Trusted Publisher with `npm publish`
-permission for all six packages, in addition to the manual workflow identity
-below. The environment and npm trust settings are external repository/registry
-configuration; merging this runbook does not change them.
+npm publishes only from the Marshal's signed `vX.Y.Z` push in
+`publish-npm.yml`. The old default-branch manual/bootstrap/cross-run resume
+publisher is retired for future releases. No user-supplied version, source,
+run ID or artifact can start a second publisher. Each channel requires exactly
+one original tag-push run; recover that run, never dispatch another workflow
+or delete/recreate a tag. Duplicate runs fail closed, even when one failed.
 
-If the tag's npm job fails while the build and assembly jobs succeeded, re-run
-only that job (`gh run rerun --job <npm-job-id> --repo malsabbagh/review-sensei`).
-GitHub retains the original tag ref and commit for a job re-run, and the job
-downloads the original run's validated npm bundle. Do not move or recreate the
-tag to recover a publication failure. If any package reached npm, the preflight
-must find the exact attested integrity before publishing missing packages.
+The `npm` environment keeps Mo's approval and its existing `v*.*.*` tag rule.
+After approval, npm requalifies the signed source/version and the exact artifact
+ID/digest emitted by its own assembly job. Downloads fail on digest mismatch.
+All six tarballs plus source metadata must have verified GitHub attestations
+for this workflow, signed ref/source, GitHub-hosted runner and original build
+run/attempt. Publisher-only retries reuse the original successful assembly
+attempt, rather than guessing the current publishing attempt. npm publication
+requires the matching **published** stable Python release, a terminal-success
+Python channel run, successful latest source/build/docs/draft/PyPI/finalizer
+jobs, exact reviewed notes/source/run
+binding and four assets. npm never downloads Python's build artifact.
 
-The public `malsabbagh/review-sensei` repository owns the npm package source
-and the manual [`.github/workflows/publish-npm.yml`](../.github/workflows/publish-npm.yml)
-release path. Dispatch it only from public `main`; it pins the dispatch SHA,
-checks the requested version against the package metadata and changelog, then
-builds each native target on a matching runner. It assembles the launcher plus
-five platform directories under ignored staging and runs non-dry-run `npm pack`
-for every directory. The exact `.tgz` bytes are independently validated, hashed
-as SHA-256 and npm SRI, attested, and uploaded as one release bundle.
+Approve npm only after the original Python run reaches terminal success,
+including its result recorder. This intentionally orders npm publication after
+Python finalization and recording. Native/npm
+builds can run concurrently with Python. If npm reaches verification first,
+missing publication or failed/pending finalization holds that publisher; after
+Python recovery succeeds, retry the original npm publisher with its retained
+attested bundle. No polling loop, rebuild or new run is introduced. Python
+finalization and qualification still do not wait for npm, and its run can become
+terminal and retry while the npm run is pending or failed.
 
-The workflow's default `publish=false` is a preparation/inspection mode. With
-`publish=true`, its protected `npm` job serializes a versioned release and
-preflights every package: a registry entry must be absent or already match the
-attested tarball's exact npm SRI. It publishes missing platform packages first,
-reads back each exact version and `dist.integrity`, then publishes
-`@reviewsensei/cli` last. This makes a transient partial run safely retryable
-when already-published bytes exactly match the release bundle. When every
-package for the requested version is already published, the version is complete:
-preflight records each package as `already-published`, publishes nothing, exits
-successfully, and reports that it did not verify provenance. A rebuilt bundle
-cannot reproduce bytes that are already on the registry, so a completed version
-is a no-op rather than a byte mismatch. A partially published version is
-different: if any existing registry entry holds different bytes while another
-package for the same version is still missing, the publish is refused because it
-would mix bytes from two builds.
+The existing `contents: read` grant is sufficient for public release metadata
+under GitHub's [published release API contract](https://docs.github.com/en/rest/releases/releases#list-releases).
+No draft-read ability is assumed: even a visible draft fails the strict
+published-release validator. The job does not gain Contents write, a new token
+or a cross-run artifact bridge to read unpublished state.
 
-If a publish job fails after some packages reach the registry, do not dispatch a
-fresh rebuild for the same version. Either re-run the failed workflow job from
-GitHub Actions, or dispatch `publish-npm.yml` again with `resume_bundle_run_id`
-set to the failed run ID so the workflow reuses that run's attested
-`review-sensei-npm-release-bundle` artifact instead of rebuilding new tarballs.
-Resume requires a bundle that includes `bundle-metadata.json` (produced by
-workflows after this metadata recording landed). Older bundles without that file
-are not eligible for resume. The resumed run must be a failed or cancelled
-manual `publish-npm` dispatch from the default branch of this repository, and
-its attested source commit and bundle metadata version must match the requested
-version. A failed tag-triggered `Release` run is not eligible for manual resume;
-re-run its failed npm job instead. The manual run title must be exactly
-`publish-npm X.Y.Z`. Attestation verification binds each tarball and
-`bundle-metadata.json` to that run's source
-commit ref and digest via `--source-ref` and `--source-digest`; the metadata
-file is listed in `SHA256SUMS` and attested with the tarballs.
-`bundle-metadata.json` also provides a secondary check. The workflow's `verify-bundle` helper checks bundle structure and
-metadata only; attestation verification runs separately in the resume path.
-Before resuming, confirm the referenced run's head SHA is the commit
-you intended to release and matches the resuming dispatch's default-branch
-`GITHUB_SHA`; a newer default-branch commit cannot resume an older run's bundle.
-The resume path trusts that run's attested source and
-does not publish bytes built from a different dispatch commit. The resumed
-dispatch reuses the prior run's attested tarballs and `source_sha`; it does not
-publish bytes built from the resuming dispatch commit. Do not combine resume
-with a fresh rebuild for the same version. Non-resume publishes still accept
-legacy bundles that lack `bundle-metadata.json`; resume requires metadata and
-attestation. Packages already verified on the
-registry are skipped and only missing packages are published.
-It also installs the launcher in a clean Linux prefix, verifies that
-`node_modules/.bin/review-sensei` resolves to the launcher rather than a
-platform package, and runs its help command. Use this manual path for an
-npm-only release; a version-tag release also publishes PyPI and GitHub assets.
+The unchanged npm helper preflights all six packages, publishes missing
+platforms first, reads back exact SRI with bounded retry/backoff, then publishes
+the launcher last. Registry HTTP404 can be eventual visibility after successful
+publication: retain the original bundle and let bounded readback finish.
+Existing exact registry entries are skipped; different bytes hold publication.
+The clean Linux consumer installation and `npm audit signatures` remain.
+No rebuild, overwrite, replacement artifact or moved tag repairs partial npm.
 
-The first version of a new npm package cannot use npm Trusted Publishing until
-the package already exists. For that one bootstrap run, create a short-lived
-granular token restricted to the ReviewSensei npm organization scope with
-package write access and 2FA bypass, then store it only as `NPM_TOKEN` in the
-protected `npm` environment. Dispatch `0.1.0` with `bootstrap=true`; the workflow refuses to
-use that secret for any other version, and also refuses an OIDC run while the
-secret remains configured. Publish from this GitHub-hosted workflow with
-`--provenance`, revoke the token, and delete the environment secret immediately
-after registry verification. Then register this exact public identity for each
-of the six packages and use OIDC-only publishing thereafter:
+For a failed Python draft/finalizer, retry that job in the original **Release**
+run once that run is terminal, even if **Release npm** is still waiting or
+publishing. For a failed npm publisher, retry only that job in its original
+**Release npm** run, with its retained bundle. The two runs share no workflow
+concurrency group, pending approval or lifecycle. Their version-specific
+publisher groups never cancel active work. A newer failed execution cannot be
+hidden by an older successful job. Published versions and signed tags remain
+immutable; expired/missing/conflicting evidence holds recovery for owner review.
 
-```bash
-npm trust github @reviewsensei/cli --repo malsabbagh/review-sensei --file publish-npm.yml --env npm --allow-publish
-npm trust github @reviewsensei/cli-darwin-arm64 --repo malsabbagh/review-sensei --file publish-npm.yml --env npm --allow-publish
-npm trust github @reviewsensei/cli-darwin-x64 --repo malsabbagh/review-sensei --file publish-npm.yml --env npm --allow-publish
-npm trust github @reviewsensei/cli-linux-arm64-gnu --repo malsabbagh/review-sensei --file publish-npm.yml --env npm --allow-publish
-npm trust github @reviewsensei/cli-linux-x64-gnu --repo malsabbagh/review-sensei --file publish-npm.yml --env npm --allow-publish
-npm trust github @reviewsensei/cli-win32-x64 --repo malsabbagh/review-sensei --file publish-npm.yml --env npm --allow-publish
-```
+Each qualified channel runs an `always()` result job after its own dependencies
+finish and uploads `release-python-result-RUN-ATTEMPT` or
+`release-npm-result-RUN-ATTEMPT`. The JSON records signed tag object, source,
+version, workflow, run/attempt, authenticated latest job conclusions and
+artifact IDs/digests. Failed/skipped jobs stay failed/skipped and the channel
+run remains non-successful. A failed source qualifier cannot produce a qualified
+channel receipt; its Actions failure is retained. Inspect both run URLs/results
+independently. These operational receipts grant no publication or promotion
+permission and do not replace PyPI/Sigstore verification under ADR0095.
 
-Account 2FA and package write access are required to create these trust records.
-Also register the tag-triggered workflow for each package before relying on
-tag publication:
+### Owner migration hold before activation
 
-```bash
-npm trust github @reviewsensei/cli --repo malsabbagh/review-sensei --file release.yml --env npm --allow-publish
-npm trust github @reviewsensei/cli-darwin-arm64 --repo malsabbagh/review-sensei --file release.yml --env npm --allow-publish
-npm trust github @reviewsensei/cli-darwin-x64 --repo malsabbagh/review-sensei --file release.yml --env npm --allow-publish
-npm trust github @reviewsensei/cli-linux-arm64-gnu --repo malsabbagh/review-sensei --file release.yml --env npm --allow-publish
-npm trust github @reviewsensei/cli-linux-x64-gnu --repo malsabbagh/review-sensei --file release.yml --env npm --allow-publish
-npm trust github @reviewsensei/cli-win32-x64 --repo malsabbagh/review-sensei --file release.yml --env npm --allow-publish
-```
+This PR does **not** change registry trust, credentials, persistent permissions,
+reviewers, environment rules, signing setup or security settings. Before the
+first future release, the owner must verify each of these six existing npm
+packages has Trusted Publishing with repository `malsabbagh/review-sensei`,
+workflow filename **`publish-npm.yml`**, environment **`npm`**, and publish
+permission:
 
-Protect the `npm` environment with a maintainer reviewer, a `main` branch
-rule for manual dispatches, and a `v*.*.*` tag rule for version-tag releases.
-Protect who can create or change release tags; the environment reviewer is the
-final publication gate. A failed or partial npm release is never repaired by
-moving a tag or overwriting bytes: retry the same version only
-when every existing registry entry matches the attested bundle exactly; otherwise
-preserve the evidence, deprecate/remove the affected recommendation when
-appropriate, and publish a higher patch version after the source and provenance
-checks pass.
+| Package | Current registration inspection | Desired workflow / environment | Change required? |
+| --- | --- | --- | --- |
+| `@reviewsensei/cli` | Read denied: registry HTTP401 on 2026-10-21 | `publish-npm.yml` / `npm` | Unknown until owner reads trust records |
+| `@reviewsensei/cli-darwin-arm64` | Not read after shared npm authentication failure | `publish-npm.yml` / `npm` | Unknown |
+| `@reviewsensei/cli-darwin-x64` | Not read after shared npm authentication failure | `publish-npm.yml` / `npm` | Unknown |
+| `@reviewsensei/cli-linux-arm64-gnu` | Not read after shared npm authentication failure | `publish-npm.yml` / `npm` | Unknown |
+| `@reviewsensei/cli-linux-x64-gnu` | Not read after shared npm authentication failure | `publish-npm.yml` / `npm` | Unknown |
+| `@reviewsensei/cli-win32-x64` | Not read after shared npm authentication failure | `publish-npm.yml` / `npm` | Unknown |
+
+The read-only `npm trust list @reviewsensei/cli --json` call (npm 11.16.0)
+reached `GET /-/package/@reviewsensei%2fcli/trust` and returned HTTP401
+("You must be logged in to publish packages"). This is an npm authentication
+hold, not evidence that any registration is missing. No login, credential,
+trust, permission or security-setting mutation was attempted. The successful
+old `release.yml` publication proves that identity worked for that execution;
+it does not enumerate today's registrations or prove `publish-npm.yml` exists.
+
+Owner checklist, using an existing authorized npm session:
+
+1. Read `npm trust list PACKAGE --json` for **each** row; this operation is
+   [documented as listing trust relationships](https://docs.npmjs.com/cli/v11/commands/npm-trust/).
+2. Compare repository `malsabbagh/review-sensei`, workflow `publish-npm.yml`,
+   protected environment `npm`, GitHub provider and publication permission.
+   Record the existing trust identity and the comparison for every package.
+3. If all six already match, record **no registry change required**. Merely
+   reusing the existing manual workflow's filename is not a security mutation.
+4. If any is absent or mismatched, report the exact current/desired difference,
+   stop activation and obtain specific action-time owner approval before
+   changing that registration. This PR grants no such authority.
+5. Coordinate retirement of the old workflow identities separately, after all
+   old release recovery is complete. Keep the merge/activation hold until the
+   release owner coordinates it.
+
+The existing manual filename may already have a registration; never assume
+that registration is present, complete or grants publication. If a record is
+missing/different, **stop activation** and report that exact package and required
+identity to the owner for a separately authorized registry migration. Do not
+weaken provenance, substitute an npm token, change an environment or grant an
+App more authority. Core PyPI stays `release.yml` / `pypi`; hosted PyPI stays
+`release-github.yml` / `pypi-github`.
+
+Old `release.yml` npm trust and any legacy dispatch authority require an
+owner-reviewed retirement plan only after all old immutable release recovery
+is complete. Merging a workflow does not revoke trust in old signed sources.
+Keep this PR unmerged until the current release owner coordinates that window.
+A rollback before a future release must also restore/reverify the original
+publisher identities; never rerun signing to retrofit an existing release.
 
 ## One-time maintainer setup
 

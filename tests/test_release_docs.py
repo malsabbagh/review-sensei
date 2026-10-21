@@ -797,7 +797,7 @@ class ReleaseDocsWorkflowTests(unittest.TestCase):
 
     def test_pages_never_executes_released_code_or_grants_build_oidc(self):
         workflow = (ROOT / ".github/workflows/pages.yml").read_text(encoding="utf-8")
-        self.assertIn("workflows: [Release]", workflow)
+        self.assertIn("workflows: [Release, Release npm]", workflow)
         self.assertNotIn("workflows: [CI]", workflow)
         self.assertNotIn("branches: [main]", workflow)
         qualifier, remaining = workflow.split("\n  deploy:\n", 1)
@@ -841,3 +841,162 @@ class ReleaseDocsWorkflowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IndependentReleasePagesTests(unittest.TestCase):
+    def setUp(self):
+        self.python = run_record()
+        self.npm = {
+            **run_record(),
+            "id": 43,
+            "path": ".github/workflows/publish-npm.yml",
+        }
+        self.python_jobs = [
+            j
+            for j in successful_jobs()
+            if j["name"] != "Publish npm packages with Trusted Publishing"
+        ]
+        names = {
+            "Qualify signed prepared source and exact-head CI",
+            "Assemble and validate npm package set",
+            "Publish npm packages with Trusted Publishing",
+            "Record independent npm channel result",
+            *(
+                f"Native standalone ({target})"
+                for target in (
+                    "darwin-arm64",
+                    "darwin-x64",
+                    "linux-arm64-gnu",
+                    "linux-x64-gnu",
+                    "win32-x64",
+                )
+            ),
+        }
+        self.npm_jobs = [
+            {
+                "name": name,
+                "run_attempt": 1,
+                "status": "completed",
+                "conclusion": "success",
+            }
+            for name in names
+        ]
+        self.runs = [self.npm]
+        self.python_runs = [self.python]
+        self.enterContext(patch.object(DOCS, "api_pages", side_effect=self.pages))
+
+    def pages(self, path, key=None):
+        if path.startswith("actions/workflows/publish-npm.yml/runs?"):
+            return self.runs
+        if path.startswith("actions/workflows/release.yml/runs?"):
+            return self.python_runs
+        if path == "actions/runs/43/jobs?filter=all":
+            return self.npm_jobs
+        if path == "actions/runs/42/jobs?filter=all":
+            return self.python_jobs
+        if path == "actions/runs/42/artifacts":
+            return [{"id": 99, "name": DOCS.ARTIFACT, "expired": False}]
+        raise AssertionError(path)
+
+    def test_pages_requires_both_independent_channels_successful(self):
+        DOCS.validate_channels(self.python, self.python_jobs)
+        for status, conclusion in (
+            ("waiting", None),
+            ("in_progress", None),
+            ("completed", "failure"),
+        ):
+            with self.subTest(status=status):
+                self.npm.update(status=status, conclusion=conclusion)
+                with self.assertRaisesRegex(ValueError, "independent npm"):
+                    DOCS.validate_channels(self.python, self.python_jobs)
+
+    def test_pages_refuses_cross_source_tag_duplicate_and_newer_failed_npm_job(self):
+        original = dict(self.npm)
+        for key, value in (
+            ("head_sha", "c" * 40),
+            ("head_branch", "v1.2.3"),
+            ("event", "workflow_dispatch"),
+            ("path", ".github/workflows/release.yml"),
+            ("head_repository", {"full_name": "attacker/fork"}),
+        ):
+            self.runs = [{**original, key: value}]
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "identity"):
+                DOCS.validate_channels(self.python, self.python_jobs)
+        self.runs = [original, original]
+        with self.assertRaisesRegex(ValueError, "one original"):
+            DOCS.validate_channels(self.python, self.python_jobs)
+        self.runs = [original]
+        self.npm_jobs.append(
+            {
+                "name": "Publish npm packages with Trusted Publishing",
+                "run_attempt": 2,
+                "status": "completed",
+                "conclusion": "failure",
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "not succeeded"):
+            DOCS.validate_channels(self.python, self.python_jobs)
+
+    def test_both_origins_require_one_original_python_run(self):
+        def api(path):
+            if path == "actions/runs/42":
+                return self.python
+            if path == "actions/runs/43":
+                return self.npm
+            if path == "compare/" + "a" * 40 + "...main":
+                return {"status": "ahead"}
+            if path == "releases/tags/v0.6.17":
+                return {"tag_name": "v0.6.17", "draft": False, "prerelease": False}
+            raise AssertionError(path)
+
+        with (
+            patch.object(DOCS, "api", side_effect=api),
+            patch.object(DOCS, "tag_identity", return_value=("b" * 40, "a" * 40)),
+        ):
+            for duplicate in (False, True):
+                self.python_runs = [self.python]
+                if duplicate:
+                    self.python_runs.append(
+                        {**self.python, "id": 44, "conclusion": "failure"}
+                    )
+                for origin in (42, 43):
+                    with self.subTest(duplicate=duplicate, origin=origin):
+                        if duplicate:
+                            with self.assertRaisesRegex(ValueError, "one original"):
+                                DOCS.qualify(origin)
+                        else:
+                            selection = DOCS.qualify(origin)
+                            self.assertEqual(selection["release_run_id"], 42)
+                            self.assertEqual(selection["artifact_id"], 99)
+
+    def test_direct_python_selection_refuses_changed_original_identity(self):
+        for key, value in (
+            ("id", 44),
+            ("run_attempt", 3),
+            ("status", "in_progress"),
+            ("conclusion", "failure"),
+        ):
+            self.python_runs = [{**self.python, key: value}]
+            with (
+                self.subTest(key=key),
+                self.assertRaisesRegex(ValueError, "Python.*identity changed"),
+            ):
+                DOCS.validate_channels(self.python, self.python_jobs)
+
+    def test_npm_completion_selects_python_run_and_its_exact_docs_artifact(self):
+        def api(path):
+            if path == "actions/runs/43":
+                return {**self.npm, "read_only_api_detail": "not an identity field"}
+            if path == "compare/" + "a" * 40 + "...main":
+                return {"status": "ahead"}
+            if path == "releases/tags/v0.6.17":
+                return {"tag_name": "v0.6.17", "draft": False, "prerelease": False}
+            raise AssertionError(path)
+
+        with (
+            patch.object(DOCS, "api", side_effect=api),
+            patch.object(DOCS, "tag_identity", return_value=("b" * 40, "a" * 40)),
+        ):
+            selection = DOCS.qualify(43)
+        self.assertEqual(selection["release_run_id"], 42)
+        self.assertEqual(selection["artifact_id"], 99)

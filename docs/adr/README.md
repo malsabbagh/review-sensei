@@ -12,6 +12,7 @@ Process: `docs/process/adr-process.md`
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
 | [0101](0101-bounded-broker-request-lifetime.md) | Proposed | Bound broker execution and retain safe failure facts | PR [#341](https://github.com/malsabbagh/review-sensei/pull/341); supports #340 | Request-owned cancellation, completed JWKS cache and unchanged authority/accounting |
+| [0100](0100-independent-release-channel-runs.md) | Proposed | Independent Python/npm runs from one Marshal signed source | User-requested future release split | Exact artifacts, separate retry/results and owner npm identity migration hold |
 | [0099](0099-confirmed-publication-cleanup-progress.md) | Proposed | Complete durable publication before optional old-thread cleanup | #246, #269; PR #316 | Current approval guards remain mandatory; exact retries resume bounded cleanup |
 | [0097](0097-explicit-trusted-publication-recovery.md) | Proposed | Explicit manual publication recovery from original trusted context | #246; PR #316 | No inference, exact reservation/context proofs, original budget and managed caller parity |
 | [0096](0096-bounded-hosted-history-readers.md) | Proposed | Recover oversized hosted histories within original read envelopes | #238, #240, #246, #267, #269; PR #316 | Complete lossless readers and presealed fence sizing |

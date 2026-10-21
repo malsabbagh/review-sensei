@@ -87,8 +87,11 @@ The signing job waits for prepared CI and refreshes receipt/main/CI/unused
 versions, narrow App identity, public-key registration and publication reviewer
 gates. It selects only the dedicated fingerprint, locally verifies that
 signature, pushes a new annotated tag without force, and requires GitHub's
-verified object/source readback. The App token triggers the existing Release
-workflow; personal owner credentials are not stored in Actions.
+verified object/source readback. The existing App token pushes one signed core
+tag, triggering independent
+`release.yml` (Python) and `publish-npm.yml` (npm) runs at that exact tag/source;
+both enforce the same core version. No workflow-dispatch permission is added;
+personal owner credentials are not stored in Actions.
 
 Command failures report fixed operation names and exit codes, never raw command
 arguments or stdout/stderr. Cleanup attempts agent shutdown, local tag removal
@@ -98,12 +101,22 @@ the run fails rather than reporting success. Inspect the emitted public tag
 object/source SHA before recovery; cleanup never deletes a remote tag.
 
 Inspect exact source/tag SHA, GPG fingerprint and Release builds before
-approving the two publish jobs. Inspect the prepared GitHub Release draft and
-its reviewed changelog notes/assets before approving. The release becomes public
-only after both publications; successful Release is still required for released
-docs/Pages. If a tag exists,
-never rerun signing or move/delete it: recover its original Release jobs and
-artifacts. Signing failures or a missing approval gate hold publication. If
+approving publication. Inspect the prepared GitHub Release draft and its
+reviewed changelog notes/assets before PyPI approval. For npm approval, inspect
+the matching published Python release and exact attested npm bundle. Wait for
+the original Python run's terminal success, including its result recorder,
+before approving npm. npm publication follows Python finalization and recording;
+an early npm publisher
+holds for an original-bundle retry, without draft-read or Contents write
+authority. The release becomes public
+after protected PyPI publication; successful Python and npm runs for the same
+signed source are both required for released docs/Pages. Inspect the independent
+channel result artifacts. Complete the [npm publisher identity migration
+hold](releasing.md#owner-migration-hold-before-activation) before any future
+release. If a tag exists, never rerun signing or move/delete it: recover each
+channel in its original run with its original artifacts.
+An npm approval/readback cannot block a Python finalizer retry once the Python
+run is terminal. Signing failures or a missing approval gate hold publication. If
 rules reject the App's tag write, inspect them separately; no broad tag bypass
 is introduced. `v5`, Worker, provider qualification and consumer migration
 remain separate operator actions.

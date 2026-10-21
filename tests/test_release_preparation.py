@@ -872,11 +872,17 @@ class PreparationWorkflowTests(unittest.TestCase):
 
     def test_all_release_build_lanes_depend_on_prepared_source_gate(self):
         text = (ROOT / ".github/workflows/release.yml").read_text()
-        for job in ("docs-build", "build", "native-build"):
+        for job in ("docs-build", "build"):
             body = re.split(
                 r"\n  [a-z][a-z0-9-]*:\n", text.split(f"  {job}:\n", 1)[1], maxsplit=1
             )[0]
             self.assertIn("needs: qualify-source", body)
-        self.assertIn('prepare_release.py qualify-tag --tag "$GITHUB_REF_NAME"', text)
+        self.assertIn("release_channels.py qualify --channel python", text)
+        npm = (ROOT / ".github/workflows/publish-npm.yml").read_text()
+        self.assertIn("release_channels.py qualify --channel npm", npm)
+        self.assertIn(
+            "needs: qualify-source",
+            npm.split("  native-build:\n", 1)[1].split("  assemble-npm:\n", 1)[0],
+        )
         self.assertNotIn("ref: ${{ github.ref }}", text)
         self.assertGreaterEqual(text.count("ref: ${{ github.sha }}"), 6)

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Split core Python and npm publication into independently retryable workflow
+  runs started by the Release Marshal's single signed tag. Preserve matching
+  core versions/source, exact artifacts/provenance, protected approvals, npm
+  registry readback and Python-only v5 admission. Record each channel result;
+  require owner verification of all six npm publisher identities before use.
+  Order npm publication after the verified public Python release so its existing
+  read-only token needs no draft visibility or broader permission.
+  Retain script-free npm CLI installation and disabled implicit tool caching;
+  pin approval/dependency and same-run recovery guarantees in regression tests.
+  Hold npm until the original Python channel run reaches terminal success,
+  including its independent result recording.
+
 ## 0.8.8 - 2026-10-21
 
 - Bound broker bootstrap exchanges and upstream reads, isolate pending JWKS work,
