@@ -7,6 +7,10 @@
   is unavailable. Preserve the GitHub default, first-step label validation,
   trusted-base policy resolution and validated downstream routing.
 
+- Run the complete installed lifecycle qualification in isolated processes,
+  preserving the 300-second suite deadline and checking exact discovered and
+  executed test inventories, including preserved incident regressions.
+
 ## 0.8.9 - 2026-10-22
 
 - Split core Python and npm publication into independently retryable workflow

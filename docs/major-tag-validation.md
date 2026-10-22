@@ -65,6 +65,13 @@ imports must resolve inside that environment's `site-packages`. The existing
 five suites exercise config precedence, machine output, exit status, limits,
 error paths, fixture/loopback transport/cancellation and mocked operation safety.
 Zero/inconsistent receipts, timeouts, nonzero exit and failed cases fail jobs.
+The installed lifecycle inventory runs through two isolated processes within
+the existing 300-second suite deadline. Every declared contract module,
+including cases added by its `load_tests` hook, stays in the inventory. Each
+worker rechecks exact installed versions and import boundaries; the parent
+compares discovered and executed test IDs and rejects missing, duplicate,
+empty, skipped or failed evidence. This avoids serial lifecycle overrun without
+increasing the deadline or reducing coverage.
 Sanitized artifacts are retained on failure; environments and binaries are not.
 Every gate or recheck requires a fresh output directory. An existing evidence
 directory is rejected before reads and its receipt is left unchanged.

@@ -531,6 +531,68 @@ class BootstrapContracts(unittest.TestCase):
 
 
 class LifecycleModuleLoadingContracts(unittest.TestCase):
+    def lifecycle_module(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "published_lifecycle_execution", Path(__file__).with_name("lifecycle.py")
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_worker_success_requires_every_assigned_test_and_result_once(self):
+        from copy import deepcopy
+
+        module = self.lifecycle_module()
+        expected = ["contract.Case.test_one", "contract.Case.test_two"]
+        record = {
+            "executed_ids": expected,
+            "tests_run": 2,
+            "successful": True,
+            "rows": [{"id": name, "status": "PASS"} for name in expected],
+        }
+        self.assertTrue(module.validate_execution(record, expected))
+        for mutation in (
+            {"executed_ids": expected[:1]},
+            {"executed_ids": expected[::-1]},
+            {"executed_ids": [expected[0], expected[0]]},
+            {"tests_run": 1},
+            {"rows": record["rows"][:1]},
+            {"rows": [record["rows"][0], record["rows"][0]]},
+            {"rows": [{"id": name, "status": "unknown"} for name in expected]},
+        ):
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                module.validate_execution(deepcopy(record) | mutation, expected)
+        self.assertFalse(
+            module.validate_execution(record | {"successful": False}, expected)
+        )
+
+    def test_worker_records_subtest_failures_and_skips_as_failure(self):
+        module = self.lifecycle_module()
+
+        class Contract(unittest.TestCase):
+            def test_clean(self):
+                pass
+
+            def test_subtest(self):
+                with self.subTest(case="synthetic"):
+                    self.fail("synthetic failure")
+
+            def test_skip(self):
+                self.skipTest("synthetic skip")
+
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(Contract)
+        expected = module.test_ids(suite)
+        result = module.execute_suite(suite)
+        self.assertEqual(result["executed_ids"], expected)
+        self.assertEqual(result["tests_run"], 3)
+        self.assertFalse(module.validate_execution(result, expected))
+        self.assertEqual(
+            {row.get("kind") for row in result["rows"] if row["status"] == "FAIL"},
+            {"subtest", "skipped"},
+        )
+
     def test_contract_files_win_over_same_named_modules_on_the_search_path(self):
         import importlib.util
         from types import ModuleType
@@ -554,15 +616,24 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                     )
                     (lane / (name + ".py")).write_text(
                         "import unittest\nclass Contract(unittest.TestCase):\n    def test_contract(self): pass\n"
+                        + (
+                            "def preserved_case(): pass\n"
+                            "def load_tests(loader, tests, pattern):\n"
+                            "    tests.addTest(unittest.FunctionTestCase(preserved_case))\n"
+                            "    return tests\n"
+                            if name == names[0]
+                            else ""
+                        )
                     )
                     shadow = ModuleType(name)
                     shadow.__file__ = str(root / (name + ".py"))
                     sys.modules[name] = shadow
                 with patch.object(sys, "path", [str(root), *sys.path]):
                     suite = module.load_contracts(root)
+                    self.assertIn("preserved_case", module.test_ids(list(suite)[0]))
                     result = unittest.TextTestRunner(stream=io.StringIO()).run(suite)
                 self.assertTrue(result.wasSuccessful())
-                self.assertEqual(result.testsRun, len(names))
+                self.assertEqual(result.testsRun, len(names) + 1)
                 for name in names:
                     self.assertEqual(
                         Path(sys.modules[name].__file__).resolve(),
