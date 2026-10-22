@@ -68,7 +68,8 @@ Zero/inconsistent receipts, timeouts, nonzero exit and failed cases fail jobs.
 The installed lifecycle inventory runs through two isolated processes within
 the existing 300-second suite deadline. Every declared contract module,
 including cases added by its `load_tests` hook, stays in the inventory. Each
-worker rechecks exact installed versions and import boundaries; the parent
+worker starts with a fresh interpreter (`spawn`), then rechecks exact installed
+versions and import boundaries; the parent
 compares discovered and executed test IDs and rejects missing, duplicate,
 empty, skipped or failed evidence. This avoids serial lifecycle overrun without
 increasing the deadline or reducing coverage.

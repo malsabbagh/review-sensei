@@ -784,6 +784,7 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                             )
                             self.assertEqual(module.main(), 1)
                         receipt = json.loads((report / "results.json").read_text())
+                        self.assertIs(validate_receipt(receipt, "0.8.1"), receipt)
                         self.assertEqual(
                             receipt["tests_run"], None if fault == "worker-error" else 0
                         )
@@ -796,6 +797,10 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                             "TimeoutError" if fault == "worker-error" else fault,
                         )
                         if fault == "worker-error":
+                            self.assertEqual(
+                                pool.call_args.kwargs["mp_context"].get_start_method(),
+                                "spawn",
+                            )
                             self.assertEqual(
                                 len(receipt["expected_inventory"]), len(names)
                             )
