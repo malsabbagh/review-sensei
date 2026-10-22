@@ -11,6 +11,7 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
+| [0104](0104-published-npm-consumer-verification.md) | Proposed | Verify published npm consumers before channel completion | User-requested npm integration follow-up | Five isolated native registry installs; read-only verification retries and unchanged publication proofs |
 | [0102](0102-bind-partial-continuation-to-review-input.md) | Proposed | Bind reusable partial coverage to complete review input | PR [#342](https://github.com/malsabbagh/review-sensei/pull/342) | Persisted bounded provenance, unchanged v1 content digests and authority/budgets |
 | [0101](0101-bounded-broker-request-lifetime.md) | Proposed | Bound broker execution and retain safe failure facts | PR [#341](https://github.com/malsabbagh/review-sensei/pull/341); supports #340 | Request-owned cancellation, completed JWKS cache and unchanged authority/accounting |
 | [0100](0100-independent-release-channel-runs.md) | Proposed | Independent Python/npm runs from one Marshal signed source | User-requested future release split | Exact artifacts, separate retry/results and owner npm identity migration hold |

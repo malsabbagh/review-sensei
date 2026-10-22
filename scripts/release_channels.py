@@ -29,7 +29,8 @@ REQUIRED_JOBS = {
         "Assemble and validate npm package set",
         "Publish npm packages with Trusted Publishing",
         *(
-            f"Native standalone ({target})"
+            f"{job} ({target})"
+            for job in ("Native standalone", "Verify published npm consumer")
             for target in (
                 "darwin-arm64",
                 "darwin-x64",

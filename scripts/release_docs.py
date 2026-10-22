@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import importlib.util
 import json
@@ -48,6 +49,17 @@ REQUIRED_JOBS = {
     "Publish npm packages with Trusted Publishing",
     "Publish to PyPI with Trusted Publishing",
     "Create GitHub release assets",
+}
+NPM_CONSUMER_POLICY = "# reviewsensei:published-npm-consumer-verification"
+NPM_CONSUMER_JOBS = {
+    f"Verify published npm consumer ({target})"
+    for target in (
+        "darwin-arm64",
+        "darwin-x64",
+        "linux-arm64-gnu",
+        "linux-x64-gnu",
+        "win32-x64",
+    )
 }
 
 
@@ -232,6 +244,49 @@ def channel_run(workflow: str, tag: str, source: str) -> dict[str, Any]:
     return run
 
 
+def npm_consumer_policy(source: str) -> bool:
+    """Read the immutable workflow's policy as bounded data, never code."""
+    if not SHA.fullmatch(source):
+        raise ValueError("Pages npm consumer policy source is invalid")
+    path = ".github/workflows/publish-npm.yml"
+    metadata = api(f"contents/{path}?ref={source}")
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("type") != "file"
+        or metadata.get("path") != path
+        or metadata.get("encoding") != "base64"
+        or type(metadata.get("size")) is not int
+        or not 0 < metadata["size"] <= 128 * 1024
+        or not isinstance(metadata.get("content"), str)
+        or len(metadata["content"]) > 256 * 1024
+        or not isinstance(metadata.get("sha"), str)
+        or not SHA.fullmatch(metadata["sha"])
+    ):
+        raise ValueError("Pages npm consumer policy workflow is invalid")
+    content = base64.b64decode("".join(metadata["content"].splitlines()), validate=True)
+    if (
+        len(content) != metadata["size"]
+        or hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
+        != metadata["sha"]
+    ):
+        raise ValueError("Pages npm consumer policy blob identity differs")
+    text = content.decode("utf-8")
+    declarations = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip().startswith(NPM_CONSUMER_POLICY)
+    ]
+    if not declarations:
+        if re.search(
+            r"(?m)^\s+(?:verify-published|['\"]verify-published['\"])\s*:", text
+        ):
+            raise ValueError("Pages npm consumer policy declaration is missing")
+        return False  # Historical split sources retain their original job set.
+    if declarations != [NPM_CONSUMER_POLICY + ":v1"]:
+        raise ValueError("Pages npm consumer policy declaration is invalid")
+    return True
+
+
 def validate_channels(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
     split = not any(
         j.get("name") == "Publish npm packages with Trusted Publishing" for j in jobs
@@ -268,6 +323,8 @@ def validate_channels(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
             )
         ),
     }
+    if npm_consumer_policy(run["head_sha"]):
+        required |= NPM_CONSUMER_JOBS
     for name in required:
         matches = [j for j in npm_jobs if j.get("name") == name]
         attempts = [j.get("run_attempt") for j in matches]

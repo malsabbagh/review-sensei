@@ -662,6 +662,16 @@ bundle on retry. Public release metadata fits the existing Contents read grant;
 draft visibility and Contents write are unnecessary. See
 [ADR 0100](adr/0100-independent-release-channel-runs.md).
 
+For future signed releases containing this policy, npm channel completion also
+depends on a separate five-target registry-installed consumer matrix after
+publication. Signed qualifier outputs bind its exact version/source. Fresh
+prefixes, caches and npm configurations isolate installation; the installed
+native launcher executes credential-free fixture and exit-code checks without
+a Python fallback. All five latest verification jobs participate in channel
+acceptance. A verification failure leaves published packages immutable and the
+channel incomplete; recovery retries verification in its original run. See
+[Proposed ADR 0104](adr/0104-published-npm-consumer-verification.md).
+
 For the next release, Python/docs builds produce the verified GitHub draft
 without waiting for native/npm assembly; PyPI approval and publication release
 that draft independently of npm. Major-channel admission verifies both engine
