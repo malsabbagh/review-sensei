@@ -82,8 +82,8 @@ persisted eligibility, mixed media/generated confirmations, clean-process exits,
 and the preserved PR308 five-disposition ledger. Synthetic broker fixtures are
 not authentication evidence for the original grant. Known failures in an older
 PyPI release remain failures; candidate-wheel success does not qualify PyPI.
-The lifecycle receipt counts rows (including failing subcases) rather than claiming
-that those rows are an independent test-method count.
+The lifecycle receipt retains one canonical row per parent method, including
+the count of its failing subtests, separately from executed method identities.
 
 The immutable major-validator baseline deliberately selects its original five
 contracts with repeated `--suite` options, preserving the exact 0.6.23/0.1.1 wheel
@@ -91,18 +91,27 @@ digests. It does not claim those old bytes implement newer lifecycle behavior.
 Default post-publication qualification runs all six suites; receipts always list
 selected and excluded suites so a subset cannot be mistaken for full coverage.
 
-Lifecycle contracts load from the nine declared files under `tests/dist_safe`,
+Lifecycle contracts load from every file declared in `lifecycle.CONTRACTS` under `tests/dist_safe`,
 so a same-named module elsewhere on the search path cannot shadow them. Receipts
 include `tests_run` separately from row counts, a sanitized `load_error` for file
 import failures, and an explicit failed `empty-suite` row if discovery is empty.
 Neither condition counts as passing qualification.
 
-Lifecycle qualification treats every skipped method or subtest as a failed row
-with `kind=skipped`, even though unittest itself permits skips. Any such row
-invalidates qualification and forces exit 1. `tests_run` counts parent methods;
-passing subtests produce their parent's passing row, while failing subtests
-produce individual failed rows. These counts intentionally differ.
-The loader validates both declared resolved paths before executing either file,
+Lifecycle qualification requires every declared method to pass. Skips,
+expected failures and unexpected successes deliberately fail qualification,
+even when unittest would accept them; `kind=skipped`, `kind=expected-failure`
+and `kind=unexpected-success` distinguish these outcomes from assertion errors.
+No expected-failure decorator exempts a released contract from this requirement.
+`tests_run` counts confirmed parent methods; passing subtests use their parent's
+passing row, while failing subtests mark that same parent row as failed and
+increment `subtest_failures`. Skipped subtests likewise use their parent's failing row and increment
+`skip_events`. If a worker's execution cannot be confirmed,
+`tests_run` is `null`, `known_tests_run` counts validated worker reports only,
+and `execution_complete` is false. These failures still produce an ordinary
+failed receipt and nonzero process exit; the qualification driver validates
+row totals and exit status without requiring an integer `tests_run`.
+Workers explicitly use `spawn` so their import checks run in fresh interpreters.
+The loader validates every declared resolved path before executing any file,
 rejecting a contract file or directory symlink that escapes its declared location.
 The qualification ref supplies trusted test code; these path checks do not
 attest the harness contents or make arbitrary test code safe to execute.

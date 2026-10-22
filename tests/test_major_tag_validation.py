@@ -677,6 +677,91 @@ class SurfaceTests(unittest.TestCase):
                 with self.subTest(old=old), self.assertRaises(ValueError):
                     surface.validate_surface(root)
 
+    def test_retry_downloads_the_original_gate_artifact_id(self):
+        data = surface.workflow_data(
+            (ROOT / ".github/workflows/major-tag-validation.yml").read_text()
+        )
+        gate_job = data["jobs"]["gate"]
+        self.assertEqual(
+            gate_job["outputs"]["receipt_artifact_id"],
+            "${{ steps.gate-receipt.outputs.artifact-id }}",
+        )
+        upload = next(
+            step for step in gate_job["steps"] if step.get("id") == "gate-receipt"
+        )
+        self.assertTrue(upload["uses"].startswith("actions/upload-artifact@"))
+        self.assertEqual(upload["with"]["if-no-files-found"], "error")
+        downloads = [
+            step
+            for step in data["jobs"]["current"]["steps"]
+            if step.get("uses", "").startswith("actions/download-artifact@")
+        ]
+        self.assertEqual(len(downloads), 1)
+        download = downloads[0]
+        self.assertEqual(
+            download["with"]["artifact-ids"],
+            "${{ needs.gate.outputs.receipt_artifact_id }}",
+        )
+        self.assertTrue(download["with"]["merge-multiple"])
+        self.assertNotIn("name", download["with"])
+        self.assertNotIn("run-id", download["with"])
+        self.assertNotIn("github.run_attempt", json.dumps(download["with"]))
+
+    @unittest.skipIf(os.name == "nt", "Linux receipt guard uses Bash")
+    def test_missing_gate_artifact_id_fails_before_download(self):
+        data = surface.workflow_data(
+            (ROOT / ".github/workflows/major-tag-validation.yml").read_text()
+        )
+        steps = data["jobs"]["current"]["steps"]
+        guard = next(
+            step
+            for step in steps
+            if step.get("name") == "Require retained gate receipt ID"
+        )
+        downloads = [
+            step
+            for step in steps
+            if step.get("uses", "").startswith("actions/download-artifact@")
+        ]
+        self.assertEqual(len(downloads), 1)
+        download = downloads[0]
+        self.assertLess(steps.index(guard), steps.index(download))
+        self.assertEqual(
+            guard["env"]["GATE_RECEIPT_ARTIFACT_ID"],
+            "${{ needs.gate.outputs.receipt_artifact_id }}",
+        )
+        # Number.MAX_SAFE_INTEGER is accepted; its successor must be rejected.
+        valid = {"665432109", "9007199254740991"}
+        for value in (
+            "",
+            "0",
+            "1,2",
+            "-1",
+            "not-an-id",
+            "665432109",
+            "9007199254740991",
+            "9007199254740992",
+            "9" * 100,
+            " 1",
+            "1 ",
+            "+1",
+            "https://example.com/1",
+            "1\n",
+        ):
+            with self.subTest(value=value):
+                result = subprocess.run(
+                    ["bash", "-c", guard["run"]],
+                    env={"PATH": os.defpath, "GATE_RECEIPT_ARTIFACT_ID": value},
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode == 0, value in valid)
+                if result.returncode:
+                    self.assertIn(
+                        "Retained gate receipt artifact ID is missing or invalid",
+                        result.stdout,
+                    )
+
     def test_workflow_pins_validator_and_digest_and_propagates_failures(self):
         text = (ROOT / ".github/workflows/major-tag-validation.yml").read_text()
         data = surface.workflow_data(text)
