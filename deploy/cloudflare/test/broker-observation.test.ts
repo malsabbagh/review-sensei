@@ -8,6 +8,7 @@ const control = (max = 1) => new BrokerDispatchControl({schema_version: "1.0", o
 
 describe("bounded operational metrics", () => {
   it("observes actual HTTP failure without changing the original debit or retrying", async () => {
+    vi.useFakeTimers();
     const log = vi.spyOn(console, "info").mockImplementation(() => {});
     let now = 100;
     vi.spyOn(performance, "now").mockImplementation(() => now);
@@ -55,6 +56,7 @@ describe("bounded operational metrics", () => {
   });
 
   it("records refused admission without a dispatch or a second debit", async () => {
+    vi.useFakeTimers();
     const log = vi.spyOn(console, "info").mockImplementation(() => {});
     const observation = new BrokerObservation("session_grant");
     const budget = control();
