@@ -303,6 +303,122 @@ class NpmConsumerTests(unittest.TestCase):
                 ):
                     self.assertTrue((directory / "receipt/package-lock.json").is_file())
 
+    def test_failure_receipt_hash_matches_final_retained_lock(self):
+        for failed_step in ("version", "audit-signatures"):
+            with (
+                self.subTest(failed_step=failed_step),
+                tempfile.TemporaryDirectory() as scratch,
+            ):
+                directory = Path(scratch)
+                fixture = RegistryAndProcessFixture()
+                changed_lock = b'{"packages": {}, "changed_after_install": true}\n'
+
+                def runner(command, **kwargs):
+                    code = fixture(command, **kwargs)
+                    if kwargs["stdout"].stem == failed_step:
+                        (directory / "receipt/prefix/package-lock.json").write_bytes(
+                            changed_lock
+                        )
+                        return 1
+                    return code
+
+                receipt = self.verify(directory, runner)
+                retained = directory / "receipt/package-lock.json"
+                self.assertFalse(receipt["successful"])
+                self.assertEqual(retained.read_bytes(), changed_lock)
+                self.assertEqual(
+                    receipt["package_lock_sha256"],
+                    hashlib.sha256(retained.read_bytes()).hexdigest(),
+                )
+                self.assertEqual(
+                    json.loads((directory / "receipt/receipt.json").read_text())[
+                        "package_lock_sha256"
+                    ],
+                    receipt["package_lock_sha256"],
+                )
+
+    def test_missing_or_oversized_final_lock_never_gets_an_unrelated_hash(self):
+        for state in ("missing-prefix", "oversized-prefix", "missing", "oversized"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as scratch:
+                directory = Path(scratch)
+                fixture = RegistryAndProcessFixture()
+
+                def runner(command, **kwargs):
+                    code = fixture(command, **kwargs)
+                    if kwargs["stdout"].stem == "version":
+                        prefix_lock = directory / "receipt/prefix/package-lock.json"
+                        prefix_lock.unlink()
+                        if state == "oversized-prefix":
+                            prefix_lock.write_bytes(
+                                b"x" * (consumer.MAX_OUTPUT_BYTES + 1)
+                            )
+                        retained = directory / "receipt/package-lock.json"
+                        if state == "missing":
+                            retained.unlink()
+                        elif state == "oversized":
+                            retained.write_bytes(b"x" * (consumer.MAX_OUTPUT_BYTES + 1))
+                        return 1
+                    return code
+
+                receipt = self.verify(directory, runner)
+                retained = directory / "receipt/package-lock.json"
+                self.assertFalse(receipt["successful"])
+                if state in ("missing", "oversized"):
+                    self.assertNotIn("package_lock_sha256", receipt)
+                else:
+                    self.assertEqual(retained.read_text(), json.dumps(fixture.lock))
+                    self.assertEqual(
+                        receipt["package_lock_sha256"],
+                        hashlib.sha256(retained.read_bytes()).hexdigest(),
+                    )
+
+    def test_real_process_oversized_logs_are_capped_after_completion_or_timeout(self):
+        for timed_out in (False, True):
+            with (
+                self.subTest(timed_out=timed_out),
+                tempfile.TemporaryDirectory() as scratch,
+            ):
+                directory = Path(scratch)
+                fixture = RegistryAndProcessFixture()
+                size = consumer.MAX_OUTPUT_BYTES + 1
+
+                def runner(command, **kwargs):
+                    if kwargs["stdout"].stem != "source":
+                        return fixture(command, **kwargs)
+                    command = [
+                        sys.executable,
+                        "-c",
+                        "import sys,time;"
+                        f"sys.stdout.buffer.write(b'x'*{size});sys.stdout.flush();"
+                        f"sys.stderr.buffer.write(b'y'*{size});sys.stderr.flush();"
+                        + ("time.sleep(30)" if timed_out else ""),
+                    ]
+                    return consumer.run_command(
+                        command, **{**kwargs, "timeout": 5 if timed_out else 10}
+                    )
+
+                receipt = self.verify(directory, runner)
+                self.assertFalse(receipt["successful"])
+                self.assertEqual(
+                    receipt["failure_type"],
+                    "TimeoutExpired" if timed_out else "ConsumerVerificationError",
+                )
+                if not timed_out:
+                    self.assertIn(
+                        "output exceeds the receipt bound", receipt["failure"]
+                    )
+                source = receipt["steps"][0]
+                for stream in ("stdout", "stderr"):
+                    self.assertEqual(
+                        (directory / "receipt" / source[stream]).stat().st_size,
+                        consumer.MAX_OUTPUT_BYTES,
+                    )
+                    self.assertEqual(source[f"{stream}_bytes"], size)
+                    self.assertIs(source[f"{stream}_truncated"], True)
+                saved = json.loads((directory / "receipt/receipt.json").read_text())
+                self.assertEqual(saved["steps"], receipt["steps"])
+                self.assertFalse(saved["successful"])
+
     def test_missing_node_keeps_failure_receipt(self):
         with tempfile.TemporaryDirectory() as scratch:
             directory = Path(scratch) / "receipt"

@@ -54,6 +54,12 @@ Missing receipt files fail that upload; an initialization failure before receipt
 creation cannot stand in for a successful check. These receipts supplement the
 original signed source and publication attestations; they do not replace those
 proofs.
+The lock hash identifies the final retained bounded lock bytes and is absent
+when no bounded retained lock is available. After each command completes or
+times out, each retained stdout/stderr stream is capped at 4 MiB with its
+original size and truncation flag recorded. Oversized completed output fails
+verification; timeout retains its original failure. This is a post-run retention
+cap, not a streaming or peak-disk quota.
 
 The authenticated npm channel result waits for all five latest verification job
 conclusions as well as its existing required jobs. Failed, skipped, cancelled,

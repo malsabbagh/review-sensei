@@ -181,6 +181,11 @@ attempt always runs the upload step for its receipt directory as
 artifacts. Missing receipt files fail the upload, including when initialization
 failed before receipt creation. Inspect failure evidence before retrying;
 absence is not a pass.
+The lock hash covers the final retained bounded lock file, when available.
+Completed or timed-out commands retain at most 4 MiB per stdout/stderr stream;
+the receipt records original sizes and truncation. Oversized completed output
+still fails verification, and timeout remains a failure. This cap applies after
+execution and does not impose a streaming or peak-disk quota.
 
 The npm channel result waits for all five latest authenticated verification job
 conclusions alongside its existing required jobs. A failed, skipped, cancelled,

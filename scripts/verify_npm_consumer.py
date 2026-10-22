@@ -233,17 +233,29 @@ def verify_consumer(
         }
         receipt["steps"].append(entry)
         save()
-        code = runner(
-            arguments,
-            cwd=work,
-            env=environment,
-            timeout=timeout,
-            stdout=stdout,
-            stderr=stderr,
-        )
-        entry["exit_code"] = code
-        save()
-        if any(path.stat().st_size > MAX_OUTPUT_BYTES for path in (stdout, stderr)):
+        oversized = False
+        try:
+            code = runner(
+                arguments,
+                cwd=work,
+                env=environment,
+                timeout=timeout,
+                stdout=stdout,
+                stderr=stderr,
+            )
+            entry["exit_code"] = code
+        finally:
+            for stream, path in (("stdout", stdout), ("stderr", stderr)):
+                if path.is_file():
+                    size = path.stat().st_size
+                    entry[f"{stream}_bytes"] = size
+                    entry[f"{stream}_truncated"] = size > MAX_OUTPUT_BYTES
+                    if size > MAX_OUTPUT_BYTES:
+                        oversized = True
+                        with path.open("r+b") as output:
+                            output.truncate(MAX_OUTPUT_BYTES)
+            save()
+        if oversized:
             raise ConsumerVerificationError(f"{name} output exceeds the receipt bound")
         if code != expected:
             raise ConsumerVerificationError(
@@ -482,8 +494,14 @@ def verify_consumer(
     finally:
         receipt["completed_at"] = datetime.now(timezone.utc).isoformat()
         lock_path = directory / "prefix/package-lock.json"
+        retained_lock = directory / "package-lock.json"
         if lock_path.is_file() and lock_path.stat().st_size <= MAX_OUTPUT_BYTES:
-            shutil.copyfile(lock_path, directory / "package-lock.json")
+            shutil.copyfile(lock_path, retained_lock)
+        receipt.pop("package_lock_sha256", None)
+        if retained_lock.is_file() and retained_lock.stat().st_size <= MAX_OUTPUT_BYTES:
+            receipt["package_lock_sha256"] = hashlib.sha256(
+                retained_lock.read_bytes()
+            ).hexdigest()
         save()
         for name in ("prefix", "tooling", "cache", "home", "tmp", "work"):
             shutil.rmtree(directory / name, ignore_errors=True)
