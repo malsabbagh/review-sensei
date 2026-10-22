@@ -452,8 +452,8 @@ and every `github.*` policy resolve from `.reviewsensei.yml` on the trusted
 policy commit, with `REVIEWSENSEI_PROVIDER` and `REVIEWSENSEI_MODEL` as the
 only product overrides. Local, cloud, and OpenRouter runtime jobs expose the
 
-through `hosted_runner` (ADR 0062). Read-only bootstrap and the local Ollama
-label array retain their existing routing. Backend, model and policy still
+through `hosted_runner` (ADR 0062), including read-only bootstrap. Local Ollama
+retains its existing label array. Backend, model and policy still
 
 Before an enabled review reaches either provider, the reusable workflow runs a
 read-only authoritative pull-request preflight. It validates the repository

@@ -712,9 +712,12 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(text.count("Verify mention reply completed"), 2)
         self.assertEqual(text.count("always() && inputs.operation == 'reply' &&"), 2)
         self.assertEqual(text.count("steps.reply.outcome != 'success'"), 2)
-        # Validate the infrastructure label on a free GitHub bootstrap before
-        # scheduling any custom hosted job. Local inference routing is separate.
-        self.assertEqual(text.count("runs-on: ubuntu-latest"), 1)
+        # Bootstrap must start on the trusted caller's runner too; only later
+        # hosted jobs consume its validated output. Local routing is separate.
+        self.assertEqual(
+            text.count("runs-on: ${{ inputs.hosted_runner || 'ubuntu-latest' }}"),
+            1,
+        )
         self.assertEqual(
             text.count("runs-on: ${{ needs.bootstrap.outputs.hosted_runner }}"), 3
         )
@@ -2009,7 +2012,8 @@ class ActionPinPolicyTests(unittest.TestCase):
                     self.assertNotIn("ubicloud-standard-2", line)
                     if workflow.name == "review-sensei-run.yml":
                         self.assertTrue(
-                            line == "runs-on: ubuntu-latest"
+                            line
+                            == "runs-on: ${{ inputs.hosted_runner || 'ubuntu-latest' }}"
                             or line
                             == "runs-on: ${{ needs.bootstrap.outputs.hosted_runner }}"
                             or ollama_self_hosted.match(line),
