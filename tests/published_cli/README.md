@@ -104,7 +104,8 @@ and `kind=unexpected-success` distinguish these outcomes from assertion errors.
 No expected-failure decorator exempts a released contract from this requirement.
 `tests_run` counts confirmed parent methods; passing subtests use their parent's
 passing row, while failing subtests mark that same parent row as failed and
-increment `subtest_failures`. If a worker's execution cannot be confirmed,
+increment `subtest_failures`. Skipped subtests likewise use their parent's failing row and increment
+`skip_events`. If a worker's execution cannot be confirmed,
 `tests_run` is `null`, `known_tests_run` counts validated worker reports only,
 and `execution_complete` is false. These failures still produce an ordinary
 failed receipt and nonzero process exit; the qualification driver validates

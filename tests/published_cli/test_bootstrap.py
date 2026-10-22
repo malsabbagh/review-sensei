@@ -554,6 +554,7 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
         }
         self.assertTrue(module.validate_execution(record, expected))
         other_contract = ["other.Case.test_one", expected[1]]
+        superset = expected + ["other.Case.test_three"]
         for mutation in (
             {"executed_ids": expected[:1]},
             {"executed_ids": expected[::-1]},
@@ -561,6 +562,11 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
             {
                 "executed_ids": other_contract,
                 "rows": [{"id": name, "status": "PASS"} for name in other_contract],
+            },
+            {
+                "executed_ids": superset,
+                "tests_run": len(superset),
+                "rows": [{"id": name, "status": "PASS"} for name in superset],
             },
             {"tests_run": 1},
             {"rows": record["rows"][:1]},
@@ -593,6 +599,11 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
             def test_skip(self):
                 self.skipTest("synthetic skip")
 
+            def test_skipped_subtests(self):
+                for case in (1, 2):
+                    with self.subTest(case=case):
+                        self.skipTest("synthetic subtest skip")
+
             @unittest.expectedFailure
             def test_expected_failure(self):
                 self.fail("synthetic expected failure")
@@ -605,8 +616,8 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
         expected = module.test_ids(suite)
         result = module.execute_suite(suite)
         self.assertEqual(result["executed_ids"], expected)
-        self.assertEqual(result["tests_run"], 5)
-        self.assertEqual(len(result["rows"]), 5)
+        self.assertEqual(result["tests_run"], 6)
+        self.assertEqual(len(result["rows"]), 6)
         self.assertFalse(module.validate_execution(result, expected))
         self.assertEqual(
             {row.get("kind") for row in result["rows"] if row["status"] == "FAIL"},
@@ -618,6 +629,13 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
             ],
             2,
         )
+        skipped = next(
+            row
+            for row in result["rows"]
+            if row["id"].endswith(".test_skipped_subtests")
+        )
+        self.assertEqual(skipped["kind"], "skipped")
+        self.assertEqual(skipped["skip_events"], 2)
 
     def test_contract_files_win_over_same_named_modules_on_the_search_path(self):
         import importlib.util

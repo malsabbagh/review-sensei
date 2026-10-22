@@ -79,6 +79,12 @@ Unconfirmed worker execution is explicit: `tests_run` is unknown (`null`),
 is false. Skips and expected/unexpected failures use `FAIL` rows with a specific
 `kind`; multiple failing subtests retain one canonical parent-test row and a
 failure count. Failure records must cover their exact assigned inventory too.
+Skipped subtests also belong to their active parent method's failing row;
+`skip_events` retains their count. A failing row's `kind` records its first
+failure category, while later failures leave its status sticky at `FAIL`.
+Confirmed execution means a structurally validated report, not passing
+assertions: full execution with failed assertions can be complete and still
+fails qualification through its failed rows and nonzero exit.
 Each worker must execute the discovered method IDs in their declared loader
 traversal order; reordering is rejected along with missing or duplicate methods.
 Reports distinguish submitted, unsubmitted and confirmed contracts. Submission

@@ -114,6 +114,7 @@ def test_ids(suite):
 def execute_suite(suite):
     rows = []
     executed = []
+    active_test = None
 
     def note(test, status, kind=None):
         row = next((row for row in rows if row["id"] == test.id()), None)
@@ -127,8 +128,15 @@ def execute_suite(suite):
 
     class Evidence(unittest.TextTestResult):
         def startTest(self, test):
+            nonlocal active_test
+            active_test = test
             executed.append(test.id())
             super().startTest(test)
+
+        def stopTest(self, test):
+            nonlocal active_test
+            super().stopTest(test)
+            active_test = None
 
         def addSuccess(self, test):
             super().addSuccess(test)
@@ -144,7 +152,11 @@ def execute_suite(suite):
 
         def addSkip(self, test, reason):
             super().addSkip(test, reason)
-            note(test, "FAIL", "skipped")
+            # unittest sends a subtest object here for skipTest in subTest.
+            # Discovery/execution identities belong to its active parent method.
+            parent = active_test if active_test is not None else test
+            row = note(parent, "FAIL", "skipped")
+            row["skip_events"] = row.get("skip_events", 0) + 1
 
         def addExpectedFailure(self, test, err):
             super().addExpectedFailure(test, err)
