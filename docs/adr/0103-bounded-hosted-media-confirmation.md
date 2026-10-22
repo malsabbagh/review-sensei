@@ -4,7 +4,7 @@
 - Date: 2026-10-22
 - Decision owner / reviewers: ReviewSensei maintainers
 - Linked GitHub Issue: No separate issue; user-authorized media command defect repair
-- Linked PR: Pending focused draft PR
+- Linked PR: [#343](https://github.com/malsabbagh/review-sensei/pull/343)
 
 ## Context
 
