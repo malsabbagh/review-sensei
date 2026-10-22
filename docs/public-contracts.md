@@ -452,6 +452,16 @@ work. See [ADR 0063](adr/0063-authenticated-reservation-recovery.md).
 `ReviewResult.to_dict()` produces a JSON-compatible document that validates
 against `review-result.schema.json`.
 
+Service-produced results also carry optional `continuation_scope_digest`, a
+lowercase SHA-256 identity of the complete review request and effective execution
+configuration. Reusing a partial result requires the same scope before planning
+or provider execution. Missing or mismatching scope refuses continuation, so
+legacy results remain readable but cannot supply reusable coverage. Same-source
+continuation survives a fresh service instance and JSON round trip. This field
+does not change the frozen v1 content digest, grant publication authority, or
+replace independent transaction checks. Its serialized bytes count toward the
+existing result limit. See [ADR 0102](adr/0102-bind-partial-continuation-to-review-input.md).
+
 Operational results always include the optional `review_status` key. Directly
 constructed results default to `incomplete`; the trusted review service marks
 its stage aggregate `complete`. Results parsed from legacy JSON without the
@@ -1437,11 +1447,15 @@ still apply. Compact 250-entry acceptance is not qualification of every rich
 250-finding review. Complete-profile replay checks authenticated actual prose and
 placement rather than treating an identity-only old review as complete.
 
-An identity-bound publication with `github.operation_entry: enabled` stores the
-final validated canonical ReviewResult using existing owned PR result parts before
-review/check publication. No raw diff, provider prompt or credential is stored,
-and `github.artifacts: none` continues to disable diagnostics artifacts. The
-existing `operation_entry: disabled` and writes-disabled paths remain opt-outs.
+An identity-bound GitHub session-ledger publication stores the final validated
+canonical ReviewResult using existing owned PR result parts before advancing its
+transaction to `publication_pending` or publishing a review/check. This retention
+is mandatory even when `github.operation_entry: disabled`; that setting selects
+operation routing and receipts rather than disabling the transaction checkpoint.
+No raw diff, provider prompt or credential is stored, and `github.artifacts: none`
+continues to disable diagnostics artifacts. Writes-disabled callers still perform
+no GitHub writes. Legacy unbound paths do not acquire durable checkpoint authority
+from this rule.
 `github review --recover-retained` loads these bytes without inference and requires
 the exact repository/PR/base/head, trusted configuration/evidence contexts and an
 independent session ledger. The accepted-operation guard remains in force. Only

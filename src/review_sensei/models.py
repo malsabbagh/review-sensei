@@ -1422,6 +1422,9 @@ class ReviewResult:
     # excluded by policy. Never model output.
     coverage_only_partial: bool = False
     work_policy_digest: str | None = None
+    # Continuation provenance is separate from the frozen v1 content digest.
+    # Its owning service compares the exact current request before reusing work.
+    continuation_scope_digest: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.coverage_only_partial, bool):
@@ -1432,6 +1435,13 @@ class ReviewResult:
         ):
             raise ReviewInputError(
                 "review result work_policy_digest must be a SHA-256 digest"
+            )
+        if self.continuation_scope_digest is not None and (
+            not isinstance(self.continuation_scope_digest, str)
+            or not _SHA256.fullmatch(self.continuation_scope_digest)
+        ):
+            raise ReviewInputError(
+                "review result continuation_scope_digest must be a SHA-256 digest"
             )
         if self.coverage_only_partial:
             from .human_file_review import coverage_only_binary
@@ -1670,6 +1680,8 @@ class ReviewResult:
         )
         if isinstance(work_policy_digest, str) and work_policy_digest:
             value["work_policy_digest"] = work_policy_digest
+        if self.continuation_scope_digest is not None:
+            value["continuation_scope_digest"] = self.continuation_scope_digest
         if self.transaction is not None:
             value["transaction"] = self.transaction.to_dict()
         return value
@@ -1868,6 +1880,9 @@ class ReviewResult:
             transaction=transaction,
             coverage_only_partial=cast(bool, value.get("coverage_only_partial", False)),
             work_policy_digest=cast(str | None, work_policy_digest),
+            continuation_scope_digest=cast(
+                str | None, value.get("continuation_scope_digest")
+            ),
         )
 
 

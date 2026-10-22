@@ -4,7 +4,7 @@
 - Date: 2026-10-19
 - Decision owner / reviewers: ReviewSensei maintainers
 - Linked GitHub Issue: [#238](https://github.com/malsabbagh/review-sensei/issues/238), [#246](https://github.com/malsabbagh/review-sensei/issues/246), [#267](https://github.com/malsabbagh/review-sensei/issues/267)
-- Linked PR: [#325](https://github.com/malsabbagh/review-sensei/pull/325); repairs the default publication failure observed on [#316](https://github.com/malsabbagh/review-sensei/pull/316)
+- Linked PR: [#325](https://github.com/malsabbagh/review-sensei/pull/325); repairs the default publication failure observed on [#316](https://github.com/malsabbagh/review-sensei/pull/316). Proposed checkpoint amendment: [#342](https://github.com/malsabbagh/review-sensei/pull/342).
 
 ## Context
 
@@ -27,8 +27,11 @@ Exact retry reconciliation verifies authenticated full retained prose/placement.
 
 Reuse ADR 0076 D-A's existing App-owned PR result-part storage for the final
 transaction-bound canonical ReviewResult, before review/check publication.
-Retention follows `github.operation_entry`, remains separate from diagnostics,
-and stores no raw diff, prompt, credential or caller settings. Recovery requires
+The original PR #325 route followed `github.operation_entry`. The PR #342
+amendment requires retention and readback before an identity-bound GitHub
+session-ledger transaction advances to `publication_pending`, independently of
+operation routing/receipts and diagnostics. Retention stores no raw diff, prompt,
+credential or caller settings. Recovery requires
 complete strict-owned parts, current PR/base/head and repository identity, a
 matching independent durable transaction, and caller-supplied trusted contexts.
 The accepted-operation guard still compares accepted bytes. Independently
@@ -61,7 +64,10 @@ activation. Rich inventories exceeding existing independent limits retain their
 validated result and fail with an actionable capacity message. No arbitrary
 250-finding capacity is claimed. Valid retained results recover without inference;
 missing/corrupt/foreign/stale parts and uncertain missing writes remain held.
-Existing `operation_entry: disabled` and writes-disabled callers preserve opt-out.
+Under the proposed PR #342 checkpoint amendment, `operation_entry: disabled`
+selects the pre-operation receipt route but does not opt an identity-bound GitHub
+session-ledger publication out of result retention. Writes-disabled callers
+still make no GitHub writes, and legacy unbound paths gain no checkpoint authority.
 Old failed runs without full result parts cannot be reconstructed from a baseline.
 
 ## Alternatives considered
@@ -95,8 +101,10 @@ configuration on `legacy` until exact installed compatibility is verified and th
 maintainer authorizes activation. Package release, v5 promotion and deployment
 are separate approved operations. Roll back emission to `legacy` while retaining
 expanded readers for already-published reviews; do not downgrade readers after
-large inventories exist. `operation_entry: disabled` remains the existing
-retention rollback and does not authorize inference or bypass validation.
+large inventories exist. `operation_entry: disabled` remains a routing/receipt
+rollback; it does not disable the proposed mandatory transaction checkpoint.
+Use the existing writes-disabled policy to stop GitHub mutation. Neither switch
+authorizes inference, missing-byte reconstruction or bypassing validation.
 
 ## Follow-up work
 

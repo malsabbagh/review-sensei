@@ -43,6 +43,195 @@ class ContextProvider(AssessingProvider):
         return ProviderResponse(json.dumps(value), self.name, self.model)
 
 
+class DirectPartialScopeTests(unittest.TestCase):
+    class Provider:
+        name = "fixture"
+        model = "fixture"
+
+        def __init__(self):
+            self.prompts = []
+
+        def complete(self, request):
+            self.prompts.append(request.prompt)
+            return ProviderResponse('{"summary":"Reviewed.","comments":[]}', self.name)
+
+    def request(self):
+        from review_sensei.validation import ReviewLimits
+
+        diff = "".join(
+            f"diff --git a/src/mod_{i}.py b/src/mod_{i}.py\n"
+            f"--- a/src/mod_{i}.py\n+++ b/src/mod_{i}.py\n"
+            "@@ -1 +1 @@\n-old\n+safe\n"
+            for i in range(2)
+        )
+        return ReviewRequest(
+            diff=diff,
+            base_sha="1" * 40,
+            head_sha="2" * 40,
+            model="fixture",
+            orchestrate_large_changes=True,
+            limits=ReviewLimits(
+                max_diff_bytes=220,
+                max_diff_lines=12,
+                max_diff_files=1,
+                max_diff_hunks=1,
+            ),
+        )
+
+    def service(self, provider, *, instruction="Review {diff}", mode="unified"):
+        return ReviewService(
+            provider,
+            stages=(Stage("review", instruction, ("summary", "comments")),),
+            work_budgets=ReviewWorkBudgets(mode=mode),
+            budget=ResourceBudget.create(max_provider_calls=1),
+        )
+
+    def test_trusted_snapshot_binds_legacy_and_unified_continuations(self):
+        from review_sensei.errors import ReviewInputError
+        from review_sensei.models import ReviewResult
+
+        request = replace(self.request(), base_sha=None, head_sha=None)
+        snapshot = {"trusted_base_sha": "1" * 40, "trusted_head_sha": "2" * 40}
+        for mode in ("legacy", "unified"):
+            with self.subTest(mode=mode):
+                provider = self.Provider()
+                service = self.service(provider, mode=mode)
+                first = service.run(request, **snapshot).result
+                self.assertEqual(first.review_status, "partial")
+                restored = ReviewResult.from_dict(
+                    json.loads(json.dumps(first.to_dict()))
+                )
+                before = len(provider.prompts)
+                with self.assertRaisesRegex(ReviewInputError, "continuation scope"):
+                    service.run(
+                        request,
+                        **(snapshot | {"trusted_head_sha": "3" * 40}),
+                        prior_partial=restored,
+                    )
+                self.assertEqual(len(provider.prompts), before)
+                second = service.run(request, **snapshot, prior_partial=restored)
+                self.assertEqual(second.result.review_status, "complete")
+                self.assertEqual(len(provider.prompts), before + 1)
+
+    def test_trusted_snapshot_requires_consistent_pair_in_every_mode(self):
+        from review_sensei.errors import ReviewInputError
+
+        for mode in ("legacy", "unified"):
+            for orchestrate in (False, True):
+                for request, snapshot in (
+                    (
+                        replace(self.request(), base_sha=None, head_sha=None),
+                        {"trusted_base_sha": "1" * 40},
+                    ),
+                    (
+                        self.request(),
+                        {"trusted_base_sha": "1" * 40, "trusted_head_sha": "3" * 40},
+                    ),
+                ):
+                    with self.subTest(
+                        mode=mode, orchestrate=orchestrate, snapshot=snapshot
+                    ):
+                        provider = self.Provider()
+                        request = replace(
+                            request, orchestrate_large_changes=orchestrate
+                        )
+                        with self.assertRaisesRegex(
+                            ReviewInputError, "consistent trusted snapshot"
+                        ):
+                            self.service(provider, mode=mode).run(request, **snapshot)
+                        self.assertFalse(provider.prompts)
+
+    def test_changed_source_or_configuration_refuses_before_provider_work(self):
+        from review_sensei.context import SourceContextSelection
+        from review_sensei.errors import ReviewInputError
+
+        request = self.request()
+        provider = self.Provider()
+        service = self.service(provider)
+        first = service.run(request).result
+        self.assertEqual(first.review_status, "partial")
+        self.assertIsNone(first.transaction)
+        for changed in (
+            replace(request, head_sha="3" * 40),
+            replace(request, diff=request.diff.replace("+safe", "+changed", 1)),
+            replace(request, instructions="Also inspect a new invariant."),
+            replace(request, metadata={"source": "different evidence"}),
+            replace(request, source_context=SourceContextSelection(complete=False)),
+        ):
+            with self.subTest(changed=changed):
+                before = len(provider.prompts)
+                with self.assertRaisesRegex(ReviewInputError, "continuation scope"):
+                    service.run(changed, prior_partial=first)
+                self.assertEqual(len(provider.prompts), before)
+        changed_service = self.service(provider, instruction="New policy: {diff}")
+        with self.assertRaisesRegex(ReviewInputError, "continuation scope"):
+            changed_service.run(request, prior_partial=first)
+        self.assertEqual(len(provider.prompts), 1)
+
+    def test_scope_metadata_is_validated_and_counts_toward_result_bound(self):
+        from review_sensei.errors import ReviewInputError
+        from review_sensei.models import ReviewResult
+        from review_sensei.schemas import validate_public_document
+
+        request = self.request()
+        first = self.service(self.Provider()).run(request).result
+        for invalid in ("", "A" * 64, "g" * 64, "a" * 63, 7):
+            with self.subTest(invalid=invalid):
+                document = first.to_dict() | {"continuation_scope_digest": invalid}
+                with self.assertRaises(ReviewInputError):
+                    ReviewResult.from_dict(document)
+                with self.assertRaises(ReviewInputError):
+                    validate_public_document(document, "review-result")
+        without_scope = first.to_dict()
+        without_scope.pop("continuation_scope_digest")
+        prior_size = len(json.dumps(without_scope, separators=(",", ":")).encode())
+        limited_request = replace(
+            request,
+            limits=replace(request.limits, max_result_bytes=prior_size + 1),
+        )
+        limited = self.service(self.Provider()).run(limited_request)
+        self.assertEqual(limited.outcome.status, "budget_exhausted")
+        self.assertEqual(limited.outcome.diagnostic, "output_budget")
+        self.assertIsNone(limited.result)
+
+    def test_same_source_continues_after_serialization_without_transaction(self):
+        from review_sensei.models import ReviewResult
+        from review_sensei.schemas import validate_public_document
+
+        request = self.request()
+        first_provider = self.Provider()
+        first = self.service(first_provider).run(request).result
+        document = json.loads(json.dumps(first.to_dict()))
+        self.assertIsNotNone(document.get("continuation_scope_digest"))
+        validate_public_document(document, "review-result")
+        restored = ReviewResult.from_dict(document)
+        fresh_provider = self.Provider()
+        second = (
+            self.service(fresh_provider).run(request, prior_partial=restored).result
+        )
+        self.assertEqual(second.review_status, "complete")
+        self.assertTrue(second.coverage.fully_reviewed)
+        self.assertEqual(len(fresh_provider.prompts), 1)
+        self.assertIn("src/mod_1.py", fresh_provider.prompts[0])
+        self.assertNotIn("src/mod_0.py", fresh_provider.prompts[0])
+
+    def test_missing_scope_fails_closed_without_changing_v1_content_digest(self):
+        from review_sensei.errors import ReviewInputError
+        from review_sensei.models import ReviewResult
+
+        request = self.request()
+        provider = self.Provider()
+        service = self.service(provider)
+        first = service.run(request).result
+        document = first.to_dict()
+        document.pop("continuation_scope_digest", None)
+        legacy = ReviewResult.from_dict(document)
+        self.assertEqual(legacy.content_digest(), first.content_digest())
+        with self.assertRaisesRegex(ReviewInputError, "continuation scope"):
+            service.run(request, prior_partial=legacy)
+        self.assertEqual(len(provider.prompts), 1)
+
+
 class WorkContinuationTests(unittest.TestCase):
     def test_repeated_scope_request_from_split_file_remains_pending_once(self):
         class Provider:
@@ -1129,6 +1318,10 @@ class WorkContinuationTests(unittest.TestCase):
             model = "fixture"
 
             def complete(self, request):
+                if "src/a.py" in request.prompt:
+                    return ProviderResponse(
+                        '{"summary":"Reviewed src/a.py.","comments":[]}', self.name
+                    )
                 return ProviderResponse("not valid json", self.name)
 
         service = ReviewService(
@@ -1150,29 +1343,30 @@ class WorkContinuationTests(unittest.TestCase):
             )
 
         # Matching head with failing chunk produces no-progress diagnostic and remedy
-        no_prog_run = service.run(
-            ReviewRequest(
-                diff=diff_text,
-                base_sha="1" * 40,
-                head_sha="2" * 40,
-                limits=ReviewLimits(
-                    max_diff_bytes=200,
-                    max_diff_lines=12,
-                    max_diff_files=1,
-                    max_diff_hunks=1,
-                ),
-                work_budget=TotalWorkBudget(
-                    max_total_diff_bytes=5000,
-                    max_total_diff_lines=100,
-                    max_total_files=10,
-                    max_total_hunks=10,
-                    max_chunks=8,
-                    max_provider_calls=8,
-                ),
-                orchestrate_large_changes=True,
+        current_request = ReviewRequest(
+            diff=diff_text,
+            base_sha="1" * 40,
+            head_sha="2" * 40,
+            limits=ReviewLimits(
+                max_diff_bytes=200,
+                max_diff_lines=12,
+                max_diff_files=1,
+                max_diff_hunks=1,
             ),
-            prior_partial=prior_partial,
+            work_budget=TotalWorkBudget(
+                max_total_diff_bytes=5000,
+                max_total_diff_lines=100,
+                max_total_files=10,
+                max_total_hunks=10,
+                max_chunks=8,
+                max_provider_calls=8,
+            ),
+            orchestrate_large_changes=True,
         )
+        actual_partial = service.run(current_request).result
+        self.assertEqual(actual_partial.review_status, "partial")
+        self.assertEqual(actual_partial.coverage.files[0].outcome, "reviewed")
+        no_prog_run = service.run(current_request, prior_partial=actual_partial)
         self.assertEqual(no_prog_run.outcome.status, "partial")
         self.assertEqual(no_prog_run.outcome.diagnostic, "no-progress")
         self.assertIn(

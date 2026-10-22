@@ -154,7 +154,7 @@ file uses the packaged defaults:
 | `github.learning` | `disabled` | Learning mode: `disabled`, `proposals`, or `pull-requests` |
 | `github.artifacts` | `none` | Artifact mode: `none` or `diagnostics` |
 | `github.publication_inventory` | `legacy` | `legacy` emits at most 64 findings; `complete` permits up to 250 within existing byte/path limits after every reader has been upgraded. See [rollout and recovery](validation/default-publication-recovery.md). |
-| `github.operation_entry` | `enabled` | Shared operation entry. `disabled` keeps the previous paths. The measured P1 profile does not fit 60 ordinary dispatches (#267). Caps stay 60/64 and 60 seconds. |
+| `github.operation_entry` | `enabled` | Shared operation routing and receipts. `disabled` does not disable mandatory result retention for identity-bound GitHub session-ledger publications. The measured P1 profile does not fit 60 ordinary dispatches (#267). Caps stay 60/64 and 60 seconds. |
 
 The packaged model for the selected backend applies unless `inference.model`
 names another one. `REVIEWSENSEI_PROVIDER` and `REVIEWSENSEI_MODEL` are the

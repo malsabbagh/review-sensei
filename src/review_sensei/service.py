@@ -372,6 +372,62 @@ class ReviewService:
     ) -> ReviewProvider:
         return self.stage_providers.get(stage.name, default or self.provider)
 
+    def _continuation_scope_digest(
+        self,
+        request: ReviewRequest,
+        *,
+        provider: ReviewProvider,
+        profile: str,
+        budget: ResourceBudget,
+        incremental: IncrementalReviewPlan | None,
+    ) -> str:
+        """Bind reusable coverage to the complete request and public execution identity."""
+        from .evidence import evidence_digest
+
+        return evidence_digest(
+            {
+                "domain": "reviewsensei:partial-continuation-scope:v1",
+                "request": asdict(replace(request, metadata=dict(request.metadata))),
+                "stages": [asdict(stage) for stage in self.stages],
+                "routing": [
+                    {
+                        "stage": stage.name,
+                        "provider": selected.name,
+                        "model": selected.model,
+                    }
+                    for stage in self.stages
+                    for selected in (self._provider_for_stage(stage, default=provider),)
+                ],
+                "profile": profile,
+                "enforce_locations": self.enforce_locations,
+                "work_budgets": asdict(self.work_budgets),
+                "resource_budget": asdict(budget),
+                "capabilities": asdict(self.capabilities)
+                if self.capabilities
+                else None,
+                "incremental": asdict(incremental) if incremental is not None else None,
+            }
+        )
+
+    @staticmethod
+    def _bind_continuation_scope(run: ReviewRun, digest: str) -> ReviewRun:
+        if run.result is None:
+            return run
+        try:
+            result = replace(run.result, continuation_scope_digest=digest)
+        except ReviewInputError as exc:
+            if "review result exceeds the configured size limit" not in str(exc):
+                raise
+            return replace(
+                run,
+                outcome=replace(
+                    run.outcome, status="budget_exhausted", diagnostic="output_budget"
+                ),
+                result=None,
+                error=None,
+            )
+        return replace(run, result=result)
+
     def _budgeted_provider(
         self, provider: ReviewProvider, budgeted: _BudgetedProvider
     ) -> ReviewProvider:
@@ -890,10 +946,8 @@ class ReviewService:
             )
         active_provider = provider_override or self.provider
         key_request = request
-        if (
-            self.work_budgets.mode == "unified"
-            and current_key is None
-            and (trusted_base_sha is not None or trusted_head_sha is not None)
+        if current_key is None and (
+            trusted_base_sha is not None or trusted_head_sha is not None
         ):
             if (
                 trusted_base_sha is None
@@ -970,6 +1024,13 @@ class ReviewService:
                 sleeper=sleeper or time.sleep,
             )
         effective_budget = tracker.budget
+        continuation_scope_digest = self._continuation_scope_digest(
+            key_request,
+            provider=active_provider,
+            profile=profile,
+            budget=effective_budget,
+            incremental=incremental,
+        )
         accumulated_summary: str = ""
         accumulated_comments: list[ReviewComment] = []
         accumulated_proposals: list[LearningProposal] = []
@@ -1049,11 +1110,15 @@ class ReviewService:
                     raise ReviewInputError(
                         "prior partial review evidence does not match current evidence policy"
                     )
+            if prior_partial.continuation_scope_digest != continuation_scope_digest:
+                raise ReviewInputError(
+                    "prior partial review continuation scope is missing or does not match current request"
+                )
 
         if self.work_budgets.mode == "unified":
             from .discovery_work import discover
 
-            return discover(
+            run = discover(
                 self,
                 request,
                 snapshot_request=key_request,
@@ -1066,6 +1131,7 @@ class ReviewService:
                 allow_expansion=allow_work_expansion,
                 prior_partial=prior_partial,
             )
+            return self._bind_continuation_scope(run, continuation_scope_digest)
 
         try:
             change_plan = plan_change(
@@ -1083,7 +1149,7 @@ class ReviewService:
                 raise
             raise ChunkPreflightError("diff failed bounded preflight") from exc
         if request.orchestrate_large_changes:
-            return self._review_chunks_run(
+            run = self._review_chunks_run(
                 request,
                 change_plan,
                 tracker=tracker,
@@ -1095,6 +1161,7 @@ class ReviewService:
                 profile=profile,
                 prior_partial=prior_partial,
             )
+            return self._bind_continuation_scope(run, continuation_scope_digest)
         analysis = change_plan.analysis
         configured_category_ids = {category.id for category in self.review_categories}
         if request.active_category_ids is not None and not set(
@@ -1145,7 +1212,7 @@ class ReviewService:
                     pull_request_number=request.pull_request_number,
                 )
             result = self._attach_coverage(result, change_plan.coverage)
-            return self._finish_run(
+            run = self._finish_run(
                 tracker=tracker,
                 status=self._run_outcome_for_result(result)[0],
                 stage_summary=stage_summary,
@@ -1153,6 +1220,7 @@ class ReviewService:
                 repository=request.repository,
                 pull_request_number=request.pull_request_number,
             )
+            return self._bind_continuation_scope(run, continuation_scope_digest)
 
         prompt_limit = min(
             request.limits.max_prompt_bytes, effective_budget.max_prompt_bytes
@@ -1604,7 +1672,7 @@ class ReviewService:
                 )
             result = self._attach_coverage(result, change_plan.coverage)
         status, diagnostic = self._run_outcome_for_result(result)
-        return self._finish_run(
+        run = self._finish_run(
             tracker=tracker,
             status=status,
             stage_summary=stage_summary,
@@ -1613,6 +1681,7 @@ class ReviewService:
             repository=request.repository,
             pull_request_number=request.pull_request_number,
         )
+        return self._bind_continuation_scope(run, continuation_scope_digest)
 
     def _finish_run(
         self,

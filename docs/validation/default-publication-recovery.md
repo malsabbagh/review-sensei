@@ -153,9 +153,13 @@ configuration or digest parts refuse. A failed/interrupted initial write can
 leave an unconfirmed durable phase. A fresh owner reconciles complete owned parts;
 an incomplete or absent set cannot be blindly recreated. This hold requires
 operator investigation. If the exact original result and trusted contexts are
-available, the existing explicit `operation_entry: disabled` rollback can publish
-those original bytes through ordinary validation; it is not a provider retry or
-permission bypass. Do not change this switch merely to clear a genuine finding.
+available, the explicit `operation_entry: disabled` route selects publication
+without shared operation receipts. In the PR #342 contract, identity-bound GitHub
+session-ledger publications still require canonical retention and readback before
+their durable checkpoint advances; disabling operation entry does not bypass
+that requirement or promise that the attempt fits its budget. This is not a
+provider retry or permission bypass. Do not change this switch merely to clear a
+genuine finding.
 
 This serial crash fence is not an atomic distributed lock. Concurrent REST comment
 writers remain an unqualified condition. Large feedback histories can still exhaust
