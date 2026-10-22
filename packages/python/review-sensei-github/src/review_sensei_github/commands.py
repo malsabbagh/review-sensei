@@ -80,3 +80,6 @@ host_plan_parser = cast(Callable[[], Any], _COMMANDS["_host_plan_parser"])
 require_accepted_result = cast(
     Callable[..., Any], _COMMANDS["_require_accepted_result"]
 )
+lookup_collaborator_permission = cast(
+    Callable[..., str | None], _COMMANDS["_collaborator_permission"]
+)

@@ -782,11 +782,20 @@ def extract_prior_reviewed_coverage(
         raise ReviewInputError(
             "prior partial review coverage paths do not match current diff"
         )
+    valid_paths = set(analysis.changed_paths)
+    valid_hunks = {
+        hunk.index for record in (analysis.file_records or ()) for hunk in record.hunks
+    }
     reviewed_files = {
-        entry.path for entry in coverage.files if entry.outcome == "reviewed"
+        entry.path
+        for entry in coverage.files
+        if entry.outcome == "reviewed" and entry.path in valid_paths
     }
     reviewed_hunks = {
-        entry.index for entry in coverage.hunks if entry.outcome == "reviewed"
+        entry.index
+        for entry in coverage.hunks
+        if entry.outcome == "reviewed"
+        and (not valid_hunks or entry.index in valid_hunks)
     }
     if not reviewed_files and not reviewed_hunks:
         return set(), set()

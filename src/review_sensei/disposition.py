@@ -1036,6 +1036,7 @@ def apply_session_command(
             if (
                 tx is not None
                 and tx.phase in {"publication_pending", "publication_failed"}
+                and (command.head_sha is None or tx.head_sha == command.head_sha)
             ) or (
                 tx is None
                 and has_unconsumed_irrecoverable_transaction_grant(
@@ -1215,7 +1216,7 @@ def apply_session_command(
             if (
                 actor_role in {"maintain", "admin", "OWNER", "MEMBER"}
                 and isinstance(target_head, str)
-                and len(target_head) == 40
+                and bool(_HEAD_SHA.fullmatch(target_head))
             ):
                 record, applied = grant_successor_continuation(
                     ledger,
@@ -1506,7 +1507,8 @@ def disposition_honors_coverage_uncertainty(
     now: datetime | None = None,
 ) -> bool:
     return any(
-        item.honors_coverage_uncertainty(
+        callable(getattr(item, "honors_coverage_uncertainty", None))
+        and item.honors_coverage_uncertainty(
             head_sha=head_sha,
             incomplete_coverage=incomplete_coverage,
             policy_digest=policy_digest,

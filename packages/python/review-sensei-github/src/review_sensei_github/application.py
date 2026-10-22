@@ -1047,6 +1047,13 @@ class GitHubApplication:
                     result_retained = True
                 transaction_record = load_transaction(ledger, commit_analysis=True)
                 if transaction_record.transaction is not None:
+                    if (
+                        transaction_record.transaction.result_sha256
+                        != result.content_digest()
+                    ):
+                        raise GitHubPublicationError(
+                            "review result digest does not match durable transaction"
+                        )
                     result = replace(result, transaction=transaction_record.transaction)
             if retention_required:
                 from .publication_recovery import retain_review_result
@@ -2023,17 +2030,26 @@ class GitHubApplication:
             raise GitHubPublicationError(
                 "hosted maintainer mutations require atomic session initialization"
             )
+        needs_elevated_permission_lookup = can_lookup_collaborator_permission and (
+            command.action
+            in {
+                "accept-risk",
+                "accept-coverage-uncertainty",
+                "reenroll",
+                "continue",
+            }
+            or bool(command.finding_reference)
+            or bool(command.finding_references)
+        )
         if (
-            actor_permission is None
-            and self.http is not None
-            and callable(getattr(self.http, "request", None))
+            needs_elevated_permission_lookup
             and isinstance(token, str)
             and token.strip()
         ):
-            from .commands import _COMMANDS
+            from .commands import lookup_collaborator_permission
 
             try:
-                actor_permission = _COMMANDS["_collaborator_permission"](
+                actor_permission = lookup_collaborator_permission(
                     self.http,
                     token=token.strip(),
                     repository=repository,

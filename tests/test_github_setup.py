@@ -2102,7 +2102,7 @@ class GitHubSetupClientTests(unittest.TestCase):
         self.assertEqual(drift.customizations["runs_on"], "[self-hosted, linux, x64]")
         self.assertIn(
             "      CUSTOM_ORG_TOKEN: ${{ secrets.CUSTOM_ORG_TOKEN }}",
-            drift.customizations["extra_secrets"],
+            drift.customizations["custom_job_lines"],
         )
 
         migrated, diff_text = migrate_caller_preserving_customizations(

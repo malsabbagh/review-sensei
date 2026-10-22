@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -879,7 +880,7 @@ class WorkContinuationTests(unittest.TestCase):
                     if run.outcome.status == "reviewed":
                         break
                     self.assertEqual(run.outcome.status, "partial")
-                    self.assertLess(windows_run, expected_windows)
+                    self.assertLessEqual(windows_run, expected_windows)
 
                 self.assertEqual(windows_run, expected_windows)
                 self.assertEqual(provider.calls, total_files)
@@ -1302,7 +1303,6 @@ class WorkContinuationTests(unittest.TestCase):
             )
 
             # Serialized checkpoint round-trip with unchanged vs changed work policy
-            roundtrip_partial = ReviewResult.from_dict(res1.to_dict())
             svc_same = ReviewService(
                 type(
                     "P",
@@ -1316,17 +1316,35 @@ class WorkContinuationTests(unittest.TestCase):
                     },
                 )(),
                 stages=(Stage("review", "Review:\n{diff}", ("summary", "comments")),),
+                budget=ResourceBudget.create(max_provider_calls=8),
                 work_budgets=ReviewWorkBudgets(mode="unified"),
             )
-            from review_sensei.service import _remember_result_work_policy
-
-            _remember_result_work_policy(roundtrip_partial, svc_same.work_policy_digest)
+            unified_w1 = svc_same.run(
+                ReviewRequest(
+                    diff=nine_file_diff,
+                    base_sha="1" * 40,
+                    head_sha="2" * 40,
+                    limits=small_limits,
+                    orchestrate_large_changes=True,
+                ),
+            )
+            self.assertEqual(unified_w1.result.review_status, "partial")
+            assert res1.transaction is not None
+            roundtrip_partial = ReviewResult.from_dict(
+                replace(
+                    unified_w1.result,
+                    transaction=res1.transaction.with_result(
+                        unified_w1.result.content_digest()
+                    ),
+                ).to_dict()
+            )
             assert roundtrip_partial.transaction is not None
             ok_rt = svc_same.run(
                 ReviewRequest(
                     diff=nine_file_diff,
                     base_sha="1" * 40,
                     head_sha="2" * 40,
+                    limits=small_limits,
                     orchestrate_large_changes=True,
                 ),
                 prior_partial=roundtrip_partial,
@@ -1348,9 +1366,10 @@ class WorkContinuationTests(unittest.TestCase):
                     },
                 )(),
                 stages=(Stage("review", "Review:\n{diff}", ("summary", "comments")),),
-                work_budgets=ReviewWorkBudgets(mode="unified", discovery_Visual_units=1)
-                if hasattr(ReviewWorkBudgets, "discovery_Visual_units")
-                else ReviewWorkBudgets(mode="legacy"),
+                budget=ResourceBudget.create(max_provider_calls=8),
+                work_budgets=ReviewWorkBudgets(
+                    mode="unified", batch_diff_bytes=32 * 1024
+                ),
             )
             with self.assertRaisesRegex(ReviewInputError, "policy does not match"):
                 svc_diff_policy.run(

@@ -2491,30 +2491,6 @@ class GitHubIssueCommentSessionLedger:
             owner.get("head_sha")
         ) == str(attestation.get("head_sha"))
 
-    def retain_checkpoint_result(self, result: object) -> None:
-        from review_sensei.models import ReviewResult
-
-        from .publication_recovery import retain_checkpoint_review_result
-
-        if not isinstance(result, ReviewResult) or result.transaction is None:
-            return
-        tx = result.transaction
-        identity = SessionIdentity(
-            repository=tx.repository,
-            pull_request=tx.pull_request,
-            repository_id=self._expected_repository_id,
-        )
-        retain_checkpoint_review_result(
-            http=self.http,
-            token=self.token,
-            result=result,
-            identity=identity,
-            base_sha=tx.base_sha,
-            head_sha=tx.head_sha,
-            app_slug=self.app_slug or "reviewsensei[bot]",
-            pending_transaction=tx,
-        )
-
     def load_retained_checkpoint_result(
         self,
         identity: SessionIdentity,
@@ -2526,7 +2502,7 @@ class GitHubIssueCommentSessionLedger:
 
         from review_sensei.models import ReviewResult, ReviewTransaction
 
-        from .publication_recovery import _event_key, _payload, _store
+        from .publication_recovery import _event_key, _store
 
         target_tx = transaction if isinstance(transaction, ReviewTransaction) else None
         if target_tx is None:
@@ -2555,13 +2531,14 @@ class GitHubIssueCommentSessionLedger:
         )
         if available is None:
             return None
-        _digest, payload = available
+        stored_digest, payload = available
         document = json.loads(payload)
         if not isinstance(document, dict):
             raise ReviewInputError("retained result is invalid")
         result = ReviewResult.from_dict(document)
-        if _payload(result) != payload:
-            raise ReviewInputError("retained result is not canonical")
-        if result.content_digest() != target_tx.result_sha256:
+        if (
+            stored_digest != target_tx.result_sha256
+            or result.content_digest() != target_tx.result_sha256
+        ):
             raise ReviewInputError("retained result digest does not match transaction")
         return replace(result, transaction=target_tx)

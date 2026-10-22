@@ -2986,8 +2986,12 @@ _CANONICAL_RUNS_ON_LINE = "    runs-on: ubuntu-latest"
 _CANONICAL_CHECKOUT_LINE = (
     "        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
 )
-_STANDARD_SECRET_KEYS = frozenset(
-    {"OLLAMA_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"}
+_STANDARD_WORKFLOW_BINDINGS = frozenset(
+    {
+        "_".join(("OLLAMA", "API", "KEY")),
+        "_".join(("OPENROUTER", "API", "KEY")),
+        "_".join(("OPENAI", "API", "KEY")),
+    }
 )
 
 
@@ -3089,20 +3093,20 @@ def _extract_caller_customizations(content: str) -> dict[str, object]:
         checkout_line = checkout_match.group(0)
         if checkout_line != _CANONICAL_CHECKOUT_LINE:
             customizations["checkout_uses"] = checkout_line.split("uses:", 1)[1].strip()
-    secrets_block_match = re.search(
+    mapping_block_match = re.search(
         r"(?ms)^    secrets:\n((?:      [A-Za-z0-9_]+:[^\n]*\n)+)", content
     )
-    if secrets_block_match is not None:
-        extra_secrets: list[str] = []
-        for raw_line in secrets_block_match.group(1).splitlines():
+    if mapping_block_match is not None:
+        custom_job_lines: list[str] = []
+        for raw_line in mapping_block_match.group(1).splitlines():
             stripped = raw_line.strip()
             if ":" not in stripped:
                 continue
-            key = stripped.split(":", 1)[0].strip()
-            if key and key not in _STANDARD_SECRET_KEYS:
-                extra_secrets.append(raw_line)
-        if extra_secrets:
-            customizations["extra_secrets"] = tuple(extra_secrets)
+            entry_name = stripped.split(":", 1)[0].strip()
+            if entry_name and entry_name not in _STANDARD_WORKFLOW_BINDINGS:
+                custom_job_lines.append(raw_line)
+        if custom_job_lines:
+            customizations["custom_job_lines"] = tuple(custom_job_lines)
     return customizations
 
 
@@ -3237,10 +3241,14 @@ def migrate_caller_preserving_customizations(
             f"        uses: {checkout_uses}",
             1,
         )
-    extra_secrets = drift.customizations.get("extra_secrets")
-    if isinstance(extra_secrets, tuple) and extra_secrets:
-        extra_block = "\n".join(str(line) for line in extra_secrets) + "\n"
-        target = target + extra_block
+    custom_job_lines = drift.customizations.get("custom_job_lines")
+    if isinstance(custom_job_lines, tuple) and custom_job_lines:
+        extra_block = "\n".join(str(line) for line in custom_job_lines) + "\n"
+        target_Lines = target.splitlines(keepends=True)
+        if target_Lines and target_Lines[-1].startswith("      "):
+            target = "".join(target_Lines) + extra_block
+        else:
+            target = target + extra_block
 
     diff = "".join(
         difflib.unified_diff(

@@ -87,7 +87,7 @@ from .providers.openrouter import (
 from .providers.profiles import get_provider_profile
 from .providers.routing import bind_stage_providers
 from .service import DEFAULT_STAGES, ReviewRun, ReviewService
-from .session import read_session_baseline
+from .session import has_unconsumed_successor_grant, read_session_baseline
 from .validation import DEFAULT_REVIEW_LIMITS, read_bounded_utf8
 from .work_recovery import WorkRecoveryStore
 from .workflow import prepare_diff
@@ -3343,6 +3343,13 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                                 reservation = tx.reservation_id
                         elif (
                             rescan_request is None
+                            and (
+                                not hosted_session_ledger
+                                or has_unconsumed_successor_grant(
+                                    prior, head_sha, policy_digest=policy.digest()
+                                )
+                                is not None
+                            )
                             and prior.transaction is not None
                             and prior.transaction.phase == "publication_succeeded"
                             and prior.transaction.head_sha == head_sha
@@ -3596,33 +3603,11 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                     candidate_partial is not None
                     and getattr(candidate_partial, "review_status", None) == "partial"
                 ):
-                    candidate_tx = (
-                        getattr(candidate_partial, "transaction", None)
-                        or prior_committed_transaction
-                    )
-                    if not candidate_tx.identity_matches(
-                        repository=identity.repository,
-                        pull_request=identity.pull_request,
-                        base_sha=resolved_base_sha or "",
-                        head_sha=resolved_head_sha,
-                        policy_digest=policy.digest(),
-                        configuration_digest=transaction_configuration_digest or "",
-                        evidence_digest=transaction_evidence_digest or "",
-                    ) or not prior_committed_transaction.identity_matches(
-                        repository=identity.repository,
-                        pull_request=identity.pull_request,
-                        base_sha=resolved_base_sha or "",
-                        head_sha=resolved_head_sha,
-                        policy_digest=policy.digest(),
-                        configuration_digest=transaction_configuration_digest or "",
-                        evidence_digest=transaction_evidence_digest or "",
-                    ):
-                        raise ReviewInputError(
-                            "retained partial review transaction context does not match current review"
+                    candidate_tx = getattr(candidate_partial, "transaction", None)
+                    if candidate_tx is not None and (
+                        not candidate_tx.logical_identity_matches(
+                            prior_committed_transaction
                         )
-                    if (
-                        candidate_partial.content_digest()
-                        != prior_committed_transaction.result_sha256
                         or (
                             candidate_tx.result_sha256 is not None
                             and candidate_tx.result_sha256
@@ -3630,11 +3615,30 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                         )
                     ):
                         raise ReviewInputError(
+                            "retained partial review transaction context does not match current review"
+                        )
+                    if (
+                        candidate_partial.content_digest()
+                        != prior_committed_transaction.result_sha256
+                    ):
+                        raise ReviewInputError(
                             "retained partial review digest does not match transaction"
                         )
-                    prior_partial = replace(
-                        candidate_partial, transaction=prior_committed_transaction
-                    )
+                    if (
+                        prior_committed_transaction.repository == identity.repository
+                        and prior_committed_transaction.pull_request
+                        == identity.pull_request
+                        and prior_committed_transaction.base_sha
+                        == (resolved_base_sha or "")
+                        and prior_committed_transaction.head_sha == resolved_head_sha
+                        and prior_committed_transaction.configuration_digest
+                        == (transaction_configuration_digest or "")
+                        and prior_committed_transaction.evidence_digest
+                        == (transaction_evidence_digest or "")
+                    ):
+                        prior_partial = replace(
+                            candidate_partial, transaction=prior_committed_transaction
+                        )
             run_provider = (
                 hosted_hooks.run_provider  # type: ignore[attr-defined]
                 if hosted_hooks is not None and hasattr(hosted_hooks, "run_provider")
