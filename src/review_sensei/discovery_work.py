@@ -213,6 +213,20 @@ def discover(
         )
 
     subdivision_allowance = SubdivisionAllowance()
+    active_stage_count = sum(
+        1
+        for candidate_stage in service.stages
+        if not candidate_stage.categories
+        or any(
+            request.active_category_ids is None
+            or category.id in request.active_category_ids
+            for category in candidate_stage.categories
+        )
+    )
+    window_batch_limit = max(
+        1,
+        tracker.budget.max_provider_calls // max(1, active_stage_count),
+    )
     for stage in service.stages:
         categories = tuple(
             category
@@ -392,7 +406,7 @@ def discover(
             requirements,
             budgets=budgets,
             render=render,
-            max_batches=min(work.max_chunks, max(1, tracker.budget.max_provider_calls)),
+            max_batches=min(work.max_chunks, window_batch_limit),
             correction=_PROVIDER_OUTPUT_CORRECTION,
             authority_digest=evidence_digest(
                 {
@@ -659,7 +673,7 @@ def discover(
             # is separate from the planner's internal pending diagnostics.
             diagnostic = (
                 "provider-call-budget"
-                if reason == "provider_call_limit"
+                if reason in {"provider_call_limit", "provider-call-budget"}
                 else "chunk-failed"
             )
             for key in item.evidence_ids:
@@ -702,16 +716,24 @@ def discover(
     if mandatory_refused_documents:
         refusal_summary += f"\nMandatory document overflow: {len(mandatory_refused_documents)} unique document(s), {sum(mandatory_refused_documents.values())} UTF-8 payload bytes."
     no_progress_detected = False
-    if (prior_reviewed_files or prior_reviewed_hunks) and not coverage.fully_reviewed:
+    has_prior_partial = (
+        prior_partial is not None
+        and prior_partial.review_status == "partial"
+        and prior_partial.coverage is not None
+        and prior_partial.coverage.enumeration_complete
+    )
+    if (
+        has_prior_partial or prior_reviewed_files or prior_reviewed_hunks
+    ) and not coverage.fully_reviewed:
         now_reviewed_files = sum(
             1 for entry in coverage.files if entry.outcome == "reviewed"
         )
         now_reviewed_hunks = sum(
             1 for entry in coverage.hunks if entry.outcome == "reviewed"
         )
-        if now_reviewed_files <= len(prior_reviewed_files) and now_reviewed_hunks <= len(
-            prior_reviewed_hunks
-        ):
+        if now_reviewed_files <= len(
+            prior_reviewed_files
+        ) and now_reviewed_hunks <= len(prior_reviewed_hunks):
             no_progress_detected = True
             refusal_summary += (
                 "\nNo progress on remaining unreviewed coverage; next action: "

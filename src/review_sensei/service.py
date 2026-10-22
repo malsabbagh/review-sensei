@@ -108,6 +108,21 @@ DEFAULT_STAGES = tuple(
 _PROMPT_PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]*)\}")
 _MAX_PROVIDER_OUTPUT_ATTEMPTS = 2
 _LOGGER = logging.getLogger(__name__)
+_RESULT_WORK_POLICY_DIGESTS: dict[str, str] = {}
+
+
+def _remember_result_work_policy(
+    result: ReviewResult, work_policy_digest: str | None
+) -> ReviewResult:
+    if not work_policy_digest:
+        return result
+    object.__setattr__(result, "_work_policy_digest", work_policy_digest)
+    if len(_RESULT_WORK_POLICY_DIGESTS) >= 256:
+        _RESULT_WORK_POLICY_DIGESTS.pop(next(iter(_RESULT_WORK_POLICY_DIGESTS)))
+    _RESULT_WORK_POLICY_DIGESTS[result.content_digest()] = work_policy_digest
+    return result
+
+
 _PROVIDER_OUTPUT_CORRECTION = """
 
 <review-output-correction>
@@ -413,7 +428,7 @@ class ReviewService:
         from .human_file_review import coverage_only_binary
 
         status = self._status_with_coverage(result.review_status, coverage)
-        return replace(
+        updated = replace(
             result,
             coverage=coverage,
             review_status=status,
@@ -425,6 +440,7 @@ class ReviewService:
                 )
             ),
         )
+        return _remember_result_work_policy(updated, self.work_policy_digest)
 
     @staticmethod
     def _status_with_coverage(status: str, coverage: CoverageManifest) -> str:
@@ -475,10 +491,14 @@ class ReviewService:
             and prior_partial.coverage.enumeration_complete
         ):
             prior_reviewed_files = sum(
-                1 for entry in prior_partial.coverage.files if entry.outcome == "reviewed"
+                1
+                for entry in prior_partial.coverage.files
+                if entry.outcome == "reviewed"
             )
             prior_reviewed_hunks = sum(
-                1 for entry in prior_partial.coverage.hunks if entry.outcome == "reviewed"
+                1
+                for entry in prior_partial.coverage.hunks
+                if entry.outcome == "reviewed"
             )
             if prior_reviewed_files > 0 or prior_reviewed_hunks > 0:
                 accumulated_summary = prior_partial.summary
@@ -678,7 +698,16 @@ class ReviewService:
                         )
                 break
         planned_chunks = len(plan.reviewable_chunks)
-        has_prior_progress = prior_reviewed_files > 0 or prior_reviewed_hunks > 0
+        has_prior_progress = (
+            prior_reviewed_files > 0
+            or prior_reviewed_hunks > 0
+            or (
+                prior_partial is not None
+                and prior_partial.review_status == "partial"
+                and prior_partial.coverage is not None
+                and prior_partial.coverage.enumeration_complete
+            )
+        )
         no_progress_detected = False
         if chunks_completed == 0 and not has_prior_progress:
             review_status = "incomplete"
@@ -776,6 +805,9 @@ class ReviewService:
         profile: str = "default",
         budget: ResourceBudget | None = None,
         prior_partial: ReviewResult | None = None,
+        expected_policy_digest: str | None = None,
+        expected_configuration_digest: str | None = None,
+        expected_evidence_digest: str | None = None,
         monotonic: Callable[[], float] | None = None,
         sleeper: Callable[[float], None] | None = None,
     ) -> ReviewResult:
@@ -794,6 +826,9 @@ class ReviewService:
             profile=profile,
             budget=budget,
             prior_partial=prior_partial,
+            expected_policy_digest=expected_policy_digest,
+            expected_configuration_digest=expected_configuration_digest,
+            expected_evidence_digest=expected_evidence_digest,
             monotonic=monotonic,
             sleeper=sleeper,
         )
@@ -821,6 +856,9 @@ class ReviewService:
         work_recovery: WorkRecoveryStore | None = None,
         allow_work_expansion: bool = True,
         prior_partial: ReviewResult | None = None,
+        expected_policy_digest: str | None = None,
+        expected_configuration_digest: str | None = None,
+        expected_evidence_digest: str | None = None,
         monotonic: Callable[[], float] | None = None,
         sleeper: Callable[[float], None] | None = None,
     ) -> ReviewRun:
@@ -941,24 +979,73 @@ class ReviewService:
         self._provider_calls = 0 if tracker is None else tracker.provider_calls
         stage_summary: dict[str, str] = {}
 
-        if prior_partial is not None and prior_partial.transaction is not None:
-            expected_base = trusted_base_sha or key_request.base_sha
-            expected_head = trusted_head_sha or key_request.head_sha
-            if expected_base is not None and prior_partial.transaction.base_sha != expected_base:
+        if prior_partial is not None:
+            if (
+                prior_partial.provider
+                and prior_partial.provider != active_provider.name
+            ):
                 raise ReviewInputError(
-                    "prior partial review snapshot does not match current base or head"
-                )
-            if expected_head is not None and prior_partial.transaction.head_sha != expected_head:
-                raise ReviewInputError(
-                    "prior partial review snapshot does not match current base or head"
+                    "prior partial review provider does not match current provider"
                 )
             if (
-                self.work_budgets.mode == "unified"
-                and prior_partial.transaction.policy_digest != self.work_policy_digest
+                request.model is not None
+                and prior_partial.model is not None
+                and prior_partial.model != request.model
+            ):
+                raise ReviewInputError(
+                    "prior partial review model does not match current model"
+                )
+            prior_work_policy = getattr(
+                prior_partial, "_work_policy_digest", None
+            ) or _RESULT_WORK_POLICY_DIGESTS.get(prior_partial.content_digest())
+            if (
+                prior_work_policy is not None
+                and prior_work_policy != self.work_policy_digest
             ):
                 raise ReviewInputError(
                     "prior partial review policy does not match current work policy"
                 )
+            if prior_partial.transaction is not None:
+                expected_base = trusted_base_sha or key_request.base_sha
+                expected_head = trusted_head_sha or key_request.head_sha
+                if (
+                    expected_base is not None
+                    and prior_partial.transaction.base_sha != expected_base
+                ):
+                    raise ReviewInputError(
+                        "prior partial review snapshot does not match current base or head"
+                    )
+                if (
+                    expected_head is not None
+                    and prior_partial.transaction.head_sha != expected_head
+                ):
+                    raise ReviewInputError(
+                        "prior partial review snapshot does not match current base or head"
+                    )
+                if (
+                    expected_policy_digest is not None
+                    and prior_partial.transaction.policy_digest
+                    != expected_policy_digest
+                ):
+                    raise ReviewInputError(
+                        "prior partial review policy does not match current convergence policy"
+                    )
+                if (
+                    expected_configuration_digest is not None
+                    and prior_partial.transaction.configuration_digest
+                    != expected_configuration_digest
+                ):
+                    raise ReviewInputError(
+                        "prior partial review configuration does not match current configuration"
+                    )
+                if (
+                    expected_evidence_digest is not None
+                    and prior_partial.transaction.evidence_digest
+                    != expected_evidence_digest
+                ):
+                    raise ReviewInputError(
+                        "prior partial review evidence does not match current evidence policy"
+                    )
 
         if self.work_budgets.mode == "unified":
             from .discovery_work import discover
@@ -1707,7 +1794,7 @@ class ReviewService:
                 (coverage.generation, coverage.mode, len(lifecycles)),
                 generation=coverage.generation,
             )
-        return result
+        return _remember_result_work_policy(result, self.work_policy_digest)
 
     def _format_prompt(
         self,

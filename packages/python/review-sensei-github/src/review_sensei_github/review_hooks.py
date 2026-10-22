@@ -80,5 +80,19 @@ class GitHubReviewHooks:
             policy=policy,  # type: ignore[arg-type]
         )
 
+    def load_retained_checkpoint_result(
+        self,
+        args: argparse.Namespace,
+        ledger: SessionLedger,
+        identity: object,
+        *,
+        transaction: object | None = None,
+        head_sha: str | None = None,
+    ) -> object | None:
+        load_retained = getattr(ledger, "load_retained_checkpoint_result", None)
+        if not callable(load_retained):
+            return None
+        return load_retained(identity, transaction=transaction, head_sha=head_sha)
+
     def report_failure(self, error: BaseException, args: argparse.Namespace) -> bool:
         return bool(report_broker_failure(error, args))

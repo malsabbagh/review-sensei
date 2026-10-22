@@ -1907,7 +1907,7 @@ class ActionPinPolicyTests(unittest.TestCase):
 
     def test_run_name_quotes_hash_so_yaml_does_not_comment_it_out(self):
         quoted = (
-            'run-name: "ReviewSensei ${{ github.event_name == \'pull_request\' && '
+            "run-name: \"ReviewSensei ${{ github.event_name == 'pull_request' && "
             "format('PR #{0}', github.event.pull_request.number) || "
             "github.event_name == 'pull_request_review_comment' && "
             "format('PR #{0} inline comment ({1})', github.event.pull_request.number, "

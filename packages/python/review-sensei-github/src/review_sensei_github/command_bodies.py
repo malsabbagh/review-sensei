@@ -927,15 +927,12 @@ def _post_command_receipt(
             _write_step_summary(text)
             return
         if isinstance(payload, dict) and payload.get("body") is not None:
-            if (
-                str(payload.get("body") or "").strip() != text.strip()
-                or (
-                    payload.get("user") is not None
-                    and not _is_app_receipt_comment(
-                        payload,
-                        app_slug=app_slug,
-                        expected_user_id=expected_app_user_id,
-                    )
+            if str(payload.get("body") or "").strip() != text.strip() or (
+                payload.get("user") is not None
+                and not _is_app_receipt_comment(
+                    payload,
+                    app_slug=app_slug,
+                    expected_user_id=expected_app_user_id,
                 )
             ):
                 _write_step_summary(text)
@@ -1104,17 +1101,28 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 "accept-risk",
                 "accept-coverage-uncertainty",
                 "reenroll",
+                "continue",
+                "dismiss",
+                "defer",
             }:
                 read_token = os.environ.get("GITHUB_TOKEN") or os.environ.get(
                     "GH_TOKEN"
                 )
                 if isinstance(read_token, str) and read_token.strip():
-                    actor_permission = _collaborator_permission(
-                        http,
-                        token=read_token.strip(),
-                        repository=args.repository,
-                        actor=args.actor,
-                    )
+                    try:
+                        actor_permission = _collaborator_permission(
+                            http,
+                            token=read_token.strip(),
+                            repository=args.repository,
+                            actor=args.actor,
+                        )
+                    except ReviewInputError:
+                        if parsed.action in {
+                            "accept-risk",
+                            "accept-coverage-uncertainty",
+                            "reenroll",
+                        }:
+                            raise
                 elif parsed.action in {"accept-risk", "accept-coverage-uncertainty"}:
                     raise ReviewInputError(
                         "maintainer override requires GitHub metadata access"

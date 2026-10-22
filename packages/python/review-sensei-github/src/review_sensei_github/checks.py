@@ -75,6 +75,7 @@ def review_check_outcome(
     required_fixes: bool,
     required_decisions: bool = False,
     mixed_coverage_satisfied: bool = False,
+    coverage_uncertainty_accepted: bool = False,
 ) -> CheckOutcome:
     """Map one review outcome onto the documented gate conclusions."""
 
@@ -85,6 +86,7 @@ def review_check_outcome(
     bounded_required = required_fixes is True
     bounded_decisions = required_decisions is True
     bounded_mixed = mixed_coverage_satisfied is True
+    bounded_coverage_accepted = coverage_uncertainty_accepted is True
     if policy == "advisory":
         detail = (
             "Required fixes were reported but enforcement is disabled by "
@@ -102,8 +104,10 @@ def review_check_outcome(
             title="Advisory review — not enforced",
             summary=detail,
         )
-    effective_complete = review_status == "complete" or (
-        review_status == "partial" and bounded_mixed
+    effective_complete = (
+        review_status == "complete"
+        or (review_status == "partial" and bounded_mixed)
+        or (review_status == "partial" and bounded_coverage_accepted)
     )
     if not effective_complete:
         return CheckOutcome(
@@ -151,6 +155,15 @@ def review_check_outcome(
                 "AI-reviewed text and human-confirmed non-text coverage "
                 "satisfied the review gate for this head (AI review status "
                 "remains partial)."
+            ),
+        )
+    if review_status == "partial" and bounded_coverage_accepted:
+        return CheckOutcome(
+            conclusion="success",
+            title="Coverage uncertainty accepted by maintainer",
+            summary=(
+                "Incomplete AI coverage was explicitly accepted by a maintainer "
+                "for this head (AI review status remains partial)."
             ),
         )
     return CheckOutcome(

@@ -280,7 +280,12 @@ class MaintainerCommand:
                 raise ReviewInputError("finding disposition requires a fingerprint")
             _require_reason(self.reason)
         elif self.action == "accept-coverage-uncertainty":
-            if self.finding_reference or self.finding_references or self.finding_fingerprint or self.finding_fingerprints:
+            if (
+                self.finding_reference
+                or self.finding_references
+                or self.finding_fingerprint
+                or self.finding_fingerprints
+            ):
                 raise ReviewInputError(
                     "coverage uncertainty acceptance does not take finding ids"
                 )
@@ -594,9 +599,10 @@ class FindingDisposition:
             "coverage_uncertainty",
         }:
             raise ReviewInputError("disposition target_kind is invalid")
-        if not isinstance(self.incomplete_coverage, tuple) or len(
-            self.incomplete_coverage
-        ) > 256:
+        if (
+            not isinstance(self.incomplete_coverage, tuple)
+            or len(self.incomplete_coverage) > 256
+        ):
             raise ReviewInputError("disposition incomplete_coverage is invalid")
         for item in self.incomplete_coverage:
             if (
@@ -980,9 +986,7 @@ def apply_session_command(
                 }
             )
         )
-        scope_key = (
-            f"coverage-uncertainty:{command.head_sha}:{','.join(enumerated)}"
-        )
+        scope_key = f"coverage-uncertainty:{command.head_sha}:{','.join(enumerated)}"
         coverage_fp = hashlib.sha256(scope_key.encode("utf-8")).hexdigest()
         planned = (
             FindingDisposition(
@@ -1012,22 +1016,30 @@ def apply_session_command(
         )
     loaded = ledger.load(identity, now=now)
     if command.action == "reenroll":
-        from .convergence import DEFAULT_MAX_FAILED_ATTEMPTS
+        from .convergence import DEFAULT_MAX_FAILED_ATTEMPTS, MAX_FAILED_ATTEMPTS
         from .session import (
             failed_attempts_for_head,
             grant_successor_continuation,
-            has_irrecoverable_transaction_grant,
+            has_unconsumed_irrecoverable_transaction_grant,
             transition_irrecoverable_transaction,
         )
 
+        if actor_role is not None and actor_role not in {
+            "maintain",
+            "admin",
+            "OWNER",
+            "MEMBER",
+        }:
+            raise ReviewInputError("reenroll requires maintain or admin permission")
         if loaded.status in {"ok", "migrated"} and loaded.record is not None:
             tx = loaded.record.transaction
             if (
-                tx is not None and tx.phase in {"publication_pending", "publication_failed"}
+                tx is not None
+                and tx.phase in {"publication_pending", "publication_failed"}
             ) or (
                 tx is None
-                and has_irrecoverable_transaction_grant(
-                    loaded.record, command.head_sha
+                and has_unconsumed_irrecoverable_transaction_grant(
+                    loaded.record, command.head_sha, policy_digest=policy_digest
                 )
                 is not None
             ):
@@ -1036,9 +1048,21 @@ def apply_session_command(
                     identity,
                     actor=command.actor,
                     head_sha=command.head_sha,
+                    policy_digest=policy_digest,
                     command_id=command.command_id,
                     now=now,
                 )
+                target_head = command.head_sha or record.failed_attempts_head_sha
+                if failed_attempts_for_head(record, target_head) >= MAX_FAILED_ATTEMPTS:
+                    return record, MaintainerCommandResult(
+                        action="reenroll",
+                        applied=applied,
+                        operator_paused=bool(getattr(record, "operator_paused", False)),
+                        summary=(
+                            "irrecoverable transaction retired, but hard failed-attempt "
+                            "ceiling is reached; push a new head to continue"
+                        ),
+                    )
                 return record, MaintainerCommandResult(
                     action="reenroll",
                     applied=applied,
@@ -1058,7 +1082,7 @@ def apply_session_command(
                     ledger,
                     identity,
                     actor=command.actor,
-                    actor_role=actor_role,
+                    actor_role=actor_role or "maintain",
                     head_sha=target_head,
                     policy_digest=policy_digest,
                     command_id=command.command_id,
@@ -1187,12 +1211,9 @@ def apply_session_command(
                 summary="abandoned analysis recovered; one failed attempt recorded; automated review may continue",
             )
         target_head = command.head_sha or record.failed_attempts_head_sha
-        if (
-            failed_attempts_for_head(record, target_head)
-            >= DEFAULT_MAX_FAILED_ATTEMPTS
-        ):
+        if failed_attempts_for_head(record, target_head) >= DEFAULT_MAX_FAILED_ATTEMPTS:
             if (
-                actor_role in {None, "maintain", "admin", "OWNER", "MEMBER"}
+                actor_role in {"maintain", "admin", "OWNER", "MEMBER"}
                 and isinstance(target_head, str)
                 and len(target_head) == 40
             ):

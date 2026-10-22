@@ -348,6 +348,7 @@ class GitHubIssueCommentSessionLedger:
         self._accepted_consumed_grant: str | None = None
         self._comments_by_id: dict[int, dict[str, Any]] = {}
         self._comment_order: list[int] = []
+        self._expected_repository_id: int | None = None
         self._inventory_complete = False
         self._list_refresh = True
         self._list_anchor: str | None = None
@@ -936,6 +937,7 @@ class GitHubIssueCommentSessionLedger:
     def _require_identity(self, identity: SessionIdentity) -> int:
         if identity.repository_id is None:
             raise ReviewInputError("GitHub session identity requires repository_id")
+        self._expected_repository_id = identity.repository_id
         return identity.repository_id
 
     def _comments_path(self, identity: SessionIdentity) -> str:
@@ -2488,3 +2490,78 @@ class GitHubIssueCommentSessionLedger:
         return str(owner.get("run_id")) == str(attestation.get("run_id")) and str(
             owner.get("head_sha")
         ) == str(attestation.get("head_sha"))
+
+    def retain_checkpoint_result(self, result: object) -> None:
+        from review_sensei.models import ReviewResult
+
+        from .publication_recovery import retain_checkpoint_review_result
+
+        if not isinstance(result, ReviewResult) or result.transaction is None:
+            return
+        tx = result.transaction
+        identity = SessionIdentity(
+            repository=tx.repository,
+            pull_request=tx.pull_request,
+            repository_id=self._expected_repository_id,
+        )
+        retain_checkpoint_review_result(
+            http=self.http,
+            token=self.token,
+            result=result,
+            identity=identity,
+            base_sha=tx.base_sha,
+            head_sha=tx.head_sha,
+            app_slug=self.app_slug or "reviewsensei[bot]",
+            pending_transaction=tx,
+        )
+
+    def load_retained_checkpoint_result(
+        self,
+        identity: SessionIdentity,
+        *,
+        transaction: object | None = None,
+        head_sha: str | None = None,
+    ) -> object | None:
+        from dataclasses import replace
+
+        from review_sensei.models import ReviewResult, ReviewTransaction
+
+        from .publication_recovery import _event_key, _payload, _store
+
+        target_tx = transaction if isinstance(transaction, ReviewTransaction) else None
+        if target_tx is None:
+            loaded = self.load(identity)
+            if loaded.status in {"ok", "migrated"} and loaded.record is not None:
+                target_tx = loaded.record.transaction
+        if target_tx is None or target_tx.result_sha256 is None:
+            return None
+        if head_sha is not None and target_tx.head_sha != head_sha:
+            return None
+        effective_identity = (
+            identity
+            if identity.repository_id is not None
+            else replace(identity, repository_id=self._expected_repository_id)
+        )
+        store = _store(
+            self.http,
+            token=self.token,
+            identity=effective_identity,
+            app_slug=self.app_slug or "reviewsensei[bot]",
+            base_sha=target_tx.base_sha,
+            head_sha=target_tx.head_sha,
+        )
+        available = store.read_available(
+            event_key=_event_key(effective_identity, target_tx)
+        )
+        if available is None:
+            return None
+        _digest, payload = available
+        document = json.loads(payload)
+        if not isinstance(document, dict):
+            raise ReviewInputError("retained result is invalid")
+        result = ReviewResult.from_dict(document)
+        if _payload(result) != payload:
+            raise ReviewInputError("retained result is not canonical")
+        if result.content_digest() != target_tx.result_sha256:
+            raise ReviewInputError("retained result digest does not match transaction")
+        return replace(result, transaction=target_tx)

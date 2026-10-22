@@ -3031,11 +3031,57 @@ class TriggerOverrideDriftReport:
 
 def _extract_caller_customizations(content: str) -> dict[str, object]:
     customizations: dict[str, object] = {}
-    runs_on_match = re.search(r"(?m)^    runs-on:[ \t]*(.+)$", content)
-    if runs_on_match is not None:
-        runs_on_line = runs_on_match.group(0)
-        if runs_on_line != _CANONICAL_RUNS_ON_LINE:
-            customizations["runs_on"] = runs_on_match.group(1).strip()
+    runs_on_matches = list(
+        re.finditer(
+            r"(?m)^    runs-on:(?:[ \t]*([^\r\n]*))?((?:\r?\n      [^\r\n]*)*)",
+            content,
+        )
+    )
+    if len(runs_on_matches) > 1:
+        raise GitHubSetupError(
+            "caller workflow defines multiple job runs-on blocks; refusing ambiguous migration"
+        )
+    if runs_on_matches:
+        runs_on_match = runs_on_matches[0]
+        runs_on_full = runs_on_match.group(0)
+        inline_value = (runs_on_match.group(1) or "").strip()
+        block_value = runs_on_match.group(2) or ""
+        if not inline_value and not block_value.strip():
+            raise GitHubSetupError("caller workflow has an empty runs-on definition")
+        if inline_value and block_value.strip():
+            raise GitHubSetupError(
+                "caller workflow mixes inline and block runs-on values"
+            )
+        if block_value.strip():
+            for raw_line in block_value.splitlines():
+                stripped = raw_line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                indent = len(raw_line) - len(raw_line.lstrip(" "))
+                if indent == 6:
+                    if not (
+                        stripped.startswith("- ")
+                        or stripped == "-"
+                        or stripped.startswith("group:")
+                        or stripped.startswith("labels:")
+                    ):
+                        raise GitHubSetupError(
+                            f"unsupported runs-on block customization: {stripped}"
+                        )
+                elif indent > 6:
+                    if not (stripped.startswith("- ") or stripped == "-"):
+                        raise GitHubSetupError(
+                            f"unsupported nested runs-on customization: {stripped}"
+                        )
+            customizations["runs_on"] = block_value.lstrip("\r\n")
+            customizations["runs_on_block"] = runs_on_full
+        elif runs_on_full != _CANONICAL_RUNS_ON_LINE:
+            if inline_value.startswith("{") and not inline_value.startswith("${{"):
+                raise GitHubSetupError(
+                    f"unsupported inline runs-on customization: {inline_value}"
+                )
+            customizations["runs_on"] = inline_value
+            customizations["runs_on_block"] = f"    runs-on: {inline_value}"
     checkout_match = re.search(
         r"(?m)^        uses:[ \t]*actions/checkout@[^\r\n]+$", content
     )
@@ -3099,7 +3145,8 @@ def inspect_installed_caller_drift(
     if (
         content.count("github.event.comment.author_association == 'OWNER'") < 2
         or content.count("github.event.comment.author_association == 'MEMBER'") < 2
-        or content.count("github.event.comment.author_association == 'COLLABORATOR'") < 2
+        or content.count("github.event.comment.author_association == 'COLLABORATOR'")
+        < 2
     ):
         stale.append("actor_association_guard")
 
@@ -3164,11 +3211,23 @@ def migrate_caller_preserving_customizations(
         if use_recovery
         else _tagged_workflow(public_workflow_tag)
     )
+    runs_on_block = drift.customizations.get("runs_on_block")
     runs_on = drift.customizations.get("runs_on")
-    if isinstance(runs_on, str) and runs_on:
+    if isinstance(runs_on_block, str) and runs_on_block:
         target = target.replace(
             _CANONICAL_RUNS_ON_LINE,
-            f"    runs-on: {runs_on}",
+            runs_on_block,
+            1,
+        )
+    elif isinstance(runs_on, str) and runs_on:
+        replacement = (
+            f"    runs-on:\n{runs_on}"
+            if "\n" in runs_on or runs_on.startswith(" ")
+            else f"    runs-on: {runs_on}"
+        )
+        target = target.replace(
+            _CANONICAL_RUNS_ON_LINE,
+            replacement,
             1,
         )
     checkout_uses = drift.customizations.get("checkout_uses")
@@ -3206,12 +3265,9 @@ def inspect_local_trigger_override(content: str) -> TriggerOverrideDriftReport:
     ):
         missing.append("standalone_anchored_rescan")
     if (
-        (
-            r"\A@(?:(?ai:reviewsensei)|sensei)[ \t]+" not in content
-            and r"\A(?:@sensei|(?ai:@reviewsensei))(?=[ \t]+)" not in content
-        )
-        or "(?m)(?<!\\S)" in content
-    ):
+        r"\A@(?:(?ai:reviewsensei)|sensei)[ \t]+" not in content
+        and r"\A(?:@sensei|(?ai:@reviewsensei))(?=[ \t]+)" not in content
+    ) or "(?m)(?<!\\S)" in content:
         missing.append("standalone_anchored_command_prefilter")
     if "accept-coverage-uncertainty" not in content:
         missing.append("accept_coverage_uncertainty_routing")
@@ -3221,4 +3277,3 @@ def inspect_local_trigger_override(content: str) -> TriggerOverrideDriftReport:
         is_current=not missing,
         missing_capabilities=tuple(missing),
     )
-

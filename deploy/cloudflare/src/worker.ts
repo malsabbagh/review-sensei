@@ -148,7 +148,7 @@ async function readBoundedBody(
   while (true) {
     const remaining = effectiveDeadline - Date.now();
     if (remaining <= 0) {
-      await reader.cancel().catch(() => undefined);
+      void reader.cancel().catch(() => undefined);
       throw new Error("broker_request_deadline_exhausted");
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -164,7 +164,7 @@ async function readBoundedBody(
         }),
       ]);
     } catch (error) {
-      await reader.cancel().catch(() => undefined);
+      void reader.cancel().catch(() => undefined);
       throw error;
     } finally {
       if (timer !== undefined) {
@@ -176,7 +176,7 @@ async function readBoundedBody(
     }
     total += next.value.byteLength;
     if (total > maximum) {
-      await reader.cancel().catch(() => undefined);
+      void reader.cancel().catch(() => undefined);
       throw new Error("request_body_too_large");
     }
     chunks.push(next.value);

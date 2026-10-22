@@ -742,7 +742,9 @@ class HostedOverrideMetadataTests(unittest.TestCase):
                 result.broker.authorize_session_mutation.assert_not_called()
                 result.ledger_factory.assert_not_called()
 
-    def test_legacy_accept_risk_and_coverage_uncertainty_require_live_maintain_or_admin(self):
+    def test_legacy_accept_risk_and_coverage_uncertainty_require_live_maintain_or_admin(
+        self,
+    ):
         for body in (
             f"@sensei accept-risk {FINGERPRINT} --reason known issue",
             f"@sensei override {FINGERPRINT} acceptable risk",

@@ -544,6 +544,7 @@ class GitHubApplication:
                     policy_digest=policy.digest(),
                     configuration_digest=expected_configuration_digest,
                     evidence_digest=expected_evidence_digest,
+                    baseline=baseline,
                     commit_analysis=commit_analysis,
                 )
             except ReviewInputError as exc:
@@ -657,7 +658,7 @@ class GitHubApplication:
             and isinstance(result, ReviewResult)
             and result.transaction is not None
         ):
-            transaction_record = load_transaction(ledger)
+            transaction_record = load_transaction(ledger, commit_analysis=False)
             transaction_ledger = ledger
             if (
                 transaction_record.transaction is not None
@@ -812,7 +813,7 @@ class GitHubApplication:
                     "identity-bound review publication context is incomplete"
                 )
             if transaction_record is None:
-                transaction_record = load_transaction(ledger)
+                transaction_record = load_transaction(ledger, commit_analysis=False)
             if transaction_record.transaction is not None:
                 result = replace(result, transaction=transaction_record.transaction)
         validated_transaction_recovery = (
@@ -824,8 +825,18 @@ class GitHubApplication:
             and result.transaction is not None
             and transaction_record is not None
             and transaction_record.transaction is not None
-            and transaction_record.transaction.result_sha256 is not None
-            and result.content_digest() == transaction_record.transaction.result_sha256
+            and (
+                (
+                    transaction_record.transaction.result_sha256 is not None
+                    and result.content_digest()
+                    == transaction_record.transaction.result_sha256
+                )
+                or (
+                    transaction_record.transaction.phase == "analysis"
+                    and result.transaction.result_sha256
+                    in {None, result.content_digest()}
+                )
+            )
         )
         if (
             validated_transaction_recovery
@@ -850,7 +861,10 @@ class GitHubApplication:
         verification_transaction_recovery_required = (
             validated_transaction_recovery
             and transaction_record is not None
-            and transaction_record.completed_verification_rounds > 0
+            and (
+                transaction_record.completed_verification_rounds > 0
+                or transaction_record.reserved_slot == "verification"
+            )
             and (baseline is None or current_key is None)
         )
         authorized_dispositions: tuple[object, ...] = ()
@@ -963,6 +977,9 @@ class GitHubApplication:
         publisher_started = False
         admission_recovery_held = False
         try:
+            from .session_ledger import GitHubIssueCommentSessionLedger
+
+            unwrapped_ledger = getattr(ledger, "ledger", ledger)
             retention_context_required = (
                 validated_transaction_recovery
                 and (
@@ -996,7 +1013,12 @@ class GitHubApplication:
                 and transaction_record.transaction.phase == "analysis"
                 and ledger is not None
             ):
-                if retention_required:
+                if retention_required or (
+                    isinstance(unwrapped_ledger, GitHubIssueCommentSessionLedger)
+                    and self.http is not None
+                    and configuration_context is not None
+                    and evidence_context is not None
+                ):
                     from .publication_recovery import retain_checkpoint_review_result
 
                     if configuration_context is None or evidence_context is None:
@@ -1022,6 +1044,7 @@ class GitHubApplication:
                         evidence_context=evidence_context,
                         policy=policy,
                     )
+                    result_retained = True
                 transaction_record = load_transaction(ledger, commit_analysis=True)
                 if transaction_record.transaction is not None:
                     result = replace(result, transaction=transaction_record.transaction)
@@ -1442,7 +1465,10 @@ class GitHubApplication:
                         if transaction_record is not None
                         else None
                     )
-                    if durable_transaction is not None:
+                    if (
+                        durable_transaction is not None
+                        and durable_transaction.phase != "analysis"
+                    ):
                         try:
                             complete_review_publication(
                                 ledger,
@@ -1649,6 +1675,7 @@ class GitHubApplication:
         operation_store: object | None = None,
         operation_parts: object | None = None,
         reviews_policy: str | None = None,
+        convergence_policy: ReviewConvergencePolicy | None = None,
     ):
         """Apply a maintainer command through its applicable authority boundary.
 
@@ -1771,7 +1798,21 @@ class GitHubApplication:
                 )
         if command is None:
             raise GitHubPublicationError("maintainer command reconstruction failed")
-        if (
+        attested_association = association
+        if hosted_mutation and isinstance(broker_attestation, Mapping):
+            attested = broker_attestation.get("association")
+            if isinstance(attested, str):
+                attested_association = attested
+        can_lookup_collaborator_permission = (
+            actor_permission is None
+            and isinstance(attested_association, str)
+            and attested_association.upper() == "COLLABORATOR"
+            and options.github_writes
+            and self.http is not None
+            and callable(getattr(self.http, "request", None))
+            and command.action != "approve-media"
+        )
+        if not can_lookup_collaborator_permission and (
             command.action
             in {
                 "approve-media",
@@ -1782,11 +1823,6 @@ class GitHubApplication:
             or command.finding_reference
             or command.finding_references
         ):
-            attested_association = association
-            if hosted_mutation and isinstance(broker_attestation, Mapping):
-                attested = broker_attestation.get("association")
-                if isinstance(attested, str):
-                    attested_association = attested
             if not authorized_override(
                 association=attested_association, permission=actor_permission
             ):
@@ -1988,6 +2024,108 @@ class GitHubApplication:
                 "hosted maintainer mutations require atomic session initialization"
             )
         if (
+            actor_permission is None
+            and self.http is not None
+            and callable(getattr(self.http, "request", None))
+            and isinstance(token, str)
+            and token.strip()
+        ):
+            from .commands import _COMMANDS
+
+            try:
+                actor_permission = _COMMANDS["_collaborator_permission"](
+                    self.http,
+                    token=token.strip(),
+                    repository=repository,
+                    actor=command.actor,
+                )
+            except Exception:
+                actor_permission = None
+        if (
+            command.action
+            in {
+                "accept-risk",
+                "accept-coverage-uncertainty",
+                "reenroll",
+            }
+            or command.finding_reference
+            or command.finding_references
+        ):
+            if not authorized_override(
+                association=attested_association, permission=actor_permission
+            ):
+                return MaintainerCommandResult(
+                    action=command.action,
+                    applied=False,
+                    operator_paused=False,
+                    summary="unauthorized",
+                )
+        if isinstance(actor_permission, str) and actor_permission.strip():
+            effective_actor_role: str | None = actor_permission.strip()
+        elif isinstance(attested_association, str) and attested_association.upper() in {
+            "OWNER",
+            "MEMBER",
+            "COLLABORATOR",
+        }:
+            effective_actor_role = (
+                None
+                if command.action in {"continue", "reenroll"}
+                and (
+                    attested_association.upper() == "COLLABORATOR"
+                    or (hosted_mutation and attested_association.upper() != "OWNER")
+                )
+                else attested_association.upper()
+            )
+        else:
+            effective_actor_role = None
+        command_policy_digest = (
+            convergence_policy or ReviewConvergencePolicy()
+        ).digest()
+        command_provenance = (
+            f"comment:{source_comment_id}"
+            if isinstance(source_comment_id, int)
+            and not isinstance(source_comment_id, bool)
+            and source_comment_id > 0
+            else (
+                f"command:{command.command_id}"
+                if command.command_id
+                else f"local:{command.action}:{head_sha[:12]}"
+            )
+        )
+        derived_incomplete_coverage: tuple[str, ...] = ()
+        if command.action == "accept-coverage-uncertainty":
+            coverage_source = (
+                review_result if isinstance(review_result, ReviewResult) else None
+            )
+            if coverage_source is None:
+                loader = getattr(ledger, "load_retained_checkpoint_result", None)
+                if callable(loader):
+                    try:
+                        loaded_checkpoint = loader(identity, head_sha=head_sha)
+                        if isinstance(loaded_checkpoint, ReviewResult):
+                            coverage_source = loaded_checkpoint
+                    except Exception:
+                        coverage_source = None
+            if coverage_source is not None and coverage_source.coverage is not None:
+                incomplete_items: list[str] = []
+                for fcov in coverage_source.coverage.files:
+                    if fcov.outcome != "reviewed":
+                        incomplete_items.append(
+                            f"file:{fcov.path}:{fcov.outcome}"
+                            + (f":{fcov.reason}" if fcov.reason else "")
+                        )
+                for hcov in coverage_source.coverage.hunks:
+                    if hcov.outcome != "reviewed":
+                        incomplete_items.append(
+                            f"hunk:{hcov.path}:{hcov.index}:{hcov.outcome}"
+                            + (f":{hcov.reason}" if hcov.reason else "")
+                        )
+                if not coverage_source.coverage.enumeration_complete:
+                    incomplete_items.append("enumeration:incomplete")
+                derived_incomplete_coverage = tuple(incomplete_items)
+            if not derived_incomplete_coverage:
+                derived_incomplete_coverage = (f"head:{head_sha}:coverage-incomplete",)
+        if (
             command.action == "verify"
             and operation_entry == "enabled"
             and operation_store is not None
@@ -2017,6 +2155,10 @@ class GitHubApplication:
                     finding_fingerprints=finding_fingerprints,
                     finding_inventory=typed_inventory,
                     prior_inventories=typed_priors,
+                    actor_role=effective_actor_role,
+                    policy_digest=command_policy_digest,
+                    provenance=command_provenance,
+                    incomplete_coverage=derived_incomplete_coverage,
                 )[1],
                 encode=_command_bytes,
                 decode=_command_from_bytes,
@@ -2048,11 +2190,22 @@ class GitHubApplication:
             finding_fingerprints=finding_fingerprints,
             finding_inventory=typed_inventory,
             prior_inventories=typed_priors,
+            actor_role=effective_actor_role,
+            policy_digest=command_policy_digest,
+            provenance=command_provenance,
+            incomplete_coverage=derived_incomplete_coverage,
         )
         if (
             options.github_writes
             and oidc_token
-            and command.action in {"verify", "accept-risk", "dismiss", "defer"}
+            and command.action
+            in {
+                "verify",
+                "accept-risk",
+                "dismiss",
+                "defer",
+                "accept-coverage-uncertainty",
+            }
             and (result.applied or command.action == "verify")
         ):
             refinalized = self._refinalize_command(

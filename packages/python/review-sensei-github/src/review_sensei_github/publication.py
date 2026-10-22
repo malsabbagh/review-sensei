@@ -2249,6 +2249,11 @@ class ReviewApprovalFinalizer:
             has_human = bool(human.pending)
         else:
             has_human = eligibility.facts.has_human_adjudication_findings
+        from review_sensei.disposition import disposition_honors_coverage_uncertainty
+
+        coverage_accepted = disposition_honors_coverage_uncertainty(
+            dispositions, head_sha=head_sha
+        )
         adjusted = replace(
             eligibility,
             human_review=human,
@@ -2256,6 +2261,9 @@ class ReviewApprovalFinalizer:
                 eligibility.facts,
                 has_blocking_findings=has_blocking,
                 has_human_adjudication_findings=has_human,
+                coverage_blocker=(
+                    None if coverage_accepted else eligibility.facts.coverage_blocker
+                ),
             ),
         )
         marker_match = _APPROVAL_ELIGIBILITY_RE.search(body)
@@ -2568,6 +2576,7 @@ class ReviewApprovalFinalizer:
                         review_status=adjusted.facts.review_status,
                         required_fixes=has_blocking,
                         required_decisions=has_human,
+                        coverage_uncertainty_accepted=coverage_accepted,
                     ),
                 )
             except (

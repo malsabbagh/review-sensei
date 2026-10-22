@@ -1402,7 +1402,9 @@ class FindingOverrideTests(unittest.TestCase):
                 )
                 self.assertNotEqual(res.summary, "unauthorized")
 
-    def test_coverage_uncertainty_and_finding_risk_dispositions_are_distinct_and_audited(self):
+    def test_coverage_uncertainty_and_finding_risk_dispositions_are_distinct_and_audited(
+        self,
+    ):
         fingerprint = "abc123456789def0" + "0" * 48
         ledger = InMemorySessionLedger()
         cov_cmd = parse_maintainer_command(
@@ -1450,9 +1452,10 @@ class FindingOverrideTests(unittest.TestCase):
     def test_post_command_receipt_requires_app_ownership_and_reconciles_stale_outcome(
         self,
     ):
+        from review_sensei_github.command_bodies import _post_command_receipt
+
         from review_sensei.disposition import OverrideReceipt
         from review_sensei.presentation import render_command_receipt
-        from review_sensei_github.command_bodies import _post_command_receipt
 
         comment_body = "@reviewsensei override RS-ABCD1234 --reason accepted"
         digest = sha256(comment_body.encode("utf-8")).hexdigest()
@@ -1580,6 +1583,295 @@ class FindingOverrideTests(unittest.TestCase):
             expected_app_user_id=777,
         )
         self.assertEqual(http_exact.requests, [])
+
+    def test_hosted_continue_reenroll_policy_binding_and_risk_acceptance_audit_context(
+        self,
+    ):
+        from review_sensei_github.application import (
+            GitHubApplication,
+            GitHubWriteOptions,
+        )
+
+        from review_sensei.context import finding_lifecycle_for_comment
+        from review_sensei.convergence import ReviewConvergencePolicy
+        from review_sensei.coverage import CoverageManifest, FileCoverage, HunkCoverage
+        from review_sensei.models import ReviewComment, ReviewResult
+        from review_sensei.session import (
+            ReviewTransaction,
+            prepare_session_round,
+        )
+
+        head = "b" * 40
+        policy_v1 = ReviewConvergencePolicy(mode="merge-focused")
+        policy_v2 = ReviewConvergencePolicy(mode="strict")
+
+        for permission, should_authorize in (
+            ("write", False),
+            (None, False),
+            ("maintain", True),
+            ("admin", True),
+        ):
+            with self.subTest(permission=permission):
+                ledger = InMemorySessionLedger()
+                ledger.initialize(IDENTITY)
+                ledger.replace(
+                    IDENTITY,
+                    lambda cur: cur.evolve(
+                        generation=6,
+                        operator_paused=False,
+                        failed_attempts=6,
+                        failed_attempts_head_sha=head,
+                    ),
+                )
+
+                class PermHttp:
+                    def repository_path(self, repo, suffix):
+                        return f"/repos/{repo}{suffix}"
+
+                    def request(self, method, path, *, token=None, body=None, **kw):
+                        if "/collaborators/" in path and path.endswith("/permission"):
+                            if permission is None:
+                                return 404, {}
+                            return 200, {"permission": permission}
+                        return 200, {}
+
+                class PermBroker:
+                    def request_oidc_token(self):
+                        return "oidc"
+
+                    def exchange(self, token, *, capability=None):
+                        return "ghs_tok"
+
+                app = GitHubApplication(
+                    broker=PermBroker(),
+                    http=PermHttp(),
+                    reviewer=object(),
+                    learner=object(),
+                    replier=object(),
+                    session_ledger=ledger,
+                )
+                res = app.apply_maintainer_command(
+                    options=GitHubWriteOptions(
+                        github_writes=True, mention_replies=True
+                    ),
+                    oidc_token="oidc",
+                    body="@reviewsensei review continue",
+                    actor_login="collab-user",
+                    actor_type="User",
+                    association="COLLABORATOR",
+                    repository=IDENTITY.repository,
+                    repository_id=IDENTITY.repository_id,
+                    pull_request=IDENTITY.pull_request,
+                    head_sha=head,
+                    app_slug="reviewsensei[bot]",
+                )
+                if should_authorize:
+                    self.assertTrue(res.applied)
+                    self.assertIn("successor continuation granted", res.summary)
+                    # Policy mismatch must neither admit work nor consume the grant
+                    mismatch_prep = prepare_session_round(
+                        ledger,
+                        IDENTITY,
+                        policy_v2,
+                        reservation_id="c" * 64,
+                        head_sha=head,
+                    )
+                    self.assertFalse(mismatch_prep.decision.admit)
+                    # Matching policy admits and consumes the grant
+                    ok_prep = prepare_session_round(
+                        ledger,
+                        IDENTITY,
+                        policy_v1,
+                        reservation_id="d" * 64,
+                        head_sha=head,
+                    )
+                    self.assertTrue(ok_prep.decision.admit)
+                else:
+                    self.assertFalse(res.applied)
+                    self.assertEqual(
+                        len(ledger.load(IDENTITY).record.continuation_grants), 0
+                    )
+
+        # Reenroll retiring a pending transaction at counts 5, 6, and hard ceiling 32
+        for prior_failed, expect_admit in ((5, True), (6, True), (32, False)):
+            with self.subTest(reenroll_prior_failed=prior_failed):
+                ledger = InMemorySessionLedger()
+                ledger.initialize(IDENTITY)
+                tx = (
+                    ReviewTransaction.create(
+                        repository=IDENTITY.repository,
+                        pull_request=IDENTITY.pull_request,
+                        base_sha="a" * 40,
+                        head_sha=head,
+                        policy_digest=policy_v1.digest(),
+                        configuration_digest="1" * 64,
+                        evidence_digest="2" * 64,
+                        reservation_id="e" * 64,
+                        generation=prior_failed + 1,
+                    )
+                    .with_result("3" * 64)
+                    .with_phase("publication_failed")
+                )
+                ledger.replace(
+                    IDENTITY,
+                    lambda cur: cur.evolve(
+                        generation=prior_failed + 1,
+                        operator_paused=False,
+                        failed_attempts=prior_failed,
+                        failed_attempts_head_sha=head,
+                        transaction=tx,
+                        last_committed_reservation_id="e" * 64,
+                    ),
+                )
+                cmd = parse_maintainer_command(
+                    "@reviewsensei review reenroll",
+                    actor="maint-alice",
+                    head_sha=head,
+                    command_id=f"reenroll-{prior_failed}",
+                )
+                assert cmd is not None
+                _, reenroll_res = apply_session_command(
+                    ledger,
+                    IDENTITY,
+                    cmd,
+                    actor_role="maintain",
+                    policy_digest=policy_v1.digest(),
+                )
+                self.assertTrue(reenroll_res.applied)
+                next_prep = prepare_session_round(
+                    ledger,
+                    IDENTITY,
+                    policy_v1,
+                    reservation_id="f" * 64,
+                    head_sha=head,
+                )
+                self.assertEqual(next_prep.decision.admit, expect_admit)
+                if not expect_admit:
+                    self.assertIn(
+                        "hard failed-attempt ceiling is reached",
+                        reenroll_res.summary,
+                    )
+
+        # Hosted accept-risk and accept-coverage-uncertainty record full audit context
+        sample_comment = ReviewComment(
+            path="src/a.py",
+            line=10,
+            severity="high",
+            category="correctness",
+            body="Bug",
+        )
+        fp = finding_lifecycle_for_comment(sample_comment).fingerprint
+        partial_result = ReviewResult(
+            summary="Partial coverage.",
+            comments=(sample_comment,),
+            provider="fixture",
+            review_status="partial",
+            coverage=CoverageManifest(
+                files=(
+                    FileCoverage("src/a.py", "reviewed"),
+                    FileCoverage(
+                        "src/b.py", "budget-exhausted", "provider-call-budget"
+                    ),
+                ),
+                hunks=(
+                    HunkCoverage(1, "src/a.py", "reviewed"),
+                    HunkCoverage(
+                        2, "src/b.py", "budget-exhausted", "provider-call-budget"
+                    ),
+                ),
+                enumeration_complete=True,
+                enumerated_paths=("src/a.py", "src/b.py"),
+            ),
+        )
+        ledger = InMemorySessionLedger()
+        ledger.initialize(IDENTITY)
+        check_posts = []
+
+        class AuditHttp:
+            def repository_path(self, repo, suffix):
+                return f"/repos/{repo}{suffix}"
+
+            def request(self, method, path, *, token=None, body=None, **kw):
+                if "/collaborators/" in path and path.endswith("/permission"):
+                    return 200, {"permission": "maintain"}
+                if path.endswith("/check-runs"):
+                    check_posts.append(body)
+                    return 201, {"id": 900}
+                return 200, {"head": {"sha": head}}
+
+        class AuditBroker:
+            def request_oidc_token(self):
+                return "oidc"
+
+            def exchange(self, token, *, capability=None):
+                return "ghs_tok"
+
+        app = GitHubApplication(
+            broker=AuditBroker(),
+            http=AuditHttp(),
+            reviewer=object(),
+            learner=object(),
+            replier=object(),
+            session_ledger=ledger,
+        )
+        risk_res = app.apply_maintainer_command(
+            options=GitHubWriteOptions(github_writes=True, mention_replies=True),
+            oidc_token="oidc",
+            body=f"@reviewsensei accept-risk {fp[:16]} --reason mitigated upstream",
+            actor_login="maint-alice",
+            actor_type="User",
+            association="COLLABORATOR",
+            repository=IDENTITY.repository,
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            head_sha=head,
+            app_slug="reviewsensei[bot]",
+            source_comment_id=701,
+            finding_fingerprints=(fp,),
+            review_result=partial_result,
+        )
+        self.assertTrue(risk_res.applied)
+        cov_res = app.apply_maintainer_command(
+            options=GitHubWriteOptions(github_writes=True, mention_replies=True),
+            oidc_token="oidc",
+            body="@reviewsensei accept-coverage-uncertainty --reason generated files verified",
+            actor_login="maint-alice",
+            actor_type="User",
+            association="COLLABORATOR",
+            repository=IDENTITY.repository,
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            head_sha=head,
+            app_slug="reviewsensei[bot]",
+            source_comment_id=702,
+            finding_fingerprints=(fp,),
+            review_result=partial_result,
+        )
+        self.assertTrue(cov_res.applied)
+        disps = session_dispositions(ledger.load(IDENTITY).record)
+        self.assertEqual(len(disps), 2)
+        for d in disps:
+            self.assertEqual(d.actor_role, "maintain")
+            self.assertIsNotNone(d.recorded_at)
+            self.assertEqual(d.policy_digest, policy_v1.digest())
+            self.assertTrue(str(d.provenance).startswith("comment:70"))
+        cov_disp = next(d for d in disps if d.action == "accept-coverage-uncertainty")
+        self.assertIn(
+            "file:src/b.py:budget-exhausted:provider-call-budget",
+            cov_disp.incomplete_coverage,
+        )
+        from review_sensei_github.checks import review_check_outcome
+
+        check_outcome = review_check_outcome(
+            policy="auto-approve",
+            review_status="partial",
+            required_fixes=False,
+            required_decisions=False,
+            coverage_uncertainty_accepted=True,
+        )
+        self.assertEqual(
+            check_outcome.title, "Coverage uncertainty accepted by maintainer"
+        )
 
 
 if __name__ == "__main__":

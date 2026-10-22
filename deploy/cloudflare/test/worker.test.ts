@@ -372,4 +372,55 @@ describe("bounded broker operation telemetry", () => {
       log.mockRestore();
     }
   });
+
+  it("does not hang on never-settling stream cancellation across both Worker handlers", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      for (const [url, expectedOp] of [
+        ["https://github.reviewsensei.dev/github/token", "exchange"],
+        ["https://github.reviewsensei.dev/github/session-grant", "session_grant"],
+      ] as const) {
+        const neverCancellingStream = new ReadableStream<Uint8Array>({
+          start() {
+            // Stalled stream
+          },
+          cancel() {
+            return new Promise<void>(() => {
+              // Never settles
+            });
+          },
+        });
+        const deadline = Date.now() + 15;
+        const stalledReq = new Request(url, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "content-length": "32",
+            "x-reviewsensei-deadline-unix-ms": String(deadline),
+          },
+          body: neverCancellingStream,
+          duplex: "half",
+        } as RequestInit);
+        const response = await Promise.race([
+          worker.fetch(stalledReq, env),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("handler_hung_on_cancel")), 150),
+          ),
+        ]);
+        expect(response.status).toBe(403);
+        const body = await response.json();
+        expect(body).toMatchObject({
+          diagnostic: { code: "broker_request_deadline_exhausted" },
+        });
+        const opEvents = log.mock.calls.filter(
+          call =>
+            call[0] === "github_broker_observation" &&
+            (call[1] as { operation?: string }).operation === expectedOp,
+        );
+        expect(opEvents).toHaveLength(1);
+      }
+    } finally {
+      log.mockRestore();
+    }
+  });
 });

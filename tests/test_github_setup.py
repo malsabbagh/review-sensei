@@ -16,6 +16,7 @@ from review_sensei_github import (
     SetupPullRequestService,
     VerifiedDelivery,
 )
+from review_sensei_github.doctor import inspect_protection_policy_discrepancies
 from review_sensei_github.setup import (
     BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS,
     CALLER_CONTRACT_VERSION,
@@ -44,7 +45,6 @@ from review_sensei_github.setup import (
     inspect_local_trigger_override,
     migrate_caller_preserving_customizations,
 )
-from review_sensei_github.doctor import inspect_protection_policy_discrepancies
 
 BASE_SHA = "b" * 40
 PUBLIC_WORKFLOW_SHA = "a" * 40
@@ -2115,16 +2115,107 @@ class GitHubSetupClientTests(unittest.TestCase):
             migrated,
         )
         self.assertIn("CUSTOM_ORG_TOKEN: ${{ secrets.CUSTOM_ORG_TOKEN }}", migrated)
-        post_drift = inspect_installed_caller_drift(
-            migrated, public_workflow_tag="v5"
-        )
+        post_drift = inspect_installed_caller_drift(migrated, public_workflow_tag="v5")
         self.assertTrue(post_drift.is_current)
         self.assertEqual(post_drift.contract_version, CALLER_CONTRACT_VERSION)
 
+    def test_multiline_runs_on_shapes_and_setup_cli_modes(self):
+        import tempfile
+        from contextlib import redirect_stdout
+
+        from review_sensei_github.cli import main as github_main
+
+        block_list_runs_on = (
+            "    runs-on:\n      - self-hosted\n      - linux\n      - x64"
+        )
+        group_labels_runs_on = (
+            "    runs-on:\n"
+            "      group: ubuntu-runners\n"
+            "      labels:\n"
+            "        - self-hosted\n"
+            "        - linux"
+        )
+        expr_runs_on = "    runs-on: ${{ fromJSON(vars.RUNNER_LABELS) }}"
+        for custom_runs_on in (
+            block_list_runs_on,
+            group_labels_runs_on,
+            expr_runs_on,
+        ):
+            with self.subTest(runs_on=custom_runs_on):
+                stale = _sensei_only_v5_workflow("v5").replace(
+                    "    runs-on: ubuntu-latest", custom_runs_on, 1
+                )
+                migrated, diff_text = migrate_caller_preserving_customizations(
+                    stale, public_workflow_tag="v5"
+                )
+                self.assertTrue(diff_text)
+                self.assertIn(custom_runs_on, migrated)
+                self.assertNotIn("ubuntu-latest", migrated)
+                post_drift = inspect_installed_caller_drift(
+                    migrated, public_workflow_tag="v5"
+                )
+                self.assertTrue(post_drift.is_current)
+                self.assertEqual(
+                    post_drift.customizations.get("runs_on_block"), custom_runs_on
+                )
+
+        # Unsupported runs-on shapes fail closed
+        for bad_runs_on in (
+            "    runs-on:",
+            "    runs-on: self-hosted\n      - linux",
+            "    runs-on:\n      unsupported_key: runner",
+        ):
+            with self.subTest(bad_runs_on=bad_runs_on):
+                malformed = _sensei_only_v5_workflow("v5").replace(
+                    "    runs-on: ubuntu-latest", bad_runs_on, 1
+                )
+                with self.assertRaises(GitHubSetupError):
+                    migrate_caller_preserving_customizations(
+                        malformed, public_workflow_tag="v5"
+                    )
+
+        # Public CLI setup --check / --diff / --migrate --write
+        with tempfile.TemporaryDirectory() as tmp:
+            wf_path = Path(tmp) / ".github" / "workflows" / "review-sensei-review.yml"
+            wf_path.parent.mkdir(parents=True, exist_ok=True)
+            stale_block = _sensei_only_v5_workflow("v5").replace(
+                "    runs-on: ubuntu-latest", block_list_runs_on, 1
+            )
+            wf_path.write_text(stale_block, encoding="utf-8")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                rc_check = github_main(["setup", "--check", "--context-root", tmp])
+            self.assertEqual(rc_check, 2)
+            self.assertIn("stale", out.getvalue())
+
+            diff_out = io.StringIO()
+            with redirect_stdout(diff_out):
+                rc_diff = github_main(["setup", "--diff", "--context-root", tmp])
+            self.assertEqual(rc_diff, 0)
+            self.assertIn(
+                "--- a/.github/workflows/review-sensei-review.yml", diff_out.getvalue()
+            )
+
+            mig_out = io.StringIO()
+            with redirect_stdout(mig_out):
+                rc_mig = github_main(
+                    ["setup", "--migrate", "--write", "--context-root", tmp]
+                )
+            self.assertEqual(rc_mig, 0)
+            updated_text = wf_path.read_text(encoding="utf-8")
+            self.assertIn(block_list_runs_on, updated_text)
+            self.assertNotIn("ubuntu-latest", updated_text)
+
+            ok_out = io.StringIO()
+            with redirect_stdout(ok_out):
+                rc_ok = github_main(["setup", "--check", "--context-root", tmp])
+            self.assertEqual(rc_ok, 0)
+            self.assertIn("current", ok_out.getvalue())
+
     def test_inspect_local_trigger_override_and_protection_discrepancies(self):
-        compliant = Path(
-            "src/review_sensei/hosting/github/trigger.py"
-        ).read_text(encoding="utf-8")
+        compliant = Path("src/review_sensei/hosting/github/trigger.py").read_text(
+            encoding="utf-8"
+        )
         res_ok = inspect_local_trigger_override(compliant)
         self.assertTrue(res_ok.is_current)
         self.assertEqual(res_ok.missing_capabilities, ())
@@ -2143,7 +2234,11 @@ class GitHubSetupClientTests(unittest.TestCase):
                 "target": "branch",
                 "enforcement": "active",
                 "bypass_actors": [
-                    {"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}
+                    {
+                        "actor_id": 5,
+                        "actor_type": "RepositoryRole",
+                        "bypass_mode": "always",
+                    }
                 ],
                 "rules": [
                     {"type": "deletion"},
@@ -2178,9 +2273,15 @@ class GitHubSetupClientTests(unittest.TestCase):
                 "target": "tag",
                 "enforcement": "active",
                 "bypass_actors": [
-                    {"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}
+                    {
+                        "actor_id": 5,
+                        "actor_type": "RepositoryRole",
+                        "bypass_mode": "always",
+                    }
                 ],
-                "conditions": {"ref_name": {"include": ["refs/tags/v*"], "exclude": []}},
+                "conditions": {
+                    "ref_name": {"include": ["refs/tags/v*"], "exclude": []}
+                },
                 "rules": [{"type": "deletion"}, {"type": "non_fast_forward"}],
             },
         ]

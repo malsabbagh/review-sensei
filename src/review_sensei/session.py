@@ -1225,13 +1225,21 @@ class SessionRecord:
         )
 
     def to_round_state(
-        self, *, head_sha: str | None = None, **flags: bool
+        self,
+        *,
+        head_sha: str | None = None,
+        policy_digest: str | None = None,
+        **flags: bool,
     ) -> RoundSessionState:
         effective_failed = failed_attempts_for_head(self, head_sha)
-        if (
-            effective_failed < MAX_FAILED_ATTEMPTS
-            and has_unconsumed_successor_grant(
-                self, head_sha or self.failed_attempts_head_sha
+        target_head = head_sha or self.failed_attempts_head_sha
+        if effective_failed < MAX_FAILED_ATTEMPTS and (
+            has_unconsumed_successor_grant(
+                self, target_head, policy_digest=policy_digest
+            )
+            is not None
+            or has_unconsumed_irrecoverable_transaction_grant(
+                self, target_head, policy_digest=policy_digest
             )
             is not None
         ):
@@ -1842,6 +1850,7 @@ def mutate_reserved(
     reservation_id: str,
     expected_generation: int,
     head_sha: str | None = None,
+    policy_digest: str | None = None,
     rescan_request: AuthorizedRescan | None = None,
     now: datetime | None = None,
 ) -> SessionRecord:
@@ -1873,8 +1882,10 @@ def mutate_reserved(
     _reservation_id(reservation_id, label="reservation_id")
     next_generation = _next_generation(record)
     updated_grants = record.continuation_grants
+    next_last_committed: str | None = record.last_committed_reservation_id
+    target_head = head_sha or record.failed_attempts_head_sha
     active_successor = has_unconsumed_successor_grant(
-        record, head_sha or record.failed_attempts_head_sha
+        record, target_head, policy_digest=policy_digest
     )
     if active_successor is not None:
         grants_list = [dict(item) for item in record.continuation_grants]
@@ -1891,12 +1902,23 @@ def mutate_reserved(
                 }
                 updated_grants = tuple(grants_list)
                 break
+    elif (
+        active_irrecoverable := has_unconsumed_irrecoverable_transaction_grant(
+            record, target_head, policy_digest=policy_digest
+        )
+    ) is not None:
+        retired_res = active_irrecoverable.get("consumed_reservation_id")
+        if isinstance(retired_res, str) and retired_res:
+            next_last_committed = hashlib.sha256(
+                f"{retired_res}|irrecoverable-consumed".encode("utf-8")
+            ).hexdigest()
     return record.evolve(
         now=now,
         generation=next_generation,
         reservation_id=reservation_id,
         reserved_slot=slot,
         continuation_grants=updated_grants,
+        last_committed_reservation_id=next_last_committed,
         **_failed_attempt_scope(record, head_sha),
     )
 
@@ -2029,6 +2051,7 @@ def prepare_session_round(
         rescan_reservation,
     )
 
+    current_policy_digest = policy.digest()
     if isinstance(rescan_request, AuthorizedRescan):
         rescan_request = replace(rescan_request, ordinary_reservation=reservation_id)
     if rescan_request is not None:
@@ -2036,7 +2059,9 @@ def prepare_session_round(
     elif (
         head_sha is not None
         and (
-            irrecoverable_grant := has_irrecoverable_transaction_grant(record, head_sha)
+            irrecoverable_grant := has_irrecoverable_transaction_grant(
+                record, head_sha, policy_digest=current_policy_digest
+            )
         )
         is not None
     ):
@@ -2047,7 +2072,9 @@ def prepare_session_round(
         ).hexdigest()
     elif (
         successor_grant := has_unconsumed_successor_grant(
-            record, head_sha or record.failed_attempts_head_sha
+            record,
+            head_sha or record.failed_attempts_head_sha,
+            policy_digest=current_policy_digest,
         )
     ) is not None:
         reservation_id = hashlib.sha256(
@@ -2092,7 +2119,11 @@ def prepare_session_round(
     elif record.last_committed_reservation_id == reservation_id and held is None:
         flags.setdefault("same_head_duplicate", True)
     decision = evaluate_round_admission(
-        record.to_round_state(head_sha=head_sha, **flags),
+        record.to_round_state(
+            head_sha=head_sha,
+            policy_digest=current_policy_digest,
+            **flags,
+        ),
         policy,
     )
     if (
@@ -2444,6 +2475,7 @@ def load_review_transaction_for_publication(
     policy_digest: str,
     configuration_digest: str,
     evidence_digest: str,
+    baseline: object | None = None,
     now: datetime | None = None,
     commit_analysis: bool = True,
 ) -> SessionRecord:
@@ -2509,6 +2541,7 @@ def load_review_transaction_for_publication(
                 current,
                 transaction,
                 result_digest,
+                baseline=baseline,
                 review_complete=result.review_status == "complete",
                 now=now,
             ),
@@ -2520,7 +2553,10 @@ def load_review_transaction_for_publication(
 
 
 def has_irrecoverable_transaction_grant(
-    record: SessionRecord, head_sha: str | None
+    record: SessionRecord,
+    head_sha: str | None,
+    *,
+    policy_digest: str | None = None,
 ) -> dict[str, object] | None:
     """Return the active irrecoverable-transaction successor grant for ``head_sha``."""
 
@@ -2533,8 +2569,35 @@ def has_irrecoverable_transaction_grant(
             and command_id.startswith("irrecoverable-tx:")
             and item.get("head_sha") == head_sha
             and isinstance(item.get("consumed_generation"), int)
+            and (policy_digest is None or item.get("policy_digest") == policy_digest)
         ):
             return dict(item)
+    return None
+
+
+def has_unconsumed_irrecoverable_transaction_grant(
+    record: SessionRecord,
+    head_sha: str | None,
+    *,
+    policy_digest: str | None = None,
+) -> dict[str, object] | None:
+    """Return an irrecoverable-transaction grant whose successor slot is not yet consumed."""
+
+    if failed_attempts_for_head(record, head_sha) >= MAX_FAILED_ATTEMPTS:
+        return None
+    existing = has_irrecoverable_transaction_grant(
+        record, head_sha, policy_digest=policy_digest
+    )
+    if existing is None or record.reservation_id is not None:
+        return None
+    retired_res = existing.get("consumed_reservation_id")
+    if not isinstance(retired_res, str) or not retired_res:
+        return None
+    expected_last = hashlib.sha256(
+        f"{retired_res}|irrecoverable-retired".encode("utf-8")
+    ).hexdigest()
+    if record.last_committed_reservation_id == expected_last:
+        return existing
     return None
 
 
@@ -2559,17 +2622,13 @@ def transition_irrecoverable_transaction(
         nonlocal applied
         tx = record.transaction
         if tx is None:
-            existing = has_irrecoverable_transaction_grant(
-                record, head_sha or record.failed_attempts_head_sha
+            existing = has_unconsumed_irrecoverable_transaction_grant(
+                record,
+                head_sha or record.failed_attempts_head_sha,
+                policy_digest=policy_digest,
             )
             if existing is not None:
-                retired_res = existing.get("consumed_reservation_id")
-                if isinstance(retired_res, str):
-                    expected_last = hashlib.sha256(
-                        f"{retired_res}|irrecoverable-retired".encode("utf-8")
-                    ).hexdigest()
-                    if record.last_committed_reservation_id == expected_last:
-                        return record
+                return record
             raise ReviewInputError(
                 "session has no committed transaction awaiting publication recovery"
             )
@@ -2591,9 +2650,9 @@ def transition_irrecoverable_transaction(
         next_failed = min(base_failed + 1, MAX_FAILED_ATTEMPTS)
         grant_cmd_id = f"irrecoverable-tx:{tx.transaction_id[:32]}"
         if command_id:
-            grant_cmd_id = f"irrecoverable-tx:{command_id[:20]}:{tx.transaction_id[:24]}"[
-                :64
-            ]
+            grant_cmd_id = (
+                f"irrecoverable-tx:{command_id[:20]}:{tx.transaction_id[:24]}"[:64]
+            )
         grant_entry: dict[str, object] = {
             "command_id": grant_cmd_id,
             "actor": actor.strip(),
@@ -2631,7 +2690,10 @@ def transition_irrecoverable_transaction(
 
 
 def has_unconsumed_successor_grant(
-    record: SessionRecord, head_sha: str | None
+    record: SessionRecord,
+    head_sha: str | None,
+    *,
+    policy_digest: str | None = None,
 ) -> dict[str, object] | None:
     """Return the active unconsumed successor continuation grant for ``head_sha``."""
 
@@ -2645,6 +2707,7 @@ def has_unconsumed_successor_grant(
             and item.get("head_sha") == head_sha
             and item.get("consumed_reservation_id") is None
             and item.get("consumed_generation") is None
+            and (policy_digest is None or item.get("policy_digest") == policy_digest)
         ):
             return dict(item)
     return None
@@ -2666,7 +2729,7 @@ def grant_successor_continuation(
 
     if not isinstance(actor, str) or not actor.strip():
         raise ReviewInputError("successor continuation grant requires an actor")
-    if actor_role not in {None, "maintain", "admin", "OWNER", "MEMBER"}:
+    if actor_role not in {"maintain", "admin", "OWNER", "MEMBER"}:
         raise ReviewInputError(
             "successor continuation grant requires maintain or admin permission"
         )
@@ -2690,11 +2753,7 @@ def grant_successor_continuation(
         target_head = (
             head_sha
             or record.failed_attempts_head_sha
-            or (
-                record.transaction.head_sha
-                if record.transaction is not None
-                else None
-            )
+            or (record.transaction.head_sha if record.transaction is not None else None)
         )
         if not isinstance(target_head, str) or not re.fullmatch(
             r"[a-f0-9]{40}", target_head
@@ -2709,12 +2768,30 @@ def grant_successor_continuation(
             raise ReviewInputError(
                 "successor continuation grant head does not match failed-attempt head"
             )
-        existing = has_unconsumed_successor_grant(record, target_head)
+        effective_policy_digest = (
+            policy_digest
+            or (
+                record.transaction.policy_digest
+                if record.transaction is not None
+                else None
+            )
+            or ReviewConvergencePolicy().digest()
+        )
+        if not isinstance(effective_policy_digest, str) or not re.fullmatch(
+            r"[a-f0-9]{64}", effective_policy_digest
+        ):
+            raise ReviewInputError(
+                "successor continuation grant requires a valid 64-char hex policy digest"
+            )
+        existing = has_unconsumed_successor_grant(
+            record, target_head, policy_digest=effective_policy_digest
+        )
         if existing is not None:
             if expected_generation is not None:
                 existing_cmd = str(existing.get("command_id", ""))
-                if record.generation != expected_generation and not existing_cmd.startswith(
-                    f"successor:{expected_generation}:"
+                if (
+                    record.generation != expected_generation
+                    and not existing_cmd.startswith(f"successor:{expected_generation}:")
                 ):
                     raise ReviewInputError(
                         "successor continuation grant generation does not match"
@@ -2740,21 +2817,6 @@ def grant_successor_continuation(
         if current_failed >= MAX_FAILED_ATTEMPTS:
             raise ReviewInputError(
                 "hard failed-attempt ceiling is reached; push a new head to continue"
-            )
-        effective_policy_digest = (
-            policy_digest
-            or (
-                record.transaction.policy_digest
-                if record.transaction is not None
-                else None
-            )
-            or ("0" * 64)
-        )
-        if not isinstance(effective_policy_digest, str) or not re.fullmatch(
-            r"[a-f0-9]{64}", effective_policy_digest
-        ):
-            raise ReviewInputError(
-                "successor continuation grant requires a valid 64-char hex policy digest"
             )
         raw_token = (command_id or target_head[:16]).strip()
         safe_token = re.sub(r"[^A-Za-z0-9._:-]+", "-", raw_token).strip("-") or "grant"
@@ -4574,6 +4636,65 @@ class LocalSessionLedger:
                     "session ledger replaced but directory sync failed"
                 ) from exc
             raise ReviewInputError("session ledger could not be written") from exc
+
+    def _checkpoint_result_path(self, identity: SessionIdentity) -> Path:
+        return (
+            self.root
+            / ".checkpoints"
+            / _safe_ledger_name(identity.repository)
+            / f"pr-{identity.pull_request}.json"
+        )
+
+    def retain_checkpoint_result(self, result: ReviewResult) -> None:
+        tx = result.transaction
+        if tx is None:
+            return
+        identity = SessionIdentity(
+            repository=tx.repository,
+            pull_request=tx.pull_request,
+        )
+        try:
+            target = self._checkpoint_result_path(identity)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            encoded = json.dumps(
+                result.to_dict(), sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+            temp_path = target.with_suffix(".tmp")
+            temp_path.write_bytes(encoded)
+            os.replace(temp_path, target)
+        except OSError:
+            pass
+
+    def load_retained_checkpoint_result(
+        self,
+        identity: SessionIdentity,
+        *,
+        transaction: ReviewTransaction | None = None,
+        head_sha: str | None = None,
+    ) -> ReviewResult | None:
+        target = self._checkpoint_result_path(identity)
+        try:
+            if not target.is_file():
+                return None
+            raw = json.loads(target.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return None
+            loaded_result = ReviewResult.from_dict(raw)
+        except (OSError, ValueError, TypeError, ReviewInputError):
+            return None
+        if loaded_result.transaction is None:
+            return None
+        if (
+            loaded_result.transaction.repository != identity.repository
+            or loaded_result.transaction.pull_request != identity.pull_request
+        ):
+            return None
+        if transaction is not None and transaction.result_sha256 is not None:
+            if loaded_result.transaction.head_sha != transaction.head_sha:
+                return None
+        if head_sha is not None and loaded_result.transaction.head_sha != head_sha:
+            return None
+        return loaded_result
 
     def load(
         self, identity: SessionIdentity, *, now: datetime | None = None

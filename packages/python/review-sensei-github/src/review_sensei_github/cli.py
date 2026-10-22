@@ -44,6 +44,7 @@ _PUBLIC = (
     "evaluate-observed",
     "release-reservation",
     "doctor",
+    "setup",
 )
 _HELP = {
     "review": "engine review plus hosted hooks",
@@ -55,6 +56,7 @@ _HELP = {
     "evaluate-observed": "evaluate an observed review",
     "release-reservation": "release this run's own session reservation",
     "doctor": "run hosted diagnostics",
+    "setup": "inspect, diff, or migrate the installed caller workflow",
 }
 
 
@@ -164,6 +166,123 @@ def _release_reservation(arguments: list[str]) -> int:
     return 0
 
 
+def _setup(arguments: list[str]) -> int:
+    import argparse
+    import json
+    from pathlib import Path
+
+    from review_sensei_github.setup import (
+        DEFAULT_PUBLIC_WORKFLOW_TAG,
+        WORKFLOW_PATH,
+        inspect_installed_caller_drift,
+        migrate_caller_preserving_customizations,
+    )
+
+    parser = argparse.ArgumentParser(
+        prog="review-sensei-github setup",
+        description=(
+            "Inspect, diff, or migrate the installed ReviewSensei caller workflow "
+            "while preserving job customizations."
+        ),
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Verify whether the installed caller workflow matches the current contract.",
+    )
+    parser.add_argument(
+        "--diff",
+        action="store_true",
+        help="Print a unified diff migrating the installed caller workflow.",
+    )
+    parser.add_argument(
+        "--migrate",
+        action="store_true",
+        help="Migrate the installed caller workflow while preserving customizations.",
+    )
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="Write the migrated caller workflow in place when used with --migrate.",
+    )
+    parser.add_argument(
+        "--context-root",
+        type=Path,
+        default=Path("."),
+        help="Repository root containing .github/workflows/review-sensei-review.yml.",
+    )
+    parser.add_argument(
+        "--workflow-file",
+        type=Path,
+        default=None,
+        help="Explicit path to a caller workflow file to inspect or migrate.",
+    )
+    parser.add_argument(
+        "--public-workflow-tag",
+        default=DEFAULT_PUBLIC_WORKFLOW_TAG,
+        help="Reusable workflow tag (default: v5).",
+    )
+    parser.add_argument("--json", action="store_true", dest="as_json")
+    parsed = parser.parse_args(arguments)
+    try:
+        workflow_path = (
+            parsed.workflow_file
+            if parsed.workflow_file is not None
+            else (parsed.context_root / WORKFLOW_PATH)
+        )
+        content = workflow_path.read_text(encoding="utf-8")
+        drift = inspect_installed_caller_drift(
+            content, public_workflow_tag=parsed.public_workflow_tag
+        )
+        if parsed.migrate or parsed.diff:
+            migrated, diff_text = migrate_caller_preserving_customizations(
+                content, public_workflow_tag=parsed.public_workflow_tag
+            )
+            if parsed.write:
+                workflow_path.write_text(migrated, encoding="utf-8")
+            if parsed.as_json:
+                sys.stdout.write(
+                    json.dumps(
+                        {
+                            "drift": drift.to_dict(),
+                            "diff": diff_text,
+                            "migrated": migrated,
+                            "written": bool(parsed.write),
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+            elif parsed.diff:
+                sys.stdout.write(diff_text)
+            elif parsed.write:
+                sys.stdout.write(diff_text or f"{WORKFLOW_PATH}: already current\n")
+            else:
+                sys.stdout.write(migrated)
+            if parsed.check and not drift.is_current and not parsed.write:
+                return DOCTOR_ACTION_REQUIRED
+            return 0
+        if parsed.as_json:
+            sys.stdout.write(
+                json.dumps(drift.to_dict(), indent=2, sort_keys=True) + "\n"
+            )
+        elif drift.is_current:
+            sys.stdout.write(
+                f"{WORKFLOW_PATH}: current (contract {drift.contract_version})\n"
+            )
+        else:
+            stale = ", ".join(drift.stale_sections) or "setup_version"
+            sys.stdout.write(
+                f"{WORKFLOW_PATH}: stale (contract {drift.contract_version}; "
+                f"stale={stale})\n"
+            )
+        return 0 if drift.is_current else DOCTOR_ACTION_REQUIRED
+    except (OSError, ValueError, TypeError, ReviewSenseiError) as exc:
+        _print_offline_error(exc)
+        return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         with _sigterm_as_keyboard_interrupt():
@@ -195,6 +314,8 @@ def _main(argv: list[str] | None = None) -> int:
         return _release_reservation(rest)
     if command == "doctor":
         return _doctor(rest)
+    if command == "setup":
+        return _setup(rest)
     print(
         f"review-sensei: unknown command {command}",
         file=sys.stderr,

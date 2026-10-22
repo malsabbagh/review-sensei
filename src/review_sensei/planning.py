@@ -500,6 +500,28 @@ def _hunk_record(
     )
 
 
+def _slice_record(
+    file_record: DiffFileRecord,
+    hunks: tuple[DiffHunk, ...],
+) -> DiffFileRecord:
+    text = file_record.header + "".join(hunk.text for hunk in hunks)
+    added_lines: list[int] = []
+    deleted_lines: list[int] = []
+    for hunk in hunks:
+        added_lines.extend(hunk.added_lines)
+        deleted_lines.extend(hunk.deleted_lines)
+    return DiffFileRecord(
+        old_path=file_record.old_path,
+        new_path=file_record.new_path,
+        text=text,
+        header=file_record.header,
+        added_lines=frozenset(added_lines),
+        deleted_lines=frozenset(deleted_lines),
+        hunks=hunks,
+        binary=False,
+    )
+
+
 def _classify_file(
     record: DiffFileRecord,
     *,
@@ -855,9 +877,7 @@ def plan_change(
                     hunk_outcomes[hunk.index] = ("reviewed", None)
                 continue
             remaining_hunks = tuple(
-                hunk
-                for hunk in record.hunks
-                if hunk.index not in prior_reviewed_hunks
+                hunk for hunk in record.hunks if hunk.index not in prior_reviewed_hunks
             )
             if record.hunks and len(remaining_hunks) < len(record.hunks):
                 for hunk in record.hunks:

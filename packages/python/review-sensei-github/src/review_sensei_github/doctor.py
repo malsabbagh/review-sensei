@@ -107,23 +107,19 @@ def inspect_protection_policy_discrepancies(
     """
 
     discrepancies: list[dict[str, Any]] = []
-    main_policy = (
-        policy.get("main_branch")
-        if isinstance(policy.get("main_branch"), dict)
-        else (
-            policy.get("ruleset")
-            if isinstance(policy.get("ruleset"), dict)
-            else {}
-        )
+    raw_main = policy.get("main_branch")
+    raw_ruleset = policy.get("ruleset")
+    main_policy: dict[str, Any] = (
+        raw_main
+        if isinstance(raw_main, dict)
+        else (raw_ruleset if isinstance(raw_ruleset, dict) else {})
     )
-    release_tag_policy = (
-        policy.get("release_tags")
-        if isinstance(policy.get("release_tags"), dict)
-        else (
-            policy.get("tags")
-            if isinstance(policy.get("tags"), dict)
-            else {}
-        )
+    raw_release = policy.get("release_tags")
+    raw_tags = policy.get("tags")
+    release_tag_policy: dict[str, Any] = (
+        raw_release
+        if isinstance(raw_release, dict)
+        else (raw_tags if isinstance(raw_tags, dict) else {})
     )
     rulesets_by_name = {
         str(rs.get("name")): rs
@@ -141,7 +137,8 @@ def inspect_protection_policy_discrepancies(
     )
     main_rs = rulesets_by_name.get(main_rs_name)
     if main_rs is not None:
-        rules = main_rs.get("rules") if isinstance(main_rs.get("rules"), list) else []
+        raw_rules = main_rs.get("rules")
+        rules: list[Any] = raw_rules if isinstance(raw_rules, list) else []
         pr_rule = next(
             (
                 r
@@ -151,10 +148,9 @@ def inspect_protection_policy_discrepancies(
             None,
         )
         if isinstance(pr_rule, dict):
-            params = (
-                pr_rule.get("parameters")
-                if isinstance(pr_rule.get("parameters"), dict)
-                else {}
+            raw_pr_params = pr_rule.get("parameters")
+            params: dict[str, Any] = (
+                raw_pr_params if isinstance(raw_pr_params, dict) else {}
             )
             expected_approvals = main_policy.get(
                 "required_approving_review_count",
@@ -198,16 +194,12 @@ def inspect_protection_policy_discrepancies(
             None,
         )
         if isinstance(status_rule, dict):
-            params = (
-                status_rule.get("parameters")
-                if isinstance(status_rule.get("parameters"), dict)
-                else {}
+            raw_status_params = status_rule.get("parameters")
+            status_params: dict[str, Any] = (
+                raw_status_params if isinstance(raw_status_params, dict) else {}
             )
-            checks = (
-                params.get("required_status_checks")
-                if isinstance(params.get("required_status_checks"), list)
-                else []
-            )
+            raw_checks = status_params.get("required_status_checks")
+            checks: list[Any] = raw_checks if isinstance(raw_checks, list) else []
             live_contexts = [
                 str(c.get("context"))
                 for c in checks
@@ -250,15 +242,13 @@ def inspect_protection_policy_discrepancies(
     tag_rs_name = str(release_tag_policy.get("ruleset_name", "release-tag-protection"))
     tag_rs = rulesets_by_name.get(tag_rs_name)
     if tag_rs is not None:
-        conditions = (
-            tag_rs.get("conditions")
-            if isinstance(tag_rs.get("conditions"), dict)
-            else {}
+        raw_conditions = tag_rs.get("conditions")
+        conditions: dict[str, Any] = (
+            raw_conditions if isinstance(raw_conditions, dict) else {}
         )
-        ref_name = (
-            conditions.get("ref_name")
-            if isinstance(conditions.get("ref_name"), dict)
-            else {}
+        raw_ref_name = conditions.get("ref_name")
+        ref_name: dict[str, Any] = (
+            raw_ref_name if isinstance(raw_ref_name, dict) else {}
         )
         live_includes = ref_name.get("include")
         expected_includes = release_tag_policy.get("include_ref_patterns")
@@ -311,4 +301,3 @@ def with_github_checks(
                 if extra.status == "action":
                     status = "action"
     return {**report, "status": status, "checks": checks}
-

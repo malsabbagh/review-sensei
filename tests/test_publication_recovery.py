@@ -2748,3 +2748,164 @@ class PublicationRecoveryTests(unittest.TestCase):
                 successor.transaction.transaction_id,
                 result.transaction.transaction_id,
             )
+
+    def test_hosted_adapter_interrupted_first_retention_post_never_commits_analysis_early(
+        self,
+    ):
+        from review_sensei_github.session_ledger import (
+            GitHubIssueCommentSessionLedger,
+            render_session_comment,
+        )
+
+        for op_entry in ("enabled", "disabled"):
+            with (
+                self.subTest(operation_entry=op_entry),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                seed = LocalSessionLedger(Path(directory))
+                prepared = prepare_review_transaction(
+                    seed,
+                    IDENTITY,
+                    POLICY,
+                    reservation_id="a" * 64,
+                    base_sha=BASE,
+                    head_sha=HEAD,
+                    configuration_digest=ReviewTransaction.compute_configuration_digest(
+                        CONFIGURATION
+                    ),
+                    evidence_digest=ReviewTransaction.compute_evidence_digest(EVIDENCE),
+                )
+                assert prepared.transaction is not None
+                state = RetentionState()
+                state.session_comment = {
+                    "id": 600,
+                    "body": render_session_comment(
+                        repository_id=1,
+                        pull_request=1,
+                        record=seed.load(IDENTITY).record,
+                    ),
+                    "user": state.app_user,
+                    "issue_url": "https://api.github.test/repos/owner/repo/issues/1",
+                }
+                hosted_ledger = GitHubIssueCommentSessionLedger(
+                    http=state.http,
+                    token="session-token",
+                    app_slug=APP,
+                )
+                comments = tuple(
+                    ReviewComment(
+                        path="src/app.py",
+                        line=1,
+                        body=f"Independent required decision {i}.",
+                        symbol=f"operation_{i}",
+                        defect_kind=f"case-{i}",
+                        needs_human=True,
+                        blocking=False,
+                    )
+                    for i in range(9)
+                )
+                raw_result = ReviewResult(
+                    summary="First review.",
+                    comments=comments,
+                    provider="fixture",
+                    model="fixture-model",
+                    review_status="complete",
+                    transaction=prepared.transaction,
+                )
+                key = ReviewContextCacheKey(
+                    repository="owner/repo",
+                    pull_request=1,
+                    base_sha=BASE,
+                    head_sha=HEAD,
+                    engine="fixture",
+                    model="fixture-model",
+                    profile="default",
+                    stage_digest="1" * 64,
+                    context_digest="2" * 64,
+                    learning_digest="3" * 64,
+                )
+                baseline = ReviewBaseline(
+                    cache_key=key,
+                    policy_digest=POLICY.digest(),
+                    complete=True,
+                    coverage_complete=True,
+                    generation=prepared.record.generation + 1,
+                    findings=tuple(
+                        sorted(
+                            (baseline_finding_from_comment(c) for c in comments),
+                            key=lambda f: f.fingerprint,
+                        )
+                    ),
+                    reviewed_paths=("src/app.py",),
+                )
+                app = application(state, hosted_ledger)
+                for failure_mode in ("crash-before", "missing"):
+                    state.fail_part = failure_mode
+                    state.retention_fault_event = None
+                    expected_exc = (
+                        KeyboardInterrupt
+                        if failure_mode == "crash-before"
+                        else GitHubPublicationError
+                    )
+                    with self.assertRaises(expected_exc):
+                        publish(
+                            app,
+                            raw_result,
+                            key,
+                            baseline=baseline,
+                            options=GitHubWriteOptions(
+                                auto_review=True,
+                                auto_approve=False,
+                                github_writes=True,
+                                operation_entry=op_entry,
+                            ),
+                        )
+                    loaded_after_interrupt = hosted_ledger.load(IDENTITY).record
+                    self.assertIsNotNone(loaded_after_interrupt.transaction)
+                    self.assertEqual(
+                        loaded_after_interrupt.transaction.phase, "analysis"
+                    )
+                    self.assertEqual(
+                        loaded_after_interrupt.completed_initial_reviews, 0
+                    )
+                    self.assertEqual(
+                        [p for p in state.parts if RESULT_COMMENT_MARKER in p["body"]],
+                        [],
+                    )
+
+                # Subsequent retry retains the result first, then advances the ledger
+                state.fail_part = None
+                state.retention_fault_event = None
+                app.reviewer = type(
+                    "_FailReviewer",
+                    (),
+                    {
+                        "publish": staticmethod(
+                            lambda **kw: (_ for _ in ()).throw(
+                                GitHubPublicationError("finding index")
+                            )
+                        )
+                    },
+                )()
+                with self.assertRaisesRegex(GitHubPublicationError, "finding index"):
+                    publish(
+                        app,
+                        raw_result,
+                        key,
+                        baseline=baseline,
+                        options=GitHubWriteOptions(
+                            auto_review=True,
+                            auto_approve=False,
+                            github_writes=True,
+                            complete_inventory=True,
+                            operation_entry=op_entry,
+                        ),
+                    )
+                after_retain = hosted_ledger.load(IDENTITY).record
+                self.assertEqual(after_retain.transaction.phase, "publication_failed")
+                self.assertEqual(after_retain.completed_initial_reviews, 1)
+                restored = recover(app, hosted_ledger)
+                self.assertEqual(
+                    restored.content_digest(),
+                    raw_result.content_digest(),
+                )
