@@ -16,7 +16,6 @@ from review_sensei_github.cli import main as github_main
 from review_sensei_github.errors import GitHubBrokerClientError
 
 from review_sensei.broker_diagnostics import BrokerDiagnostic
-
 from review_sensei.disposition import command_exit_code
 from review_sensei.models import ReviewResult
 from tests.fake_github_http import json_response

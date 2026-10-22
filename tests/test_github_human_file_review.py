@@ -870,18 +870,15 @@ class GitHubHumanFileReviewTests(unittest.TestCase):
             {item["filename"] for item in self.state.files},
         )
         self.assertEqual(self.budget.calls, len(self.state.calls))
-        self.assertEqual(self.budget.calls, 36)
+        self.assertEqual(self.budget.calls, 33)
         trees = [path for _, path, _ in self.state.calls if "/git/trees/" in path]
         self.assertEqual(
             trees,
             [
                 f"{REPO}/git/trees/{'1' * 40}",
-                f"{REPO}/git/trees/{10000:040x}",
-                f"{REPO}/git/trees/{10001:040x}",
+                f"{REPO}/git/trees/{10000:040x}?recursive=1",
                 f"{REPO}/git/trees/{'2' * 40}",
-                f"{REPO}/git/trees/{20000:040x}",
-                f"{REPO}/git/trees/{20001:040x}",
-                f"{REPO}/git/trees/{20002:040x}?recursive=1",
+                f"{REPO}/git/trees/{20000:040x}?recursive=1",
             ],
         )
         self.assertEqual([len(part.files) for part in request.parts], [32, 9])
@@ -915,7 +912,7 @@ class GitHubHumanFileReviewTests(unittest.TestCase):
                 for root in ("1" * 40, "2" * 40)
             )
         )
-        self.assertEqual(self.budget.calls, 36)
+        self.assertEqual(self.budget.calls, 33)
 
     def test_nested_shallow_prefix_requires_complete_regular_directory_chain(self):
         for mutation in (
@@ -959,7 +956,10 @@ class GitHubHumanFileReviewTests(unittest.TestCase):
                 self.assertEqual(self.posts(), 0)
                 self.assertEqual(self.budget.calls, len(self.state.calls))
                 self.assertFalse(
-                    any("?recursive=1" in path for _, path, _ in self.state.calls)
+                    any(
+                        path == f"{REPO}/git/trees/{20000:040x}?recursive=1"
+                        for _, path, _ in self.state.calls
+                    )
                 )
 
     def test_nested_recursive_tree_refuses_incomplete_or_conflicting_proof(self):
@@ -986,7 +986,7 @@ class GitHubHumanFileReviewTests(unittest.TestCase):
 
                 def invalid(method, path, **kwargs):
                     status, value = real(method, path, **kwargs)
-                    if path.endswith("?recursive=1"):
+                    if path == f"{REPO}/git/trees/{20000:040x}?recursive=1":
                         if mutation == "truncated":
                             value["truncated"] = True
                         elif mutation == "tree-sha":
@@ -997,13 +997,17 @@ class GitHubHumanFileReviewTests(unittest.TestCase):
                             value["tree"].append(None)
                         elif mutation == "missing-ancestor":
                             value["tree"] = [
-                                x for x in value["tree"] if x["path"] != "after"
+                                x
+                                for x in value["tree"]
+                                if x["path"] != "execution/quieter-workspace/after"
                             ]
                         elif mutation == "symlink":
                             value["tree"][0]["mode"] = "120000"
                         elif mutation == "ancestor-blob":
                             ancestor = next(
-                                x for x in value["tree"] if x["path"] == "after"
+                                x
+                                for x in value["tree"]
+                                if x["path"] == "execution/quieter-workspace/after"
                             )
                             ancestor.update(type="blob", mode="100644")
                         elif mutation == "duplicate":
@@ -1022,7 +1026,12 @@ class GitHubHumanFileReviewTests(unittest.TestCase):
                         elif mutation == "bad-type":
                             value["tree"][0]["type"] = "tree"
                         elif mutation == "missing-leaf":
-                            value["tree"].pop(0)
+                            value["tree"] = [
+                                item
+                                for item in value["tree"]
+                                if item["path"]
+                                != "execution/quieter-workspace/after/desktop/media-000.png"
+                            ]
                         else:
                             value["padding"] = "x" * (512 * 1024)
                     return status, value
@@ -1044,7 +1053,7 @@ class GitHubHumanFileReviewTests(unittest.TestCase):
                             if "?recursive=1" in path
                         ]
                     ),
-                    1,
+                    2,
                 )
 
     def test_nested_absent_old_path_requires_unconflicted_ancestor_proof(self):
@@ -1072,14 +1081,14 @@ class GitHubHumanFileReviewTests(unittest.TestCase):
         self.many_files(41, nested=True)
         self.blanket_source()
         publisher = self.publisher()
-        for _ in range(48):
+        for _ in range(51):
             self.budget.consume()
         with self.assertRaises(ReviewInputError):
             publisher.request_review(review_id=10, result=self.state.result)
         self.assertEqual(self.budget.calls, 60)
-        self.assertEqual(len(self.state.calls), 12)
+        self.assertEqual(len(self.state.calls), 9)
         self.assertEqual(
-            self.state.calls[-1][1], f"{REPO}/git/trees/{20002:040x}?recursive=1"
+            self.state.calls[-1][1], f"{REPO}/git/trees/{20000:040x}?recursive=1"
         )
         self.assertEqual(self.posts(), 0)
         self.assertFalse(any(x["state"] == "APPROVED" for x in self.state.reviews))
