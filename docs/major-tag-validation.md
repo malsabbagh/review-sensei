@@ -84,6 +84,10 @@ traversal order; reordering is rejected along with missing or duplicate methods.
 Reports distinguish submitted, unsubmitted and confirmed contracts. Submission
 does not prove a worker started or completed: submitted but unconfirmed work
 has unknown execution, including reports not collected after another worker fails.
+A pool creation/entry failure precedes contract submission: it reports zero
+confirmed tests, a `worker-pool` failure and `execution_complete: false`.
+Consumers must inspect failure/completion fields, not treat a non-null count
+as successful qualification.
 Sanitized artifacts are retained on failure; environments and binaries are not.
 Every gate or recheck requires a fresh output directory. An existing evidence
 directory is rejected before reads and its receipt is left unchanged.
@@ -91,6 +95,9 @@ The gate exposes its uploaded receipt artifact ID to final validation. A retry
 of an installed lane retains that exact same-run artifact, even when the gate
 itself succeeded in an earlier attempt; it does not construct a new artifact
 name from the retry attempt. Final identity and lane-result rechecks still run.
+This reuse applies only to installed-lane retries of a successful gate in the
+same workflow run. A skipped/failed gate or missing upload fails closed; a new
+workflow run must qualify anew and cannot borrow an earlier run's receipt.
 
 All lanes freeze validation code to one protected default-branch checkout SHA.
 Same-channel concurrency cancels older runs. The final job requires every CLI

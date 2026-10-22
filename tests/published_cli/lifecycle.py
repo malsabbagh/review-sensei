@@ -255,10 +255,10 @@ def main():
                     )
                 # Processes isolate module globals and installed imports. Keep
                 # the complete inventory and the outer 300-second deadline.
+                stage = "worker-pool"
                 with concurrent.futures.ProcessPoolExecutor(
                     max_workers=2, mp_context=multiprocessing.get_context("spawn")
                 ) as pool:
-                    stage = "worker-pool"
                     workers_started = True
                     futures = []
                     for name in CONTRACTS:

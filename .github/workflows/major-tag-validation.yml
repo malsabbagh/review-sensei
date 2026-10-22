@@ -145,6 +145,7 @@ jobs:
           GATE_RECEIPT_ARTIFACT_ID: ${{ needs.gate.outputs.receipt_artifact_id }}
         run: |
           # download-artifact parses one positive JavaScript-safe integer ID.
+          # Builtins only: this guard does not require external tools or profiles.
           if ! [[ "$GATE_RECEIPT_ARTIFACT_ID" =~ ^[1-9][0-9]{0,15}$ ]] ||
             (( GATE_RECEIPT_ARTIFACT_ID > 9007199254740991 )); then
             echo "::error::Retained gate receipt artifact ID is missing or invalid"

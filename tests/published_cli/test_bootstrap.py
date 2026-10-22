@@ -553,10 +553,15 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
             "rows": [{"id": name, "status": "PASS"} for name in expected],
         }
         self.assertTrue(module.validate_execution(record, expected))
+        other_contract = ["other.Case.test_one", expected[1]]
         for mutation in (
             {"executed_ids": expected[:1]},
             {"executed_ids": expected[::-1]},
             {"executed_ids": [expected[0], expected[0]]},
+            {
+                "executed_ids": other_contract,
+                "rows": [{"id": name, "status": "PASS"} for name in other_contract],
+            },
             {"tests_run": 1},
             {"rows": record["rows"][:1]},
             {"rows": [record["rows"][0], record["rows"][0]]},
@@ -734,18 +739,20 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                 for fault in (
                     "load-error",
                     "empty-suite",
+                    "pool-enter-error",
                     "worker-error",
                     "partial-worker-error",
                 ):
                     with self.subTest(fault=fault):
                         worker_error = fault.endswith("worker-error")
+                        worker_layer = worker_error or fault == "pool-enter-error"
                         confirmed = 1 if fault == "partial-worker-error" else 0
                         for name in names:
                             (lane / (name + ".py")).write_text(
                                 "raise RuntimeError('private module detail')\n"
                                 if fault == "load-error"
                                 else "import unittest\nclass Contract(unittest.TestCase):\n    def test_contract(self): pass\n"
-                                if worker_error
+                                if worker_layer
                                 else ""
                             )
                         report = root / fault
@@ -786,6 +793,10 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                             pool.return_value.__enter__.return_value.submit.return_value.result.side_effect = TimeoutError(
                                 "private worker detail"
                             )
+                            if fault == "pool-enter-error":
+                                pool.return_value.__enter__.side_effect = RuntimeError(
+                                    "private pool detail"
+                                )
                             if confirmed:
 
                                 def submitted(_function, _tests, name, *_versions):
@@ -814,19 +825,36 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                                 "0.8.1" if name == "review-sensei" else "0.3.1"
                             )
                             self.assertEqual(module.main(), 1)
+                            if fault in {"load-error", "empty-suite"}:
+                                pool.assert_not_called()
                         receipt = json.loads((report / "results.json").read_text())
                         self.assertIs(validate_receipt(receipt, "0.8.1"), receipt)
-                        self.assertEqual(
-                            receipt["tests_run"], None if worker_error else 0
-                        )
+                        if worker_error:
+                            self.assertIsNone(receipt["tests_run"])
+                        else:
+                            self.assertEqual(receipt["tests_run"], 0)
                         self.assertEqual(receipt["known_tests_run"], confirmed)
                         self.assertFalse(receipt["execution_complete"])
                         self.assertEqual(receipt["pass"], confirmed)
                         self.assertEqual(receipt["fail"], 1)
                         self.assertEqual(
                             receipt["rows"][-1]["kind"],
-                            "TimeoutError" if worker_error else fault,
+                            "TimeoutError"
+                            if worker_error
+                            else "RuntimeError"
+                            if fault == "pool-enter-error"
+                            else fault,
                         )
+                        if fault == "pool-enter-error":
+                            self.assertFalse(receipt["workers_started"])
+                            self.assertEqual(receipt["submitted_contracts"], [])
+                            self.assertEqual(
+                                receipt["unsubmitted_contracts"], list(names)
+                            )
+                            self.assertEqual(
+                                receipt["rows"][-1]["stage"], "worker-pool"
+                            )
+                            self.assertNotIn("private pool detail", json.dumps(receipt))
                         if worker_error:
                             self.assertEqual(
                                 pool.call_args.kwargs["mp_context"].get_start_method(),

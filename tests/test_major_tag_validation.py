@@ -691,11 +691,13 @@ class SurfaceTests(unittest.TestCase):
         )
         self.assertTrue(upload["uses"].startswith("actions/upload-artifact@"))
         self.assertEqual(upload["with"]["if-no-files-found"], "error")
-        download = next(
+        downloads = [
             step
             for step in data["jobs"]["current"]["steps"]
             if step.get("uses", "").startswith("actions/download-artifact@")
-        )
+        ]
+        self.assertEqual(len(downloads), 1)
+        download = downloads[0]
         self.assertEqual(
             download["with"]["artifact-ids"],
             "${{ needs.gate.outputs.receipt_artifact_id }}",
@@ -716,16 +718,19 @@ class SurfaceTests(unittest.TestCase):
             for step in steps
             if step.get("name") == "Require retained gate receipt ID"
         )
-        download = next(
+        downloads = [
             step
             for step in steps
             if step.get("uses", "").startswith("actions/download-artifact@")
-        )
+        ]
+        self.assertEqual(len(downloads), 1)
+        download = downloads[0]
         self.assertLess(steps.index(guard), steps.index(download))
         self.assertEqual(
             guard["env"]["GATE_RECEIPT_ARTIFACT_ID"],
             "${{ needs.gate.outputs.receipt_artifact_id }}",
         )
+        # Number.MAX_SAFE_INTEGER is accepted; its successor must be rejected.
         valid = {"665432109", "9007199254740991"}
         for value in (
             "",
@@ -746,7 +751,7 @@ class SurfaceTests(unittest.TestCase):
             with self.subTest(value=value):
                 result = subprocess.run(
                     ["bash", "-c", guard["run"]],
-                    env={"GATE_RECEIPT_ARTIFACT_ID": value},
+                    env={"PATH": os.defpath, "GATE_RECEIPT_ARTIFACT_ID": value},
                     capture_output=True,
                     text=True,
                 )
