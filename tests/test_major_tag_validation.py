@@ -677,6 +677,33 @@ class SurfaceTests(unittest.TestCase):
                 with self.subTest(old=old), self.assertRaises(ValueError):
                     surface.validate_surface(root)
 
+    def test_retry_downloads_the_original_gate_artifact_id(self):
+        data = surface.workflow_data(
+            (ROOT / ".github/workflows/major-tag-validation.yml").read_text()
+        )
+        gate_job = data["jobs"]["gate"]
+        self.assertEqual(
+            gate_job["outputs"]["receipt_artifact_id"],
+            "${{ steps.gate-receipt.outputs.artifact-id }}",
+        )
+        upload = next(
+            step for step in gate_job["steps"] if step.get("id") == "gate-receipt"
+        )
+        self.assertTrue(upload["uses"].startswith("actions/upload-artifact@"))
+        self.assertEqual(upload["with"]["if-no-files-found"], "error")
+        download = next(
+            step
+            for step in data["jobs"]["current"]["steps"]
+            if step.get("uses", "").startswith("actions/download-artifact@")
+        )
+        self.assertEqual(
+            download["with"]["artifact-ids"],
+            "${{ needs.gate.outputs.receipt_artifact_id }}",
+        )
+        self.assertTrue(download["with"]["merge-multiple"])
+        self.assertNotIn("name", download["with"])
+        self.assertNotIn("run-id", download["with"])
+
     def test_workflow_pins_validator_and_digest_and_propagates_failures(self):
         text = (ROOT / ".github/workflows/major-tag-validation.yml").read_text()
         data = surface.workflow_data(text)

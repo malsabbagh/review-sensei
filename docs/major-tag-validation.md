@@ -75,6 +75,10 @@ increasing the deadline or reducing coverage.
 Sanitized artifacts are retained on failure; environments and binaries are not.
 Every gate or recheck requires a fresh output directory. An existing evidence
 directory is rejected before reads and its receipt is left unchanged.
+The gate exposes its uploaded receipt artifact ID to final validation. A retry
+of an installed lane retains that exact same-run artifact, even when the gate
+itself succeeded in an earlier attempt; it does not construct a new artifact
+name from the retry attempt. Final identity and lane-result rechecks still run.
 
 All lanes freeze validation code to one protected default-branch checkout SHA.
 Same-channel concurrency cancels older runs. The final job requires every CLI
