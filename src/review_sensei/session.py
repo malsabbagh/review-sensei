@@ -4653,17 +4653,24 @@ class LocalSessionLedger:
             repository=tx.repository,
             pull_request=tx.pull_request,
         )
+        target = self._checkpoint_result_path(identity)
+        temp_path = target.with_suffix(".tmp")
         try:
-            target = self._checkpoint_result_path(identity)
             target.parent.mkdir(parents=True, exist_ok=True)
             encoded = json.dumps(
                 result.to_dict(), sort_keys=True, separators=(",", ":")
             ).encode("utf-8")
-            temp_path = target.with_suffix(".tmp")
             temp_path.write_bytes(encoded)
             os.replace(temp_path, target)
-        except OSError:
-            pass
+            if target.read_bytes() != encoded:
+                raise OSError("retained checkpoint result readback mismatch")
+        except OSError as exc:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except OSError:
+                pass
+            raise ReviewInputError("local checkpoint result retention failed") from exc
 
     def load_retained_checkpoint_result(
         self,

@@ -748,6 +748,7 @@ def retain_review_result(
     configuration_context: Mapping[str, object],
     evidence_context: Mapping[str, object],
     policy: ReviewConvergencePolicy,
+    already_retained: bool = False,
 ) -> None:
     """Persist a prior independently validated checkpoint before publication writes."""
     try:
@@ -762,6 +763,12 @@ def retain_review_result(
             policy=policy,
         )
         assert validated.transaction is not None
+        if already_retained:
+            if validated.transaction.phase == "publication_pending":
+                complete_review_publication(
+                    ledger, identity, validated.transaction, published=False
+                )
+            return
         event_key = _event_key(identity, validated.transaction)
         store = _store(
             http,

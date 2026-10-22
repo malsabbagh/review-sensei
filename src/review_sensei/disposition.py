@@ -730,19 +730,20 @@ class FindingDisposition:
         if self.head_sha is None or head_sha is None or self.head_sha != head_sha:
             return False
         if (
-            self.policy_digest is not None
-            and policy_digest is not None
-            and self.policy_digest != policy_digest
+            not self.policy_digest
+            or not policy_digest
+            or self.policy_digest != policy_digest
         ):
             return False
-        if incomplete_coverage is not None and self.incomplete_coverage:
-            required = {
-                item.strip()
-                for item in incomplete_coverage
-                if isinstance(item, str) and item.strip()
-            }
-            if not required.issubset(set(self.incomplete_coverage)):
-                return False
+        if incomplete_coverage is None or not self.incomplete_coverage:
+            return False
+        required = {
+            item.strip()
+            for item in incomplete_coverage
+            if isinstance(item, str) and item.strip()
+        }
+        if not required or required != set(self.incomplete_coverage):
+            return False
         if self.expires_at is None:
             return True
         expires = datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
@@ -986,26 +987,40 @@ def apply_session_command(
                 }
             )
         )
-        scope_key = f"coverage-uncertainty:{command.head_sha}:{','.join(enumerated)}"
-        coverage_fp = hashlib.sha256(scope_key.encode("utf-8")).hexdigest()
-        planned = (
-            FindingDisposition(
-                fingerprint=coverage_fp,
-                action="accept-coverage-uncertainty",
-                reason=command.reason or "",
-                actor=command.actor,
-                head_sha=command.head_sha,
-                actor_role=actor_role,
-                recorded_at=recorded_at,
-                policy_digest=policy_digest,
-                provenance=provenance,
-                target_kind="coverage_uncertainty",
-                incomplete_coverage=enumerated,
-            ),
-        )
-        planned_receipts = (
-            OverrideReceipt("coverage-uncertainty", coverage_fp, "recorded"),
-        )
+        if not enumerated or not policy_digest:
+            planned = ()
+            planned_receipts = (
+                OverrideReceipt(
+                    "coverage-uncertainty",
+                    None,
+                    "unknown",
+                    "needs the current review",
+                ),
+            )
+        else:
+            scope_key = (
+                f"coverage-uncertainty:{command.head_sha}:{policy_digest}:"
+                f"{','.join(enumerated)}"
+            )
+            coverage_fp = hashlib.sha256(scope_key.encode("utf-8")).hexdigest()
+            planned = (
+                FindingDisposition(
+                    fingerprint=coverage_fp,
+                    action="accept-coverage-uncertainty",
+                    reason=command.reason or "",
+                    actor=command.actor,
+                    head_sha=command.head_sha,
+                    actor_role=actor_role,
+                    recorded_at=recorded_at,
+                    policy_digest=policy_digest,
+                    provenance=provenance,
+                    target_kind="coverage_uncertainty",
+                    incomplete_coverage=enumerated,
+                ),
+            )
+            planned_receipts = (
+                OverrideReceipt("coverage-uncertainty", coverage_fp, "recorded"),
+            )
     if (
         command.action not in {"status", "verify"}
         and getattr(ledger, "_broker", None) is not None
@@ -1112,6 +1127,22 @@ def apply_session_command(
                 "expired or witness-only state was retired"
             ),
         )
+    if command.action == "accept-coverage-uncertainty" and not planned:
+        existing_record = (
+            loaded.record
+            if loaded.status in {"ok", "migrated"} and loaded.record is not None
+            else SessionRecord.create(identity, now=now)
+        )
+        return existing_record, MaintainerCommandResult(
+            action=command.action,
+            applied=False,
+            operator_paused=bool(getattr(existing_record, "operator_paused", False)),
+            summary=(
+                "coverage uncertainty acceptance withheld; current incomplete "
+                "coverage scope and policy could not be established"
+            ),
+            receipts=planned_receipts,
+        )
     initialized_with_mutation = False
     if loaded.status in {"missing", "expired"} or loaded.record is None:
         # Status is a read-only command: do not create a hosted issue comment
@@ -1163,6 +1194,15 @@ def apply_session_command(
         current: list[FindingDisposition] = []
         for item in dispositions:
             if item.honors(item.fingerprint, head_sha=command.head_sha):
+                current.append(item)
+            elif (
+                item.action == "accept-coverage-uncertainty"
+                and item.honors_coverage_uncertainty(
+                    head_sha=command.head_sha,
+                    incomplete_coverage=incomplete_coverage,
+                    policy_digest=policy_digest,
+                )
+            ):
                 current.append(item)
             elif item.head_sha is not None and item.head_sha != command.head_sha:
                 stale.append(finding_identifier(item.fingerprint))
@@ -1498,6 +1538,35 @@ def disposition_honors_fingerprint(
     )
 
 
+def incomplete_coverage_from_result(
+    result: object | None,
+) -> tuple[str, ...]:
+    """Derive the canonical incomplete-coverage scope bound to one ReviewResult."""
+    from .models import ReviewResult
+
+    if not isinstance(result, ReviewResult) or result.coverage is None:
+        return ()
+    incomplete_items: list[str] = []
+    for fcov in result.coverage.files:
+        if fcov.outcome != "reviewed":
+            incomplete_items.append(
+                f"file:{fcov.path}:{fcov.outcome}"
+                + (f":{fcov.reason}" if fcov.reason else "")
+            )
+    for hcov in result.coverage.hunks:
+        if hcov.outcome != "reviewed":
+            incomplete_items.append(
+                f"hunk:{hcov.path}:{hcov.index}:{hcov.outcome}"
+                + (f":{hcov.reason}" if hcov.reason else "")
+            )
+    if not result.coverage.enumeration_complete:
+        incomplete_items.append("enumeration:incomplete")
+    if not incomplete_items:
+        return ()
+    incomplete_items.append(f"result:{result.content_digest()}")
+    return tuple(sorted(set(incomplete_items)))
+
+
 def disposition_honors_coverage_uncertainty(
     dispositions: Sequence[FindingDisposition],
     *,
@@ -1619,6 +1688,7 @@ __all__ = [
     "authorized_maintainer",
     "disposition_honors_coverage_uncertainty",
     "disposition_honors_fingerprint",
+    "incomplete_coverage_from_result",
     "parse_maintainer_command",
     "render_convergence_summary",
     "session_dispositions",

@@ -1078,6 +1078,7 @@ class GitHubApplication:
                     configuration_context=configuration_context,
                     evidence_context=evidence_context,
                     policy=policy,
+                    already_retained=result_retained,
                 )
                 result_retained = True
                 transaction_record = load_transaction(ledger)
@@ -2109,7 +2110,15 @@ class GitHubApplication:
             )
         )
         derived_incomplete_coverage: tuple[str, ...] = ()
-        if command.action == "accept-coverage-uncertainty":
+        if command.action in {
+            "accept-coverage-uncertainty",
+            "verify",
+            "accept-risk",
+            "dismiss",
+            "defer",
+        }:
+            from review_sensei.disposition import incomplete_coverage_from_result
+
             coverage_source = (
                 review_result if isinstance(review_result, ReviewResult) else None
             )
@@ -2122,25 +2131,9 @@ class GitHubApplication:
                             coverage_source = loaded_checkpoint
                     except Exception:
                         coverage_source = None
-            if coverage_source is not None and coverage_source.coverage is not None:
-                incomplete_items: list[str] = []
-                for fcov in coverage_source.coverage.files:
-                    if fcov.outcome != "reviewed":
-                        incomplete_items.append(
-                            f"file:{fcov.path}:{fcov.outcome}"
-                            + (f":{fcov.reason}" if fcov.reason else "")
-                        )
-                for hcov in coverage_source.coverage.hunks:
-                    if hcov.outcome != "reviewed":
-                        incomplete_items.append(
-                            f"hunk:{hcov.path}:{hcov.index}:{hcov.outcome}"
-                            + (f":{hcov.reason}" if hcov.reason else "")
-                        )
-                if not coverage_source.coverage.enumeration_complete:
-                    incomplete_items.append("enumeration:incomplete")
-                derived_incomplete_coverage = tuple(incomplete_items)
-            if not derived_incomplete_coverage:
-                derived_incomplete_coverage = (f"head:{head_sha}:coverage-incomplete",)
+            derived_incomplete_coverage = incomplete_coverage_from_result(
+                coverage_source
+            )
         if (
             command.action == "verify"
             and operation_entry == "enabled"
@@ -2195,6 +2188,8 @@ class GitHubApplication:
                     app_slug=app_slug,
                     actor=command.actor,
                     record=loaded.record,
+                    incomplete_coverage=derived_incomplete_coverage,
+                    policy_digest=command_policy_digest,
                 )
                 if isinstance(refinalized, MaintainerCommandResult):
                     produced = refinalized
@@ -2234,6 +2229,8 @@ class GitHubApplication:
                 app_slug=app_slug,
                 actor=command.actor,
                 record=_record,
+                incomplete_coverage=derived_incomplete_coverage,
+                policy_digest=command_policy_digest,
             )
             if isinstance(refinalized, MaintainerCommandResult):
                 result = refinalized
@@ -2812,6 +2809,8 @@ class GitHubApplication:
         app_slug: str,
         actor: str,
         record: object,
+        incomplete_coverage: Sequence[str] | None = None,
+        policy_digest: str | None = None,
     ) -> object:
         """Re-check approval after a hosted override. A failed check leaves the ledger write."""
 
@@ -2862,6 +2861,8 @@ class GitHubApplication:
                 actor=actor,
                 finding_ids=finding_ids,
                 dispositions=dispositions,
+                incomplete_coverage=incomplete_coverage,
+                policy_digest=policy_digest,
             )
         except Exception:
             return replace(result, summary=failed, evaluation_failed=True)
@@ -2894,7 +2895,13 @@ class GitHubApplication:
         if getattr(publication, "status", None) == "gate_reevaluation_failed":
             return replace(result, summary=failed, evaluation_failed=True)
         if getattr(publication, "status", None) in {"approved", "already_approved"}:
-            return replace(result, summary=result.summary + "; approval submitted")
+            suffix = (
+                "; approval submitted (maintainer-coverage-exception)"
+                if getattr(publication, "diagnostic", None)
+                == "maintainer_coverage_exception"
+                else "; approval submitted"
+            )
+            return replace(result, summary=result.summary + suffix)
         diagnostic = getattr(publication, "diagnostic", None)
         if diagnostic:
             return replace(

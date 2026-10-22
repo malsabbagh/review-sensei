@@ -1463,6 +1463,341 @@ class WorkContinuationTests(unittest.TestCase):
         self.assertTrue(w3.result.coverage.fully_reviewed)
         self.assertEqual(stage_calls[16:], ["FIRST:8", "SECOND:8"])
 
+    def test_local_checkpoint_retention_failures_prevent_commit_and_preserve_prior_evidence(
+        self,
+    ):
+        from unittest.mock import patch
+
+        from review_sensei.convergence import ReviewConvergencePolicy
+        from review_sensei.coverage import CoverageManifest, FileCoverage, HunkCoverage
+        from review_sensei.errors import ReviewInputError
+        from review_sensei.models import ReviewResult
+        from review_sensei.rescan import AuthorizedRescan
+        from review_sensei.session import (
+            LocalSessionLedger,
+            SessionIdentity,
+            checkpoint_review_analysis,
+            complete_review_publication,
+            prepare_review_transaction,
+        )
+
+        identity = SessionIdentity(repository="owner/repo", pull_request=88)
+        base_sha = "1" * 40
+        head_sha = "2" * 40
+        policy = ReviewConvergencePolicy()
+        config_digest = "4" * 64
+        evidence_digest = "5" * 64
+
+        def make_partial(summary: str) -> ReviewResult:
+            return ReviewResult(
+                summary=summary,
+                comments=(),
+                provider="fixture",
+                review_status="partial",
+                coverage=CoverageManifest(
+                    files=(
+                        FileCoverage("src/done.py", "reviewed"),
+                        FileCoverage(
+                            "src/pending.py",
+                            "budget-exhausted",
+                            "provider-call-budget",
+                        ),
+                    ),
+                    hunks=(
+                        HunkCoverage(1, "src/done.py", "reviewed"),
+                        HunkCoverage(
+                            2,
+                            "src/pending.py",
+                            "budget-exhausted",
+                            "provider-call-budget",
+                        ),
+                    ),
+                    enumeration_complete=True,
+                    enumerated_paths=("src/done.py", "src/pending.py"),
+                ),
+            )
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            ledger = LocalSessionLedger(root)
+
+            # Seed window 1 so there is valid prior retained evidence on disk
+            prep1 = prepare_review_transaction(
+                ledger,
+                identity,
+                policy,
+                reservation_id="a" * 64,
+                base_sha=base_sha,
+                head_sha=head_sha,
+                configuration_digest=config_digest,
+                evidence_digest=evidence_digest,
+            )
+            first_partial = make_partial("Window 1 partial evidence.")
+            bound1 = checkpoint_review_analysis(ledger, identity, prep1, first_partial)
+            pub1 = complete_review_publication(
+                ledger, identity, bound1.transaction, published=True
+            )
+            prior_retained = ledger.load_retained_checkpoint_result(
+                identity, head_sha=head_sha
+            )
+            self.assertIsNotNone(prior_retained)
+            self.assertEqual(prior_retained.summary, "Window 1 partial evidence.")
+
+            # Prepare window 2
+            prep2 = prepare_review_transaction(
+                ledger,
+                identity,
+                policy,
+                reservation_id="b" * 64,
+                base_sha=base_sha,
+                head_sha=head_sha,
+                configuration_digest=config_digest,
+                evidence_digest=evidence_digest,
+                rescan_request=AuthorizedRescan(
+                    kind="issue_comment",
+                    request_id=2,
+                    source=pub1.transaction,
+                    review_id=201,
+                ),
+            )
+            gen_before = ledger.load(identity).record.generation
+            second_partial = make_partial("Window 2 partial evidence.")
+            result_path = ledger._checkpoint_result_path(identity)
+            temp_path = result_path.with_suffix(".tmp")
+
+            # 1. Failed write (e.g. disk full) prevents checkpoint commit and preserves prior evidence
+            orig_write_bytes = Path.write_bytes
+
+            def fail_result_write(path_obj: Path, data: bytes) -> int:
+                if path_obj == temp_path:
+                    raise OSError("No space left on device")
+                return orig_write_bytes(path_obj, data)
+
+            with patch.object(Path, "write_bytes", fail_result_write):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "local checkpoint result retention failed"
+                ):
+                    checkpoint_review_analysis(ledger, identity, prep2, second_partial)
+
+            after_write_fail = ledger.load(identity).record
+            self.assertEqual(after_write_fail.generation, gen_before)
+            self.assertEqual(after_write_fail.transaction.phase, "analysis")
+            self.assertIsNone(after_write_fail.transaction.result_sha256)
+            self.assertFalse(temp_path.exists())
+            still_intact_1 = ledger.load_retained_checkpoint_result(
+                identity, head_sha=head_sha
+            )
+            self.assertIsNotNone(still_intact_1)
+            self.assertEqual(still_intact_1.summary, "Window 1 partial evidence.")
+
+            # 2. Failed atomic replacement (os.replace) prevents commit, cleans up .tmp, and preserves prior evidence
+            import os as _os
+
+            orig_replace = _os.replace
+
+            def fail_result_replace(src, dst):
+                if Path(dst) == result_path:
+                    raise OSError("Permission denied on atomic replace")
+                return orig_replace(src, dst)
+
+            with patch(
+                "review_sensei.session.os.replace", side_effect=fail_result_replace
+            ):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "local checkpoint result retention failed"
+                ):
+                    checkpoint_review_analysis(ledger, identity, prep2, second_partial)
+
+            after_replace_fail = ledger.load(identity).record
+            self.assertEqual(after_replace_fail.generation, gen_before)
+            self.assertEqual(after_replace_fail.transaction.phase, "analysis")
+            self.assertIsNone(after_replace_fail.transaction.result_sha256)
+            self.assertFalse(temp_path.exists())
+            still_intact_2 = ledger.load_retained_checkpoint_result(
+                identity, head_sha=head_sha
+            )
+            self.assertIsNotNone(still_intact_2)
+            self.assertEqual(still_intact_2.summary, "Window 1 partial evidence.")
+
+    def test_fresh_process_work_policy_validation_survives_serialized_checkpoint_reload(
+        self,
+    ):
+        import subprocess
+        import sys
+
+        from review_sensei.convergence import ReviewConvergencePolicy
+        from review_sensei.session import (
+            LocalSessionLedger,
+            SessionIdentity,
+            checkpoint_review_analysis,
+            complete_review_publication,
+            prepare_review_transaction,
+        )
+        from review_sensei.validation import ReviewLimits
+
+        diff_parts = []
+        for idx in range(9):
+            diff_parts.append(
+                f"diff --git a/src/mod_{idx}.py b/src/mod_{idx}.py\n"
+                "new file mode 100644\n"
+                "index 0000000..1111111\n"
+                "--- /dev/null\n"
+                f"+++ b/src/mod_{idx}.py\n"
+                "@@ -0,0 +1,5 @@\n"
+                f"+v{idx}_1 = 1\n+v{idx}_2 = 2\n+v{idx}_3 = 3\n+v{idx}_4 = 4\n+v{idx}_5 = 5\n"
+            )
+        nine_file_diff = "".join(diff_parts)
+        small_limits = ReviewLimits(
+            max_diff_bytes=64 * 1024,
+            max_diff_lines=1600,
+            max_diff_files=1,
+            max_diff_hunks=1,
+        )
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            diff_path = root / "nine.diff"
+            diff_path.write_text(nine_file_diff, encoding="utf-8")
+            ledger_dir = root / "ledger"
+            ledger = LocalSessionLedger(ledger_dir)
+            identity = SessionIdentity(repository="owner/repo", pull_request=91)
+            policy = ReviewConvergencePolicy()
+            prep = prepare_review_transaction(
+                ledger,
+                identity,
+                policy,
+                reservation_id="1" * 64,
+                base_sha="1" * 40,
+                head_sha="2" * 40,
+                configuration_digest="4" * 64,
+                evidence_digest="5" * 64,
+            )
+
+            svc = ReviewService(
+                type(
+                    "P",
+                    (),
+                    {
+                        "name": "fixture",
+                        "model": "fixture",
+                        "complete": lambda self, req: ProviderResponse(
+                            '{"summary":"ok","comments":[]}', "fixture"
+                        ),
+                    },
+                )(),
+                stages=(Stage("review", "Review:\n{diff}", ("summary", "comments")),),
+                budget=ResourceBudget.create(max_provider_calls=8),
+                work_budgets=ReviewWorkBudgets(mode="unified"),
+            )
+            w1 = svc.run(
+                ReviewRequest(
+                    diff=nine_file_diff,
+                    base_sha="1" * 40,
+                    head_sha="2" * 40,
+                    limits=small_limits,
+                    orchestrate_large_changes=True,
+                )
+            )
+            self.assertEqual(w1.result.review_status, "partial")
+            self.assertIsNotNone(w1.result.work_policy_digest)
+            bound = checkpoint_review_analysis(ledger, identity, prep, w1.result)
+            complete_review_publication(
+                ledger, identity, bound.transaction, published=True
+            )
+
+            script = """
+import sys
+from pathlib import Path
+from review_sensei.budgets import ReviewWorkBudgets
+from review_sensei.errors import ReviewInputError
+from review_sensei.models import ProviderResponse, ReviewRequest
+from review_sensei.outcomes import ResourceBudget
+from review_sensei.service import ReviewService, _RESULT_WORK_POLICY_DIGESTS
+from review_sensei.session import LocalSessionLedger, SessionIdentity
+from review_sensei.stages import Stage
+from review_sensei.validation import ReviewLimits
+
+assert not _RESULT_WORK_POLICY_DIGESTS, "fresh process cache must start empty"
+ledger_dir = Path(sys.argv[1])
+diff_text = Path(sys.argv[2]).read_text(encoding="utf-8")
+ledger = LocalSessionLedger(ledger_dir)
+identity = SessionIdentity(repository="owner/repo", pull_request=91)
+loaded = ledger.load_retained_checkpoint_result(identity, head_sha="2" * 40)
+assert loaded is not None, "retained checkpoint must load"
+assert loaded.work_policy_digest is not None, "work_policy_digest must survive JSON serialization"
+assert not _RESULT_WORK_POLICY_DIGESTS, "loading ReviewResult must not require process-global cache"
+
+small_limits = ReviewLimits(
+    max_diff_bytes=64 * 1024,
+    max_diff_lines=1600,
+    max_diff_files=1,
+    max_diff_hunks=1,
+)
+provider = type(
+    "P",
+    (),
+    {
+        "name": "fixture",
+        "model": "fixture",
+        "complete": lambda self, req: ProviderResponse('{"summary":"ok","comments":[]}', "fixture"),
+    },
+)()
+
+# Changed work policy in fresh process must be rejected
+svc_changed = ReviewService(
+    provider,
+    stages=(Stage("review", "Review:\\n{diff}", ("summary", "comments")),),
+    budget=ResourceBudget.create(max_provider_calls=8),
+    work_budgets=ReviewWorkBudgets(mode="unified", batch_diff_bytes=32 * 1024),
+)
+try:
+    svc_changed.run(
+        ReviewRequest(
+            diff=diff_text,
+            base_sha="1" * 40,
+            head_sha="2" * 40,
+            limits=small_limits,
+            orchestrate_large_changes=True,
+        ),
+        prior_partial=loaded,
+    )
+except ReviewInputError as exc:
+    assert "policy does not match" in str(exc), f"unexpected error: {exc}"
+else:
+    raise AssertionError("changed work policy in fresh process was not rejected")
+
+# Matching work policy in fresh process must succeed and complete review
+svc_same = ReviewService(
+    provider,
+    stages=(Stage("review", "Review:\\n{diff}", ("summary", "comments")),),
+    budget=ResourceBudget.create(max_provider_calls=8),
+    work_budgets=ReviewWorkBudgets(mode="unified"),
+)
+assert loaded.transaction is not None
+resumed = svc_same.run(
+    ReviewRequest(
+        diff=diff_text,
+        base_sha="1" * 40,
+        head_sha="2" * 40,
+        limits=small_limits,
+        orchestrate_large_changes=True,
+    ),
+    prior_partial=loaded,
+    expected_policy_digest=loaded.transaction.policy_digest,
+    expected_configuration_digest=loaded.transaction.configuration_digest,
+)
+assert resumed.result.review_status == "complete", f"expected complete, got {resumed.result.review_status}"
+"""
+            repo_src = str(Path(__file__).resolve().parents[1] / "src")
+            proc = subprocess.run(
+                [sys.executable, "-c", script, str(ledger_dir), str(diff_path)],
+                env={"PYTHONPATH": repo_src},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

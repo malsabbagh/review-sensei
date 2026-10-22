@@ -116,6 +116,7 @@ def _remember_result_work_policy(
 ) -> ReviewResult:
     if not work_policy_digest:
         return result
+    object.__setattr__(result, "work_policy_digest", work_policy_digest)
     object.__setattr__(result, "_work_policy_digest", work_policy_digest)
     if len(_RESULT_WORK_POLICY_DIGESTS) >= 256:
         _RESULT_WORK_POLICY_DIGESTS.pop(next(iter(_RESULT_WORK_POLICY_DIGESTS)))
@@ -995,9 +996,11 @@ class ReviewService:
                 raise ReviewInputError(
                     "prior partial review model does not match current model"
                 )
-            prior_work_policy = getattr(
-                prior_partial, "_work_policy_digest", None
-            ) or _RESULT_WORK_POLICY_DIGESTS.get(prior_partial.content_digest())
+            prior_work_policy = (
+                prior_partial.work_policy_digest
+                or getattr(prior_partial, "_work_policy_digest", None)
+                or _RESULT_WORK_POLICY_DIGESTS.get(prior_partial.content_digest())
+            )
             if (
                 prior_work_policy is not None
                 and prior_work_policy != self.work_policy_digest

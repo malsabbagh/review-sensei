@@ -273,6 +273,15 @@ def _github_parser() -> argparse.ArgumentParser:
             "GitHub capability; read-only status does not require it."
         ),
     )
+    command.add_argument(
+        "--config",
+        type=Path,
+        help="Path to trusted ReviewSensei configuration",
+    )
+    command.add_argument(
+        "--review-mode",
+        help=("Review-convergence mode: merge-focused (default), advisory, or strict."),
+    )
 
     reply = subparsers.add_parser("reply", help="Generate or publish a mention reply")
     reply.add_argument("--reply", type=Path)
@@ -1135,6 +1144,16 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 replier=ConversationPublisher(http=http),
             )
             command_configuration = load_configuration(getattr(args, "config", None))
+            explicit_mode = getattr(args, "review_mode", None)
+            if (
+                explicit_mode is None
+                and not os.environ.get("REVIEWSENSEI_REVIEW_MODE", "").strip()
+                and command_configuration.github.reviews == "advisory"
+            ):
+                explicit_mode = "advisory"
+            command_convergence_policy = resolve_review_convergence_policy(
+                mode=explicit_mode
+            )
             from review_sensei.disposition import OverrideRejected
 
             try:
@@ -1159,6 +1178,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     finding_fingerprints=finding_fingerprints,
                     finding_inventory=finding_inventory,
                     prior_inventories=prior_inventories,
+                    convergence_policy=command_convergence_policy,
                     operation_entry=command_configuration.github.operation_entry,
                     app_id=_actions_app_id(),
                     run_id=os.environ.get("GITHUB_RUN_ID", "").strip() or None,
@@ -1213,8 +1233,51 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         session_identity = SessionIdentity(
             repository=args.repository, pull_request=args.pull_request
         )
+        local_configuration = load_configuration(getattr(args, "config", None))
+        local_explicit_mode = getattr(args, "review_mode", None)
+        if (
+            local_explicit_mode is None
+            and not os.environ.get("REVIEWSENSEI_REVIEW_MODE", "").strip()
+            and local_configuration.github.reviews == "advisory"
+        ):
+            local_explicit_mode = "advisory"
+        local_convergence_policy = resolve_review_convergence_policy(
+            mode=local_explicit_mode
+        )
+        from review_sensei.disposition import incomplete_coverage_from_result
+
+        local_incomplete_coverage: tuple[str, ...] = ()
+        loader = getattr(ledger, "load_retained_checkpoint_result", None)
+        if callable(loader):
+            try:
+                loaded_checkpoint = loader(session_identity, head_sha=parsed.head_sha)
+                local_incomplete_coverage = incomplete_coverage_from_result(
+                    loaded_checkpoint
+                )
+            except Exception:
+                local_incomplete_coverage = ()
+        local_assoc = (
+            args.association.strip().upper()
+            if isinstance(args.association, str)
+            else ""
+        )
+        local_actor_role = (
+            None
+            if parsed.action in {"continue", "reenroll"}
+            and local_assoc == "COLLABORATOR"
+            else (
+                local_assoc
+                if local_assoc in {"OWNER", "MEMBER", "COLLABORATOR"}
+                else None
+            )
+        )
         _record, command_result = apply_session_command(
-            ledger, session_identity, parsed
+            ledger,
+            session_identity,
+            parsed,
+            actor_role=local_actor_role,
+            policy_digest=local_convergence_policy.digest(),
+            incomplete_coverage=local_incomplete_coverage,
         )
         print(command_result.summary)
         from review_sensei.disposition import command_exit_code

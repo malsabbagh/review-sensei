@@ -690,6 +690,61 @@ class DefaultHumanInventoryTests(unittest.TestCase):
                         count=count, detail=detail
                     )
 
+    def test_validate_root_accepts_review_comments_with_null_line_and_side_and_already_retained_skips_duplicate_scan(
+        self,
+    ):
+        if sys.platform == "win32":
+            return
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger"
+            result, key = human_checkpoint(
+                LocalSessionLedger(path, enable_partition_writes=True), count=77
+            )
+            state = DefaultHumanState(result.comments)
+            publish_human(state, LocalSessionLedger(path), result, key)
+            # Simulate GitHub REST /pulls/{pr}/reviews/{id}/comments omitting line and side
+            for item in state.inline:
+                item["line"] = None
+                item["side"] = None
+            next_mention(state, 1)
+            provider = AssessingProvider()
+            outcome = reply_human(state, LocalSessionLedger(path), provider)
+            self.assertEqual(outcome.status, "replied")
+            self.assertGreater(len(provider.calls), 0)
+
+        from unittest.mock import MagicMock
+
+        from review_sensei_github.publication_recovery import retain_review_result
+
+        from review_sensei.session import InMemorySessionLedger
+        from tests.default_human_inventory_contract import (
+            EVIDENCE,
+            POLICY,
+            trusted_configuration,
+        )
+
+        ledger = InMemorySessionLedger()
+        checkpoint, _ = human_checkpoint(ledger, count=1)
+        http = MagicMock()
+        retain_review_result(
+            http=http,
+            token="tok",
+            result=checkpoint,
+            identity=IDENTITY,
+            base_sha=BASE,
+            head_sha=HEAD,
+            app_slug=APP,
+            ledger=ledger,
+            configuration_context=trusted_configuration(None),
+            evidence_context=EVIDENCE,
+            policy=POLICY,
+            already_retained=True,
+        )
+        http.request.assert_not_called()
+        self.assertEqual(
+            ledger.load(IDENTITY).record.transaction.phase, "publication_failed"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
