@@ -3568,8 +3568,10 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 )
         try:
             prior_partial = None
+            # An authorized rescan is fresh analysis, not partial-work continuation.
             if (
-                ledger is not None
+                rescan_request is None
+                and ledger is not None
                 and identity is not None
                 and resolved_head_sha is not None
                 and prior_committed_transaction is not None

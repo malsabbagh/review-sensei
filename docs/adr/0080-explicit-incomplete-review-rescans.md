@@ -97,7 +97,16 @@ and both reusable provider lanes:
 - `test_bounded_receipts_keep_watermarks_after_eviction`
 - `test_ordinary_retry_after_failed_rescan_publication_requires_recovery_without_inference`
 - `test_real_cli_published_partial_rescan_and_duplicate_delivery`
+- `test_full_rescan_uses_real_engine_without_mismatched_partial_scope`
+- `test_full_rescan_uses_real_engine_without_legacy_partial_scope`
 - `test_reusable_runner_wires_both_provider_lanes_without_caller_upgrade`
+
+The real-engine regressions keep the old published transaction and checkpoint
+identity intact, request fresh same-head analysis through a distinct authorized
+comment, and verify that neither incremental work nor a retained partial reaches
+the engine. Missing and incompatible continuation scopes still fail closed for
+ordinary continuation in `tests/test_work_continuation.py`; a repeated rescan
+delivery makes no additional provider call.
 
 Status stays Proposed until a maintainer accepts this record. The tests above
 ship in the same pull request. Run the repository gates and clean-wheel
