@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Fund the required hosted media check capability for a separate cold Worker
+  and annotated-tag fallback within the original dispatch allowance. Reduce
+  repeated shared-directory tree reads without accepting incomplete or oversized
+  evidence, retain explicit receipt recovery, and report sanitized broker failures.
+
 - Honor the trusted caller's `hosted_runner` for read-only reusable bootstrap,
   so an opted-in Linux runner can start the workflow when GitHub-hosted billing
   is unavailable. Preserve the GitHub default, first-step label validation,

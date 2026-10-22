@@ -35,8 +35,9 @@ retain their existing maximum of 32 literal IDs.
 Use one publisher and one original budget throughout each invocation. Reuse
 only exact-commit inventory inside that invocation. Recheck mutable request,
 receipt, source, permission, latest review and full PR state before approval.
-For nested media, prove the common directory through complete shallow Git trees,
-then read only its complete recursive subtree. Keep the 512 KiB response bound;
+For nested media, prove the first shared non-root directory through a complete
+shallow root tree, then validate every selected relative ancestor in its complete
+recursive subtree. This avoids repeated shared-prefix reads. Keep the 512 KiB response bound;
 do not enumerate an oversized whole repository or infer absence from truncation.
 The host supplies fresh thread, draft/fork/App-author and provider qualification
 facts. Resolved inline findings require the authenticated exact-result finding
@@ -45,8 +46,12 @@ alone cannot resolve a finding. Keep the complete raw result and its digest.
 
 Broker-internal dispatches retain prepaid accounting and bounded server
 enforcement. The ordinary command profile admits ten internal requests; the
-following check capability admits five. Colder caches, fallback or larger
-history may refuse before an unfunded dispatch. No unused liability is refunded.
+following required check capability admits eight, covering a separate cold JWKS
+cache and the bounded Git-advertisement/annotated-tag REST fallback. Different
+exchanges can reach different Worker isolates; warming the session exchange is
+not evidence that the check exchange is warm. No unused liability is refunded.
+A required check broker failure reaches the existing allowlisted CLI diagnostic
+reporter; remote exception text and credentials remain excluded.
 The final check uses only the four already reserved finalization calls, scoped
 to its exact repository/head and check routes. All calls retain the original
 64-total/60-ordinary allowance and 60-second deadline.
@@ -55,7 +60,7 @@ Unknown writes are not automatically retried. A later explicit invocation of
 the original supported command reconciles owned requests, receipts and reviews,
 then performs fresh authorization and finalization. A missing or invalid
 assessment, exhausted budget or unfinished check remains a command failure.
-The 41-file nested profile may retain its request and genuine receipt before
+The two-file and 41-file profiles may retain their request and genuine receipt before
 the approval tail no longer fits. That invocation fails before native approval;
 an explicit retry reconciles those records and can finish under a fresh original
 invocation allowance. It never resets an allowance inside one invocation.
@@ -74,7 +79,12 @@ analysis. AI coverage and result status remain partial. Receipts remain audit
 metadata and cannot replace technical findings, human adjudication, provider
 qualification or current thread evidence. Large histories, deep trees,
 oversized documents and depleted deadlines can still require an explicit retry
-or operator evidence repair; support is bounded rather than unlimited.
+or operator evidence repair; support is bounded rather than unlimited. Reading the first shared directory
+can exceed the unchanged response ceiling where a deeper subtree would fit;
+such an inventory refuses before approval rather than falling back to an
+unfunded walk. The complete shallow root plus complete recursive subtree must
+still prove each selected ancestor is a regular tree, including absence.
+Missing, symlink, non-tree, truncated or oversized evidence cannot authorize a write.
 
 ## Alternatives considered
 
@@ -95,6 +105,11 @@ pagination and two retained parts. Synthetic production broker qualification
 counts actual TypeScript internal dispatches and signed OIDC exchanges. Failure
 tests cover source/head/base changes, permissions, tampering, stale roots,
 drafts/forks, missing qualification, unknown writes and explicit replay.
+A cold Worker rejects the old five-dispatch check profile before an unfunded
+request. Separate cold exchanges with the annotated-tag fallback consume all
+eight prepaid dispatches and complete the two-invocation media journey.
+Tests retain immutable result status, one owned receipt, one native approval,
+check reconciliation, source/permission fences and failed/unknown-write recovery.
 Source, clean-package, exact-head review and CI receipts are separate gates.
 
 ## Rollout and rollback

@@ -38,19 +38,30 @@ const env = { ...fixture.broker.env, GITHUB_API_URL: "https://api.github.test" }
 const broker = new TokenBroker(env, new GitHubApi(env));
 let authority;
 let attempts;
+let annotatedCheckFallback = false;
 globalThis.fetch = async (input, init) => {
   const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
   const method = init?.method ?? "GET";
   attempts.push({ origin: "broker-internal", method, path: url.pathname });
-  if (url.href === "https://token.actions.githubusercontent.com/.well-known/jwks") return fixture.transport(input, init);
+  // Model a separate cold Worker and Git-advertisement failure only for the
+  // explicitly selected check exchange. Every external fetch stays synthetic.
+  if (annotatedCheckFallback && url.hostname === "github.com") {
+    return new Response(null, { status: 503 });
+  }
+  if (annotatedCheckFallback && url.hostname === "api.github.com") {
+    if (url.pathname.endsWith("/git/ref/tags/v5")) return Response.json({ object: { type: "tag", sha: "9".repeat(40) } });
+    if (url.pathname.endsWith("/git/tags/" + "9".repeat(40))) return Response.json({ object: { type: "commit", sha: SHA } });
+    url.hostname = "api.github.test";
+  }
+  if (url.href === "https://token.actions.githubusercontent.com/.well-known/jwks") return fixture.transport(url, init);
   if (url.hostname !== "api.github.test") throw new Error("fixture_external_fetch_refused");
   if (url.pathname === "/repos/malsabbagh/review-sensei/git/ref/tags/v5") return Response.json({ object: { type: "commit", sha: SHA } });
   if (url.pathname === "/repos/owner/repo/installation") return fixture.transport("https://api.github.test/repos/acme/widgets/installation", init);
-  if (url.pathname === "/app/installations/2468/access_tokens" && method === "POST") return fixture.transport(input, init);
+  if (url.pathname === "/app/installations/2468/access_tokens" && method === "POST") return fixture.transport(url, init);
   if (url.pathname === "/repos/owner/repo") return Response.json({ id: 1, fork: authority.fork });
   if (url.pathname === "/repos/owner/repo/pulls/2") return Response.json({ number: 2, state: "open", draft: authority.draft, base: { sha: authority.base }, head: { sha: authority.head } });
   if (url.pathname === "/repos/owner/repo/issues/comments/20") return authority.source === null ? Response.json({ message: "Not Found" }, { status: 404 }) : Response.json(authority.source);
-  if (url.pathname === "/app") return fixture.transport(input, init);
+  if (url.pathname === "/app") return fixture.transport(url, init);
   if (url.pathname === "/repos/owner/repo/pulls/2/reviews") {
     const size = Number(url.searchParams.get("per_page") ?? "100");
     const page = Number(url.searchParams.get("page") ?? "1");
@@ -76,7 +87,11 @@ for await (const line of lines) {
       result = null;
     } else if (request.action === "exchange") {
       authority = request.authority;
-      result = await broker.exchange(request.body);
+      annotatedCheckFallback = request.annotated_check_fallback === true && request.body.capability === "check_publish";
+      const selectedBroker = annotatedCheckFallback
+        ? new TokenBroker({ ...env, GITHUB_API_URL: "https://api.github.com" }, new GitHubApi({ ...env, GITHUB_API_URL: "https://api.github.com" }))
+        : broker;
+      result = await selectedBroker.exchange(request.body);
     } else if (request.action === "shutdown") {
       fixture.close();
       lines.close();

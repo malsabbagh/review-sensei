@@ -423,8 +423,10 @@ class HumanFileReviewPublisher:
             return trees[identifier]
 
         # A whole recursive repository can exceed the unchanged response bound
-        # even when the selected files are small. Prove their common directory
-        # through complete shallow trees, then recurse only into that subtree.
+        # even when the selected files are small. Prove the first shared
+        # non-root directory, then validate its complete recursive subtree.
+        # This bounds physical reads while retaining every relative ancestor
+        # check. A subtree exceeding the response bound still fails closed.
         # Disjoint selections keep the existing bounded shallow path walk.
         common = paths[0].split("/")[:-1] if paths else []
         for path in paths[1:]:
@@ -432,6 +434,7 @@ class HumanFileReviewPublisher:
             while common and parent[: len(common)] != common:
                 common.pop()
         if common:
+            common = common[:1]
             identifier = tree["sha"]
             for part in common:
                 prefix_node = next(

@@ -16,7 +16,10 @@ from review_sensei_github import (
     GitHubWriteOptions,
     ReviewPublisher,
 )
-from review_sensei_github.errors import GitHubPublicationError
+from review_sensei_github.errors import (
+    GitHubHTTPResponseTooLargeError,
+    GitHubPublicationError,
+)
 from review_sensei_github.hosted_media import prepare_hosted_media_context
 from review_sensei_github.human_file_review import RECEIPT_GROUP_PREFIX
 from review_sensei_github.operation_host import RESULT_COMMENT_MARKER
@@ -621,19 +624,14 @@ class HostedMediaContextTests(unittest.TestCase):
         )
         self.assertTrue(assessment.approval.approved)
         self.assertEqual(len(assessment.human_reviewed_ids), 41)
-        prefix = "docs/execution/quieter-workspace"
         expected_tree_requests = []
         for root in ("1" * 40, "2" * 40):
             expected_tree_requests.extend(
-                [(root, False)]
-                + [
-                    (hashlib.sha1(f"{root}:{path}".encode()).hexdigest(), False)
-                    for path in ("docs", "docs/execution")
+                [
+                    (root, False),
+                    (hashlib.sha1(f"{root}:docs".encode()).hexdigest(), True),
                 ]
             )
-        expected_tree_requests.append(
-            (hashlib.sha1(f"{'2' * 40}:{prefix}".encode()).hexdigest(), True)
-        )
         self.assertEqual(self.state.tree_requests, expected_tree_requests)
         self.assertEqual(self.budget.calls, len(self.state.physical))
         self.assertLessEqual(self.budget.calls, 46)
@@ -641,18 +639,48 @@ class HostedMediaContextTests(unittest.TestCase):
         self.assertEqual(self.state.result.review_status, "partial")
 
     def test_incomplete_or_non_tree_nested_ancestor_refuses_before_request_write(self):
-        for corruption in ("truncated", "missing-ancestor", "non-tree-ancestor"):
+        for corruption in (
+            "truncated",
+            "missing-ancestor",
+            "non-tree-ancestor",
+            "symlink-ancestor",
+            "oversized-subtree",
+        ):
             with self.subTest(corruption=corruption):
                 self.setup_state(media_count=41, text_count=61, nested_media=True)
                 if corruption == "truncated":
                     self.state.recursive_tree_truncated = True
                 elif corruption == "missing-ancestor":
-                    self.state.recursive_tree_missing_ancestor = "after"
-                else:
+                    self.state.recursive_tree_missing_ancestor = (
+                        "execution/quieter-workspace/after"
+                    )
+                elif corruption == "non-tree-ancestor":
                     self.state.recursive_tree_entry_overrides = {
-                        "after": {"type": "blob", "mode": "100644"}
+                        "execution/quieter-workspace/after": {
+                            "type": "blob",
+                            "mode": "100644",
+                        }
                     }
-                with self.assertRaises(ReviewInputError):
+                elif corruption == "symlink-ancestor":
+                    self.state.recursive_tree_entry_overrides = {
+                        "execution": {"type": "blob", "mode": "120000"}
+                    }
+                else:
+                    original_document = self.state.tree_document
+
+                    def oversized(identifier, *, recursive=False):
+                        value = original_document(identifier, recursive=recursive)
+                        if recursive:
+                            value["padding"] = "x" * (512 * 1024)
+                        return value
+
+                    self.state.tree_document = oversized
+                expected_error = (
+                    GitHubHTTPResponseTooLargeError
+                    if corruption == "oversized-subtree"
+                    else ReviewInputError
+                )
+                with self.assertRaises(expected_error):
                     self.context()
                 self.assertEqual(self.budget.calls, len(self.state.physical))
                 self.assertFalse(
@@ -672,7 +700,8 @@ class HostedMediaContextTests(unittest.TestCase):
             nested_media=True,
             oversized_root=True,
         )
-        prior_dispatches = 17
+        # Caller requests plus prepaid session/check liabilities: 2 + 10 + 8.
+        prior_dispatches = 20
         for _ in range(prior_dispatches):
             self.budget.consume()
         context = self.context()

@@ -5,7 +5,7 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +13,9 @@ from unittest.mock import Mock, patch
 
 from review_sensei_github import GitHubApplication, GitHubHttp, GitHubWriteOptions
 from review_sensei_github.cli import main as github_main
+from review_sensei_github.errors import GitHubBrokerClientError
+
+from review_sensei.broker_diagnostics import BrokerDiagnostic
 
 from review_sensei.disposition import command_exit_code
 from review_sensei.models import ReviewResult
@@ -43,6 +46,19 @@ class MediaPublisher:
 
 class MediaCommandReportingTests(unittest.TestCase):
     def test_public_cli_missing_check_context_fails_without_remote_writes(self):
+        self.assert_check_failure()
+
+    def test_public_cli_preserves_allowlisted_check_broker_diagnostic(self):
+        self.assert_check_failure(
+            GitHubBrokerClientError(
+                "synthetic-untrusted-exception-detail",
+                broker_diagnostic=BrokerDiagnostic(
+                    "broker_control_budget_exhausted", "0123456789abcdef-YYZ"
+                ),
+            )
+        )
+
+    def assert_check_failure(self, error=None):
         import review_sensei_github as github_module
 
         body = "@reviewsensei I reviewed the media files and I approve"
@@ -69,6 +85,8 @@ class MediaCommandReportingTests(unittest.TestCase):
                 "command_digest": sha256(body.encode()).hexdigest(),
             },
         )
+        if error is not None:
+            broker.exchange.side_effect = error
         calls = []
 
         def metadata_only(request, timeout):
@@ -80,7 +98,7 @@ class MediaCommandReportingTests(unittest.TestCase):
                 return json_response([])
             raise AssertionError("unexpected command metadata request")
 
-        stdout = io.StringIO()
+        stdout, stderr = io.StringIO(), io.StringIO()
         with tempfile.TemporaryDirectory() as scratch:
             path = Path(scratch) / "attestation.json"
             path.write_text(json.dumps(attestation), encoding="utf-8")
@@ -98,6 +116,7 @@ class MediaCommandReportingTests(unittest.TestCase):
                     GitHubApplication, "_session_ledger_for_token"
                 ) as ledger_factory,
                 redirect_stdout(stdout),
+                redirect_stderr(stderr),
             ):
                 status = github_main(
                     [
@@ -128,9 +147,15 @@ class MediaCommandReportingTests(unittest.TestCase):
                     ]
                 )
         self.assertEqual(status, 1)
-        self.assertIn(
-            "media approval could not fund its check capability", stdout.getvalue()
-        )
+        if error is None:
+            self.assertIn(
+                "media approval could not fund its check capability", stdout.getvalue()
+            )
+        else:
+            self.assertIn("broker_control_budget_exhausted", stderr.getvalue())
+            self.assertIn("0123456789abcdef-YYZ", stderr.getvalue())
+            self.assertIn("broker_rejected", stderr.getvalue())
+            self.assertNotIn("synthetic-untrusted-exception-detail", stderr.getvalue())
         self.assertEqual(len(calls), 1)
         self.assertTrue(all(method == "GET" for method, _ in calls))
         broker.authorize_session_mutation.assert_called_once()
