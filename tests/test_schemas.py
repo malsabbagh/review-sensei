@@ -36,6 +36,8 @@ SCHEMA_NAMES = (
     "review-result",
     "human-file-review",
     "human-file-receipt",
+    "human-file-review-group",
+    "human-file-receipt-group",
     "review-comment",
     "learning-entry",
     "learning-proposal",

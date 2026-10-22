@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/human-file-receipt-group.schema.json",
+  "title": "human-file-receipt-group",
+  "description": "One source event bound to a grouped request digest and bounded v1 receipt parts. Runtime validation and fresh independent host authentication remain required.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request_digest", "parts"],
+  "properties": {
+    "schema_version": {"const": "human-file-receipt-group-v1"},
+    "request_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "parts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {"$ref": "https://reviewsensei.dev/schemas/v1/human-file-receipt.schema.json"}
+    }
+  }
+}

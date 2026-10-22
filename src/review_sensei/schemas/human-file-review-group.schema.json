@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/human-file-review-group.schema.json",
+  "title": "human-file-review-group",
+  "description": "One complete inventory of ordered bounded v1 parts. Runtime validation checks common snapshot, canonical ordering, exact union, document bytes and independent authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "parts"],
+  "properties": {
+    "schema_version": {"const": "human-file-review-group-v1"},
+    "parts": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {"$ref": "https://reviewsensei.dev/schemas/v1/human-file-review.schema.json"}
+    }
+  }
+}

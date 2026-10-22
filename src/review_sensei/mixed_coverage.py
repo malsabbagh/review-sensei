@@ -14,11 +14,38 @@ from dataclasses import dataclass
 from .coverage import CoverageManifest
 from .errors import ReviewInputError
 from .evidence import evidence_digest
-from .human_file_review import UnsupportedFile, coverage_only_binary, validate_inventory
+from .human_file_review import (
+    UnsupportedFile,
+    coverage_only_binary,
+    digest,
+    validate_inventory,
+)
 from .models import ReviewResult
 
 MIXED_COVERAGE_SCHEMA = "mixed-coverage-v1"
 _RECEIPT_DOMAIN = "reviewsensei:human-file-receipt-identity:v1"
+
+
+@dataclass(frozen=True)
+class CurrentFindingFacts:
+    """Trusted host finding state for one unchanged analysis result.
+
+    The host authenticates the complete admitted finding index and current
+    resolution evidence before constructing this value. These facts neither
+    rewrite the retained AI result nor prove their own freshness or authority.
+    """
+
+    result_digest: str
+    has_blocking_findings: bool
+    has_human_adjudication_findings: bool
+
+    def __post_init__(self) -> None:
+        if (
+            not digest(self.result_digest)
+            or type(self.has_blocking_findings) is not bool
+            or type(self.has_human_adjudication_findings) is not bool
+        ):
+            raise ReviewInputError("mixed coverage current finding facts are invalid")
 
 
 @dataclass(frozen=True)
@@ -205,6 +232,7 @@ def evaluate_mixed_coverage(
     qualification: str = "not-required",
     unresolved_threads: bool | None = False,
     reason_metadata: Mapping[str, str] | None = None,
+    current_findings: CurrentFindingFacts | None = None,
     schema_version: str = MIXED_COVERAGE_SCHEMA,
 ) -> MixedCoverageDecision:
     """Return a mixed-coverage approval decision without mutating ``result``.
@@ -220,6 +248,13 @@ def evaluate_mixed_coverage(
         raise ReviewInputError("mixed coverage schema is unsupported")
     if not isinstance(result, ReviewResult):
         raise ReviewInputError("mixed coverage requires a validated review result")
+    if current_findings is not None and (
+        type(current_findings) is not CurrentFindingFacts
+        or current_findings.result_digest != result.content_digest()
+    ):
+        raise ReviewInputError(
+            "mixed coverage current finding facts conflict with result"
+        )
     if not isinstance(text_completed, bool) or not isinstance(
         allow_confirmations, bool
     ):
@@ -323,9 +358,16 @@ def evaluate_mixed_coverage(
         gates.append("permission-revoked")
     if stale_receipt:
         gates.append("stale-receipt")
-    if any(
-        comment.blocks_approval or comment.needs_human for comment in result.comments
-    ):
+    unresolved_findings = (
+        current_findings.has_blocking_findings
+        or current_findings.has_human_adjudication_findings
+        if current_findings is not None
+        else any(
+            comment.blocks_approval or comment.needs_human
+            for comment in result.comments
+        )
+    )
+    if unresolved_findings:
         gates.append("unresolved-finding")
     if unresolved_threads is None:
         gates.append("review-threads-incomplete")
@@ -367,9 +409,9 @@ def evaluate_mixed_coverage(
 
 
 def _inventory_request(result: ReviewResult, inventory: tuple[UnsupportedFile, ...]):
-    from .human_file_review import FileReviewRequest
+    from .human_file_review import build_request_group
 
-    return FileReviewRequest(
+    return build_request_group(
         "owner/repo",
         1,
         1,

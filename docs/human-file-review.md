@@ -1,14 +1,20 @@
 # Explicit human review of unsupported binary files
 
-The opt-in library adapter can record an authorized person's review of selected
+The library adapter and supported hosted command can record an authorized person's review of selected
 binary changes that ReviewSensei cannot assess. AI coverage continues to say
 `unsupported` with reason `binary`; the separate report says `human-reviewed`.
 A file extension, model answer, pasted marker, URL, or general reassurance does
 not select or clear a file.
 
 The live caller treats the blanket approval sentence and a finding override as
-commands. The ordinary approval finalizer still withholds a partial AI result.
-There is no new YAML option or release in this change.
+commands. Hosted composition reconstructs the current canonical retained result
+after broker authorization. The ordinary finalizer still withholds a partial AI
+result. Deployment requires separate release receipts.
+
+The current CLI does not construct independent OpenRouter qualification
+authority, so media approval for that provider remains withheld. A persisted
+`qualified` string never replaces current authority. The qualified synthetic
+positive command fixtures use a non-OpenRouter provider.
 
 ## Host configuration and invocation
 
@@ -23,11 +29,11 @@ a scoped token, and the original `before_request` IO guard. Every physical
 GET/POST is charged before dispatch; the guard returns a positive remaining
 absolute timeout at most 60 seconds. An exhausted guard refuses. There is no
 per-phase budget reset, implicit retry, or default unlimited transport. Request,
-confirmation and later evaluation are separate explicit human invocations,
-possibly days apart; each invocation retains its one original budget. Any future
-public factory must also account for its broker/internal transports and prove
-its complete resource profile. This adapter does not qualify a whole hosted
-64-dispatch/60-second operation.
+confirmation and later evaluation may be separate explicit human invocations,
+possibly days apart; each invocation retains its one original budget. Hosted
+composition also accounts for broker-internal transports, canonical retained
+reads and the terminal check: 60 ordinary dispatches and four reserved
+finalization calls inside the original 60-second deadline.
 
 The host starts with the validated `ReviewResult` and its actual numeric owned
 COMMENT review ID, then calls:
@@ -55,14 +61,15 @@ These methods independently authenticate the live repository/PR, latest numeric
 App-owned review and exact result, complete changed-file inventory, immutable
 base/head Git trees, source comment and current collaborator permission. Raw
 `FileReviewRequest`/`FileReviewReceipt` documents are reference data, not grants.
-Partitioned eligibility-v4 roots refuse in this initial adapter.
+Partitioned eligibility-v4 roots refuse; referenced eligibility uses the existing
+trusted host reader.
 
 The names above denote separately authorized invocations, not three phases that
-may refill a guard. If a host performs confirmation and evaluation in one
-invocation, both must share that invocation's original guard and may refuse when
-their combined cost exceeds it. The two-file synthetic fixture measures 18,
-43 and 33 physical attempts respectively; it does not qualify a combined
-confirmation-plus-approval handler or promise useful 32-file hosted support.
+may refill a guard. The compound `approve_reviewed_media` path reuses immutable
+exact-commit inventory while retaining fresh mutable fences. Request creation
+and compound approval use 31 physical dispatches in the flat two- and 41-file
+adapter fixtures. Whole hosted profiles additionally include retention, broker,
+current approval facts and final check; adapter counts are not deployment proof.
 
 ## Bot request and human reply
 
@@ -145,22 +152,27 @@ cache, eligibility marker and partial coverage unchanged and does not post
 APPROVE or a passing check. `publish_mixed_approval` is the separate host call
 that posts one exact-head APPROVE after that decision passes. A returned
 assessment is a fresh observation. The ordinary finalizer still withholds the
-partial review. The public mention router does not call either method yet, so
-a GitHub comment is not connected until a reviewed host wires it. Remote reads
+partial review. The supported hosted media command composes these operations
+after reconstructing current retained authority. Remote reads
 and writes are not an atomic GitHub CAS; concurrent duplicate receipts refuse
 evaluation.
 
 ## Finite limits and validation
 
-A request contains at most 32 binary changes and 32 KiB canonical JSON. A human
+A v1 request contains at most 32 changes and 32 KiB canonical JSON. Versioned
+groups bind ordered v1 parts to one snapshot/review/result and the complete
+inventory. The group retains the 32 KiB document cap; 41 files use parts of 32
+and nine. Grouped receipts bind the same genuine source and exact root/part
+digests. Missing parts, duplicate paths/IDs and incomplete union coverage refuse.
+Named selections still admit at most 32 literal IDs. A human
 command is at most 8 KiB strict UTF-8. Published bodies are at most 64 KiB; a
 physical response is at most 512 KiB; each bounded list requires EOF within ten
 100-item pages. These are refusal bounds, not a promise that every 32-file
 lifecycle fits a host budget. Literal canonical Unicode/glob filenames retain
 exact equality and are escaped for display.
 
-Public schemas are `human-file-review.schema.json` and
-`human-file-receipt.schema.json`. Runtime constructors additionally enforce
+Public schemas are `human-file-review.schema.json`,
+`human-file-receipt.schema.json` and their `-group` counterparts. Runtime constructors additionally enforce
 canonical paths, exact change/blob relationships, real timestamps and byte
 bounds. Tests use synthetic HTTP only, retain original budgets, exercise full
 and selected coverage, replay/invalidation and permission/content fences, and
@@ -185,8 +197,10 @@ metadata, and an old schema withhold or refuse. Policy off leaves the binary
 blocker in place. Replay of the same confirmation event returns the same receipt
 identity.
 
-`approve_reviewed_media` confirms the source comment and then calls
-`publish_mixed_approval`, which can post that decision. The shared finalizer
-is unchanged and still withholds a partial AI result. The live caller treats
-the blanket sentence and the finding override as commands. Posting the APPROVE
-still needs the current review result.
+`approve_reviewed_media` confirms and evaluates in one bounded composition,
+then posts only after fresh source, request, latest root and full PR fences.
+It admits the native write/readback tail before POST. Unknown responses and
+exhausted allowances remain failures; an explicit retry of the original command
+reconciles owned publications and repeats current authorization. No human
+assessment is repeated or invocation budget silently renewed. See
+[ADR 0103](adr/0103-bounded-hosted-media-confirmation.md).

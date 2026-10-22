@@ -42,7 +42,7 @@ class MediaPublisher:
 
 
 class MediaCommandReportingTests(unittest.TestCase):
-    def test_public_cli_missing_media_context_fails_without_remote_writes(self):
+    def test_public_cli_missing_check_context_fails_without_remote_writes(self):
         import review_sensei_github as github_module
 
         body = "@reviewsensei I reviewed the media files and I approve"
@@ -129,12 +129,14 @@ class MediaCommandReportingTests(unittest.TestCase):
                 )
         self.assertEqual(status, 1)
         self.assertIn(
-            "media approval requires the current review result", stdout.getvalue()
+            "media approval could not fund its check capability", stdout.getvalue()
         )
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 1)
         self.assertTrue(all(method == "GET" for method, _ in calls))
         broker.authorize_session_mutation.assert_called_once()
-        broker.exchange.assert_not_called()
+        broker.exchange.assert_called_once_with(
+            "synthetic-oidc", capability="check_publish"
+        )
         ledger_factory.assert_not_called()
 
     def test_missing_media_dependencies_fail_before_evaluation_or_writes(self):
