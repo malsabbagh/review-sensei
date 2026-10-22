@@ -21,12 +21,12 @@ Writers default to at most 64 findings; readers accept 250. Only trusted
 `github.publication_inventory: complete` enables larger emission after reader-first
 rollout. Preserve every identity/explanation within body/item/path/future-assessment
 bounds; refuse overflow without truncation. Exact replay verifies prose.
-With `github.operation_entry: enabled`, retain transaction-bound validated result bytes in owned PR comments
-before review/check mutation; never retain raw diffs/prompts/credentials or enable
-diagnostics. Recovery validates durable transaction and trusted exact-current-snapshot
-contexts, preserving admission/acceptance. One publication-attempt budget covers retention/reads/
-publication. Unconfirmed writes require complete owned readback; missing/conflicting
-parts refuse creation. Existing opt-outs remain. See ADR 0093.
+Retain bound result bytes in owned PR comments before GitHub-ledger
+`publication_pending`/review/check writes despite routing/diagnostics.
+Never retain diffs/prompts/credentials or write when writes-disabled.
+Recovery binds exact trusted transaction/admission/acceptance. One budget covers
+reads/writes; unconfirmed writes need complete owned readback. Missing/conflicting
+parts refuse. Unbound gains no checkpoint authority. See ADR 0093.
 
 <!-- selected-design -->
 
@@ -650,3 +650,6 @@ Opt-in partitioned publication binds independent result/snapshot/policy/config/p
 original budget/conditional generation/owned numeric readback. Fresh scans verify all prose;
 partial roots keep links/capacity/full-ID status. Local replay only; default routes/all-resolved
 approval unqualified (ADR 0089).
+
+
+Continuation must verify full input scope; absent/changed scope refuses reuse.

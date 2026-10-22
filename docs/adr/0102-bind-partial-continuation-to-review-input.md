@@ -94,6 +94,12 @@ size ceilings, hosted transaction rejection and original request accounting.
 Synthetic regressions establish these contracts, not deployed provider quality
 or native merge approval.
 
+Fixture evaluation normalizes this service-derived provenance alongside existing
+derived lifecycle metadata. The corpus still compares exact review content and
+evidence policy; changed summaries, findings and evidence policy must fail.
+Corpus assets and evaluation thresholds remain unchanged. Continuation binding
+itself is tested through the public service and validated result readers.
+
 ## Rollout and rollback
 
 Qualify updated engine and hosted readers before publishing or activating new

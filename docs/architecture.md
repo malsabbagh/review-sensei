@@ -17,15 +17,12 @@ Writers default to at most 64 findings; readers accept 250. Only trusted
 `github.publication_inventory: complete` enables larger emission after reader-first
 rollout. Preserve every identity/explanation within body/item/path/future-assessment
 bounds; refuse overflow without truncation. Exact replay verifies prose.
-Retain transaction-bound validated result bytes in owned PR comments before a
-GitHub session-ledger transaction advances to `publication_pending` or mutates a
-review/check, even when `github.operation_entry: disabled`. Operation routing and
-receipts do not opt a durable transaction out of retention; writes-disabled
-callers still make no GitHub writes. Never retain raw diffs/prompts/credentials or
-enable diagnostics implicitly. Recovery validates durable transaction and trusted
-exact-current-snapshot contexts, preserving admission/acceptance. One publication-attempt budget covers retention/reads/
-publication. Unconfirmed writes require complete owned readback; missing/conflicting
-parts refuse creation. Legacy unbound paths gain no checkpoint authority. See ADR 0093.
+Retain bound result bytes in owned PR comments before GitHub-ledger
+`publication_pending`/review/check writes despite routing/diagnostics.
+Never retain diffs/prompts/credentials or write when writes-disabled.
+Recovery binds exact trusted transaction/admission/acceptance. One budget covers
+reads/writes; unconfirmed writes need complete owned readback. Missing/conflicting
+parts refuse. Unbound gains no checkpoint authority. See ADR 0093.
 
 The packaged v5 schema validates structure; explicit rescan uses the trusted reader
 and one original command read allowance.
@@ -1054,8 +1051,9 @@ the public `ReviewService.run` boundary. A domain-separated digest binds the ful
 request, effective stage/provider/model routing, review profile, work/resource
 budgets, capabilities and incremental plan. The service checks it before planning
 or reusing coverage, including when a direct API result has no transaction.
-Missing or changed scope refuses reuse; a fresh service can resume the same
-serialized input. Nested chunk runs bind their aggregate to the outer request.
+Continuation must verify full input scope; absent/changed scope refuses reuse.
+Same-input serialized continuation works.
+Nested chunk runs bind their aggregate to the outer request.
 The digest remains separate from the frozen v1 content digest and existing
 transaction fences, and consumes bytes under the original result ceiling. See
 [ADR 0102](adr/0102-bind-partial-continuation-to-review-input.md).
