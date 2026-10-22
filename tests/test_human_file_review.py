@@ -6,21 +6,202 @@ from dataclasses import replace
 from review_sensei.coverage import CoverageManifest, FileCoverage, HunkCoverage
 from review_sensei.errors import ReviewInputError
 from review_sensei.human_file_review import (
+    MAX_DOCUMENT_BYTES,
+    MAX_FILES,
     FileReviewReceipt,
+    FileReviewReceiptGroup,
     FileReviewRequest,
+    FileReviewRequestGroup,
     UnsupportedFile,
+    build_receipt,
+    build_request_group,
+    canonical,
     coverage_only_binary,
     human_confirmation_reason,
     parse_confirmation,
+    parse_receipt,
+    parse_request,
     validate_inventory,
 )
 from review_sensei.models import ReviewRequest, ReviewResult
+from review_sensei.schemas import validate_public_document
 from review_sensei.service import ReviewService
 from review_sensei.validation import ReviewLimits
 from tests.test_coverage_planning import BINARY, GENERATED, TWO_FILES, FakeProvider
 
 
 class HumanFileReviewTests(unittest.TestCase):
+    def group(self, count=41, *, path_width=3):
+        files = tuple(
+            UnsupportedFile(
+                f"assets/{index:0{path_width}d}.png",
+                "added",
+                None,
+                "a" * 40,
+                new_mode="100644",
+            )
+            for index in range(count)
+        )
+        return build_request_group(
+            "owner/repo", 1, 2, "c" * 40, "d" * 40, 3, "e" * 64, files
+        )
+
+    def receipt(self, request, selected=None):
+        return build_receipt(
+            request,
+            request_comment_id=4,
+            source_comment_id=5,
+            source_updated_at="2026-10-10T01:00:00Z",
+            source_sha256="a" * 64,
+            actor_id=6,
+            actor="alice",
+            selected_ids=selected or tuple(item.file_id for item in request.files),
+        )
+
+    def test_group_preserves_v1_serialization_and_existing_caps(self):
+        request = self.request()
+        same = build_request_group(
+            request.repository,
+            request.repository_id,
+            request.pull_request,
+            request.base_sha,
+            request.head_sha,
+            request.review_id,
+            request.result_digest,
+            request.files,
+        )
+        self.assertIsInstance(same, FileReviewRequest)
+        self.assertEqual(canonical(same.to_dict()), canonical(request.to_dict()))
+        self.assertEqual(same.digest, request.digest)
+        receipt = self.receipt(request)
+        expected = FileReviewReceipt(
+            request.digest,
+            4,
+            5,
+            "2026-10-10T01:00:00Z",
+            "a" * 64,
+            6,
+            "alice",
+            tuple(item.file_id for item in request.files),
+        )
+        self.assertEqual(receipt, expected)
+        self.assertEqual(parse_request(request.to_dict()), request)
+        self.assertEqual(parse_receipt(receipt.to_dict()), receipt)
+        self.assertEqual((MAX_FILES, MAX_DOCUMENT_BYTES), (32, 32768))
+        with self.assertRaises(ReviewInputError):
+            replace(request, files=self.group().files)
+
+    def test_41_file_group_is_one_exact_complete_inventory(self):
+        request = self.group()
+        self.assertIsInstance(request, FileReviewRequestGroup)
+        self.assertEqual([len(part.files) for part in request.parts], [32, 9])
+        self.assertEqual(parse_request(request.to_dict()), request)
+        validate_public_document(request.to_dict(), "human-file-review-group")
+        coverage = CoverageManifest(
+            files=tuple(
+                FileCoverage(item.path, "unsupported", "binary")
+                for item in request.files
+            ),
+            enumerated_paths=tuple(item.path for item in request.files),
+        )
+        validate_inventory(request, coverage)
+        with self.assertRaisesRegex(ReviewInputError, "exactly all"):
+            validate_inventory(request.parts[0], coverage)
+        selected = parse_confirmation(
+            "@reviewsensei I reviewed the media files and I approve", request
+        )
+        self.assertEqual(selected, tuple(item.file_id for item in request.files))
+        command = f"@sensei media-reviewed {request.digest} " + " ".join(selected)
+        self.assertIsNone(parse_confirmation(command, request))
+        self.assertEqual(
+            parse_confirmation(" ".join(command.split()[: 3 + MAX_FILES]), request),
+            selected[:MAX_FILES],
+        )
+        self.assertIn("41 file changes", request.render())
+
+    def test_group_canonical_order_common_identity_and_exact_paths_are_required(self):
+        request = self.group()
+        for field, value in (
+            ("repository", "other/repo"),
+            ("repository_id", 9),
+            ("pull_request", 9),
+            ("base_sha", "f" * 40),
+            ("head_sha", "f" * 40),
+            ("review_id", 9),
+            ("result_digest", "f" * 64),
+        ):
+            with self.subTest(field=field), self.assertRaises(ReviewInputError):
+                FileReviewRequestGroup(
+                    (request.parts[0], replace(request.parts[1], **{field: value}))
+                )
+        for parts in (
+            tuple(reversed(request.parts)),
+            (
+                replace(request.parts[0], files=request.parts[0].files[:-1]),
+                request.parts[1],
+            ),
+            (
+                request.parts[0],
+                replace(request.parts[1], files=(request.parts[0].files[0],)),
+            ),
+        ):
+            with self.subTest(parts=parts), self.assertRaises(ReviewInputError):
+                FileReviewRequestGroup(parts)
+        value = request.to_dict()
+        value["approved"] = True
+        with self.assertRaises(ReviewInputError):
+            parse_request(value)
+        with self.assertRaises(ReviewInputError):
+            self.group(path_width=700)
+        with self.assertRaises(ReviewInputError):
+            FileReviewRequestGroup(request.parts * 17)
+
+    def test_group_receipt_binds_one_source_and_preserves_part_limits(self):
+        request = self.group()
+        receipt = self.receipt(request)
+        self.assertIsInstance(receipt, FileReviewReceiptGroup)
+        self.assertEqual(receipt.request_digest, request.digest)
+        self.assertEqual(
+            (
+                receipt.request_comment_id,
+                receipt.source_comment_id,
+                receipt.actor_id,
+                receipt.actor,
+            ),
+            (4, 5, 6, "alice"),
+        )
+        self.assertEqual(
+            set(receipt.selected_ids), {item.file_id for item in request.files}
+        )
+        self.assertTrue(
+            all(len(part.selected_ids) <= MAX_FILES for part in receipt.parts)
+        )
+        self.assertEqual(parse_receipt(receipt.to_dict()), receipt)
+        validate_public_document(receipt.to_dict(), "human-file-receipt-group")
+        selected = (request.files[0].file_id, request.files[-1].file_id)
+        subset = self.receipt(request, selected)
+        self.assertEqual(set(subset.selected_ids), set(selected))
+        for field, value in (
+            ("request_comment_id", 9),
+            ("source_comment_id", 9),
+            ("source_updated_at", "2026-10-11T01:00:00Z"),
+            ("source_sha256", "f" * 64),
+            ("actor_id", 9),
+            ("actor", "bob"),
+        ):
+            with self.subTest(field=field), self.assertRaises(ReviewInputError):
+                FileReviewReceiptGroup(
+                    request.digest,
+                    (receipt.parts[0], replace(receipt.parts[1], **{field: value})),
+                )
+        with self.assertRaises(ReviewInputError):
+            FileReviewReceiptGroup(request.digest, tuple(reversed(receipt.parts)))
+        with self.assertRaises(ReviewInputError):
+            FileReviewReceiptGroup(request.digest, (receipt.parts[0], receipt.parts[0]))
+        for selected in (("f" * 64,), (request.files[0].file_id,) * 2, ([],)):
+            with self.subTest(selected=selected), self.assertRaises(ReviewInputError):
+                self.receipt(request, selected)
+
     def test_selected_confirmation_uses_complete_snapshot_and_file_id(self):
         item = UnsupportedFile("assets/photo.png", "modified", "a" * 40, "b" * 40)
         request = FileReviewRequest(

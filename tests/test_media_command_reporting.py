@@ -42,7 +42,7 @@ class MediaPublisher:
 
 
 class MediaCommandReportingTests(unittest.TestCase):
-    def test_public_cli_missing_media_context_fails_without_remote_writes(self):
+    def test_public_cli_missing_check_context_fails_without_remote_writes(self):
         import review_sensei_github as github_module
 
         body = "@reviewsensei I reviewed the media files and I approve"
@@ -129,12 +129,14 @@ class MediaCommandReportingTests(unittest.TestCase):
                 )
         self.assertEqual(status, 1)
         self.assertIn(
-            "media approval requires the current review result", stdout.getvalue()
+            "media approval could not fund its check capability", stdout.getvalue()
         )
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 1)
         self.assertTrue(all(method == "GET" for method, _ in calls))
         broker.authorize_session_mutation.assert_called_once()
-        broker.exchange.assert_not_called()
+        broker.exchange.assert_called_once_with(
+            "synthetic-oidc", capability="check_publish"
+        )
         ledger_factory.assert_not_called()
 
     def test_missing_media_dependencies_fail_before_evaluation_or_writes(self):
@@ -385,6 +387,42 @@ class MediaCommandReportingTests(unittest.TestCase):
                     self.assertEqual(publisher.confirmations, 1)
                     self.assertEqual(broker.capabilities, ["check_publish"])
                     self.assertFalse(calls)
+
+    def test_bounded_finalizer_cannot_exchange_an_unfunded_check_capability(self):
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+
+        broker, http = Mock(), Mock()
+        app = GitHubApplication(
+            broker=broker,
+            http=http,
+            reviewer=object(),
+            learner=object(),
+            replier=object(),
+        )
+        budget = EvidenceReadBudget()
+        result = app._finalize_media_command_result(
+            assessment=SimpleNamespace(
+                approval=SimpleNamespace(approved=True, blockers=())
+            ),
+            review_result=ReviewResult(
+                summary="synthetic reviewed files", comments=(), provider="fixture"
+            ),
+            media_publisher=None,
+            options=GitHubWriteOptions(github_writes=True),
+            effective_policy="auto-approve",
+            oidc_token="synthetic-oidc",
+            repository="owner/repo",
+            head_sha="a" * 40,
+            app_slug="reviewsensei[bot]",
+            evidence_budget=budget,
+        )
+        self.assertTrue(result.applied)
+        self.assertTrue(result.evaluation_failed)
+        self.assertIn("requires its prepaid check capability", result.summary)
+        self.assertEqual(command_exit_code(result), 1)
+        self.assertEqual(budget.calls, 0)
+        self.assertFalse(broker.mock_calls)
+        self.assertFalse(http.mock_calls)
 
 
 if __name__ == "__main__":

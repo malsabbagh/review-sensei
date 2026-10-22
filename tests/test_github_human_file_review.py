@@ -127,7 +127,10 @@ class State:
             value = {
                 "state": "open",
                 "number": 2,
-                "base": {"sha": self.base},
+                "base": {
+                    "sha": self.base,
+                    "repo": {"id": 1, "full_name": "owner/repo"},
+                },
                 "head": {"sha": self.head},
             }
         elif path == "/pulls/2/reviews/10":
@@ -154,16 +157,58 @@ class State:
                 "tree": {"sha": "1" * 40 if commit == BASE else "2" * 40},
             }
         elif path.startswith("/git/trees/"):
-            tree = path.rsplit("/", 1)[1]
-            blobs = self.old if tree == "1" * 40 else self.new
-            value = {
-                "sha": tree,
-                "truncated": False,
-                "tree": [
-                    {"path": path, "type": "blob", "sha": sha, "mode": mode}
-                    for path, (sha, mode) in blobs.items()
-                ],
-            }
+            tree, _, query = path.rsplit("/", 1)[1].partition("?")
+            info = None
+            for blobs, root, offset in (
+                (self.old, "1" * 40, 10000),
+                (self.new, "2" * 40, 20000),
+            ):
+                ancestors = sorted(
+                    {
+                        "/".join(parts[:index])
+                        for name in blobs
+                        for parts in [name.split("/")]
+                        for index in range(1, len(parts))
+                    }
+                )
+                identifiers = {
+                    "": root,
+                    **{
+                        name: f"{offset + index:040x}"
+                        for index, name in enumerate(ancestors)
+                    },
+                }
+                scope = next(
+                    (name for name, sha in identifiers.items() if sha == tree), None
+                )
+                if scope is not None:
+                    info = (blobs, identifiers, scope)
+                    break
+            if info is None:
+                raise AssertionError(path)
+            blobs, identifiers, scope = info
+            prefix = scope + "/" if scope else ""
+            entries = []
+            for name, (sha, mode) in blobs.items():
+                if name.startswith(prefix):
+                    relative = name[len(prefix) :]
+                    if query == "recursive=1" or "/" not in relative:
+                        entries.append(
+                            {"path": relative, "type": "blob", "sha": sha, "mode": mode}
+                        )
+            for name, sha in identifiers.items():
+                if name and name != scope and name.startswith(prefix):
+                    relative = name[len(prefix) :]
+                    if query == "recursive=1" or "/" not in relative:
+                        entries.append(
+                            {
+                                "path": relative,
+                                "type": "tree",
+                                "sha": sha,
+                                "mode": "040000",
+                            }
+                        )
+            value = {"sha": tree, "truncated": False, "tree": entries}
         else:
             raise AssertionError(path)
         return 200, copy.deepcopy(value)
@@ -750,13 +795,802 @@ class GitHubHumanFileReviewTests(unittest.TestCase):
         def edited(method, path):
             if path.endswith("/issues/comments/20"):
                 reads[0] += 1
-            if "/git/commits/" in path and reads[0]:
+            if "/pulls/2/reviews?" in path and reads[0]:
                 self.state.comments[20]["body"] += " edited"
 
         self.state.hook = edited
         assessment = self.evaluate(identifier)
         self.assertFalse(assessment.approval.approved)
         self.assertEqual(assessment.invalidated_receipt_ids, (receipt,))
+
+    def blanket_source(self):
+        self.state.permission = "maintain"
+        self.state.comments[20] = {
+            "id": 20,
+            "user": ALICE,
+            "author_association": "MEMBER",
+            "issue_url": f"{API}{REPO}/issues/2",
+            "updated_at": "2026-10-10T01:00:00Z",
+            "body": "@reviewsensei I reviewed the media files and I approve",
+        }
+
+    def many_files(self, count, nested=False):
+        buckets = (
+            "after/desktop",
+            "after/mobile",
+            "before/desktop",
+            "before/mobile",
+            "zoom",
+        )
+        paths = tuple(
+            f"docs/execution/quieter-workspace/{buckets[n // 10]}/media-{n:03}.png"
+            if nested
+            else f"media-{n:03}.png"
+            for n in range(count)
+        )
+        self.state.old = (
+            {"docs/execution/existing-not-media.txt": ("f" * 40, "100644")}
+            if nested
+            else {}
+        )
+        self.state.new = {
+            path: (f"{n + 100:040x}", "100644") for n, path in enumerate(paths)
+        }
+        self.state.new.update(self.state.old)
+        self.state.files = [{"filename": path, "status": "added"} for path in paths]
+        self.state.set_result(
+            replace(
+                self.state.result,
+                coverage=CoverageManifest(
+                    files=tuple(
+                        FileCoverage(path, "unsupported", "binary") for path in paths
+                    ),
+                    enumerated_paths=paths,
+                ),
+            )
+        )
+
+    def test_nested_forty_one_files_use_complete_recursive_tree_proof(self):
+        self.many_files(41, nested=True)
+        self.blanket_source()
+        publisher = self.publisher()
+        identifier, request = publisher.request_review(
+            review_id=10, result=self.state.result
+        )
+        assessment = publisher.approve_reviewed_media(
+            request_comment_id=identifier,
+            source_comment_id=20,
+            result=self.state.result,
+            has_open_review_threads=False,
+        )
+        self.assertTrue(assessment.approval.approved)
+        self.assertEqual(len(assessment.human_reviewed_ids), 41)
+        self.assertEqual(
+            {item.path for item in request.files},
+            {item["filename"] for item in self.state.files},
+        )
+        self.assertEqual(self.budget.calls, len(self.state.calls))
+        self.assertEqual(self.budget.calls, 36)
+        trees = [path for _, path, _ in self.state.calls if "/git/trees/" in path]
+        self.assertEqual(
+            trees,
+            [
+                f"{REPO}/git/trees/{'1' * 40}",
+                f"{REPO}/git/trees/{10000:040x}",
+                f"{REPO}/git/trees/{10001:040x}",
+                f"{REPO}/git/trees/{'2' * 40}",
+                f"{REPO}/git/trees/{20000:040x}",
+                f"{REPO}/git/trees/{20001:040x}",
+                f"{REPO}/git/trees/{20002:040x}?recursive=1",
+            ],
+        )
+        self.assertEqual([len(part.files) for part in request.parts], [32, 9])
+        self.assertEqual(self.state.result.review_status, "partial")
+
+    def test_nested_scoped_read_never_attempts_oversized_whole_repository_tree(self):
+        self.many_files(41, nested=True)
+        self.blanket_source()
+        real = self.state.request
+
+        def root_too_large(method, path, **kwargs):
+            status, value = real(method, path, **kwargs)
+            if path.endswith(f"/git/trees/{'2' * 40}?recursive=1"):
+                value["padding"] = "x" * (512 * 1024)
+            return status, value
+
+        self.state.request = root_too_large
+        publisher = self.publisher()
+        identifier, _ = publisher.request_review(review_id=10, result=self.state.result)
+        outcome = publisher.approve_reviewed_media(
+            request_comment_id=identifier,
+            source_comment_id=20,
+            result=self.state.result,
+            has_open_review_threads=False,
+        )
+        self.assertTrue(outcome.approval.approved)
+        self.assertFalse(
+            any(
+                path.endswith(f"/git/trees/{root}?recursive=1")
+                for _, path, _ in self.state.calls
+                for root in ("1" * 40, "2" * 40)
+            )
+        )
+        self.assertEqual(self.budget.calls, 36)
+
+    def test_nested_shallow_prefix_requires_complete_regular_directory_chain(self):
+        for mutation in (
+            "truncated",
+            "sha",
+            "duplicate",
+            "non-immediate",
+            "symlink",
+            "submodule",
+            "missing",
+        ):
+            with self.subTest(mutation=mutation):
+                self.setUp()
+                self.many_files(41, nested=True)
+                real = self.state.request
+
+                def broken(method, path, **kwargs):
+                    status, value = real(method, path, **kwargs)
+                    if path.endswith(f"/git/trees/{'2' * 40}"):
+                        if mutation == "truncated":
+                            value["truncated"] = True
+                        elif mutation == "sha":
+                            value["sha"] = "f" * 40
+                        elif mutation == "duplicate":
+                            value["tree"].append(dict(value["tree"][0]))
+                        elif mutation == "non-immediate":
+                            value["tree"][0]["path"] = "docs/execution"
+                        elif mutation in {"symlink", "submodule"}:
+                            value["tree"][0].update(
+                                type="blob" if mutation == "symlink" else "commit",
+                                mode="120000" if mutation == "symlink" else "160000",
+                            )
+                        else:
+                            value["tree"] = []
+                    return status, value
+
+                self.state.request = broken
+                publisher = self.publisher()
+                with self.assertRaises(ReviewInputError):
+                    publisher.request_review(review_id=10, result=self.state.result)
+                self.assertEqual(self.posts(), 0)
+                self.assertEqual(self.budget.calls, len(self.state.calls))
+                self.assertFalse(
+                    any("?recursive=1" in path for _, path, _ in self.state.calls)
+                )
+
+    def test_nested_recursive_tree_refuses_incomplete_or_conflicting_proof(self):
+        for mutation in (
+            "truncated",
+            "tree-sha",
+            "list-shape",
+            "entry-shape",
+            "missing-ancestor",
+            "symlink",
+            "ancestor-blob",
+            "duplicate",
+            "traversal",
+            "bad-mode",
+            "bad-type",
+            "missing-leaf",
+            "response-bound",
+        ):
+            with self.subTest(mutation=mutation):
+                self.setUp()
+                self.many_files(41, nested=True)
+                self.blanket_source()
+                real = self.state.request
+
+                def invalid(method, path, **kwargs):
+                    status, value = real(method, path, **kwargs)
+                    if path.endswith("?recursive=1"):
+                        if mutation == "truncated":
+                            value["truncated"] = True
+                        elif mutation == "tree-sha":
+                            value["sha"] = "f" * 40
+                        elif mutation == "list-shape":
+                            value["tree"] = {}
+                        elif mutation == "entry-shape":
+                            value["tree"].append(None)
+                        elif mutation == "missing-ancestor":
+                            value["tree"] = [
+                                x for x in value["tree"] if x["path"] != "after"
+                            ]
+                        elif mutation == "symlink":
+                            value["tree"][0]["mode"] = "120000"
+                        elif mutation == "ancestor-blob":
+                            ancestor = next(
+                                x for x in value["tree"] if x["path"] == "after"
+                            )
+                            ancestor.update(type="blob", mode="100644")
+                        elif mutation == "duplicate":
+                            value["tree"].append(dict(value["tree"][0]))
+                        elif mutation == "traversal":
+                            value["tree"].append(
+                                dict(
+                                    path="docs/../escape.png",
+                                    type="blob",
+                                    mode="100644",
+                                    sha="f" * 40,
+                                )
+                            )
+                        elif mutation == "bad-mode":
+                            value["tree"][0]["mode"] = "100777"
+                        elif mutation == "bad-type":
+                            value["tree"][0]["type"] = "tree"
+                        elif mutation == "missing-leaf":
+                            value["tree"].pop(0)
+                        else:
+                            value["padding"] = "x" * (512 * 1024)
+                    return status, value
+
+                self.state.request = invalid
+                publisher = self.publisher()
+                with self.assertRaises(ReviewInputError):
+                    publisher.request_review(review_id=10, result=self.state.result)
+                self.assertEqual(self.budget.calls, len(self.state.calls))
+                self.assertEqual(self.posts(), 0)
+                self.assertFalse(
+                    any(x["state"] == "APPROVED" for x in self.state.reviews)
+                )
+                self.assertEqual(
+                    len(
+                        [
+                            path
+                            for _, path, _ in self.state.calls
+                            if "?recursive=1" in path
+                        ]
+                    ),
+                    1,
+                )
+
+    def test_nested_absent_old_path_requires_unconflicted_ancestor_proof(self):
+        for conflict in (False, True):
+            with self.subTest(conflict=conflict):
+                self.setUp()
+                self.many_files(41, nested=True)
+                self.state.old = {
+                    "docs" if conflict else "unrelated-link": ("f" * 40, "120000")
+                }
+                publisher = self.publisher()
+                if conflict:
+                    with self.assertRaisesRegex(ReviewInputError, "regular tree path"):
+                        publisher.request_review(review_id=10, result=self.state.result)
+                    self.assertEqual(self.posts(), 0)
+                else:
+                    _, request = publisher.request_review(
+                        review_id=10, result=self.state.result
+                    )
+                    self.assertTrue(all(x.old_blob is None for x in request.files))
+
+    def test_nested_recursive_dispatch_respects_original_exhaustion_without_approval(
+        self,
+    ):
+        self.many_files(41, nested=True)
+        self.blanket_source()
+        publisher = self.publisher()
+        for _ in range(48):
+            self.budget.consume()
+        with self.assertRaises(ReviewInputError):
+            publisher.request_review(review_id=10, result=self.state.result)
+        self.assertEqual(self.budget.calls, 60)
+        self.assertEqual(len(self.state.calls), 12)
+        self.assertEqual(
+            self.state.calls[-1][1], f"{REPO}/git/trees/{20002:040x}?recursive=1"
+        )
+        self.assertEqual(self.posts(), 0)
+        self.assertFalse(any(x["state"] == "APPROVED" for x in self.state.reviews))
+
+    def test_compound_request_confirmation_approval_fits_one_original_budget(self):
+        for count in (2, 41):
+            with self.subTest(count=count):
+                self.setUp()
+                if count == 41:
+                    self.many_files(count)
+                self.blanket_source()
+                publisher = self.publisher()
+                identifier, request = publisher.request_review(
+                    review_id=10, result=self.state.result
+                )
+                assessment = publisher.approve_reviewed_media(
+                    request_comment_id=identifier,
+                    source_comment_id=20,
+                    result=self.state.result,
+                    has_open_review_threads=False,
+                )
+                self.assertTrue(assessment.approval.approved)
+                self.assertEqual(len(assessment.human_reviewed_ids), count)
+                self.assertEqual(self.budget.calls, len(self.state.calls))
+                self.assertEqual(self.budget.calls, 31)
+                self.assertEqual(self.state.result.review_status, "partial")
+                self.assertEqual(
+                    len([x for x in self.state.reviews if x["state"] == "APPROVED"]), 1
+                )
+                if count == 41:
+                    self.assertEqual(
+                        [len(part.files) for part in request.parts], [32, 9]
+                    )
+                    self.assertIn(
+                        "request-group:v1", self.state.comments[identifier]["body"]
+                    )
+                    self.assertTrue(
+                        any(
+                            "receipt-group:v1" in x["body"]
+                            for x in self.state.comments.values()
+                        )
+                    )
+                posts = self.posts()
+                publisher = self.publisher()
+                self.assertEqual(
+                    publisher.request_review(review_id=10, result=self.state.result)[0],
+                    identifier,
+                )
+                retried = publisher.approve_reviewed_media(
+                    request_comment_id=identifier,
+                    source_comment_id=20,
+                    result=self.state.result,
+                    has_open_review_threads=False,
+                )
+                self.assertTrue(retried.approval.approved)
+                self.assertEqual(self.posts(), posts)
+
+    def test_compound_unknown_receipt_or_approval_write_reconciles_without_duplicate(
+        self,
+    ):
+        for failed_path in ("/issues/2/comments", "/pulls/2/reviews"):
+            with self.subTest(failed_path=failed_path):
+                self.setUp()
+                self.blanket_source()
+                publisher = self.publisher()
+                identifier, _request = publisher.request_review(
+                    review_id=10, result=self.state.result
+                )
+                real = self.state.request
+
+                def lost(method, path, **kwargs):
+                    status, value = real(method, path, **kwargs)
+                    return (
+                        (502, {})
+                        if method == "POST" and path.endswith(failed_path)
+                        else (status, value)
+                    )
+
+                self.state.request = lost
+                with self.assertRaises(ReviewInputError):
+                    publisher.approve_reviewed_media(
+                        request_comment_id=identifier,
+                        source_comment_id=20,
+                        result=self.state.result,
+                        has_open_review_threads=False,
+                    )
+                self.state.request = real
+                publisher = self.publisher()
+                publisher.request_review(review_id=10, result=self.state.result)
+                assessment = publisher.approve_reviewed_media(
+                    request_comment_id=identifier,
+                    source_comment_id=20,
+                    result=self.state.result,
+                    has_open_review_threads=False,
+                )
+                self.assertTrue(assessment.approval.approved)
+                self.assertEqual(
+                    len(self.state.comments), 3
+                )  # source, request, receipt
+                self.assertEqual(
+                    len([x for x in self.state.reviews if x["state"] == "APPROVED"]), 1
+                )
+
+    def test_compound_late_mutable_changes_never_approve(self):
+        for mutation in (
+            "head",
+            "base",
+            "source",
+            "permission",
+            "request",
+            "root",
+            "duplicate",
+        ):
+            with self.subTest(mutation=mutation):
+                self.setUp()
+                self.blanket_source()
+                publisher = self.publisher()
+                identifier, _ = publisher.request_review(
+                    review_id=10, result=self.state.result
+                )
+                fired = [False]
+
+                def changed(method, path):
+                    if (
+                        fired[0]
+                        or method != "POST"
+                        or not path.endswith("/issues/2/comments")
+                    ):
+                        return
+                    fired[0] = True
+                    if mutation in {"head", "base"}:
+                        setattr(self.state, mutation, "f" * 40)
+                    elif mutation == "source":
+                        self.state.comments[20]["body"] += " edited"
+                    elif mutation == "permission":
+                        self.state.permission = "read"
+                    elif mutation == "request":
+                        self.state.comments[identifier]["body"] += " edited"
+                    elif mutation == "root":
+                        self.state.reviews.append({**self.state.root, "id": 1000})
+
+                if mutation == "duplicate":
+                    real = self.state.request
+
+                    def duplicated(method, path, **kwargs):
+                        status, value = real(method, path, **kwargs)
+                        if method == "POST" and path.endswith("/issues/2/comments"):
+                            self.state.comments[999] = {**value, "id": 999}
+                        return status, value
+
+                    self.state.request = duplicated
+                else:
+                    self.state.hook = changed
+                try:
+                    result = publisher.approve_reviewed_media(
+                        request_comment_id=identifier,
+                        source_comment_id=20,
+                        result=self.state.result,
+                        has_open_review_threads=False,
+                    )
+                except ReviewInputError:
+                    pass
+                else:
+                    self.assertFalse(result.approval.approved)
+                self.assertFalse(
+                    any(x["state"] == "APPROVED" for x in self.state.reviews)
+                )
+
+    def test_compound_fresh_host_facts_withhold_or_refuse_before_approve(self):
+        for facts in (
+            {
+                "enabled": True,
+                "app_authored": False,
+                "has_open_review_threads": True,
+                "qualification": "not-required",
+            },
+            {
+                "enabled": True,
+                "app_authored": True,
+                "has_open_review_threads": False,
+                "qualification": "not-required",
+            },
+            {
+                "enabled": True,
+                "app_authored": False,
+                "has_open_review_threads": False,
+                "qualification": "missing",
+            },
+            {
+                "enabled": True,
+                "app_authored": False,
+                "has_open_review_threads": False,
+                "qualification": "not-required",
+                "unexpected": True,
+            },
+        ):
+            with self.subTest(facts=facts):
+                self.setUp()
+                self.blanket_source()
+                publisher = self.publisher()
+                publisher.approval_facts_provider = lambda **kwargs: facts
+                identifier, _ = publisher.request_review(
+                    review_id=10, result=self.state.result
+                )
+                try:
+                    result = publisher.approve_reviewed_media(
+                        request_comment_id=identifier,
+                        source_comment_id=20,
+                        result=self.state.result,
+                        has_open_review_threads=False,
+                    )
+                except ReviewInputError:
+                    pass
+                else:
+                    self.assertFalse(result.approval.approved)
+                self.assertFalse(
+                    any(x["state"] == "APPROVED" for x in self.state.reviews)
+                )
+
+    def test_native_tail_is_admitted_before_post_and_retry_reuses_recorded_receipt(
+        self,
+    ):
+        self.blanket_source()
+        publisher = self.publisher()
+        budget = self.budget
+        calls = []
+
+        def admit(required):
+            calls.append((required, budget.calls))
+            budget.check()
+            if budget.calls + required > 60:
+                raise ReviewInputError(
+                    "native approval tail does not fit original budget"
+                )
+
+        publisher.before_approval = admit
+        # Earlier broker/metadata work belongs to this same original allowance.
+        for _ in range(31):
+            budget.consume()
+        identifier, _ = publisher.request_review(review_id=10, result=self.state.result)
+        with self.assertRaisesRegex(ReviewInputError, "tail does not fit"):
+            publisher.approve_reviewed_media(
+                request_comment_id=identifier,
+                source_comment_id=20,
+                result=self.state.result,
+                has_open_review_threads=False,
+            )
+        self.assertEqual(calls, [(3, 59)])
+        self.assertEqual(budget.calls, 59)  # refusal neither debits nor refunds
+        self.assertEqual(len(self.state.comments), 3)  # source/request/retained receipt
+        self.assertFalse(any(x["state"] == "APPROVED" for x in self.state.reviews))
+        posts = self.posts()
+        # A later explicit invocation owns a new original event allowance, not
+        # a refill inside the refused invocation. It authenticates/reuses audit.
+        publisher = self.publisher()
+        publisher.request_review(review_id=10, result=self.state.result)
+        result = publisher.approve_reviewed_media(
+            request_comment_id=identifier,
+            source_comment_id=20,
+            result=self.state.result,
+            has_open_review_threads=False,
+        )
+        self.assertTrue(result.approval.approved)
+        self.assertEqual(self.posts(), posts + 1)
+        self.assertEqual(len(self.state.comments), 3)
+        self.assertEqual(
+            len([x for x in self.state.reviews if x["state"] == "APPROVED"]), 1
+        )
+
+    def test_existing_native_approval_requires_funded_two_call_readback_tail(self):
+        self.blanket_source()
+        publisher = self.publisher()
+        identifier, _ = publisher.request_review(review_id=10, result=self.state.result)
+        publisher.approve_reviewed_media(
+            request_comment_id=identifier,
+            source_comment_id=20,
+            result=self.state.result,
+            has_open_review_threads=False,
+        )
+        posts = self.posts()
+        publisher = self.publisher()
+        publisher.request_review(review_id=10, result=self.state.result)
+        seen = []
+
+        def refuse(required):
+            seen.append(required)
+            raise ReviewInputError("existing native tail is unfunded")
+
+        publisher.before_approval = refuse
+        with self.assertRaisesRegex(ReviewInputError, "existing native tail"):
+            publisher.approve_reviewed_media(
+                request_comment_id=identifier,
+                source_comment_id=20,
+                result=self.state.result,
+                has_open_review_threads=False,
+            )
+        self.assertEqual(seen, [2])
+        self.assertEqual(self.posts(), posts)
+
+    def test_current_finding_facts_bind_resolved_inline_without_editing_retained_result(
+        self,
+    ):
+        from review_sensei.mixed_coverage import CurrentFindingFacts
+
+        comment = ReviewComment(
+            "app.py", 1, "An inline finding retained for audit.", blocking=True
+        )
+        result = replace(self.state.result, comments=(comment,))
+        self.state.set_result(result, has_blocking_findings=False)
+        before = result.to_dict()
+        digest = result.content_digest()
+        self.blanket_source()
+        publisher = self.publisher()
+        current = CurrentFindingFacts(digest, False, False)
+        publisher.approval_facts_provider = lambda **kwargs: dict(
+            enabled=True,
+            app_authored=False,
+            has_open_review_threads=False,
+            qualification="not-required",
+            current_findings=current,
+        )
+        identifier, _ = publisher.request_review(review_id=10, result=result)
+        assessment = publisher.approve_reviewed_media(
+            request_comment_id=identifier,
+            source_comment_id=20,
+            result=result,
+            has_open_review_threads=False,
+        )
+        self.assertTrue(assessment.approval.approved)
+        self.assertIs(assessment.current_findings, current)
+        self.assertEqual(result.to_dict(), before)
+        self.assertEqual(result.content_digest(), digest)
+        self.assertIs(result.comments[0], comment)
+        self.assertTrue(result.comments[0].blocks_approval)
+
+    def test_current_finding_facts_never_drop_unproven_or_original_blockers(self):
+        from review_sensei.mixed_coverage import CurrentFindingFacts
+
+        for mode in ("missing", "plain-false", "stale", "frozen", "human", "blocking"):
+            with self.subTest(mode=mode):
+                self.setUp()
+                comment = ReviewComment(
+                    "app.py", 1, "Retained blocking finding.", blocking=True
+                )
+                result = replace(self.state.result, comments=(comment,))
+                self.state.set_result(result, has_blocking_findings=mode == "frozen")
+                self.blanket_source()
+                publisher = self.publisher()
+
+                def facts(**kwargs):
+                    value = dict(
+                        enabled=True,
+                        app_authored=False,
+                        has_open_review_threads=False,
+                        qualification="not-required",
+                    )
+                    if mode != "missing":
+                        value["current_findings"] = (
+                            False
+                            if mode == "plain-false"
+                            else CurrentFindingFacts(
+                                "f" * 64
+                                if mode == "stale"
+                                else result.content_digest(),
+                                mode == "blocking",
+                                mode == "human",
+                            )
+                        )
+                    return value
+
+                publisher.approval_facts_provider = facts
+                identifier, _ = publisher.request_review(review_id=10, result=result)
+                if mode in {"plain-false", "stale"}:
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "current finding facts"
+                    ):
+                        publisher.approve_reviewed_media(
+                            request_comment_id=identifier,
+                            source_comment_id=20,
+                            result=result,
+                            has_open_review_threads=False,
+                        )
+                else:
+                    assessment = publisher.approve_reviewed_media(
+                        request_comment_id=identifier,
+                        source_comment_id=20,
+                        result=result,
+                        has_open_review_threads=False,
+                    )
+                    self.assertFalse(assessment.approval.approved)
+                self.assertFalse(
+                    any(x["state"] == "APPROVED" for x in self.state.reviews)
+                )
+
+    def test_compound_rechecks_latest_root_after_current_fact_reads(self):
+        self.blanket_source()
+        publisher = self.publisher()
+        identifier, _request = publisher.request_review(
+            review_id=10, result=self.state.result
+        )
+
+        def superseded(**kwargs):
+            self.state.reviews.append({**self.state.root, "id": 1000})
+            return dict(
+                enabled=True,
+                app_authored=False,
+                has_open_review_threads=False,
+                qualification="not-required",
+            )
+
+        publisher.approval_facts_provider = superseded
+        with self.assertRaisesRegex(ReviewInputError, "superseded"):
+            publisher.approve_reviewed_media(
+                request_comment_id=identifier,
+                source_comment_id=20,
+                result=self.state.result,
+                has_open_review_threads=False,
+            )
+        self.assertFalse(any(x["state"] == "APPROVED" for x in self.state.reviews))
+
+    def test_compound_final_snapshot_uses_host_validator_after_fact_reads(self):
+        for mutation in ("draft", "fork", "author"):
+            with self.subTest(mutation=mutation):
+                self.setUp()
+                self.blanket_source()
+                publisher = self.publisher()
+                identifier, _request = publisher.request_review(
+                    review_id=10, result=self.state.result
+                )
+                changed = [False]
+
+                def current(**kwargs):
+                    changed[0] = True
+                    return dict(
+                        enabled=True,
+                        app_authored=False,
+                        has_open_review_threads=False,
+                        qualification="not-required",
+                    )
+
+                publisher.approval_facts_provider = current
+                real = self.state.request
+
+                def response(method, path, **kwargs):
+                    status, value = real(method, path, **kwargs)
+                    if changed[0] and method == "GET" and path.endswith("/pulls/2"):
+                        if mutation == "draft":
+                            value["draft"] = True
+                        elif mutation == "fork":
+                            value["base"]["repo"]["fork"] = True
+                        else:
+                            value["user"] = BOT
+                    return status, value
+
+                def validate(payload):
+                    if (
+                        payload.get("draft")
+                        or payload["base"]["repo"].get("fork")
+                        or payload.get("user") == BOT
+                    ):
+                        raise ReviewInputError("host snapshot changed")
+
+                publisher.snapshot_validator = validate
+                self.state.request = response
+                with self.assertRaisesRegex(ReviewInputError, "host snapshot changed"):
+                    publisher.approve_reviewed_media(
+                        request_comment_id=identifier,
+                        source_comment_id=20,
+                        result=self.state.result,
+                        has_open_review_threads=False,
+                    )
+                self.assertFalse(
+                    any(x["state"] == "APPROVED" for x in self.state.reviews)
+                )
+
+    def test_approval_readback_requires_exact_numeric_owned_review(self):
+        for change in ("owner", "id", "float"):
+            with self.subTest(change=change):
+                self.setUp()
+                self.blanket_source()
+                publisher = self.publisher()
+                identifier, _ = publisher.request_review(
+                    review_id=10, result=self.state.result
+                )
+                real = self.state.request
+
+                def altered(method, path, **kwargs):
+                    status, value = real(method, path, **kwargs)
+                    if (
+                        method == "GET"
+                        and "/pulls/2/reviews/" in path
+                        and value.get("state") == "APPROVED"
+                    ):
+                        if change == "owner":
+                            value["user"] = ALICE
+                        else:
+                            value["id"] = (
+                                value["id"] + 1
+                                if change == "id"
+                                else float(value["id"])
+                            )
+                    return status, value
+
+                self.state.request = altered
+                with self.assertRaisesRegex(ReviewInputError, "readback disagrees"):
+                    publisher.approve_reviewed_media(
+                        request_comment_id=identifier,
+                        source_comment_id=20,
+                        result=self.state.result,
+                        has_open_review_threads=False,
+                    )
 
     def test_generated_file_is_requested_with_the_owned_review(self):
         from review_sensei_github.application import GitHubApplication

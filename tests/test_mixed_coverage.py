@@ -8,7 +8,11 @@ from review_sensei_github.human_file_review import HumanFileReviewPolicy
 from review_sensei.coverage import CoverageManifest, FileCoverage, HunkCoverage
 from review_sensei.errors import ReviewInputError
 from review_sensei.human_file_review import UnsupportedFile
-from review_sensei.mixed_coverage import BinaryConfirmation, evaluate_mixed_coverage
+from review_sensei.mixed_coverage import (
+    BinaryConfirmation,
+    CurrentFindingFacts,
+    evaluate_mixed_coverage,
+)
 from review_sensei.models import ReviewComment, ReviewResult
 
 EVENT = "event-1"
@@ -54,6 +58,147 @@ def _result(files, *, comments=(), persistence_status=None, flag=None):
 
 
 class MixedCoverageTests(unittest.TestCase):
+    def test_current_finding_facts_are_strict_and_bound_to_exact_content(self):
+        result = self.result()
+        for result_digest, blocking, human in (
+            ("a" * 63, False, False),
+            ("A" * 64, False, False),
+            (None, False, False),
+            (result.content_digest(), 0, False),
+            (result.content_digest(), False, "false"),
+        ):
+            with self.subTest(values=(result_digest, blocking, human)):
+                with self.assertRaises(ReviewInputError):
+                    CurrentFindingFacts(result_digest, blocking, human)
+        for facts in (
+            CurrentFindingFacts("a" * 64, False, False),
+            {
+                "result_digest": result.content_digest(),
+                "has_blocking_findings": False,
+                "has_human_adjudication_findings": False,
+            },
+            False,
+        ):
+            with self.subTest(facts=facts), self.assertRaises(ReviewInputError):
+                self.evaluate(result, self.inventory(), current_findings=facts)
+
+    def test_explicit_current_facts_preserve_raw_result_and_legacy_finding_gate(self):
+        for comment in (
+            ReviewComment("src/a.py", 1, "Required fix.", blocking=True),
+            ReviewComment("src/a.py", 1, "Human decision required.", needs_human=True),
+        ):
+            with self.subTest(comment=comment):
+                result = self.result(comments=(comment,))
+                before = result.to_dict()
+                legacy = self.evaluate(result, self.inventory())
+                self.assertFalse(legacy.approved)
+                self.assertIn("unresolved-finding", legacy.blockers)
+                current = CurrentFindingFacts(result.content_digest(), False, False)
+                decision = self.evaluate(
+                    result, self.inventory(), current_findings=current
+                )
+                self.assertTrue(decision.approved)
+                self.assertEqual(decision.ai_review_status, "partial")
+                self.assertFalse(decision.publishes_approve)
+                self.assertFalse(decision.baseline_completed)
+                self.assertFalse(decision.cache_completed)
+                self.assertEqual(result.to_dict(), before)
+                self.assertEqual(result.content_digest(), current.result_digest)
+                for blocking, human in ((True, False), (False, True)):
+                    blocked = self.evaluate(
+                        result,
+                        self.inventory(),
+                        current_findings=CurrentFindingFacts(
+                            result.content_digest(), blocking, human
+                        ),
+                    )
+                    self.assertFalse(blocked.approved)
+                    self.assertIn("unresolved-finding", blocked.blockers)
+
+    def test_current_findings_cannot_remove_other_coverage_or_approval_gates(self):
+        result = self.result(
+            comments=(ReviewComment("src/a.py", 1, "Historical fix.", blocking=True),)
+        )
+        current = CurrentFindingFacts(result.content_digest(), False, False)
+        for overrides, blocker in (
+            ({"text_completed": False}, "text-incomplete"),
+            ({"allow_confirmations": False}, "human-file-policy-disabled"),
+            ({"qualification": "missing"}, "qualification-missing"),
+            ({"qualification": "unverified"}, "qualification-unverified"),
+            ({"unresolved_threads": True}, "unresolved-thread"),
+            ({"unresolved_threads": None}, "review-threads-incomplete"),
+            ({"mandatory_document_context_lost": True}, "document-context-lost"),
+            ({"source_context_incomplete": True}, "source-context-incomplete"),
+            ({"unknown_file": True}, "unknown-file"),
+            ({"failed_stage": True}, "failed-stage"),
+            ({"provider_output_incomplete": True}, "incomplete-provider-output"),
+        ):
+            with self.subTest(blocker=blocker):
+                decision = self.evaluate(
+                    result, self.inventory(), current_findings=current, **overrides
+                )
+                self.assertFalse(decision.approved)
+                self.assertIn(blocker, decision.blockers)
+        for confirmations, blocker in (
+            ((), "binary-coverage"),
+            (
+                self.confirmations(self.inventory(), permission_current=False),
+                "permission-revoked",
+            ),
+            (self.confirmations(self.inventory(), current=False), "stale-receipt"),
+        ):
+            with self.subTest(blocker=blocker):
+                decision = evaluate_mixed_coverage(
+                    result,
+                    self.inventory(),
+                    confirmations,
+                    text_completed=True,
+                    allow_confirmations=True,
+                    event_id=EVENT,
+                    current_findings=current,
+                )
+                self.assertFalse(decision.approved)
+                self.assertIn(blocker, decision.blockers)
+
+    def test_41_file_group_requires_every_confirmation_and_keeps_ai_partial(self):
+        inventory = tuple(_file(f"assets/image-{index:03d}.png") for index in range(41))
+        result = _result(
+            (FileCoverage("src/a.py", "reviewed"),)
+            + tuple(
+                FileCoverage(item.path, "unsupported", "binary") for item in inventory
+            )
+        )
+        confirmations = self.confirmations(inventory)
+        for selected, approved in ((confirmations, True), (confirmations[:-1], False)):
+            with self.subTest(approved=approved):
+                outcome = evaluate_mixed_coverage(
+                    result,
+                    inventory,
+                    selected,
+                    text_completed=True,
+                    allow_confirmations=True,
+                    event_id=EVENT,
+                )
+                self.assertEqual(outcome.approved, approved)
+                self.assertEqual(outcome.coverage_satisfied, approved)
+                self.assertEqual(outcome.ai_review_status, "partial")
+                self.assertFalse(outcome.publishes_approve)
+                self.assertFalse(outcome.baseline_completed)
+                self.assertFalse(outcome.cache_completed)
+        self.assertEqual(result.review_status, "partial")
+        for malformed in (inventory[:-1], inventory + (inventory[0],)):
+            with self.subTest(malformed=malformed):
+                outcome = evaluate_mixed_coverage(
+                    result,
+                    malformed,
+                    confirmations,
+                    text_completed=True,
+                    allow_confirmations=True,
+                    event_id=EVENT,
+                )
+                self.assertFalse(outcome.approved)
+                self.assertIn("unknown-file", outcome.blockers)
+
     def inventory(self):
         return (
             _file("photo.png", old="c" * 40, new="d" * 40),

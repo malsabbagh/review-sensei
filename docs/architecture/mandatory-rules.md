@@ -30,16 +30,15 @@ parts refuse. Unbound gains no checkpoint authority. See ADR 0093.
 
 <!-- selected-design -->
 
-The proposed [human file review adapter](human-file-review.md) binds selected unsupported
-binary/policy-excluded generated changes to exact owned review/result, complete changed inventory,
-base/head Git blobs and live authorized human source. Confirmation defaults off; never rewrite AI
-coverage/eligibility/baseline/cache. Host-derived `coverage_only_partial` uses a versioned content
-digest projection; absent provenance preserves old digests. Fresh assessment satisfies only that coverage
-blocker after all files are confirmed; other findings/approval facts remain. No cross-head carry or automatic hosted command.
-Explicit verification may post one exact-head APPROVE when mixed coverage is the only blocker;
-AI result/baseline/cache stay incomplete. Legacy finalizer withholds partial results.
-Broker composition/deployed resource qualification remain pending. Confirmation is not approval.
-See [Proposed ADR 0077](adr/0077-explicit-human-file-review.md).
+[Human file review](human-file-review.md) binds an owned exact result/root, complete inventory,
+regular base/head blobs and current authorized source. Hosted composition reads canonical retained
+state after broker authorization. V1 parts keep 32 files; groups keep 32 KiB and exact union coverage.
+One publisher keeps 60 ordinary/four finalization calls and 60 seconds, including broker liability.
+Fresh source, permission, root, request, thread, qualification and full PR facts gate approval.
+Current finding facts require an exact-result index and positive resolution proof; never infer
+resolution from false flags. Never complete AI coverage/result/baseline/cache or carry across heads.
+Unknown writes reconcile only on explicit retry; no cap increase, model approval or new authority.
+See [Proposed ADR 0103](adr/0103-bounded-hosted-media-confirmation.md) and [ADR 0077](adr/0077-explicit-human-file-review.md).
 
 reassessment check that identity before planning and dispatch. Ollama advertises
 the contract only with explicit fixed-model `require_completion_metadata=True`:

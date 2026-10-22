@@ -1160,11 +1160,16 @@ fail closed.
 The media sentence requires an authenticated current result, owned file-review
 request and qualified publisher composition. Missing context or an invalid
 assessment is an evaluation failure and exits nonzero; a completed evaluation
-that withholds approval remains distinct. The existing human-file adapter caps
-one complete inventory at 32 changes. Command recognition does not activate a
-larger inventory, refill the original request budget, or replace fresh approval
-facts. The public hosted composition remains unqualified; directly injecting a
-library publisher is not deployed end-to-end evidence. See
+that withholds approval remains distinct. Hosted composition reconstructs the
+canonical retained transaction/result after broker authorization and supplies
+fresh snapshot, source, thread and qualification facts. A v1 request/receipt
+still admits at most 32 changes; versioned groups bind ordered v1 parts to one
+complete inventory under the unchanged 32 KiB document cap. No source carries
+across heads or results. The whole command keeps one 64-call budget, with four
+calls reserved for finalization, and its original 60-second deadline. Explicit
+retries reconcile owned publications and repeat current authority checks. Source
+qualification and actual deployment remain separate evidence. See
+[ADR 0103](adr/0103-bounded-hosted-media-confirmation.md) and
 [ADR 0077](adr/0077-explicit-human-file-review.md).
 
 The publication boundary resolves an omitted convergence policy to the
@@ -1537,5 +1542,7 @@ later inference/checkpoint lifecycle. This is not an approval grant. Default
 finalization, conversation, maintainer decisions and explicit rescan use schema 5
 readers. Maintainer legacy-inventory fallback applies only when the complete
 finding index is absent; a default schema 5 publication retains that index.
-The separately proposed local opt-in human-file-review adapter remains legacy
-inline-root only and does not gain schema 5 support from this change.
+The bare opt-in human-file-review adapter uses inline roots unless the trusted
+host supplies an eligibility reader. Hosted media composition supplies the
+existing independent schema 5 reader with current ledger, scope and root/prose
+proof. Partitioned schema 4 roots remain unsupported.
