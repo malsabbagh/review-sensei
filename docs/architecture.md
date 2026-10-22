@@ -855,8 +855,8 @@ compute and egress boundaries. `local-ollama` uses the labelled self-hosted
 Ollama runner; `cloud-ollama` uses the hosted Ollama Cloud lane; `openrouter`
 uses the hosted OpenRouter lane for allowlisted models. Hosted reusable jobs
 default to GitHub; an operator may select one validated trusted Linux label
-through `hosted_runner` (ADR 0062). Read-only bootstrap and the local Ollama
-label array retain their existing routing. Backend, model and policy still
+through `hosted_runner` (ADR 0062), including read-only bootstrap. Local Ollama
+retains its existing label array. Backend, model and policy still
 resolve from trusted configuration, not this infrastructure input.
 Older setup-v4 callers remain recognized as managed content and migrate through
 the existing reviewable setup PR path.

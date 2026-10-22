@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Honor the trusted caller's `hosted_runner` for read-only reusable bootstrap,
+  so an opted-in Linux runner can start the workflow when GitHub-hosted billing
+  is unavailable. Preserve the GitHub default, first-step label validation,
+  trusted-base policy resolution and validated downstream routing.
+
 ## 0.8.9 - 2026-10-22
 
 - Split core Python and npm publication into independently retryable workflow

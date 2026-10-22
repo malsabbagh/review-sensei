@@ -140,7 +140,10 @@ jobs:
     # so they are not failed by later eligibility checks; ready_for_review and
     # non-pull_request operations continue.
     if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
-    runs-on: ubuntu-latest
+    # Scheduling precedes step validation, so bootstrap must honor the trusted
+    # caller's label too. Its first step validates the label before any work;
+    # downstream jobs consume only that validated output.
+    runs-on: ${{ inputs.hosted_runner || 'ubuntu-latest' }}
     # Read-only. The bootstrap reads the trusted policy commit, installs the
     # exact released package, and reports the plan; it holds no write scope and
     # never materializes a provider credential.

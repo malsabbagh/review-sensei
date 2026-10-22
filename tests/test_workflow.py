@@ -127,6 +127,29 @@ class WorkflowValidationTests(unittest.TestCase):
                 f"{name} must not appear in the workflow",
             )
 
+    def test_bootstrap_uses_caller_runner_before_validated_downstream_routing(self):
+        import yaml
+
+        jobs = yaml.safe_load(_reusable_workflow())["jobs"]
+        bootstrap = jobs["bootstrap"]
+        self.assertEqual(
+            bootstrap["runs-on"], "${{ inputs.hosted_runner || 'ubuntu-latest' }}"
+        )
+        self.assertEqual(bootstrap["permissions"], {"contents": "read"})
+        self.assertEqual(bootstrap["steps"][0]["name"], "Resolve hosted runner label")
+        self.assertEqual(
+            bootstrap["outputs"]["hosted_runner"],
+            "${{ steps.hosted-runner.outputs.label }}",
+        )
+        routed = [
+            name
+            for name, job in jobs.items()
+            if job.get("runs-on") == "${{ needs.bootstrap.outputs.hosted_runner }}"
+        ]
+        self.assertEqual(len(routed), 3)
+        for name in routed:
+            self.assertIn("bootstrap", jobs[name]["needs"])
+
     @unittest.skipIf(sys.platform == "win32", "hosted Linux script requires POSIX Bash")
     def test_hosted_runner_label_validation_defaults_and_rejects_invalid_shapes(self):
         workflow = _reusable_workflow()
