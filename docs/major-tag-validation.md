@@ -79,6 +79,11 @@ Unconfirmed worker execution is explicit: `tests_run` is unknown (`null`),
 is false. Skips and expected/unexpected failures use `FAIL` rows with a specific
 `kind`; multiple failing subtests retain one canonical parent-test row and a
 failure count. Failure records must cover their exact assigned inventory too.
+Each worker must execute the discovered method IDs in their declared loader
+traversal order; reordering is rejected along with missing or duplicate methods.
+Reports distinguish submitted, unsubmitted and confirmed contracts. Submission
+does not prove a worker started or completed: submitted but unconfirmed work
+has unknown execution, including reports not collected after another worker fails.
 Sanitized artifacts are retained on failure; environments and binaries are not.
 Every gate or recheck requires a fresh output directory. An existing evidence
 directory is rejected before reads and its receipt is left unchanged.

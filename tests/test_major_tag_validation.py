@@ -726,7 +726,23 @@ class SurfaceTests(unittest.TestCase):
             guard["env"]["GATE_RECEIPT_ARTIFACT_ID"],
             "${{ needs.gate.outputs.receipt_artifact_id }}",
         )
-        for value in ("", "0", "1,2", "-1", "not-an-id", "665432109"):
+        valid = {"665432109", "9007199254740991"}
+        for value in (
+            "",
+            "0",
+            "1,2",
+            "-1",
+            "not-an-id",
+            "665432109",
+            "9007199254740991",
+            "9007199254740992",
+            "9" * 100,
+            " 1",
+            "1 ",
+            "+1",
+            "https://example.com/1",
+            "1\n",
+        ):
             with self.subTest(value=value):
                 result = subprocess.run(
                     ["bash", "-c", guard["run"]],
@@ -734,7 +750,7 @@ class SurfaceTests(unittest.TestCase):
                     capture_output=True,
                     text=True,
                 )
-                self.assertEqual(result.returncode == 0, value == "665432109")
+                self.assertEqual(result.returncode == 0, value in valid)
                 if result.returncode:
                     self.assertIn(
                         "Retained gate receipt artifact ID is missing or invalid",

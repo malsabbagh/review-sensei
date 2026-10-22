@@ -731,14 +731,21 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                 lane = tests / "dist_safe"
                 lane.mkdir(parents=True)
                 # Let the real file loader raise, then load the declared real empty files.
-                for fault in ("load-error", "empty-suite", "worker-error"):
+                for fault in (
+                    "load-error",
+                    "empty-suite",
+                    "worker-error",
+                    "partial-worker-error",
+                ):
                     with self.subTest(fault=fault):
+                        worker_error = fault.endswith("worker-error")
+                        confirmed = 1 if fault == "partial-worker-error" else 0
                         for name in names:
                             (lane / (name + ".py")).write_text(
                                 "raise RuntimeError('private module detail')\n"
                                 if fault == "load-error"
                                 else "import unittest\nclass Contract(unittest.TestCase):\n    def test_contract(self): pass\n"
-                                if fault == "worker-error"
+                                if worker_error
                                 else ""
                             )
                         report = root / fault
@@ -779,6 +786,30 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                             pool.return_value.__enter__.return_value.submit.return_value.result.side_effect = TimeoutError(
                                 "private worker detail"
                             )
+                            if confirmed:
+
+                                def submitted(_function, _tests, name, *_versions):
+                                    future = module.concurrent.futures.Future()
+                                    if name == names[0]:
+                                        identity = name + ".Contract.test_contract"
+                                        future.set_result(
+                                            {
+                                                "rows": [
+                                                    {"id": identity, "status": "PASS"}
+                                                ],
+                                                "executed_ids": [identity],
+                                                "tests_run": 1,
+                                                "successful": True,
+                                                "log": "",
+                                            }
+                                        )
+                                    else:
+                                        future.set_exception(
+                                            TimeoutError("private worker detail")
+                                        )
+                                    return future
+
+                                pool.return_value.__enter__.return_value.submit.side_effect = submitted
                             version.side_effect = lambda name: (
                                 "0.8.1" if name == "review-sensei" else "0.3.1"
                             )
@@ -786,17 +817,17 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                         receipt = json.loads((report / "results.json").read_text())
                         self.assertIs(validate_receipt(receipt, "0.8.1"), receipt)
                         self.assertEqual(
-                            receipt["tests_run"], None if fault == "worker-error" else 0
+                            receipt["tests_run"], None if worker_error else 0
                         )
-                        self.assertEqual(receipt["known_tests_run"], 0)
+                        self.assertEqual(receipt["known_tests_run"], confirmed)
                         self.assertFalse(receipt["execution_complete"])
-                        self.assertEqual(receipt["pass"], 0)
+                        self.assertEqual(receipt["pass"], confirmed)
                         self.assertEqual(receipt["fail"], 1)
                         self.assertEqual(
-                            receipt["rows"][0]["kind"],
-                            "TimeoutError" if fault == "worker-error" else fault,
+                            receipt["rows"][-1]["kind"],
+                            "TimeoutError" if worker_error else fault,
                         )
-                        if fault == "worker-error":
+                        if worker_error:
                             self.assertEqual(
                                 pool.call_args.kwargs["mp_context"].get_start_method(),
                                 "spawn",
@@ -806,9 +837,19 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                             )
                             self.assertEqual(receipt["expected_contracts"], list(names))
                             self.assertEqual(
-                                receipt["unconfirmed_contracts"], list(names)
+                                receipt["unconfirmed_contracts"],
+                                list(names[confirmed:]),
                             )
-                            self.assertEqual(receipt["rows"][0]["contract"], names[0])
+                            self.assertEqual(
+                                receipt["submitted_contracts"], list(names)
+                            )
+                            self.assertEqual(receipt["unsubmitted_contracts"], [])
+                            self.assertEqual(
+                                receipt["confirmed_contracts"], list(names[:confirmed])
+                            )
+                            self.assertEqual(
+                                receipt["rows"][-1]["contract"], names[confirmed]
+                            )
                             self.assertNotIn(
                                 "private worker detail", json.dumps(receipt)
                             )

@@ -180,6 +180,7 @@ def run_contract(tests, name, version, github_version):
 
 
 def validate_execution(record, expected):
+    # Parent and worker must preserve the same declared loader traversal order.
     if (
         not isinstance(record, dict)
         or not expected
@@ -223,6 +224,7 @@ def main():
     load_error = None
     inventory = []
     confirmed_contracts = []
+    submitted_contracts = []
     workers_started = False
     worker_contract = None
     stage = "inventory"
@@ -258,16 +260,20 @@ def main():
                 ) as pool:
                     stage = "worker-pool"
                     workers_started = True
-                    futures = [
-                        pool.submit(
-                            run_contract,
-                            str(tests),
-                            name,
-                            args.expected_version,
-                            args.expected_github_version,
+                    futures = []
+                    for name in CONTRACTS:
+                        stage = "worker-submit"
+                        worker_contract = name
+                        futures.append(
+                            pool.submit(
+                                run_contract,
+                                str(tests),
+                                name,
+                                args.expected_version,
+                                args.expected_github_version,
+                            )
                         )
-                        for name in CONTRACTS
-                    ]
+                        submitted_contracts.append(name)
                     successful = True
                     for name, future in zip(CONTRACTS, futures):
                         stage = "worker-result"
@@ -312,6 +318,11 @@ def main():
         "executed_ids": executed,
         "expected_inventory": inventory,
         "expected_contracts": list(CONTRACTS),
+        "submitted_contracts": submitted_contracts,
+        "unsubmitted_contracts": [
+            name for name in CONTRACTS if name not in submitted_contracts
+        ],
+        "confirmed_contracts": confirmed_contracts,
         "unconfirmed_contracts": [
             name for name in CONTRACTS if name not in confirmed_contracts
         ]
