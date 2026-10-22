@@ -417,6 +417,54 @@ class ReleaseChannelTests(unittest.TestCase):
                 )
                 self.assertFalse(channels.record(channel)["successful"])
 
+    def test_npm_channel_result_requires_every_published_consumer_verification(self):
+        targets = (
+            "darwin-arm64",
+            "darwin-x64",
+            "linux-arm64-gnu",
+            "linux-x64-gnu",
+            "win32-x64",
+        )
+        job_names = (
+            "Qualify signed prepared source and exact-head CI",
+            "Assemble and validate npm package set",
+            "Publish npm packages with Trusted Publishing",
+            *(f"Native standalone ({target})" for target in targets),
+            *(f"Verify published npm consumer ({target})" for target in targets),
+        )
+        successful_jobs = [
+            {
+                "id": index,
+                "name": name,
+                "run_attempt": 2,
+                "status": "completed",
+                "conclusion": "success",
+            }
+            for index, name in enumerate(job_names, 1)
+        ]
+        self.jobs = copy.deepcopy(successful_jobs)
+        with (
+            patch.dict(os.environ, self.environment("npm"), clear=True),
+            patch.object(channels.docs, "api", return_value=run("npm")),
+        ):
+            self.assertTrue(channels.record("npm")["successful"])
+            for target in targets:
+                name = f"Verify published npm consumer ({target})"
+                for outcome in ("missing", "failure", "skipped", "in_progress"):
+                    with self.subTest(target=target, outcome=outcome):
+                        self.jobs = copy.deepcopy(successful_jobs)
+                        verification = next(j for j in self.jobs if j["name"] == name)
+                        if outcome == "missing":
+                            self.jobs.remove(verification)
+                        elif outcome == "in_progress":
+                            verification.update(status="in_progress", conclusion=None)
+                        else:
+                            verification["conclusion"] = outcome
+                        receipt = channels.record("npm")
+                        self.assertFalse(receipt["successful"])
+                        if outcome != "missing":
+                            self.assertIn(verification, receipt["jobs"])
+
     def npm_bundle(self):
         bundle = self.root / "bundle"
         bundle.mkdir()

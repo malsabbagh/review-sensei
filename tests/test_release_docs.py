@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib.util
 import io
 import json
@@ -883,7 +885,137 @@ class IndependentReleasePagesTests(unittest.TestCase):
         ]
         self.runs = [self.npm]
         self.python_runs = [self.python]
+        self.workflow = b"name: Release npm\njobs:\n  publish-npm: {}\n"
+        self.enterContext(patch.object(DOCS, "api", side_effect=self.source_api))
         self.enterContext(patch.object(DOCS, "api_pages", side_effect=self.pages))
+
+    def source_api(self, path):
+        self.assertEqual(
+            path,
+            "contents/.github/workflows/publish-npm.yml?ref=" + self.npm["head_sha"],
+        )
+        return {
+            "type": "file",
+            "path": ".github/workflows/publish-npm.yml",
+            "encoding": "base64",
+            "size": len(self.workflow),
+            "sha": hashlib.sha1(
+                f"blob {len(self.workflow)}\0".encode() + self.workflow
+            ).hexdigest(),
+            "content": base64.b64encode(self.workflow).decode() + "\n",
+        }
+
+    def consumer_policy(self):
+        self.workflow = (
+            b"# reviewsensei:published-npm-consumer-verification:v1\n"
+            b"name: Release npm\njobs:\n  verify-published: {}\n"
+        )
+        names = [
+            f"Verify published npm consumer ({target})"
+            for target in (
+                "darwin-arm64",
+                "darwin-x64",
+                "linux-arm64-gnu",
+                "linux-x64-gnu",
+                "win32-x64",
+            )
+        ]
+        self.npm_jobs.extend(
+            {
+                "name": name,
+                "run_attempt": 1,
+                "status": "completed",
+                "conclusion": "success",
+            }
+            for name in names
+        )
+        return names
+
+    def test_new_source_requires_each_verified_consumer_despite_green_aggregate(self):
+        names = self.consumer_policy()
+        DOCS.validate_channels(self.python, self.python_jobs)
+        original = list(self.npm_jobs)
+        for name in names:
+            for outcome in (
+                "missing",
+                "skipped",
+                "failure",
+                "cancelled",
+                "in_progress",
+            ):
+                with self.subTest(name=name, outcome=outcome):
+                    self.npm_jobs = [dict(job) for job in original]
+                    job = next(j for j in self.npm_jobs if j["name"] == name)
+                    if outcome == "missing":
+                        self.npm_jobs.remove(job)
+                    elif outcome == "in_progress":
+                        job.update(status="in_progress", conclusion=None)
+                    else:
+                        job["conclusion"] = outcome
+                    with self.assertRaisesRegex(ValueError, "npm prerequisite"):
+                        DOCS.validate_channels(self.python, self.python_jobs)
+        self.npm_jobs = original
+
+    def test_consumer_retry_uses_latest_execution_and_refuses_ambiguity(self):
+        name = self.consumer_policy()[0]
+        first = next(j for j in self.npm_jobs if j["name"] == name)
+        first["conclusion"] = "failure"
+        retried = {**first, "run_attempt": 2, "conclusion": "success"}
+        self.npm_jobs.append(retried)
+        DOCS.validate_channels(self.python, self.python_jobs)
+        for outcome in ("failure", "skipped", "cancelled"):
+            retried["conclusion"] = outcome
+            with self.subTest(outcome=outcome), self.assertRaises(ValueError):
+                DOCS.validate_channels(self.python, self.python_jobs)
+        retried["conclusion"] = "success"
+        self.npm_jobs.append(dict(retried))
+        with self.assertRaisesRegex(ValueError, "npm prerequisite"):
+            DOCS.validate_channels(self.python, self.python_jobs)
+
+    def test_unknown_duplicate_or_undeclared_consumer_policy_refuses(self):
+        self.consumer_policy()
+        declared = self.workflow
+        for workflow in (
+            declared.replace(b":v1", b":v2"),
+            declared.replace(b":v1", b""),
+            declared + b"# reviewsensei:published-npm-consumer-verification:v1\n",
+            b"name: Release npm\njobs:\n  verify-published: {}\n",
+        ):
+            with (
+                self.subTest(workflow=workflow),
+                self.assertRaisesRegex(ValueError, "consumer policy"),
+            ):
+                self.workflow = workflow
+                DOCS.validate_channels(self.python, self.python_jobs)
+
+    def test_source_policy_requires_exact_bounded_workflow_blob(self):
+        self.consumer_policy()
+        metadata = self.source_api(
+            "contents/.github/workflows/publish-npm.yml?ref=" + self.npm["head_sha"]
+        )
+        for key, value in (
+            ("path", "attacker.yml"),
+            ("type", "dir"),
+            ("encoding", "none"),
+            ("size", 131073),
+            ("size", metadata["size"] + 1),
+            ("sha", "b" * 40),
+            ("content", "!!not-base64!!"),
+        ):
+            with (
+                self.subTest(key=key, value=value),
+                patch.object(DOCS, "api", return_value={**metadata, key: value}),
+                self.assertRaises(ValueError),
+            ):
+                DOCS.validate_channels(self.python, self.python_jobs)
+
+    def test_checked_in_workflow_declares_supported_consumer_policy(self):
+        self.workflow = (ROOT / ".github/workflows/publish-npm.yml").read_bytes()
+        self.assertTrue(DOCS.npm_consumer_policy(self.npm["head_sha"]))
+
+    def test_historical_combined_source_needs_no_new_policy_lookup(self):
+        with patch.object(DOCS, "api", side_effect=AssertionError("unexpected lookup")):
+            DOCS.validate_channels(run_record(), successful_jobs())
 
     def pages(self, path, key=None):
         if path.startswith("actions/workflows/publish-npm.yml/runs?"):
@@ -939,6 +1071,8 @@ class IndependentReleasePagesTests(unittest.TestCase):
 
     def test_both_origins_require_one_original_python_run(self):
         def api(path):
+            if path.startswith("contents/"):
+                return self.source_api(path)
             if path == "actions/runs/42":
                 return self.python
             if path == "actions/runs/43":
@@ -985,6 +1119,8 @@ class IndependentReleasePagesTests(unittest.TestCase):
 
     def test_npm_completion_selects_python_run_and_its_exact_docs_artifact(self):
         def api(path):
+            if path.startswith("contents/"):
+                return self.source_api(path)
             if path == "actions/runs/43":
                 return {**self.npm, "read_only_api_detail": "not an identity field"}
             if path == "compare/" + "a" * 40 + "...main":

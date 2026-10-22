@@ -16,6 +16,15 @@ invoke a shell. The resulting folder is copied into the matching npm platform
 package by `scripts/prepare_npm_packages.py` and independently validated before
 `npm pack`.
 
+Those native build checks exercise the staged bundle before publication. Future
+signed releases containing the separate `verify-published` matrix additionally
+install the exact launcher/platform pair from the public npm registry on all
+five supported native targets. The installed command executes fixture and exit
+checks without falling back to the checkout engine or a system Python. A failed
+consumer verifier leaves the npm channel incomplete even if publication has
+already succeeded. See [the release runbook](../../docs/releasing.md#published-npm-consumer-verification)
+and [Proposed ADR 0104](../../docs/adr/0104-published-npm-consumer-verification.md).
+
 For a local deterministic prerequisite check (which does not require
 PyInstaller), run:
 

@@ -149,6 +149,61 @@ Existing exact registry entries are skipped; different bytes hold publication.
 The clean Linux consumer installation and `npm audit signatures` remain.
 No rebuild, overwrite, replacement artifact or moved tag repairs partial npm.
 
+### Published npm consumer verification
+
+Future signed releases containing [Proposed ADR 0104](adr/0104-published-npm-consumer-verification.md)
+add a separate read-only `verify-published` matrix after `qualify-source` and
+`publish-npm`. Its checks are named `Verify published npm consumer (TARGET)` for
+`linux-x64-gnu`, `linux-arm64-gnu`, `darwin-x64`, `darwin-arm64` and `win32-x64`.
+Native builds, prepublication smoke tests, tarball/source attestations and the
+protected publisher remain required. The verifier adds no publishing authority.
+
+Each target takes the exact version and source SHA from the signed qualifier
+outputs. Verification-only npm 11.16.0 installs the exact launcher and optional
+native dependency from the public registry with `--ignore-scripts`, a fresh
+prefix/cache and empty user/global configurations. The helper verifies installed
+version, native package, registry integrity and provenance against that source,
+and runs `npm audit signatures`. Its CLI subprocesses use a strict environment
+allowlist without inherited npm, GitHub or provider credentials. No checkout
+engine, staged bundle or system Python fallback supplies the command.
+The existing publisher retains npm 11.5.1; its publication toolchain is unchanged.
+Unix lanes execute the owned npm bin shim. Windows validates the cmd shim's
+target and invokes that installed JavaScript launcher through Node without a
+command shell; the receipt records the entrypoint used.
+
+The installed command must pass `--version`, `--help` and deterministic fixture
+evaluation, produce the expected blocking review with review exit code 1 and
+operational exit code 0, and reject an invalid diff with exit code 2. Fixtures
+use synthetic data and require no live provider credentials. Each target
+attempt always runs the upload step for its receipt directory as
+`npm-consumer-TARGET-RUN-ATTEMPT`, including `receipt.json`, command stdout/stderr,
+`package-lock.json`, `audit-signatures.json` and any produced evaluation/review
+artifacts. Missing receipt files fail the upload, including when initialization
+failed before receipt creation. Inspect failure evidence before retrying;
+absence is not a pass.
+
+The npm channel result waits for all five latest authenticated verification job
+conclusions alongside its existing required jobs. A failed, skipped, cancelled,
+missing or ambiguous check leaves the channel incomplete even when publication
+has already succeeded. These consumer receipts supplement the original
+publication proofs. Python/v5 remains independent, and Pages retains the
+requirement that both release channels complete successfully.
+Pages reads the bounded npm workflow from the exact signed source as data and
+verifies its Git blob identity. The closed
+`# reviewsensei:published-npm-consumer-verification:v1` declaration requires all
+five latest successful consumer jobs at selection and fresh rechecks. Historical
+combined runs and split sources with neither the consumer job nor its declaration
+keep their original prerequisites. Unknown, malformed or duplicate declarations, or
+an undeclared `verify-published` job, refuse admission.
+
+Retry failed verification jobs in the original **Release npm** run against the
+same published version and qualified source. Do not republish, rebuild different
+bytes or create a tag merely to retry verification. Preserve the original bundle
+and receipts. A defect in the published package requires a reviewed repair and
+higher version through the usual release process. Existing signed tags keep
+their original workflow; evidence from an earlier version or one target does not
+qualify a future release's five-platform matrix.
+
 For a failed Python draft/finalizer, retry that job in the original **Release**
 run once that run is terminal, even if **Release npm** is still waiting or
 publishing. For a failed npm publisher, retry only that job in its original

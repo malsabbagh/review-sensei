@@ -149,6 +149,13 @@ workflow/command with its own authorization. Selecting a remote provider sends
 the supplied review data to that provider. Review the data-handling guidance
 before using private source or context.
 
+Maintainer release verification is described in the
+[release runbook](https://github.com/malsabbagh/review-sensei/blob/main/docs/releasing.md#published-npm-consumer-verification).
+Native build smoke and registry-installed consumer checks cover different
+boundaries. Their receipts identify the exact release and target tested;
+package visibility alone does not establish successful integration on every
+supported target.
+
 - [Provider configuration](https://github.com/malsabbagh/review-sensei/blob/main/README.md#providers)
 - [Stages and categories](https://github.com/malsabbagh/review-sensei/blob/main/README.md#structured-review-stages)
 - [Installation](https://github.com/malsabbagh/review-sensei/blob/main/docs/installation.md)
