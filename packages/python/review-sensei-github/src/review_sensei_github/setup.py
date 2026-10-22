@@ -313,6 +313,7 @@ def _looks_like_managed_v5_setup(path: str, content: str) -> bool:
                 _sensei_only_v5_workflow(tag_matches[0]),
                 _keyword_rescan_v5_workflow(tag_matches[0]),
                 _pre_recovery_v5_workflow(tag_matches[0]),
+                _historical_prepared_recovery_v5_workflow(tag_matches[0]),
                 _prepared_recovery_workflow(tag_matches[0]),
             }
         except GitHubSetupError:
@@ -1294,7 +1295,7 @@ def _resolve_trigger_workflow(public_workflow_tag: str) -> str:
     tag = _validate_public_workflow_tag(public_workflow_tag)
     return r"""# ReviewSensei setup version: 5
 name: ReviewSensei review
-run-name: "ReviewSensei ${{ github.event.pull_request && format('PR #{0}', github.event.pull_request.number) || 'manual' }}"
+run-name: "ReviewSensei ${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || github.event_name == 'pull_request_review_comment' && format('PR #{0} inline comment ({1})', github.event.pull_request.number, github.event.comment.user.type == 'Bot' && 'bot skipped' || format('@{0}', github.actor)) || github.event_name == 'issue_comment' && (github.event.issue.pull_request && format('PR #{0} comment ({1})', github.event.issue.number, github.event.comment.user.type == 'Bot' && 'bot skipped' || format('@{0}', github.actor)) || format('issue #{0} comment (skipped)', github.event.issue.number)) || inputs.pull_request_number && format('PR #{0} manual', inputs.pull_request_number) || 'manual' }}"
 
 # Configuration lives in .reviewsensei.yml at the repository root of the
 # trusted policy commit (the repository default branch) that the reusable
@@ -1457,7 +1458,7 @@ jobs:
           sha_full = re.compile(r"^[a-f0-9]{40}$")
           sha_prefix = re.compile(r"^[a-f0-9]{7,39}$")
           ref = re.compile(r"^[A-Za-z0-9._/-]+$")
-          rescan = re.compile(r"(?:@sensei|(?ai:@reviewsensei))[^\S\r\n]+(?i:re(?:[^\S\r\n]|-)?scan)(?:[^\S\r\n]+(?ai:commit)[^\S\r\n]+(?P<commit>[a-fA-F0-9]{7,40}))?")
+          rescan = re.compile(r"\A(?:@sensei|(?ai:@reviewsensei))[ \t]+(?i:re(?:[ \t]|-)?scan)(?:[ \t]+(?ai:commit)[ \t]+(?P<commit>[a-fA-F0-9]{7,40}))?\s*\Z")
           pull = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
           event_name = sys.argv[2]
           comment_body = sys.argv[3] if len(sys.argv) > 3 else ""
@@ -1520,13 +1521,13 @@ jobs:
           elif event_name == "pull_request_review_comment":
               operation = "reply"
           elif event_name == "issue_comment":
-              match = rescan.fullmatch(comment_body.strip())
+              match = rescan.fullmatch(comment_body)
               if match is not None:
                   if len(comment_body.encode("utf-8")) > 4096:
                       print("::error::explicit rescan comment exceeds 4096 UTF-8 bytes", file=sys.stderr)
                       raise SystemExit(1)
                   resolved_head = choose_head(match.group("commit"))
-              elif isinstance(comment_body, str) and len(comment_body.encode("utf-8")) <= 4096 and re.search(r"(?m)(?<!\S)@(?:(?ai:reviewsensei)|sensei)\s+(?:review\s+(?:status|pause|continue|reenroll)|verify|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}\s+--reason\s+\S.*|i\s+reviewed\s+the\s+media\s+files\s+and\s+i\s+approve|override\s+(?:(?:rs-)?[a-f0-9]{6,64})(?:(?:\s*,\s*|\s+)(?:rs-)?[a-f0-9]{6,64}){0,9}(?:\s+acceptable\s+risk)?|(?:(?:rs-)?[a-f0-9]{6,64})(?:(?:\s*,\s*|\s+)(?:rs-)?[a-f0-9]{6,64}){0,9}\s+(?:is|are)\s+acceptable\s+risk)\s*\Z", comment_body, re.IGNORECASE):
+              elif isinstance(comment_body, str) and len(comment_body.encode("utf-8")) <= 4096 and re.search(r"\A@(?:(?ai:reviewsensei)|sensei)[ \t]+(?:review[ \t]+(?:status|pause|continue|reenroll)|verify|(?:dismiss|defer|accept-risk)[ \t]+[a-f0-9]{16,64}[ \t]+--reason[ \t]+\S[^\r\n]*|(?:review[ \t]+)?accept-coverage-uncertainty[ \t]+--reason[ \t]+\S[^\r\n]*|i[ \t]+reviewed[ \t]+the[ \t]+media[ \t]+files[ \t]+and[ \t]+i[ \t]+approve|override[ \t]+(?:(?:rs-)?[a-f0-9]{6,64})(?:(?:[ \t]*,[ \t]*|[ \t]+)(?:rs-)?[a-f0-9]{6,64}){0,9}(?:[ \t]+acceptable[ \t]+risk)?|(?:(?:rs-)?[a-f0-9]{6,64})(?:(?:[ \t]*,[ \t]*|[ \t]+)(?:rs-)?[a-f0-9]{6,64}){0,9}[ \t]+(?:is|are)[ \t]+acceptable[ \t]+risk)[ \t\r\n]*\Z", comment_body, re.IGNORECASE):
                   operation = "command"
               else:
                   operation = "reply"
@@ -1581,6 +1582,58 @@ jobs:
 """.replace("__PUBLIC_WORKFLOW_TAG__", tag)
 
 
+_RECOVERY_DISPATCH_INPUTS = (
+    "      recover_publication:\n"
+    "        description: Publish the original retained result without inference\n"
+    "        required: false\n"
+    "        default: false\n"
+    "        type: boolean\n"
+    "      recovery_policy_commit:\n"
+    "        description: Exact original trusted default-branch policy commit for recovery\n"
+    "        required: false\n"
+    "      recovery_expected_head:\n"
+    "        description: Exact original pull-request head for recovery\n"
+    "        required: false\n"
+)
+
+_RECOVERY_WITH_BLOCK = (
+    "      recover_publication: ${{ inputs.recover_publication || false }}\n"
+    "      recovery_policy_commit: ${{ inputs.recovery_policy_commit || '' }}\n"
+    "      recovery_expected_head: ${{ inputs.recovery_expected_head || '' }}\n"
+)
+
+
+def _current_pre_recovery_v5_workflow(
+    public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG,
+) -> str:
+    """Return the current setup-v5 caller without recovery dispatch inputs."""
+
+    prepared = _resolve_trigger_workflow(public_workflow_tag)
+    without_inputs = prepared.replace(_RECOVERY_DISPATCH_INPUTS, "", 1)
+    without_with = without_inputs.replace(_RECOVERY_WITH_BLOCK, "", 1)
+    if without_inputs == prepared or without_with == without_inputs:
+        raise GitHubSetupError("recovery block is missing from the prepared caller")
+    return without_with
+
+
+def _historical_prepared_recovery_v5_workflow(
+    public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG,
+) -> str:
+    """Return the historical prepared recovery caller for managed recognition."""
+
+    base = _pre_recovery_v5_workflow(public_workflow_tag)
+    return base.replace(
+        "        options: [review]\n",
+        f"        options: [review]\n{_RECOVERY_DISPATCH_INPUTS}",
+        1,
+    ).replace(
+        "      operation: ${{ needs.resolve-trigger.outputs.operation }}\n",
+        "      operation: ${{ needs.resolve-trigger.outputs.operation }}\n"
+        + _RECOVERY_WITH_BLOCK,
+        1,
+    )
+
+
 def _prepared_recovery_workflow(
     public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG,
 ) -> str:
@@ -1592,7 +1645,7 @@ def _prepared_recovery_workflow(
 def _tagged_workflow(public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG) -> str:
     """Emit released-compatible setup-v5 bytes until runner-first activation."""
 
-    return _pre_recovery_v5_workflow(public_workflow_tag)
+    return _current_pre_recovery_v5_workflow(public_workflow_tag)
 
 
 def _merge_focused_v4_caller_bytes() -> str:
@@ -2924,3 +2977,356 @@ class SetupPullRequestService:
             permission in normalized and normalized[permission] == "write"
             for permission in REQUIRED_SETUP_PERMISSIONS
         )
+
+
+CALLER_CONTRACT_VERSION = "5.2"
+LOCAL_TRIGGER_OVERRIDE_PATH = "src/review_sensei/hosting/github/trigger.py"
+
+_CANONICAL_RUNS_ON_LINE = "    runs-on: ubuntu-latest"
+_CANONICAL_CHECKOUT_LINE = (
+    "        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
+)
+_STANDARD_WORKFLOW_BINDINGS = frozenset(
+    {
+        "_".join(("OLLAMA", "API", "KEY")),
+        "_".join(("OPENROUTER", "API", "KEY")),
+        "_".join(("OPENAI", "API", "KEY")),
+    }
+)
+
+
+@dataclass(frozen=True)
+class CallerDriftReport:
+    """Structured inspection result for an installed caller workflow."""
+
+    setup_version: int | None
+    contract_version: str
+    is_current: bool
+    stale_sections: tuple[str, ...]
+    recovery_inputs_enabled: bool
+    customizations: dict[str, object]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "setup_version": self.setup_version,
+            "contract_version": self.contract_version,
+            "target_contract_version": CALLER_CONTRACT_VERSION,
+            "is_current": self.is_current,
+            "stale_sections": list(self.stale_sections),
+            "recovery_inputs_enabled": self.recovery_inputs_enabled,
+            "customizations": dict(self.customizations),
+        }
+
+
+@dataclass(frozen=True)
+class TriggerOverrideDriftReport:
+    """Structured inspection result for an optional local trigger.py override."""
+
+    is_current: bool
+    missing_capabilities: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "path": LOCAL_TRIGGER_OVERRIDE_PATH,
+            "is_current": self.is_current,
+            "missing_capabilities": list(self.missing_capabilities),
+        }
+
+
+def _caller_job_setting_bounds(
+    lines: Sequence[str], *, setting: str, allow_inline: bool = False
+) -> tuple[int, int] | None:
+    suffix = r".*" if allow_inline else r"(?:#.*)?"
+    starts = []
+    for index, line in enumerate(lines):
+        if not line.startswith(f"    {setting}:"):
+            continue
+        if not re.fullmatch(rf"    {re.escape(setting)}:[ \t]*{suffix}", line):
+            raise GitHubSetupError(
+                f"unsupported {setting} declaration; refusing lossy migration"
+            )
+        starts.append(index)
+    if len(starts) > 1:
+        raise GitHubSetupError(
+            f"caller workflow defines multiple {setting} blocks; refusing ambiguous migration"
+        )
+    if not starts:
+        return None
+    start = starts[0] + 1
+    end = start
+    while end < len(lines):
+        line = lines[end]
+        if (
+            line.strip()
+            and not line.lstrip().startswith("#")
+            and len(line) - len(line.lstrip(" ")) <= 4
+        ):
+            break
+        end += 1
+    return start, end
+
+
+def _extract_caller_customizations(content: str) -> dict[str, object]:
+    customizations: dict[str, object] = {}
+    lines = content.splitlines()
+    runs_on_bounds = _caller_job_setting_bounds(
+        lines, setting="runs-on", allow_inline=True
+    )
+    if runs_on_bounds is not None:
+        start, end = runs_on_bounds
+        runs_on_full = "\n".join(lines[start - 1 : end])
+        inline_value = lines[start - 1].split(":", 1)[1].strip()
+        if inline_value.startswith("#"):
+            inline_value = ""
+        block_lines = lines[start:end]
+        block_has_value = any(
+            line.strip() and not line.lstrip().startswith("#") for line in block_lines
+        )
+        if not inline_value and not block_has_value:
+            raise GitHubSetupError("caller workflow has an empty runs-on definition")
+        if inline_value and block_has_value:
+            raise GitHubSetupError(
+                "caller workflow mixes inline and block runs-on values"
+            )
+        if block_has_value:
+            for raw_line in block_lines:
+                stripped = raw_line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                indent = len(raw_line) - len(raw_line.lstrip(" "))
+                if indent == 6:
+                    if not (
+                        stripped.startswith("- ")
+                        or stripped == "-"
+                        or stripped.startswith("group:")
+                        or stripped.startswith("labels:")
+                    ):
+                        raise GitHubSetupError(
+                            f"unsupported runs-on block customization: {stripped}"
+                        )
+                elif indent > 6:
+                    if not (stripped.startswith("- ") or stripped == "-"):
+                        raise GitHubSetupError(
+                            f"unsupported nested runs-on customization: {stripped}"
+                        )
+                else:
+                    raise GitHubSetupError(
+                        f"unsupported runs-on block indentation: {stripped}"
+                    )
+            customizations["runs_on"] = "\n".join(block_lines)
+            customizations["runs_on_block"] = runs_on_full
+        elif runs_on_full != _CANONICAL_RUNS_ON_LINE:
+            if inline_value.startswith("{") and not inline_value.startswith("${{"):
+                raise GitHubSetupError(
+                    f"unsupported inline runs-on customization: {inline_value}"
+                )
+            customizations["runs_on"] = inline_value
+            customizations["runs_on_block"] = runs_on_full
+    checkout_match = re.search(
+        r"(?m)^        uses:[ \t]*actions/checkout@[^\r\n]+$", content
+    )
+    if checkout_match is not None:
+        checkout_line = checkout_match.group(0)
+        if checkout_line != _CANONICAL_CHECKOUT_LINE:
+            customizations["checkout_uses"] = checkout_line.split("uses:", 1)[1].strip()
+    mapping_bounds = _caller_job_setting_bounds(lines, setting="secrets")
+    if mapping_bounds is not None:
+        custom_job_lines: list[str] = []
+        keep_value = False
+        start, end = mapping_bounds
+        for raw_line in lines[start:end]:
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                custom_job_lines.append(raw_line)
+                continue
+            entry = re.fullmatch(r"      ([A-Za-z0-9_]+):(?:[ \t].*)?", raw_line)
+            if entry is not None:
+                keep_value = entry.group(1) not in _STANDARD_WORKFLOW_BINDINGS
+            elif not raw_line.startswith("        "):
+                raise GitHubSetupError(
+                    "unsupported secrets mapping customization; refusing lossy migration"
+                )
+            if keep_value:
+                custom_job_lines.append(raw_line)
+        if any(line.strip() for line in custom_job_lines):
+            customizations["custom_job_lines"] = tuple(custom_job_lines)
+    return customizations
+
+
+def inspect_installed_caller_drift(
+    content: str,
+    *,
+    public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG,
+) -> CallerDriftReport:
+    """Inspect an installed caller workflow for stale sections and customizations."""
+
+    _validate_public_workflow_tag(public_workflow_tag)
+    setup_version = _setup_marker_version(content)
+    stale: list[str] = []
+
+    if (
+        "github.event_name == 'pull_request_review_comment'" not in content
+        or "bot skipped" not in content
+    ):
+        stale.append("run_name")
+
+    issue_guard_ok = (
+        "github.event_name == 'issue_comment'" in content
+        and "contains(github.event.comment.body, '@reviewsensei')" in content
+        and "contains(github.event.comment.body, '@sensei')" in content
+    )
+    if not issue_guard_ok:
+        stale.append("issue_comment_guard_alias")
+
+    inline_guard_ok = (
+        "github.event_name == 'pull_request_review_comment'" in content
+        and content.count("contains(github.event.comment.body, '@reviewsensei')") >= 2
+        and content.count("contains(github.event.comment.body, '@sensei')") >= 2
+    )
+    if not inline_guard_ok:
+        stale.append("inline_comment_guard_alias")
+
+    if content.count("github.event.comment.user.type != 'Bot'") < 2:
+        stale.append("bot_loop_guard")
+
+    if (
+        content.count("github.event.comment.author_association == 'OWNER'") < 2
+        or content.count("github.event.comment.author_association == 'MEMBER'") < 2
+        or content.count("github.event.comment.author_association == 'COLLABORATOR'")
+        < 2
+    ):
+        stale.append("actor_association_guard")
+
+    if (
+        r'rescan = re.compile(r"\A(?:@sensei|(?ai:@reviewsensei))[ \t]+' not in content
+        or "match = rescan.fullmatch(comment_body)" not in content
+    ):
+        stale.append("standalone_rescan_parser")
+
+    if (
+        r're.search(r"\A@(?:(?ai:reviewsensei)|sensei)[ \t]+' not in content
+        or "accept-coverage-uncertainty" not in content
+        or "override[ \\t]+" not in content
+    ):
+        stale.append("standalone_command_prefilter")
+
+    recovery_inputs_enabled = (
+        "recover_publication:" in content
+        and "recovery_policy_commit:" in content
+        and "recovery_expected_head:" in content
+    )
+    customizations = _extract_caller_customizations(content)
+    if setup_version is None or setup_version < SETUP_VERSION:
+        contract_version = "legacy"
+    elif not stale:
+        contract_version = CALLER_CONTRACT_VERSION
+    elif "issue_comment_guard_alias" in stale or "inline_comment_guard_alias" in stale:
+        contract_version = "5.0"
+    else:
+        contract_version = "5.1"
+
+    return CallerDriftReport(
+        setup_version=setup_version,
+        contract_version=contract_version,
+        is_current=(setup_version == SETUP_VERSION and not stale),
+        stale_sections=tuple(stale),
+        recovery_inputs_enabled=recovery_inputs_enabled,
+        customizations=customizations,
+    )
+
+
+def migrate_caller_preserving_customizations(
+    content: str,
+    *,
+    public_workflow_tag: str = DEFAULT_PUBLIC_WORKFLOW_TAG,
+    include_recovery_inputs: bool | None = None,
+) -> tuple[str, str]:
+    """Migrate an installed caller while preserving runner, checkout, and secret pins."""
+
+    import difflib
+
+    drift = inspect_installed_caller_drift(
+        content, public_workflow_tag=public_workflow_tag
+    )
+    use_recovery = (
+        drift.recovery_inputs_enabled
+        if include_recovery_inputs is None
+        else include_recovery_inputs
+    )
+    target = (
+        _prepared_recovery_workflow(public_workflow_tag)
+        if use_recovery
+        else _tagged_workflow(public_workflow_tag)
+    )
+    runs_on_block = drift.customizations.get("runs_on_block")
+    runs_on = drift.customizations.get("runs_on")
+    if isinstance(runs_on_block, str) and runs_on_block:
+        target = target.replace(
+            _CANONICAL_RUNS_ON_LINE,
+            runs_on_block,
+            1,
+        )
+    elif isinstance(runs_on, str) and runs_on:
+        replacement = (
+            f"    runs-on:\n{runs_on}"
+            if "\n" in runs_on or runs_on.startswith(" ")
+            else f"    runs-on: {runs_on}"
+        )
+        target = target.replace(
+            _CANONICAL_RUNS_ON_LINE,
+            replacement,
+            1,
+        )
+    checkout_uses = drift.customizations.get("checkout_uses")
+    if isinstance(checkout_uses, str) and checkout_uses:
+        target = target.replace(
+            _CANONICAL_CHECKOUT_LINE,
+            f"        uses: {checkout_uses}",
+            1,
+        )
+    custom_job_lines = drift.customizations.get("custom_job_lines")
+    if isinstance(custom_job_lines, tuple) and custom_job_lines:
+        target_lines = target.splitlines()
+        target_bounds = _caller_job_setting_bounds(target_lines, setting="secrets")
+        if target_bounds is None:
+            raise GitHubSetupError("current caller has no secrets mapping")
+        target_lines[target_bounds[1] : target_bounds[1]] = [
+            str(line) for line in custom_job_lines
+        ]
+        target = "\n".join(target_lines) + "\n"
+
+    diff = "".join(
+        difflib.unified_diff(
+            content.splitlines(keepends=True),
+            target.splitlines(keepends=True),
+            fromfile=f"a/{WORKFLOW_PATH}",
+            tofile=f"b/{WORKFLOW_PATH}",
+        )
+    )
+    return target, diff
+
+
+def inspect_local_trigger_override(content: str) -> TriggerOverrideDriftReport:
+    """Inspect an optional local trigger.py override that takes precedence over caller fallback."""
+
+    missing: list[str] = []
+    if "(?ai:@reviewsensei)" not in content or "@sensei" not in content:
+        missing.append("dual_handle_alias")
+    if (
+        r"\A(?:@sensei|(?ai:@reviewsensei))[ \t]+" not in content
+        or "_RESCAN_COMMAND.fullmatch(body.strip())" in content
+    ):
+        missing.append("standalone_anchored_rescan")
+    if (
+        r"\A@(?:(?ai:reviewsensei)|sensei)[ \t]+" not in content
+        and r"\A(?:@sensei|(?ai:@reviewsensei))(?=[ \t]+)" not in content
+    ) or "(?m)(?<!\\S)" in content:
+        missing.append("standalone_anchored_command_prefilter")
+    if "accept-coverage-uncertainty" not in content:
+        missing.append("accept_coverage_uncertainty_routing")
+    if "override" not in content or "{0,9}" not in content:
+        missing.append("batch_override_routing")
+    return TriggerOverrideDriftReport(
+        is_current=not missing,
+        missing_capabilities=tuple(missing),
+    )

@@ -44,48 +44,57 @@ const SHA_PATTERN = /^[a-f0-9]{40}$/;
 const RUN_ID_PATTERN = /^[1-9][0-9]{0,18}$/;
 const ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const MAX_COMMAND_REASON_BYTES = 512;
+const MAX_COMMAND_BODY_BYTES = 4096;
 // Keep this command grammar in lockstep with Python's parser. The explicit
 // ASCII set rejects control and Unicode separators instead of letting the two
 // runtimes disagree about whether a mention is command-shaped.
 const COMMAND_WHITESPACE = "[ \\t\\r\\n]";
 const COMMAND_WHITESPACE_RUN = `${COMMAND_WHITESPACE}+`;
+const COMMAND_HORIZONTAL_WHITESPACE = "[ \\t]";
+const COMMAND_HORIZONTAL_RUN = `${COMMAND_HORIZONTAL_WHITESPACE}+`;
 const COMMAND_TRIM = /^[ \t\r\n]+|[ \t\r\n]+$/g;
-// Equivalent to Python's scoped (?ai:@reviewsensei): canonical ASCII case
-// variants qualify, Unicode lookalikes do not, and the legacy gate stays lowercase.
+// Equivalent to Python's scoped \A(?:@sensei|(?ai:@reviewsensei)): canonical
+// ASCII case variants qualify at the very start of the comment body (index 0),
+// Unicode lookalikes do not, the legacy gate stays lowercase, and leading
+// indentation, blockquotes (`>`), code fences, and inline prose are rejected.
 const RECOGNIZED_COMMAND = new RegExp(
-  `(?:^|${COMMAND_WHITESPACE})@(?:sensei|[rR][eE][vV][iI][eE][wW][sS][eE][nN][sS][eE][iI])${COMMAND_WHITESPACE_RUN}([\\s\\S]*?)${COMMAND_WHITESPACE}*$`,
+  `^@(?:sensei|[rR][eE][vV][iI][eE][wW][sS][eE][nN][sS][eE][iI])${COMMAND_HORIZONTAL_RUN}([^\\r\\n]+?)${COMMAND_WHITESPACE}*$`,
 );
 const RECOGNIZED_FINDING = new RegExp(
-  `^(?:dismiss|defer|accept-risk)${COMMAND_WHITESPACE_RUN}[a-f0-9]{16,64}${COMMAND_WHITESPACE_RUN}--reason${COMMAND_WHITESPACE_RUN}([^ \\t\\r\\n][\\s\\S]*)$`,
+  `^(?:dismiss|defer|accept-risk)${COMMAND_HORIZONTAL_RUN}[a-f0-9]{16,64}${COMMAND_HORIZONTAL_RUN}--reason${COMMAND_HORIZONTAL_RUN}([^ \\t\\r\\n][^\\r\\n]*)$`,
+  "i",
+);
+const RECOGNIZED_COVERAGE_UNCERTAINTY = new RegExp(
+  `^(?:review${COMMAND_HORIZONTAL_RUN})?accept-coverage-uncertainty${COMMAND_HORIZONTAL_RUN}--reason${COMMAND_HORIZONTAL_RUN}([^ \\t\\r\\n][^\\r\\n]*)$`,
   "i",
 );
 const RECOGNIZED_REVIEW_STATUS = new RegExp(
-  `^review${COMMAND_WHITESPACE_RUN}(?:status|pause)${COMMAND_WHITESPACE}*$`,
+  `^review${COMMAND_HORIZONTAL_RUN}(?:status|pause)${COMMAND_WHITESPACE}*$`,
   "i",
 );
 const RECOGNIZED_REENROLL = new RegExp(
-  `^review${COMMAND_WHITESPACE_RUN}reenroll${COMMAND_WHITESPACE}*$`,
+  `^review${COMMAND_HORIZONTAL_RUN}reenroll${COMMAND_WHITESPACE}*$`,
   "i",
 );
 const RECOGNIZED_VERIFY = new RegExp(`^verify${COMMAND_WHITESPACE}*$`, "i");
 const RECOGNIZED_CONTINUE = new RegExp(
-  `^review${COMMAND_WHITESPACE_RUN}continue${COMMAND_WHITESPACE}*$`,
+  `^review${COMMAND_HORIZONTAL_RUN}continue${COMMAND_WHITESPACE}*$`,
   "i",
 );
 const RECOGNIZED_MEDIA_APPROVAL = new RegExp(
-  `^i${COMMAND_WHITESPACE_RUN}reviewed${COMMAND_WHITESPACE_RUN}the${COMMAND_WHITESPACE_RUN}media${COMMAND_WHITESPACE_RUN}files${COMMAND_WHITESPACE_RUN}and${COMMAND_WHITESPACE_RUN}i${COMMAND_WHITESPACE_RUN}approve${COMMAND_WHITESPACE}*$`,
+  `^i${COMMAND_HORIZONTAL_RUN}reviewed${COMMAND_HORIZONTAL_RUN}the${COMMAND_HORIZONTAL_RUN}media${COMMAND_HORIZONTAL_RUN}files${COMMAND_HORIZONTAL_RUN}and${COMMAND_HORIZONTAL_RUN}i${COMMAND_HORIZONTAL_RUN}approve${COMMAND_WHITESPACE}*$`,
   "i",
 );
 const MAX_OVERRIDE_IDS = 10;
 const OVERRIDE_ID = "(?:rs-)?[a-f0-9]{6,64}";
-const OVERRIDE_SEP = `(?:${COMMAND_WHITESPACE}*,${COMMAND_WHITESPACE}*|${COMMAND_WHITESPACE}+)`;
+const OVERRIDE_SEP = `(?:${COMMAND_HORIZONTAL_WHITESPACE}*,${COMMAND_HORIZONTAL_WHITESPACE}*|${COMMAND_HORIZONTAL_WHITESPACE}+)`;
 const OVERRIDE_LIST = `${OVERRIDE_ID}(?:${OVERRIDE_SEP}${OVERRIDE_ID}){0,${MAX_OVERRIDE_IDS - 1}}`;
 const RECOGNIZED_OVERRIDE = new RegExp(
-  `^override${COMMAND_WHITESPACE_RUN}${OVERRIDE_LIST}(?:${COMMAND_WHITESPACE_RUN}acceptable${COMMAND_WHITESPACE_RUN}risk)?${COMMAND_WHITESPACE}*$`,
+  `^override${COMMAND_HORIZONTAL_RUN}${OVERRIDE_LIST}(?:${COMMAND_HORIZONTAL_RUN}acceptable${COMMAND_HORIZONTAL_RUN}risk)?${COMMAND_WHITESPACE}*$`,
   "i",
 );
 const RECOGNIZED_ACCEPTABLE_RISK = new RegExp(
-  `^${OVERRIDE_LIST}${COMMAND_WHITESPACE_RUN}(?:is|are)${COMMAND_WHITESPACE_RUN}acceptable${COMMAND_WHITESPACE_RUN}risk${COMMAND_WHITESPACE}*$`,
+  `^${OVERRIDE_LIST}${COMMAND_HORIZONTAL_RUN}(?:is|are)${COMMAND_HORIZONTAL_RUN}acceptable${COMMAND_HORIZONTAL_RUN}risk${COMMAND_WHITESPACE}*$`,
   "i",
 );
 
@@ -494,10 +503,14 @@ function sessionAttestationForVerification(
 }
 
 function recognizedCommand(value: string): boolean {
+  if (new TextEncoder().encode(value).byteLength > MAX_COMMAND_BODY_BYTES) {
+    return false;
+  }
   const match = RECOGNIZED_COMMAND.exec(value);
   if (match === null) return false;
   const command = match[1];
   const finding = RECOGNIZED_FINDING.exec(command);
+  const coverage = RECOGNIZED_COVERAGE_UNCERTAINTY.exec(command);
   return (
     RECOGNIZED_REVIEW_STATUS.test(command) ||
     RECOGNIZED_REENROLL.test(command) ||
@@ -506,7 +519,8 @@ function recognizedCommand(value: string): boolean {
     RECOGNIZED_MEDIA_APPROVAL.test(command) ||
     RECOGNIZED_OVERRIDE.test(command) ||
     RECOGNIZED_ACCEPTABLE_RISK.test(command) ||
-    (finding !== null && validCommandReason(finding[1]))
+    (finding !== null && validCommandReason(finding[1])) ||
+    (coverage !== null && validCommandReason(coverage[1]))
   );
 }
 

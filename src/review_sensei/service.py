@@ -108,6 +108,22 @@ DEFAULT_STAGES = tuple(
 _PROMPT_PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]*)\}")
 _MAX_PROVIDER_OUTPUT_ATTEMPTS = 2
 _LOGGER = logging.getLogger(__name__)
+_RESULT_WORK_POLICY_DIGESTS: dict[str, str] = {}
+
+
+def _remember_result_work_policy(
+    result: ReviewResult, work_policy_digest: str | None
+) -> ReviewResult:
+    if not work_policy_digest:
+        return result
+    object.__setattr__(result, "work_policy_digest", work_policy_digest)
+    object.__setattr__(result, "_work_policy_digest", work_policy_digest)
+    if len(_RESULT_WORK_POLICY_DIGESTS) >= 256:
+        _RESULT_WORK_POLICY_DIGESTS.pop(next(iter(_RESULT_WORK_POLICY_DIGESTS)))
+    _RESULT_WORK_POLICY_DIGESTS[result.content_digest()] = work_policy_digest
+    return result
+
+
 _PROVIDER_OUTPUT_CORRECTION = """
 
 <review-output-correction>
@@ -356,6 +372,62 @@ class ReviewService:
     ) -> ReviewProvider:
         return self.stage_providers.get(stage.name, default or self.provider)
 
+    def _continuation_scope_digest(
+        self,
+        request: ReviewRequest,
+        *,
+        provider: ReviewProvider,
+        profile: str,
+        budget: ResourceBudget,
+        incremental: IncrementalReviewPlan | None,
+    ) -> str:
+        """Bind reusable coverage to the complete request and public execution identity."""
+        from .evidence import evidence_digest
+
+        return evidence_digest(
+            {
+                "domain": "reviewsensei:partial-continuation-scope:v1",
+                "request": asdict(replace(request, metadata=dict(request.metadata))),
+                "stages": [asdict(stage) for stage in self.stages],
+                "routing": [
+                    {
+                        "stage": stage.name,
+                        "provider": selected.name,
+                        "model": selected.model,
+                    }
+                    for stage in self.stages
+                    for selected in (self._provider_for_stage(stage, default=provider),)
+                ],
+                "profile": profile,
+                "enforce_locations": self.enforce_locations,
+                "work_budgets": asdict(self.work_budgets),
+                "resource_budget": asdict(budget),
+                "capabilities": asdict(self.capabilities)
+                if self.capabilities
+                else None,
+                "incremental": asdict(incremental) if incremental is not None else None,
+            }
+        )
+
+    @staticmethod
+    def _bind_continuation_scope(run: ReviewRun, digest: str) -> ReviewRun:
+        if run.result is None:
+            return run
+        try:
+            result = replace(run.result, continuation_scope_digest=digest)
+        except ReviewInputError as exc:
+            if "review result exceeds the configured size limit" not in str(exc):
+                raise
+            return replace(
+                run,
+                outcome=replace(
+                    run.outcome, status="budget_exhausted", diagnostic="output_budget"
+                ),
+                result=None,
+                error=None,
+            )
+        return replace(run, result=result)
+
     def _budgeted_provider(
         self, provider: ReviewProvider, budgeted: _BudgetedProvider
     ) -> ReviewProvider:
@@ -413,7 +485,7 @@ class ReviewService:
         from .human_file_review import coverage_only_binary
 
         status = self._status_with_coverage(result.review_status, coverage)
-        return replace(
+        updated = replace(
             result,
             coverage=coverage,
             review_status=status,
@@ -425,6 +497,7 @@ class ReviewService:
                 )
             ),
         )
+        return _remember_result_work_policy(updated, self.work_policy_digest)
 
     @staticmethod
     def _status_with_coverage(status: str, coverage: CoverageManifest) -> str:
@@ -458,6 +531,7 @@ class ReviewService:
         trusted_base_sha: str | None,
         trusted_head_sha: str | None,
         profile: str,
+        prior_partial: ReviewResult | None = None,
     ) -> ReviewRun:
         """Run bounded chunk orchestration against one shared resource budget."""
         call_budget = _CallBudget(max_calls=request.work_budget.max_provider_calls)
@@ -465,6 +539,28 @@ class ReviewService:
         accumulated_summary = ""
         accumulated_comments: list[ReviewComment] = []
         accumulated_proposals: list[LearningProposal] = []
+        prior_reviewed_files = 0
+        prior_reviewed_hunks = 0
+        if (
+            prior_partial is not None
+            and prior_partial.review_status == "partial"
+            and prior_partial.coverage is not None
+            and prior_partial.coverage.enumeration_complete
+        ):
+            prior_reviewed_files = sum(
+                1
+                for entry in prior_partial.coverage.files
+                if entry.outcome == "reviewed"
+            )
+            prior_reviewed_hunks = sum(
+                1
+                for entry in prior_partial.coverage.hunks
+                if entry.outcome == "reviewed"
+            )
+            if prior_reviewed_files > 0 or prior_reviewed_hunks > 0:
+                accumulated_summary = prior_partial.summary
+                accumulated_comments.extend(prior_partial.comments)
+                accumulated_proposals.extend(prior_partial.learning_proposals)
         coverage = plan.coverage
         chunks_completed = 0
         last_model = request.model
@@ -659,10 +755,43 @@ class ReviewService:
                         )
                 break
         planned_chunks = len(plan.reviewable_chunks)
-        if chunks_completed == 0:
+        has_prior_progress = (
+            prior_reviewed_files > 0
+            or prior_reviewed_hunks > 0
+            or (
+                prior_partial is not None
+                and prior_partial.review_status == "partial"
+                and prior_partial.coverage is not None
+                and prior_partial.coverage.enumeration_complete
+            )
+        )
+        no_progress_detected = False
+        if chunks_completed == 0 and not has_prior_progress:
             review_status = "incomplete"
         elif chunks_completed < planned_chunks or not coverage.fully_reviewed:
             review_status = "partial"
+            if has_prior_progress:
+                now_reviewed_files = sum(
+                    1 for entry in coverage.files if entry.outcome == "reviewed"
+                )
+                now_reviewed_hunks = sum(
+                    1 for entry in coverage.hunks if entry.outcome == "reviewed"
+                )
+                if (
+                    now_reviewed_files <= prior_reviewed_files
+                    and now_reviewed_hunks <= prior_reviewed_hunks
+                ):
+                    no_progress_detected = True
+                    no_progress_note = (
+                        "No progress on remaining unreviewed coverage; next action: "
+                        "@reviewsensei accept-coverage-uncertainty --reason <reason> "
+                        "or @reviewsensei pause."
+                    )
+                    accumulated_summary = (
+                        f"{accumulated_summary}\n\n{no_progress_note}"
+                        if accumulated_summary
+                        else no_progress_note
+                    )
         else:
             review_status = "complete"
         try:
@@ -710,6 +839,8 @@ class ReviewService:
             result = replace(result, coverage=coverage, coverage_only_partial=True)
         result = self._attach_coverage(result, coverage)
         status, diagnostic = self._run_outcome_for_result(result)
+        if no_progress_detected:
+            diagnostic = "no-progress"
         return self._finish_run(
             tracker=tracker,
             status=status,
@@ -730,6 +861,10 @@ class ReviewService:
         trusted_head_sha: str | None = None,
         profile: str = "default",
         budget: ResourceBudget | None = None,
+        prior_partial: ReviewResult | None = None,
+        expected_policy_digest: str | None = None,
+        expected_configuration_digest: str | None = None,
+        expected_evidence_digest: str | None = None,
         monotonic: Callable[[], float] | None = None,
         sleeper: Callable[[float], None] | None = None,
     ) -> ReviewResult:
@@ -747,6 +882,10 @@ class ReviewService:
             trusted_head_sha=trusted_head_sha,
             profile=profile,
             budget=budget,
+            prior_partial=prior_partial,
+            expected_policy_digest=expected_policy_digest,
+            expected_configuration_digest=expected_configuration_digest,
+            expected_evidence_digest=expected_evidence_digest,
             monotonic=monotonic,
             sleeper=sleeper,
         )
@@ -773,6 +912,10 @@ class ReviewService:
         attach_change_coverage: bool = True,
         work_recovery: WorkRecoveryStore | None = None,
         allow_work_expansion: bool = True,
+        prior_partial: ReviewResult | None = None,
+        expected_policy_digest: str | None = None,
+        expected_configuration_digest: str | None = None,
+        expected_evidence_digest: str | None = None,
         monotonic: Callable[[], float] | None = None,
         sleeper: Callable[[float], None] | None = None,
     ) -> ReviewRun:
@@ -803,10 +946,8 @@ class ReviewService:
             )
         active_provider = provider_override or self.provider
         key_request = request
-        if (
-            self.work_budgets.mode == "unified"
-            and current_key is None
-            and (trusted_base_sha is not None or trusted_head_sha is not None)
+        if current_key is None and (
+            trusted_base_sha is not None or trusted_head_sha is not None
         ):
             if (
                 trusted_base_sha is None
@@ -883,6 +1024,13 @@ class ReviewService:
                 sleeper=sleeper or time.sleep,
             )
         effective_budget = tracker.budget
+        continuation_scope_digest = self._continuation_scope_digest(
+            key_request,
+            provider=active_provider,
+            profile=profile,
+            budget=effective_budget,
+            incremental=incremental,
+        )
         accumulated_summary: str = ""
         accumulated_comments: list[ReviewComment] = []
         accumulated_proposals: list[LearningProposal] = []
@@ -893,10 +1041,84 @@ class ReviewService:
         self._provider_calls = 0 if tracker is None else tracker.provider_calls
         stage_summary: dict[str, str] = {}
 
+        if prior_partial is not None:
+            if (
+                prior_partial.provider
+                and prior_partial.provider != active_provider.name
+            ):
+                raise ReviewInputError(
+                    "prior partial review provider does not match current provider"
+                )
+            if (
+                request.model is not None
+                and prior_partial.model is not None
+                and prior_partial.model != request.model
+            ):
+                raise ReviewInputError(
+                    "prior partial review model does not match current model"
+                )
+            prior_work_policy = (
+                prior_partial.work_policy_digest
+                or getattr(prior_partial, "_work_policy_digest", None)
+                or _RESULT_WORK_POLICY_DIGESTS.get(prior_partial.content_digest())
+            )
+            if (
+                prior_work_policy is not None
+                and prior_work_policy != self.work_policy_digest
+            ):
+                raise ReviewInputError(
+                    "prior partial review policy does not match current work policy"
+                )
+            if prior_partial.transaction is not None:
+                expected_base = trusted_base_sha or key_request.base_sha
+                expected_head = trusted_head_sha or key_request.head_sha
+                if (
+                    expected_base is not None
+                    and prior_partial.transaction.base_sha != expected_base
+                ):
+                    raise ReviewInputError(
+                        "prior partial review snapshot does not match current base or head"
+                    )
+                if (
+                    expected_head is not None
+                    and prior_partial.transaction.head_sha != expected_head
+                ):
+                    raise ReviewInputError(
+                        "prior partial review snapshot does not match current base or head"
+                    )
+                if (
+                    expected_policy_digest is not None
+                    and prior_partial.transaction.policy_digest
+                    != expected_policy_digest
+                ):
+                    raise ReviewInputError(
+                        "prior partial review policy does not match current convergence policy"
+                    )
+                if (
+                    expected_configuration_digest is not None
+                    and prior_partial.transaction.configuration_digest
+                    != expected_configuration_digest
+                ):
+                    raise ReviewInputError(
+                        "prior partial review configuration does not match current configuration"
+                    )
+                if (
+                    expected_evidence_digest is not None
+                    and prior_partial.transaction.evidence_digest
+                    != expected_evidence_digest
+                ):
+                    raise ReviewInputError(
+                        "prior partial review evidence does not match current evidence policy"
+                    )
+            if prior_partial.continuation_scope_digest != continuation_scope_digest:
+                raise ReviewInputError(
+                    "prior partial review continuation scope is missing or does not match current request"
+                )
+
         if self.work_budgets.mode == "unified":
             from .discovery_work import discover
 
-            return discover(
+            run = discover(
                 self,
                 request,
                 snapshot_request=key_request,
@@ -907,7 +1129,9 @@ class ReviewService:
                 provider=active_provider,
                 recovery=work_recovery,
                 allow_expansion=allow_work_expansion,
+                prior_partial=prior_partial,
             )
+            return self._bind_continuation_scope(run, continuation_scope_digest)
 
         try:
             change_plan = plan_change(
@@ -915,13 +1139,17 @@ class ReviewService:
                 limits=request.limits,
                 work_budget=request.work_budget,
                 orchestrate=request.orchestrate_large_changes,
+                prior_partial=prior_partial,
             )
         except ReviewInputError as exc:
-            if request.orchestrate_large_changes:
-                raise ChunkPreflightError("diff failed bounded preflight") from exc
-            raise
+            if (
+                "prior partial review" in str(exc)
+                or not request.orchestrate_large_changes
+            ):
+                raise
+            raise ChunkPreflightError("diff failed bounded preflight") from exc
         if request.orchestrate_large_changes:
-            return self._review_chunks_run(
+            run = self._review_chunks_run(
                 request,
                 change_plan,
                 tracker=tracker,
@@ -931,7 +1159,9 @@ class ReviewService:
                 trusted_base_sha=trusted_base_sha,
                 trusted_head_sha=trusted_head_sha,
                 profile=profile,
+                prior_partial=prior_partial,
             )
+            return self._bind_continuation_scope(run, continuation_scope_digest)
         analysis = change_plan.analysis
         configured_category_ids = {category.id for category in self.review_categories}
         if request.active_category_ids is not None and not set(
@@ -982,7 +1212,7 @@ class ReviewService:
                     pull_request_number=request.pull_request_number,
                 )
             result = self._attach_coverage(result, change_plan.coverage)
-            return self._finish_run(
+            run = self._finish_run(
                 tracker=tracker,
                 status=self._run_outcome_for_result(result)[0],
                 stage_summary=stage_summary,
@@ -990,6 +1220,7 @@ class ReviewService:
                 repository=request.repository,
                 pull_request_number=request.pull_request_number,
             )
+            return self._bind_continuation_scope(run, continuation_scope_digest)
 
         prompt_limit = min(
             request.limits.max_prompt_bytes, effective_budget.max_prompt_bytes
@@ -1441,7 +1672,7 @@ class ReviewService:
                 )
             result = self._attach_coverage(result, change_plan.coverage)
         status, diagnostic = self._run_outcome_for_result(result)
-        return self._finish_run(
+        run = self._finish_run(
             tracker=tracker,
             status=status,
             stage_summary=stage_summary,
@@ -1450,6 +1681,7 @@ class ReviewService:
             repository=request.repository,
             pull_request_number=request.pull_request_number,
         )
+        return self._bind_continuation_scope(run, continuation_scope_digest)
 
     def _finish_run(
         self,
@@ -1634,7 +1866,7 @@ class ReviewService:
                 (coverage.generation, coverage.mode, len(lifecycles)),
                 generation=coverage.generation,
             )
-        return result
+        return _remember_result_work_policy(result, self.work_policy_digest)
 
     def _format_prompt(
         self,

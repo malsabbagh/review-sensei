@@ -87,7 +87,7 @@ from .providers.openrouter import (
 from .providers.profiles import get_provider_profile
 from .providers.routing import bind_stage_providers
 from .service import DEFAULT_STAGES, ReviewRun, ReviewService
-from .session import read_session_baseline
+from .session import has_unconsumed_successor_grant, read_session_baseline
 from .validation import DEFAULT_REVIEW_LIMITS, read_bounded_utf8
 from .work_recovery import WorkRecoveryStore
 from .workflow import prepare_diff
@@ -2543,7 +2543,9 @@ def _run_review_provider(
     return produced()
 
 
-_MOVED_TO_GITHUB_CLI = frozenset({"github", "host-plan", "resolve-hosted-openrouter"})
+_MOVED_TO_GITHUB_CLI = frozenset(
+    {"github", "host-plan", "resolve-hosted-openrouter", "setup"}
+)
 
 
 def _report_broker_failure(error: BaseException, args: argparse.Namespace) -> bool:
@@ -2869,6 +2871,7 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
             admission_diagnostic,
             checkpoint_baseline_capacity,
             checkpoint_review_analysis,
+            has_irrecoverable_transaction_grant,
             prepare_review_transaction,
             prepare_session_round,
             record_session_failed_attempt,
@@ -2924,6 +2927,12 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
         held_reservation: str | None = None
         prepared_round = None
         prepared_transaction = None
+        prior_committed_transaction = (
+            rescan_request.source
+            if rescan_request is not None
+            and getattr(rescan_request, "source", None) is not None
+            else None
+        )
         transaction_configuration_digest: str | None = None
         transaction_configuration_context: dict[str, object] | None = None
         transaction_evidence_digest: str | None = None
@@ -3308,6 +3317,8 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                         and loaded.record is not None
                     ):
                         prior = loaded.record
+                        if prior_committed_transaction is None:
+                            prior_committed_transaction = prior.transaction
                         history = prior.convergence_history
                         # Preserve idempotency for an unchanged legacy attempt
                         # whose current context is proved by its full baseline.
@@ -3330,6 +3341,38 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                                 == tx.reservation_id
                             ):
                                 reservation = tx.reservation_id
+                        elif (
+                            rescan_request is None
+                            and (
+                                not hosted_session_ledger
+                                or has_unconsumed_successor_grant(
+                                    prior, head_sha, policy_digest=policy.digest()
+                                )
+                                is not None
+                            )
+                            and prior.transaction is not None
+                            and prior.transaction.phase == "publication_succeeded"
+                            and prior.transaction.head_sha == head_sha
+                            and prior.failed_attempts > 0
+                            and prior.failed_attempts_head_sha == head_sha
+                            and prior.last_committed_reservation_id == reservation
+                        ):
+                            reservation = session_reservation_id(
+                                repository=args.repository,
+                                pull_request=args.pull_request,
+                                head_sha=head_sha,
+                                kind=(
+                                    "publish:"
+                                    + current_key.digest()
+                                    + ":"
+                                    + policy.digest()
+                                    + ":"
+                                    + transaction_configuration_digest
+                                    + ":"
+                                    + transaction_evidence_digest
+                                    + f":partial-continue:{prior.failed_attempts}:{prior.generation}"
+                                ),
+                            )
                 prepared_round = prepare_review_transaction(
                     ledger,
                     identity,
@@ -3415,6 +3458,13 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
         # identity-bound transaction/artifact request. Legacy operator runs
         # keep their prior full-review behavior until that flag is selected.
         baseline_enforcement_requested = transaction_requested
+        irrecoverable_grant = (
+            has_irrecoverable_transaction_grant(
+                prepared_round.record, resolved_head_sha
+            )
+            if prepared_round is not None
+            else None
+        )
         if (
             ledger is not None
             and identity is not None
@@ -3446,7 +3496,20 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
             # so the publication boundary of the same run needs the exact
             # baseline and current key this analysis admitted with. The
             # transaction alone cannot reconstruct either.
-            admission_baseline = persisted_baseline
+            consumed_gen = (
+                irrecoverable_grant.get("consumed_generation")
+                if irrecoverable_grant is not None
+                else None
+            )
+            if (
+                isinstance(consumed_gen, int)
+                and persisted_baseline.generation == consumed_gen - 1
+                and prepared_round.record.completed_initial_reviews == 1
+                and prepared_round.record.completed_verification_rounds == 0
+            ):
+                admission_baseline = None
+            else:
+                admission_baseline = persisted_baseline
             current_key = build_review_context_cache_key(
                 _checkpoint_cache_request(
                     request,
@@ -3457,7 +3520,7 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 stages=service.stages,
                 profile=effective_profile,
             )
-            if rescan_request is None:
+            if rescan_request is None and irrecoverable_grant is None:
                 scope = plan_verification_scope(
                     policy=policy,
                     baseline=persisted_baseline,
@@ -3504,6 +3567,78 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                     "the admitted transaction"
                 )
         try:
+            prior_partial = None
+            if (
+                ledger is not None
+                and identity is not None
+                and resolved_head_sha is not None
+                and prior_committed_transaction is not None
+                and prior_committed_transaction.result_sha256 is not None
+                and prior_committed_transaction.head_sha == resolved_head_sha
+            ):
+                candidate_partial = None
+                if (
+                    hosted_session_ledger
+                    and hosted_hooks is not None
+                    and hasattr(hosted_hooks, "load_retained_checkpoint_result")
+                ):
+                    candidate_partial = hosted_hooks.load_retained_checkpoint_result(  # type: ignore[attr-defined]
+                        args,
+                        ledger,
+                        identity,
+                        transaction=prior_committed_transaction,
+                        head_sha=resolved_head_sha,
+                    )
+                else:
+                    load_retained = getattr(
+                        ledger, "load_retained_checkpoint_result", None
+                    )
+                    if callable(load_retained):
+                        candidate_partial = load_retained(
+                            identity,
+                            transaction=prior_committed_transaction,
+                            head_sha=resolved_head_sha,
+                        )
+                if (
+                    candidate_partial is not None
+                    and getattr(candidate_partial, "review_status", None) == "partial"
+                ):
+                    candidate_tx = getattr(candidate_partial, "transaction", None)
+                    if candidate_tx is not None and (
+                        not candidate_tx.logical_identity_matches(
+                            prior_committed_transaction
+                        )
+                        or (
+                            candidate_tx.result_sha256 is not None
+                            and candidate_tx.result_sha256
+                            != prior_committed_transaction.result_sha256
+                        )
+                    ):
+                        raise ReviewInputError(
+                            "retained partial review transaction context does not match current review"
+                        )
+                    if (
+                        candidate_partial.content_digest()
+                        != prior_committed_transaction.result_sha256
+                    ):
+                        raise ReviewInputError(
+                            "retained partial review digest does not match transaction"
+                        )
+                    if (
+                        prior_committed_transaction.repository == identity.repository
+                        and prior_committed_transaction.pull_request
+                        == identity.pull_request
+                        and prior_committed_transaction.base_sha
+                        == (resolved_base_sha or "")
+                        and prior_committed_transaction.head_sha == resolved_head_sha
+                        and prior_committed_transaction.configuration_digest
+                        == (transaction_configuration_digest or "")
+                        and prior_committed_transaction.evidence_digest
+                        == (transaction_evidence_digest or "")
+                    ):
+                        prior_partial = replace(
+                            candidate_partial, transaction=prior_committed_transaction
+                        )
             run_provider = (
                 hosted_hooks.run_provider  # type: ignore[attr-defined]
                 if hosted_hooks is not None and hasattr(hosted_hooks, "run_provider")
@@ -3519,6 +3654,12 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 profile=effective_profile,
                 budget=resource_budget,
                 work_recovery=work_recovery,
+                prior_partial=prior_partial,
+                expected_policy_digest=policy.digest()
+                if transaction_requested
+                else None,
+                expected_configuration_digest=transaction_configuration_digest,
+                expected_evidence_digest=transaction_evidence_digest,
                 hosted_session_ledger=hosted_session_ledger,
                 operation_entry=work_configuration.github.operation_entry,
                 ledger=ledger,
@@ -3773,6 +3914,30 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                             checkpoint_baseline
                             if checkpoint_baseline is not None
                             and checkpoint_baseline.complete
+                            else None
+                        ),
+                        retain_result=(
+                            (
+                                lambda pending_result: (
+                                    hosted_hooks.retain_checkpoint_result(  # type: ignore[attr-defined]
+                                        args,
+                                        ledger,
+                                        identity,
+                                        pending_result,
+                                        base_sha=effective_base_sha,
+                                        head_sha=head_sha,
+                                        configuration_context=transaction_configuration_context,
+                                        evidence_context={
+                                            "evidence_policy": "legacy",
+                                            "snapshot_sha256": None,
+                                        },
+                                        policy=policy,
+                                    )
+                                )
+                            )
+                            if hosted_session_ledger
+                            and hosted_hooks is not None
+                            and hasattr(hosted_hooks, "retain_checkpoint_result")
                             else None
                         ),
                     )

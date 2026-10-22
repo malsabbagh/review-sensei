@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,6 +41,195 @@ class ContextProvider(AssessingProvider):
                 }
             ]
         return ProviderResponse(json.dumps(value), self.name, self.model)
+
+
+class DirectPartialScopeTests(unittest.TestCase):
+    class Provider:
+        name = "fixture"
+        model = "fixture"
+
+        def __init__(self):
+            self.prompts = []
+
+        def complete(self, request):
+            self.prompts.append(request.prompt)
+            return ProviderResponse('{"summary":"Reviewed.","comments":[]}', self.name)
+
+    def request(self):
+        from review_sensei.validation import ReviewLimits
+
+        diff = "".join(
+            f"diff --git a/src/mod_{i}.py b/src/mod_{i}.py\n"
+            f"--- a/src/mod_{i}.py\n+++ b/src/mod_{i}.py\n"
+            "@@ -1 +1 @@\n-old\n+safe\n"
+            for i in range(2)
+        )
+        return ReviewRequest(
+            diff=diff,
+            base_sha="1" * 40,
+            head_sha="2" * 40,
+            model="fixture",
+            orchestrate_large_changes=True,
+            limits=ReviewLimits(
+                max_diff_bytes=220,
+                max_diff_lines=12,
+                max_diff_files=1,
+                max_diff_hunks=1,
+            ),
+        )
+
+    def service(self, provider, *, instruction="Review {diff}", mode="unified"):
+        return ReviewService(
+            provider,
+            stages=(Stage("review", instruction, ("summary", "comments")),),
+            work_budgets=ReviewWorkBudgets(mode=mode),
+            budget=ResourceBudget.create(max_provider_calls=1),
+        )
+
+    def test_trusted_snapshot_binds_legacy_and_unified_continuations(self):
+        from review_sensei.errors import ReviewInputError
+        from review_sensei.models import ReviewResult
+
+        request = replace(self.request(), base_sha=None, head_sha=None)
+        snapshot = {"trusted_base_sha": "1" * 40, "trusted_head_sha": "2" * 40}
+        for mode in ("legacy", "unified"):
+            with self.subTest(mode=mode):
+                provider = self.Provider()
+                service = self.service(provider, mode=mode)
+                first = service.run(request, **snapshot).result
+                self.assertEqual(first.review_status, "partial")
+                restored = ReviewResult.from_dict(
+                    json.loads(json.dumps(first.to_dict()))
+                )
+                before = len(provider.prompts)
+                with self.assertRaisesRegex(ReviewInputError, "continuation scope"):
+                    service.run(
+                        request,
+                        **(snapshot | {"trusted_head_sha": "3" * 40}),
+                        prior_partial=restored,
+                    )
+                self.assertEqual(len(provider.prompts), before)
+                second = service.run(request, **snapshot, prior_partial=restored)
+                self.assertEqual(second.result.review_status, "complete")
+                self.assertEqual(len(provider.prompts), before + 1)
+
+    def test_trusted_snapshot_requires_consistent_pair_in_every_mode(self):
+        from review_sensei.errors import ReviewInputError
+
+        for mode in ("legacy", "unified"):
+            for orchestrate in (False, True):
+                for request, snapshot in (
+                    (
+                        replace(self.request(), base_sha=None, head_sha=None),
+                        {"trusted_base_sha": "1" * 40},
+                    ),
+                    (
+                        self.request(),
+                        {"trusted_base_sha": "1" * 40, "trusted_head_sha": "3" * 40},
+                    ),
+                ):
+                    with self.subTest(
+                        mode=mode, orchestrate=orchestrate, snapshot=snapshot
+                    ):
+                        provider = self.Provider()
+                        request = replace(
+                            request, orchestrate_large_changes=orchestrate
+                        )
+                        with self.assertRaisesRegex(
+                            ReviewInputError, "consistent trusted snapshot"
+                        ):
+                            self.service(provider, mode=mode).run(request, **snapshot)
+                        self.assertFalse(provider.prompts)
+
+    def test_changed_source_or_configuration_refuses_before_provider_work(self):
+        from review_sensei.context import SourceContextSelection
+        from review_sensei.errors import ReviewInputError
+
+        request = self.request()
+        provider = self.Provider()
+        service = self.service(provider)
+        first = service.run(request).result
+        self.assertEqual(first.review_status, "partial")
+        self.assertIsNone(first.transaction)
+        for changed in (
+            replace(request, head_sha="3" * 40),
+            replace(request, diff=request.diff.replace("+safe", "+changed", 1)),
+            replace(request, instructions="Also inspect a new invariant."),
+            replace(request, metadata={"source": "different evidence"}),
+            replace(request, source_context=SourceContextSelection(complete=False)),
+        ):
+            with self.subTest(changed=changed):
+                before = len(provider.prompts)
+                with self.assertRaisesRegex(ReviewInputError, "continuation scope"):
+                    service.run(changed, prior_partial=first)
+                self.assertEqual(len(provider.prompts), before)
+        changed_service = self.service(provider, instruction="New policy: {diff}")
+        with self.assertRaisesRegex(ReviewInputError, "continuation scope"):
+            changed_service.run(request, prior_partial=first)
+        self.assertEqual(len(provider.prompts), 1)
+
+    def test_scope_metadata_is_validated_and_counts_toward_result_bound(self):
+        from review_sensei.errors import ReviewInputError
+        from review_sensei.models import ReviewResult
+        from review_sensei.schemas import validate_public_document
+
+        request = self.request()
+        first = self.service(self.Provider()).run(request).result
+        for invalid in ("", "A" * 64, "g" * 64, "a" * 63, 7):
+            with self.subTest(invalid=invalid):
+                document = first.to_dict() | {"continuation_scope_digest": invalid}
+                with self.assertRaises(ReviewInputError):
+                    ReviewResult.from_dict(document)
+                with self.assertRaises(ReviewInputError):
+                    validate_public_document(document, "review-result")
+        without_scope = first.to_dict()
+        without_scope.pop("continuation_scope_digest")
+        prior_size = len(json.dumps(without_scope, separators=(",", ":")).encode())
+        limited_request = replace(
+            request,
+            limits=replace(request.limits, max_result_bytes=prior_size + 1),
+        )
+        limited = self.service(self.Provider()).run(limited_request)
+        self.assertEqual(limited.outcome.status, "budget_exhausted")
+        self.assertEqual(limited.outcome.diagnostic, "output_budget")
+        self.assertIsNone(limited.result)
+
+    def test_same_source_continues_after_serialization_without_transaction(self):
+        from review_sensei.models import ReviewResult
+        from review_sensei.schemas import validate_public_document
+
+        request = self.request()
+        first_provider = self.Provider()
+        first = self.service(first_provider).run(request).result
+        document = json.loads(json.dumps(first.to_dict()))
+        self.assertIsNotNone(document.get("continuation_scope_digest"))
+        validate_public_document(document, "review-result")
+        restored = ReviewResult.from_dict(document)
+        fresh_provider = self.Provider()
+        second = (
+            self.service(fresh_provider).run(request, prior_partial=restored).result
+        )
+        self.assertEqual(second.review_status, "complete")
+        self.assertTrue(second.coverage.fully_reviewed)
+        self.assertEqual(len(fresh_provider.prompts), 1)
+        self.assertIn("src/mod_1.py", fresh_provider.prompts[0])
+        self.assertNotIn("src/mod_0.py", fresh_provider.prompts[0])
+
+    def test_missing_scope_fails_closed_without_changing_v1_content_digest(self):
+        from review_sensei.errors import ReviewInputError
+        from review_sensei.models import ReviewResult
+
+        request = self.request()
+        provider = self.Provider()
+        service = self.service(provider)
+        first = service.run(request).result
+        document = first.to_dict()
+        document.pop("continuation_scope_digest", None)
+        legacy = ReviewResult.from_dict(document)
+        self.assertEqual(legacy.content_digest(), first.content_digest())
+        with self.assertRaisesRegex(ReviewInputError, "continuation scope"):
+            service.run(request, prior_partial=legacy)
+        self.assertEqual(len(provider.prompts), 1)
 
 
 class WorkContinuationTests(unittest.TestCase):
@@ -787,6 +977,1020 @@ class WorkContinuationTests(unittest.TestCase):
         self.assertEqual(len(provider.calls), 1)
         self.assertTrue(work.inventory.pending)
         self.assertFalse(work.reply.decisions)
+
+    def test_multi_window_progression_9_and_33_provider_calls_complete_without_reanalyzing_prefix(
+        self,
+    ):
+        from review_sensei.validation import ReviewLimits, TotalWorkBudget
+
+        def build_multi_file_diff(file_count: int) -> str:
+            parts: list[str] = []
+            for idx in range(file_count):
+                body_lines = "\n".join(
+                    f"+value_{idx}_{line} = {line}  # padding text to keep file in single chunk"
+                    for line in range(12)
+                )
+                parts.append(
+                    f"diff --git a/src/mod_{idx:02d}.py b/src/mod_{idx:02d}.py\n"
+                    f"new file mode 100644\n"
+                    f"index 0000000..2222222\n"
+                    f"--- /dev/null\n"
+                    f"+++ b/src/mod_{idx:02d}.py\n"
+                    f"@@ -0,0 +1,12 @@\n"
+                    f"{body_lines}\n"
+                )
+            return "".join(parts)
+
+        class CountingChunkProvider:
+            name = "fixture"
+            model = "fixture"
+
+            def __init__(self) -> None:
+                self.calls = 0
+                self.seen_Files: list[str] = []
+
+            def complete(self, request):
+                self.calls += 1
+                for idx in range(40):
+                    marker = f"b/src/mod_{idx:02d}.py"
+                    if marker in request.prompt:
+                        self.seen_Files.append(f"src/mod_{idx:02d}.py")
+                return ProviderResponse(
+                    json.dumps(
+                        {
+                            "summary": f"Window chunk {self.calls} reviewed.",
+                            "comments": [],
+                        }
+                    ),
+                    self.name,
+                )
+
+        limits = ReviewLimits(
+            max_diff_bytes=950,
+            max_diff_lines=25,
+            max_diff_files=1,
+            max_diff_hunks=1,
+        )
+        work_budget = TotalWorkBudget(
+            max_total_diff_bytes=60_000,
+            max_total_diff_lines=2_000,
+            max_total_files=64,
+            max_total_hunks=64,
+            max_chunks=8,
+            max_provider_calls=8,
+        )
+
+        for total_files, expected_windows in ((9, 2), (33, 5)):
+            with self.subTest(total_files=total_files):
+                diff_text = build_multi_file_diff(total_files)
+                provider = CountingChunkProvider()
+                service = ReviewService(
+                    provider,
+                    stages=(
+                        Stage("review", "Review:\n{diff}", ("summary", "comments")),
+                    ),
+                    budget=ResourceBudget.create(max_provider_calls=8),
+                )
+                prior_result = None
+                windows_run = 0
+                while True:
+                    windows_run += 1
+                    run = service.run(
+                        ReviewRequest(
+                            diff=diff_text,
+                            limits=limits,
+                            work_budget=work_budget,
+                            orchestrate_large_changes=True,
+                        ),
+                        prior_partial=prior_result,
+                    )
+                    self.assertIsNotNone(run.result)
+                    prior_result = run.result
+                    if run.outcome.status == "reviewed":
+                        break
+                    self.assertEqual(run.outcome.status, "partial")
+                    self.assertLessEqual(windows_run, expected_windows)
+
+                self.assertEqual(windows_run, expected_windows)
+                self.assertEqual(provider.calls, total_files)
+                self.assertEqual(
+                    provider.seen_Files,
+                    [f"src/mod_{idx:02d}.py" for idx in range(total_files)],
+                )
+                self.assertEqual(prior_result.review_status, "complete")
+                self.assertTrue(prior_result.coverage.fully_reviewed)
+
+    def test_six_partial_windows_plus_authorized_successor_grant_proceeds_on_seventh_window(
+        self,
+    ):
+        from review_sensei.convergence import ReviewConvergencePolicy
+        from review_sensei.coverage import CoverageManifest, FileCoverage, HunkCoverage
+        from review_sensei.disposition import (
+            MaintainerCommand,
+            apply_session_command,
+        )
+        from review_sensei.models import ReviewResult
+        from review_sensei.rescan import AuthorizedRescan
+        from review_sensei.session import (
+            InMemorySessionLedger,
+            SessionIdentity,
+            checkpoint_review_analysis,
+            complete_review_publication,
+            prepare_review_transaction,
+            prepare_session_round,
+        )
+
+        ledger = InMemorySessionLedger()
+        identity = SessionIdentity(
+            repository="owner/repo", pull_request=7, repository_id=100
+        )
+        base_sha = "1" * 40
+        head_sha = "2" * 40
+        policy = ReviewConvergencePolicy()
+        config_digest = "4" * 64
+        evidence_digest = "5" * 64
+
+        last_published_tx = None
+        for window_idx in range(6):
+            rescan_req = None
+            if window_idx > 0:
+                rescan_req = AuthorizedRescan(
+                    kind="issue_comment",
+                    request_id=window_idx,
+                    source=last_published_tx,
+                    review_id=100 + window_idx,
+                )
+            prepared = prepare_review_transaction(
+                ledger,
+                identity,
+                policy,
+                reservation_id=f"{window_idx + 1:064x}",
+                base_sha=base_sha,
+                head_sha=head_sha,
+                configuration_digest=config_digest,
+                evidence_digest=evidence_digest,
+                rescan_request=rescan_req,
+            )
+            self.assertTrue(prepared.decision.admit)
+            tx = prepared.transaction
+            self.assertIsNotNone(tx)
+            partial_res = ReviewResult(
+                summary=f"Partial window {window_idx + 1}.",
+                comments=(),
+                provider="fixture",
+                review_status="partial",
+                coverage=CoverageManifest(
+                    files=(
+                        FileCoverage("src/done.py", "reviewed"),
+                        FileCoverage(
+                            "src/pending.py",
+                            "budget-exhausted",
+                            "provider-call-budget",
+                        ),
+                    ),
+                    hunks=(
+                        HunkCoverage(1, "src/done.py", "reviewed"),
+                        HunkCoverage(
+                            2,
+                            "src/pending.py",
+                            "budget-exhausted",
+                            "provider-call-budget",
+                        ),
+                    ),
+                    enumeration_complete=True,
+                    enumerated_paths=("src/done.py", "src/pending.py"),
+                ),
+            )
+            bound = checkpoint_review_analysis(ledger, identity, prepared, partial_res)
+            published_record = complete_review_publication(
+                ledger, identity, bound.transaction, published=True
+            )
+            last_published_tx = published_record.transaction
+
+        exhausted_record = ledger.load(identity).record
+        self.assertEqual(exhausted_record.failed_attempts, 6)
+
+        blocked_rescan = AuthorizedRescan(
+            kind="issue_comment",
+            request_id=99,
+            source=last_published_tx,
+            review_id=199,
+        )
+        blocked_prep = prepare_session_round(
+            ledger,
+            identity,
+            policy,
+            reservation_id="9" * 64,
+            head_sha=head_sha,
+            rescan_request=blocked_rescan,
+        )
+        self.assertFalse(blocked_prep.decision.admit)
+        self.assertEqual(
+            blocked_prep.decision.handoff_reason, "failed-attempt-budget-exhausted"
+        )
+
+        # Collaborator continue only unpauses and does not restore eligibility
+        _, collab_outcome = apply_session_command(
+            ledger,
+            identity,
+            MaintainerCommand(
+                action="continue",
+                actor="collab",
+                head_sha=head_sha,
+                command_id="cmd-collab",
+            ),
+            actor_role="COLLABORATOR",
+        )
+        self.assertFalse(collab_outcome.applied)
+        self.assertIn("failed-attempt budget remains exhausted", collab_outcome.summary)
+
+        # Maintainer/admin continue grants bounded successor continuation
+        granted_record, maint_outcome = apply_session_command(
+            ledger,
+            identity,
+            MaintainerCommand(
+                action="continue",
+                actor="admin-user",
+                head_sha=head_sha,
+                command_id="cmd-maint-grant",
+            ),
+            actor_role="maintain",
+        )
+        self.assertTrue(maint_outcome.applied)
+        self.assertIn("successor continuation granted", maint_outcome.summary)
+        self.assertEqual(granted_record.failed_attempts, 6)
+
+        # Duplicate/concurrent successor grant is idempotent
+        dup_record, dup_outcome = apply_session_command(
+            ledger,
+            identity,
+            MaintainerCommand(
+                action="reenroll",
+                actor="admin-user",
+                head_sha=head_sha,
+                command_id="cmd-maint-dup",
+            ),
+            actor_role="admin",
+        )
+        self.assertFalse(dup_outcome.applied)
+        self.assertEqual(dup_record.generation, granted_record.generation)
+
+        # 7th window now admits and consumes the single successor grant
+        seventh_prep = prepare_session_round(
+            ledger,
+            identity,
+            policy,
+            reservation_id="7" * 64,
+            head_sha=head_sha,
+        )
+        self.assertTrue(seventh_prep.decision.admit)
+        self.assertIsNotNone(seventh_prep.reservation_id)
+        retained_prior = ledger.load_retained_checkpoint_result(
+            identity, head_sha=head_sha
+        )
+        self.assertIsNotNone(retained_prior)
+        self.assertEqual(retained_prior.review_status, "partial")
+
+    def test_changed_head_cannot_inherit_stale_partial_coverage_and_no_progress_suspends_with_remedy(
+        self,
+    ):
+        from review_sensei.coverage import CoverageManifest, FileCoverage, HunkCoverage
+        from review_sensei.errors import ReviewInputError
+        from review_sensei.models import ReviewResult
+        from review_sensei.session import ReviewTransaction
+        from review_sensei.validation import ReviewLimits, TotalWorkBudget
+
+        diff_text = (
+            "diff --git a/src/a.py b/src/a.py\n"
+            "new file mode 100644\n"
+            "index 0000000..2222222\n"
+            "--- /dev/null\n"
+            "+++ b/src/a.py\n"
+            "@@ -0,0 +1,5 @@\n"
+            "+a1 = 1\n+a2 = 2\n+a3 = 3\n+a4 = 4\n+a5 = 5\n"
+            "diff --git a/src/b.py b/src/b.py\n"
+            "new file mode 100644\n"
+            "index 0000000..2222222\n"
+            "--- /dev/null\n"
+            "+++ b/src/b.py\n"
+            "@@ -0,0 +1,5 @@\n"
+            "+b1 = 1\n+b2 = 2\n+b3 = 3\n+b4 = 4\n+b5 = 5\n"
+        )
+        prior_partial = ReviewResult(
+            summary="Reviewed src/a.py.",
+            comments=(),
+            provider="fixture",
+            review_status="partial",
+            coverage=CoverageManifest(
+                files=(
+                    FileCoverage("src/a.py", "reviewed"),
+                    FileCoverage(
+                        "src/b.py", "budget-exhausted", "provider-call-budget"
+                    ),
+                ),
+                hunks=(
+                    HunkCoverage(1, "src/a.py", "reviewed"),
+                    HunkCoverage(
+                        2,
+                        "src/b.py",
+                        "budget-exhausted",
+                        "provider-call-budget",
+                    ),
+                ),
+                enumeration_complete=True,
+                enumerated_paths=("src/a.py", "src/b.py"),
+            ),
+            transaction=ReviewTransaction.create(
+                repository="owner/repo",
+                pull_request=1,
+                base_sha="1" * 40,
+                head_sha="2" * 40,
+                policy_digest="3" * 64,
+                configuration_digest="4" * 64,
+                evidence_digest="5" * 64,
+                reservation_id="6" * 64,
+                generation=2,
+            ),
+        )
+
+        class FailingProvider:
+            name = "fixture"
+            model = "fixture"
+
+            def complete(self, request):
+                if "src/a.py" in request.prompt:
+                    return ProviderResponse(
+                        '{"summary":"Reviewed src/a.py.","comments":[]}', self.name
+                    )
+                return ProviderResponse("not valid json", self.name)
+
+        service = ReviewService(
+            FailingProvider(),
+            stages=(Stage("review", "Review:\n{diff}", ("summary", "comments")),),
+        )
+        # Stale head is rejected immediately
+        with self.assertRaisesRegex(
+            ReviewInputError, "does not match current base or head"
+        ):
+            service.run(
+                ReviewRequest(
+                    diff=diff_text,
+                    base_sha="1" * 40,
+                    head_sha="9" * 40,
+                    orchestrate_large_changes=True,
+                ),
+                prior_partial=prior_partial,
+            )
+
+        # Matching head with failing chunk produces no-progress diagnostic and remedy
+        current_request = ReviewRequest(
+            diff=diff_text,
+            base_sha="1" * 40,
+            head_sha="2" * 40,
+            limits=ReviewLimits(
+                max_diff_bytes=200,
+                max_diff_lines=12,
+                max_diff_files=1,
+                max_diff_hunks=1,
+            ),
+            work_budget=TotalWorkBudget(
+                max_total_diff_bytes=5000,
+                max_total_diff_lines=100,
+                max_total_files=10,
+                max_total_hunks=10,
+                max_chunks=8,
+                max_provider_calls=8,
+            ),
+            orchestrate_large_changes=True,
+        )
+        actual_partial = service.run(current_request).result
+        self.assertEqual(actual_partial.review_status, "partial")
+        self.assertEqual(actual_partial.coverage.files[0].outcome, "reviewed")
+        no_prog_run = service.run(current_request, prior_partial=actual_partial)
+        self.assertEqual(no_prog_run.outcome.status, "partial")
+        self.assertEqual(no_prog_run.outcome.diagnostic, "no-progress")
+        self.assertIn(
+            "accept-coverage-uncertainty --reason",
+            no_prog_run.result.summary,
+        )
+
+    def test_cli_invocations_reuse_retained_partial_across_ledger_and_multistage_windows(
+        self,
+    ):
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        from unittest.mock import patch
+
+        from review_sensei.cli import main as cli_main
+        from review_sensei.errors import ReviewInputError
+        from review_sensei.models import ReviewResult
+        from review_sensei.session import LocalSessionLedger, SessionIdentity
+        from review_sensei.validation import ReviewLimits, TotalWorkBudget
+
+        diff_parts = []
+        for idx in range(9):
+            diff_parts.append(
+                f"diff --git a/src/mod_{idx}.py b/src/mod_{idx}.py\n"
+                "new file mode 100644\n"
+                "index 0000000..1111111\n"
+                "--- /dev/null\n"
+                f"+++ b/src/mod_{idx}.py\n"
+                "@@ -0,0 +1,5 @@\n"
+                f"+v{idx}_1 = 1\n+v{idx}_2 = 2\n+v{idx}_3 = 3\n+v{idx}_4 = 4\n+v{idx}_5 = 5\n"
+            )
+        nine_file_diff = "".join(diff_parts)
+
+        # 1. Two separate CLI invocations against the same durable ledger
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            diff_path = root / "nine.diff"
+            diff_path.write_text(nine_file_diff, encoding="utf-8")
+            cfg_path = root / ".reviewsensei.yml"
+            cfg_path.write_text(
+                "schema: 1\n"
+                "inference:\n"
+                "  backend: local-ollama\n"
+                "  model: qwen3.5:4b\n"
+                "advanced:\n"
+                "  large_changes:\n"
+                "    orchestrate: true\n"
+                "  resources:\n"
+                "    max_provider_calls: 8\n",
+                encoding="utf-8",
+            )
+            fixture_resp = root / "resp.json"
+            fixture_resp.write_text(
+                '{"summary":"Chunk clean.","comments":[]}', encoding="utf-8"
+            )
+            ledger_dir = root / "ledger"
+            out1 = root / "out1.json"
+            out2 = root / "out2.json"
+
+            cli_args_base = [
+                "--config",
+                str(cfg_path),
+                "--diff",
+                str(diff_path),
+                "--provider",
+                "fixture",
+                "--fixture-response",
+                str(fixture_resp),
+                "--repository",
+                "owner/repo",
+                "--pull-request",
+                "42",
+                "--base-sha",
+                "1" * 40,
+                "--head-sha",
+                "2" * 40,
+                "--transaction",
+                "--session-ledger",
+                str(ledger_dir),
+                "--orchestrate-large-changes",
+                "--format",
+                "json",
+                "--no-learning-proposals",
+            ]
+            small_limits = ReviewLimits(
+                max_diff_bytes=64 * 1024,
+                max_diff_lines=1600,
+                max_diff_files=1,
+                max_diff_hunks=1,
+            )
+            with (
+                patch("review_sensei.cli.DEFAULT_REVIEW_LIMITS", small_limits),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+            ):
+                rc1 = cli_main([*cli_args_base, "--output", str(out1)])
+            self.assertEqual(rc1, 2)
+            res1 = ReviewResult.from_dict(json.loads(out1.read_text(encoding="utf-8")))
+            self.assertEqual(res1.review_status, "partial")
+            assert res1.coverage is not None
+            self.assertEqual(
+                sum(1 for f in res1.coverage.files if f.outcome == "reviewed"), 8
+            )
+
+            # Commit window 1's publication in the durable ledger as hosted publication does
+            from review_sensei.session import complete_review_publication
+
+            ledger = LocalSessionLedger(ledger_dir)
+            ident = SessionIdentity(repository="owner/repo", pull_request=42)
+            assert res1.transaction is not None
+            complete_review_publication(ledger, ident, res1.transaction, published=True)
+
+            # Second separate CLI invocation loads retained partial from ledger and finishes file 8
+            with (
+                patch("review_sensei.cli.DEFAULT_REVIEW_LIMITS", small_limits),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+            ):
+                rc2 = cli_main([*cli_args_base, "--output", str(out2)])
+            self.assertEqual(rc2, 0)
+            res2 = ReviewResult.from_dict(json.loads(out2.read_text(encoding="utf-8")))
+            self.assertEqual(res2.review_status, "complete")
+            assert res2.coverage is not None
+            self.assertTrue(res2.coverage.fully_reviewed)
+            self.assertEqual(
+                [f.path for f in res2.coverage.files if f.outcome == "reviewed"],
+                [f"src/mod_{i}.py" for i in range(9)],
+            )
+
+            # Serialized checkpoint round-trip with unchanged vs changed work policy
+            svc_same = ReviewService(
+                type(
+                    "P",
+                    (),
+                    {
+                        "name": "fixture",
+                        "model": "fixture",
+                        "complete": lambda self, req: ProviderResponse(
+                            '{"summary":"ok","comments":[]}', "fixture"
+                        ),
+                    },
+                )(),
+                stages=(Stage("review", "Review:\n{diff}", ("summary", "comments")),),
+                budget=ResourceBudget.create(max_provider_calls=8),
+                work_budgets=ReviewWorkBudgets(mode="unified"),
+            )
+            unified_w1 = svc_same.run(
+                ReviewRequest(
+                    diff=nine_file_diff,
+                    base_sha="1" * 40,
+                    head_sha="2" * 40,
+                    limits=small_limits,
+                    orchestrate_large_changes=True,
+                ),
+            )
+            self.assertEqual(unified_w1.result.review_status, "partial")
+            assert res1.transaction is not None
+            roundtrip_partial = ReviewResult.from_dict(
+                replace(
+                    unified_w1.result,
+                    transaction=res1.transaction.with_result(
+                        unified_w1.result.content_digest()
+                    ),
+                ).to_dict()
+            )
+            assert roundtrip_partial.transaction is not None
+            ok_rt = svc_same.run(
+                ReviewRequest(
+                    diff=nine_file_diff,
+                    base_sha="1" * 40,
+                    head_sha="2" * 40,
+                    limits=small_limits,
+                    orchestrate_large_changes=True,
+                ),
+                prior_partial=roundtrip_partial,
+                expected_policy_digest=roundtrip_partial.transaction.policy_digest,
+                expected_configuration_digest=roundtrip_partial.transaction.configuration_digest,
+            )
+            self.assertEqual(ok_rt.result.review_status, "complete")
+
+            svc_diff_policy = ReviewService(
+                type(
+                    "P",
+                    (),
+                    {
+                        "name": "fixture",
+                        "model": "fixture",
+                        "complete": lambda self, req: ProviderResponse(
+                            '{"summary":"ok","comments":[]}', "fixture"
+                        ),
+                    },
+                )(),
+                stages=(Stage("review", "Review:\n{diff}", ("summary", "comments")),),
+                budget=ResourceBudget.create(max_provider_calls=8),
+                work_budgets=ReviewWorkBudgets(
+                    mode="unified", batch_diff_bytes=32 * 1024
+                ),
+            )
+            with self.assertRaisesRegex(ReviewInputError, "policy does not match"):
+                svc_diff_policy.run(
+                    ReviewRequest(
+                        diff=nine_file_diff,
+                        base_sha="1" * 40,
+                        head_sha="2" * 40,
+                        orchestrate_large_changes=True,
+                    ),
+                    prior_partial=roundtrip_partial,
+                )
+
+        # 2. Multi-stage (2 stages, 9 batches, 8 calls per window) completes all stages per scheduled batch
+        stage_calls: list[str] = []
+
+        class TwoStageProvider:
+            name = "fixture"
+            model = "fixture"
+
+            def complete(self, request):
+                tag = "FIRST" if "FIRST_STAGE" in request.prompt else "SECOND"
+                for idx in range(9):
+                    if f"src/mod_{idx}.py" in request.prompt:
+                        stage_calls.append(f"{tag}:{idx}")
+                        break
+                return ProviderResponse('{"summary":"Clean.","comments":[]}', self.name)
+
+        two_stage_service = ReviewService(
+            TwoStageProvider(),
+            stages=(
+                Stage("first", "FIRST_STAGE\n{diff}", ("summary", "comments")),
+                Stage("second", "SECOND_STAGE\n{diff}", ("summary", "comments")),
+            ),
+            work_budgets=ReviewWorkBudgets(mode="unified"),
+        )
+        req_9 = ReviewRequest(
+            diff=nine_file_diff,
+            base_sha="1" * 40,
+            head_sha="2" * 40,
+            limits=ReviewLimits(
+                max_diff_bytes=220,
+                max_diff_lines=12,
+                max_diff_files=1,
+                max_diff_hunks=1,
+            ),
+            work_budget=TotalWorkBudget(
+                max_total_diff_bytes=10000,
+                max_total_diff_lines=200,
+                max_total_files=20,
+                max_total_hunks=20,
+                max_chunks=8,
+                max_provider_calls=8,
+            ),
+            orchestrate_large_changes=True,
+        )
+        w1 = two_stage_service.run(req_9)
+        self.assertEqual(w1.result.review_status, "partial")
+        # Window 1 runs 4 batches across both FIRST and SECOND stages (8 calls total)
+        self.assertEqual(
+            stage_calls,
+            [
+                "FIRST:0",
+                "FIRST:1",
+                "FIRST:2",
+                "FIRST:3",
+                "SECOND:0",
+                "SECOND:1",
+                "SECOND:2",
+                "SECOND:3",
+            ],
+        )
+        w2 = two_stage_service.run(req_9, prior_partial=w1.result)
+        self.assertEqual(w2.result.review_status, "partial")
+        # Window 2 advances to batches 4..7 across both stages
+        self.assertEqual(
+            stage_calls[8:],
+            [
+                "FIRST:4",
+                "FIRST:5",
+                "FIRST:6",
+                "FIRST:7",
+                "SECOND:4",
+                "SECOND:5",
+                "SECOND:6",
+                "SECOND:7",
+            ],
+        )
+        w3 = two_stage_service.run(req_9, prior_partial=w2.result)
+        self.assertEqual(w3.result.review_status, "complete")
+        assert w3.result.coverage is not None
+        self.assertTrue(w3.result.coverage.fully_reviewed)
+        self.assertEqual(stage_calls[16:], ["FIRST:8", "SECOND:8"])
+
+    def test_local_checkpoint_retention_failures_prevent_commit_and_preserve_prior_evidence(
+        self,
+    ):
+        from unittest.mock import patch
+
+        from review_sensei.convergence import ReviewConvergencePolicy
+        from review_sensei.coverage import CoverageManifest, FileCoverage, HunkCoverage
+        from review_sensei.errors import ReviewInputError
+        from review_sensei.models import ReviewResult
+        from review_sensei.rescan import AuthorizedRescan
+        from review_sensei.session import (
+            LocalSessionLedger,
+            SessionIdentity,
+            checkpoint_review_analysis,
+            complete_review_publication,
+            prepare_review_transaction,
+        )
+
+        identity = SessionIdentity(repository="owner/repo", pull_request=88)
+        base_sha = "1" * 40
+        head_sha = "2" * 40
+        policy = ReviewConvergencePolicy()
+        config_digest = "4" * 64
+        evidence_digest = "5" * 64
+
+        def make_partial(summary: str) -> ReviewResult:
+            return ReviewResult(
+                summary=summary,
+                comments=(),
+                provider="fixture",
+                review_status="partial",
+                coverage=CoverageManifest(
+                    files=(
+                        FileCoverage("src/done.py", "reviewed"),
+                        FileCoverage(
+                            "src/pending.py",
+                            "budget-exhausted",
+                            "provider-call-budget",
+                        ),
+                    ),
+                    hunks=(
+                        HunkCoverage(1, "src/done.py", "reviewed"),
+                        HunkCoverage(
+                            2,
+                            "src/pending.py",
+                            "budget-exhausted",
+                            "provider-call-budget",
+                        ),
+                    ),
+                    enumeration_complete=True,
+                    enumerated_paths=("src/done.py", "src/pending.py"),
+                ),
+            )
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            ledger = LocalSessionLedger(root)
+
+            # Seed window 1 so there is valid prior retained evidence on disk
+            prep1 = prepare_review_transaction(
+                ledger,
+                identity,
+                policy,
+                reservation_id="a" * 64,
+                base_sha=base_sha,
+                head_sha=head_sha,
+                configuration_digest=config_digest,
+                evidence_digest=evidence_digest,
+            )
+            first_partial = make_partial("Window 1 partial evidence.")
+            bound1 = checkpoint_review_analysis(ledger, identity, prep1, first_partial)
+            pub1 = complete_review_publication(
+                ledger, identity, bound1.transaction, published=True
+            )
+            prior_retained = ledger.load_retained_checkpoint_result(
+                identity, head_sha=head_sha
+            )
+            self.assertIsNotNone(prior_retained)
+            self.assertEqual(prior_retained.summary, "Window 1 partial evidence.")
+
+            # Prepare window 2
+            prep2 = prepare_review_transaction(
+                ledger,
+                identity,
+                policy,
+                reservation_id="b" * 64,
+                base_sha=base_sha,
+                head_sha=head_sha,
+                configuration_digest=config_digest,
+                evidence_digest=evidence_digest,
+                rescan_request=AuthorizedRescan(
+                    kind="issue_comment",
+                    request_id=2,
+                    source=pub1.transaction,
+                    review_id=201,
+                ),
+            )
+            gen_before = ledger.load(identity).record.generation
+            second_partial = make_partial("Window 2 partial evidence.")
+            result_path = ledger._checkpoint_result_path(identity)
+            temp_path = result_path.with_suffix(".tmp")
+
+            # 1. Failed write (e.g. disk full) prevents checkpoint commit and preserves prior evidence
+            orig_write_bytes = Path.write_bytes
+
+            def fail_result_write(path_obj: Path, data: bytes) -> int:
+                if path_obj == temp_path:
+                    raise OSError("No space left on device")
+                return orig_write_bytes(path_obj, data)
+
+            with patch.object(Path, "write_bytes", fail_result_write):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "local checkpoint result retention failed"
+                ):
+                    checkpoint_review_analysis(ledger, identity, prep2, second_partial)
+
+            after_write_fail = ledger.load(identity).record
+            self.assertEqual(after_write_fail.generation, gen_before)
+            self.assertEqual(after_write_fail.transaction.phase, "analysis")
+            self.assertIsNone(after_write_fail.transaction.result_sha256)
+            self.assertFalse(temp_path.exists())
+            still_intact_1 = ledger.load_retained_checkpoint_result(
+                identity, head_sha=head_sha
+            )
+            self.assertIsNotNone(still_intact_1)
+            self.assertEqual(still_intact_1.summary, "Window 1 partial evidence.")
+
+            # 2. Failed atomic replacement (os.replace) prevents commit, cleans up .tmp, and preserves prior evidence
+            import os as _os
+
+            orig_replace = _os.replace
+
+            def fail_result_replace(src, dst):
+                if Path(dst) == result_path:
+                    raise OSError("Permission denied on atomic replace")
+                return orig_replace(src, dst)
+
+            with patch(
+                "review_sensei.session.os.replace", side_effect=fail_result_replace
+            ):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "local checkpoint result retention failed"
+                ):
+                    checkpoint_review_analysis(ledger, identity, prep2, second_partial)
+
+            after_replace_fail = ledger.load(identity).record
+            self.assertEqual(after_replace_fail.generation, gen_before)
+            self.assertEqual(after_replace_fail.transaction.phase, "analysis")
+            self.assertIsNone(after_replace_fail.transaction.result_sha256)
+            self.assertFalse(temp_path.exists())
+            still_intact_2 = ledger.load_retained_checkpoint_result(
+                identity, head_sha=head_sha
+            )
+            self.assertIsNotNone(still_intact_2)
+            self.assertEqual(still_intact_2.summary, "Window 1 partial evidence.")
+
+    def test_fresh_process_work_policy_validation_survives_serialized_checkpoint_reload(
+        self,
+    ):
+        import subprocess
+        import sys
+
+        from review_sensei.convergence import ReviewConvergencePolicy
+        from review_sensei.session import (
+            LocalSessionLedger,
+            SessionIdentity,
+            checkpoint_review_analysis,
+            complete_review_publication,
+            prepare_review_transaction,
+        )
+        from review_sensei.validation import ReviewLimits
+
+        diff_parts = []
+        for idx in range(9):
+            diff_parts.append(
+                f"diff --git a/src/mod_{idx}.py b/src/mod_{idx}.py\n"
+                "new file mode 100644\n"
+                "index 0000000..1111111\n"
+                "--- /dev/null\n"
+                f"+++ b/src/mod_{idx}.py\n"
+                "@@ -0,0 +1,5 @@\n"
+                f"+v{idx}_1 = 1\n+v{idx}_2 = 2\n+v{idx}_3 = 3\n+v{idx}_4 = 4\n+v{idx}_5 = 5\n"
+            )
+        nine_file_diff = "".join(diff_parts)
+        small_limits = ReviewLimits(
+            max_diff_bytes=64 * 1024,
+            max_diff_lines=1600,
+            max_diff_files=1,
+            max_diff_hunks=1,
+        )
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            diff_path = root / "nine.diff"
+            diff_path.write_text(nine_file_diff, encoding="utf-8")
+            ledger_dir = root / "ledger"
+            ledger = LocalSessionLedger(ledger_dir)
+            identity = SessionIdentity(repository="owner/repo", pull_request=91)
+            policy = ReviewConvergencePolicy()
+            prep = prepare_review_transaction(
+                ledger,
+                identity,
+                policy,
+                reservation_id="1" * 64,
+                base_sha="1" * 40,
+                head_sha="2" * 40,
+                configuration_digest="4" * 64,
+                evidence_digest="5" * 64,
+            )
+
+            svc = ReviewService(
+                type(
+                    "P",
+                    (),
+                    {
+                        "name": "fixture",
+                        "model": "fixture",
+                        "complete": lambda self, req: ProviderResponse(
+                            '{"summary":"ok","comments":[]}', "fixture"
+                        ),
+                    },
+                )(),
+                stages=(Stage("review", "Review:\n{diff}", ("summary", "comments")),),
+                budget=ResourceBudget.create(max_provider_calls=8),
+                work_budgets=ReviewWorkBudgets(mode="unified"),
+            )
+            w1 = svc.run(
+                ReviewRequest(
+                    diff=nine_file_diff,
+                    base_sha="1" * 40,
+                    head_sha="2" * 40,
+                    limits=small_limits,
+                    orchestrate_large_changes=True,
+                )
+            )
+            self.assertEqual(w1.result.review_status, "partial")
+            self.assertIsNotNone(w1.result.work_policy_digest)
+            bound = checkpoint_review_analysis(ledger, identity, prep, w1.result)
+            complete_review_publication(
+                ledger, identity, bound.transaction, published=True
+            )
+
+            script = """
+import sys
+from pathlib import Path
+from review_sensei.budgets import ReviewWorkBudgets
+from review_sensei.errors import ReviewInputError
+from review_sensei.models import ProviderResponse, ReviewRequest
+from review_sensei.outcomes import ResourceBudget
+from review_sensei.service import ReviewService, _RESULT_WORK_POLICY_DIGESTS
+from review_sensei.session import LocalSessionLedger, SessionIdentity
+from review_sensei.stages import Stage
+from review_sensei.validation import ReviewLimits
+
+assert not _RESULT_WORK_POLICY_DIGESTS, "fresh process cache must start empty"
+ledger_dir = Path(sys.argv[1])
+diff_text = Path(sys.argv[2]).read_text(encoding="utf-8")
+ledger = LocalSessionLedger(ledger_dir)
+identity = SessionIdentity(repository="owner/repo", pull_request=91)
+loaded = ledger.load_retained_checkpoint_result(identity, head_sha="2" * 40)
+assert loaded is not None, "retained checkpoint must load"
+assert loaded.work_policy_digest is not None, "work_policy_digest must survive JSON serialization"
+assert not _RESULT_WORK_POLICY_DIGESTS, "loading ReviewResult must not require process-global cache"
+
+small_limits = ReviewLimits(
+    max_diff_bytes=64 * 1024,
+    max_diff_lines=1600,
+    max_diff_files=1,
+    max_diff_hunks=1,
+)
+provider = type(
+    "P",
+    (),
+    {
+        "name": "fixture",
+        "model": "fixture",
+        "complete": lambda self, req: ProviderResponse('{"summary":"ok","comments":[]}', "fixture"),
+    },
+)()
+
+# Changed work policy in fresh process must be rejected
+svc_changed = ReviewService(
+    provider,
+    stages=(Stage("review", "Review:\\n{diff}", ("summary", "comments")),),
+    budget=ResourceBudget.create(max_provider_calls=8),
+    work_budgets=ReviewWorkBudgets(mode="unified", batch_diff_bytes=32 * 1024),
+)
+try:
+    svc_changed.run(
+        ReviewRequest(
+            diff=diff_text,
+            base_sha="1" * 40,
+            head_sha="2" * 40,
+            limits=small_limits,
+            orchestrate_large_changes=True,
+        ),
+        prior_partial=loaded,
+    )
+except ReviewInputError as exc:
+    assert "policy does not match" in str(exc), f"unexpected error: {exc}"
+else:
+    raise AssertionError("changed work policy in fresh process was not rejected")
+
+# Matching work policy in fresh process must succeed and complete review
+svc_same = ReviewService(
+    provider,
+    stages=(Stage("review", "Review:\\n{diff}", ("summary", "comments")),),
+    budget=ResourceBudget.create(max_provider_calls=8),
+    work_budgets=ReviewWorkBudgets(mode="unified"),
+)
+assert loaded.transaction is not None
+resumed = svc_same.run(
+    ReviewRequest(
+        diff=diff_text,
+        base_sha="1" * 40,
+        head_sha="2" * 40,
+        limits=small_limits,
+        orchestrate_large_changes=True,
+    ),
+    prior_partial=loaded,
+    expected_policy_digest=loaded.transaction.policy_digest,
+    expected_configuration_digest=loaded.transaction.configuration_digest,
+)
+assert resumed.result.review_status == "complete", f"expected complete, got {resumed.result.review_status}"
+"""
+            repo_src = str(Path(__file__).resolve().parents[1] / "src")
+            proc = subprocess.run(
+                [sys.executable, "-c", script, str(ledger_dir), str(diff_path)],
+                env={"PYTHONPATH": repo_src},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
 
 
 if __name__ == "__main__":

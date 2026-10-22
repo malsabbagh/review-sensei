@@ -279,13 +279,19 @@ class ResultPartStore:
         self._port = port
         self._app_user_id = app_user_id
 
-    def write(self, *, event_key: str, result: bytes) -> str:
+    def write(
+        self,
+        *,
+        event_key: str,
+        result: bytes,
+        _check_existing: bool = True,
+    ) -> str:
         if not isinstance(result, bytes) or not result:
             raise ValueError("result is empty")
         _parse_event_key(event_key)
         ensure_result_part_capacity(len(result))
         digest = hashlib.sha256(result).hexdigest()
-        existing = self._parts(event_key)
+        existing = self._parts(event_key) if _check_existing else []
         if existing:
             joined = _join(existing, digest)
             if hashlib.sha256(joined).hexdigest() != digest:

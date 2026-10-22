@@ -16,8 +16,10 @@ from review_sensei_github import (
     SetupPullRequestService,
     VerifiedDelivery,
 )
+from review_sensei_github.doctor import inspect_protection_policy_discrepancies
 from review_sensei_github.setup import (
     BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS,
+    CALLER_CONTRACT_VERSION,
     CONFIG_PATH,
     LEGACY_CONFIG_PATH,
     RELEASED_RUNNER_SWITCH_V4_SHA256,
@@ -36,8 +38,12 @@ from review_sensei_github.setup import (
     _public_workflow_tag_from_job_ref,
     _released_minimal_v5_config_file,
     _released_runner_switch_v4_workflow,
+    _sensei_only_v5_workflow,
     _tagged_workflow,
     _v4_with_review_mode_config_file,
+    inspect_installed_caller_drift,
+    inspect_local_trigger_override,
+    migrate_caller_preserving_customizations,
 )
 
 BASE_SHA = "b" * 40
@@ -939,7 +945,8 @@ class SetupPullRequestServiceTests(unittest.TestCase):
 
         tag = setup_module.DEFAULT_PUBLIC_WORKFLOW_TAG
         current = _tagged_workflow(tag)
-        self.assertEqual(current, setup_module._pre_recovery_v5_workflow(tag))
+        self.assertEqual(current, setup_module._current_pre_recovery_v5_workflow(tag))
+        self.assertNotEqual(current, setup_module._pre_recovery_v5_workflow(tag))
         self.assertNotEqual(current, setup_module._prepared_recovery_workflow(tag))
         reverted = current.replace(
             "# ReviewSensei setup version: 5",
@@ -2078,6 +2085,312 @@ class GitHubSetupClientTests(unittest.TestCase):
                         repository="owner/repo",
                         installation_token="ghs_opaque",
                     )
+
+    def test_caller_drift_detection_and_customization_preserving_migration(self):
+        stale = (
+            _sensei_only_v5_workflow("v5")
+            .replace("runs-on: ubuntu-latest", "runs-on: [self-hosted, linux, x64]")
+            .replace(
+                "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
+                "uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2",
+            )
+            + "      CUSTOM_ORG_TOKEN: ${{ secrets.CUSTOM_ORG_TOKEN }}\n"
+        )
+        drift = inspect_installed_caller_drift(stale, public_workflow_tag="v5")
+        self.assertFalse(drift.is_current)
+        self.assertIn("inline_comment_guard_alias", drift.stale_sections)
+        self.assertEqual(drift.customizations["runs_on"], "[self-hosted, linux, x64]")
+        self.assertIn(
+            "      CUSTOM_ORG_TOKEN: ${{ secrets.CUSTOM_ORG_TOKEN }}",
+            drift.customizations["custom_job_lines"],
+        )
+
+        migrated, diff_text = migrate_caller_preserving_customizations(
+            stale, public_workflow_tag="v5"
+        )
+        self.assertTrue(diff_text)
+        self.assertIn("runs-on: [self-hosted, linux, x64]", migrated)
+        self.assertIn(
+            "uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2",
+            migrated,
+        )
+        self.assertIn("CUSTOM_ORG_TOKEN: ${{ secrets.CUSTOM_ORG_TOKEN }}", migrated)
+        post_drift = inspect_installed_caller_drift(migrated, public_workflow_tag="v5")
+        self.assertTrue(post_drift.is_current)
+        self.assertEqual(post_drift.contract_version, CALLER_CONTRACT_VERSION)
+
+    def test_setup_migration_preserves_secret_comments_and_blank_lines(self):
+        import tempfile
+        from contextlib import redirect_stdout
+
+        from review_sensei_github.cli import main as github_main
+
+        custom_bindings = (
+            "\n"
+            "# Organization-specific credentials\n"
+            "      CUSTOM_ORG_TOKEN: ${{ secrets.CUSTOM_ORG_TOKEN }}\n"
+            "\n"
+            "    # A folded value belongs to this secret\n"
+            "      CUSTOM_FOLDED_TOKEN: >-\n"
+            "        ${{ secrets.CUSTOM_FOLDED_TOKEN }}\n"
+        )
+        sibling_permissions = "    permissions:\n      packages: read\n"
+        stale = _sensei_only_v5_workflow("v5") + custom_bindings + sibling_permissions
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow_path = Path(tmp) / WORKFLOW_PATH
+            workflow_path.parent.mkdir(parents=True)
+            workflow_path.write_text(stale, encoding="utf-8")
+            with redirect_stdout(io.StringIO()):
+                status = github_main(
+                    ["setup", "--migrate", "--write", "--context-root", tmp]
+                )
+            self.assertEqual(status, 0)
+            migrated = workflow_path.read_text(encoding="utf-8")
+        self.assertIn(custom_bindings, migrated)
+        self.assertNotIn(sibling_permissions, migrated)
+        self.assertTrue(inspect_installed_caller_drift(migrated).is_current)
+        repeated, difference = migrate_caller_preserving_customizations(migrated)
+        self.assertEqual(repeated, migrated)
+        self.assertEqual(difference, "")
+
+    def test_setup_write_requires_explicit_migration_and_preserves_file(self):
+        import tempfile
+        from contextlib import redirect_stderr, redirect_stdout
+
+        from review_sensei_github.cli import main as github_main
+
+        stale = _sensei_only_v5_workflow("v5")
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow_path = Path(tmp) / WORKFLOW_PATH
+            workflow_path.parent.mkdir(parents=True)
+            workflow_path.write_text(stale, encoding="utf-8")
+            for flags in (("--diff", "--write"), ("--write",)):
+                with self.subTest(flags=flags):
+                    stderr = io.StringIO()
+                    with (
+                        redirect_stdout(io.StringIO()),
+                        redirect_stderr(stderr),
+                        self.assertRaises(SystemExit) as raised,
+                    ):
+                        github_main(["setup", *flags, "--context-root", tmp])
+                    self.assertEqual(raised.exception.code, 2)
+                    self.assertIn("--write requires --migrate", stderr.getvalue())
+                    self.assertEqual(workflow_path.read_text(encoding="utf-8"), stale)
+
+    def test_setup_migration_refuses_unsupported_secret_declarations(self):
+        import tempfile
+        from contextlib import redirect_stderr, redirect_stdout
+
+        from review_sensei_github.cli import main as github_main
+
+        before_bindings = _sensei_only_v5_workflow("v5").split("    secrets:\n", 1)[0]
+        for declaration in (
+            "    secrets: inherit\n",
+            '    secrets: { CUSTOM_ORG_TOKEN: "${{ secrets.CUSTOM_ORG_TOKEN }}" }\n',
+        ):
+            with (
+                self.subTest(declaration=declaration),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                stale = before_bindings + declaration
+                workflow_path = Path(tmp) / WORKFLOW_PATH
+                workflow_path.parent.mkdir(parents=True)
+                workflow_path.write_text(stale, encoding="utf-8")
+                stderr = io.StringIO()
+                with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                    status = github_main(
+                        ["setup", "--migrate", "--write", "--context-root", tmp]
+                    )
+                self.assertEqual(status, 2)
+                self.assertIn("unsupported secrets declaration", stderr.getvalue())
+                self.assertEqual(workflow_path.read_text(encoding="utf-8"), stale)
+
+    def test_multiline_runs_on_shapes_and_setup_cli_modes(self):
+        import tempfile
+        from contextlib import redirect_stdout
+
+        from review_sensei_github.cli import main as github_main
+
+        block_list_runs_on = (
+            "    runs-on:\n      - self-hosted\n      - linux\n      - x64"
+        )
+        group_labels_runs_on = (
+            "    runs-on:\n"
+            "      group: ubuntu-runners\n"
+            "      labels:\n"
+            "        - self-hosted\n"
+            "        - linux"
+        )
+        commented_group_labels_runs_on = (
+            "    runs-on:\n"
+            "      group: ubuntu-runners\n"
+            "\n"
+            "# Preserve labels after a mapping comment\n"
+            "      labels:\n"
+            "    # Preserve the nested sequence too\n"
+            "        - self-hosted\n"
+            "        - linux"
+        )
+        expr_runs_on = "    runs-on: ${{ fromJSON(vars.RUNNER_LABELS) }}"
+        for custom_runs_on in (
+            block_list_runs_on,
+            group_labels_runs_on,
+            commented_group_labels_runs_on,
+            expr_runs_on,
+        ):
+            with self.subTest(runs_on=custom_runs_on):
+                stale = _sensei_only_v5_workflow("v5").replace(
+                    "    runs-on: ubuntu-latest", custom_runs_on, 1
+                )
+                migrated, diff_text = migrate_caller_preserving_customizations(
+                    stale, public_workflow_tag="v5"
+                )
+                self.assertTrue(diff_text)
+                self.assertIn(custom_runs_on, migrated)
+                self.assertNotIn("ubuntu-latest", migrated)
+                post_drift = inspect_installed_caller_drift(
+                    migrated, public_workflow_tag="v5"
+                )
+                self.assertTrue(post_drift.is_current)
+                self.assertEqual(
+                    post_drift.customizations.get("runs_on_block"), custom_runs_on
+                )
+
+        # Unsupported runs-on shapes fail closed
+        for bad_runs_on in (
+            "    runs-on:",
+            "    runs-on: self-hosted\n      - linux",
+            "    runs-on:\n      unsupported_key: runner",
+        ):
+            with self.subTest(bad_runs_on=bad_runs_on):
+                malformed = _sensei_only_v5_workflow("v5").replace(
+                    "    runs-on: ubuntu-latest", bad_runs_on, 1
+                )
+                with self.assertRaises(GitHubSetupError):
+                    migrate_caller_preserving_customizations(
+                        malformed, public_workflow_tag="v5"
+                    )
+
+        # Public CLI setup --check / --diff / --migrate --write
+        with tempfile.TemporaryDirectory() as tmp:
+            wf_path = Path(tmp) / ".github" / "workflows" / "review-sensei-review.yml"
+            wf_path.parent.mkdir(parents=True, exist_ok=True)
+            stale_block = _sensei_only_v5_workflow("v5").replace(
+                "    runs-on: ubuntu-latest", block_list_runs_on, 1
+            )
+            wf_path.write_text(stale_block, encoding="utf-8")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                rc_check = github_main(["setup", "--check", "--context-root", tmp])
+            self.assertEqual(rc_check, 2)
+            self.assertIn("stale", out.getvalue())
+
+            diff_out = io.StringIO()
+            with redirect_stdout(diff_out):
+                rc_diff = github_main(["setup", "--diff", "--context-root", tmp])
+            self.assertEqual(rc_diff, 0)
+            self.assertIn(
+                "--- a/.github/workflows/review-sensei-review.yml", diff_out.getvalue()
+            )
+
+            mig_out = io.StringIO()
+            with redirect_stdout(mig_out):
+                rc_mig = github_main(
+                    ["setup", "--migrate", "--write", "--context-root", tmp]
+                )
+            self.assertEqual(rc_mig, 0)
+            updated_text = wf_path.read_text(encoding="utf-8")
+            self.assertIn(block_list_runs_on, updated_text)
+            self.assertNotIn("ubuntu-latest", updated_text)
+
+            ok_out = io.StringIO()
+            with redirect_stdout(ok_out):
+                rc_ok = github_main(["setup", "--check", "--context-root", tmp])
+            self.assertEqual(rc_ok, 0)
+            self.assertIn("current", ok_out.getvalue())
+
+    def test_inspect_local_trigger_override_and_protection_discrepancies(self):
+        repository_root = Path(__file__).resolve().parents[1]
+        compliant = (
+            repository_root / "src/review_sensei/hosting/github/trigger.py"
+        ).read_text(encoding="utf-8")
+        res_ok = inspect_local_trigger_override(compliant)
+        self.assertTrue(res_ok.is_current)
+        self.assertEqual(res_ok.missing_capabilities, ())
+
+        res_stale = inspect_local_trigger_override("# legacy custom trigger\n")
+        self.assertFalse(res_stale.is_current)
+        self.assertTrue(len(res_stale.missing_capabilities) >= 3)
+
+        policy = json.loads(
+            (repository_root / ".github/protection-policy.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        live_rulesets = [
+            {
+                "id": 21068957,
+                "name": "main-branch-protection",
+                "target": "branch",
+                "enforcement": "active",
+                "bypass_actors": [
+                    {
+                        "actor_id": 5,
+                        "actor_type": "RepositoryRole",
+                        "bypass_mode": "always",
+                    }
+                ],
+                "rules": [
+                    {"type": "deletion"},
+                    {"type": "non_fast_forward"},
+                    {"type": "required_linear_history"},
+                    {
+                        "type": "pull_request",
+                        "parameters": {
+                            "required_approving_review_count": 0,
+                            "dismiss_stale_reviews_on_push": True,
+                            "require_code_owner_review": True,
+                            "require_last_push_approval": False,
+                            "required_review_thread_resolution": True,
+                        },
+                    },
+                    {
+                        "type": "required_status_checks",
+                        "parameters": {
+                            "strict_required_status_checks_policy": True,
+                            "required_status_checks": [
+                                {"context": "verify"},
+                                {"context": "codeql"},
+                                {"context": "dependency-review"},
+                            ],
+                        },
+                    },
+                ],
+            },
+            {
+                "id": 24763806,
+                "name": "release-tag-protection",
+                "target": "tag",
+                "enforcement": "active",
+                "bypass_actors": [
+                    {
+                        "actor_id": 5,
+                        "actor_type": "RepositoryRole",
+                        "bypass_mode": "always",
+                    }
+                ],
+                "conditions": {
+                    "ref_name": {"include": ["refs/tags/v*"], "exclude": []}
+                },
+                "rules": [{"type": "deletion"}, {"type": "non_fast_forward"}],
+            },
+        ]
+        discrepancies = inspect_protection_policy_discrepancies(
+            policy=policy, live_rulesets=live_rulesets
+        )
+        fields = {d["field"] for d in discrepancies}
+        self.assertIn("required_approving_review_count", fields)
+        self.assertIn("bypass_actors", fields)
 
 
 if __name__ == "__main__":

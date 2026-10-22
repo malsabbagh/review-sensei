@@ -41,6 +41,7 @@ from .planning import (
     _coverage_for,
     _hunk_record,
     _reconcile_file_outcomes_from_hunks,
+    extract_prior_reviewed_coverage,
     plan_work,
 )
 from .providers.base import ReviewProvider
@@ -114,6 +115,7 @@ def discover(
     provider: ReviewProvider,
     recovery: WorkRecoveryStore | None = None,
     allow_expansion: bool = True,
+    prior_partial: ReviewResult | None = None,
 ) -> ReviewRun:
     configured = {category.id for category in service.review_categories}
     if request.active_category_ids is not None and not set(
@@ -148,6 +150,9 @@ def discover(
     coverage_decision = service._coverage_decision(
         request, incremental=incremental, current_key=current_key, profile=profile
     )
+    prior_reviewed_files, prior_reviewed_hunks = extract_prior_reviewed_coverage(
+        analysis, prior_partial, limits=request.limits
+    )
     file_outcomes: dict[str, tuple[str, str | None]] = {}
     hunk_outcomes: dict[int, tuple[str, str | None]] = {}
     records = []
@@ -164,10 +169,26 @@ def discover(
                 ("reviewed", None) if outcome == "reviewable" else (outcome, reason)
             )
         if outcome == "reviewable":
+            if prior_reviewed_files or prior_reviewed_hunks:
+                paths_done = bool(record.coverage_paths) and all(
+                    path in prior_reviewed_files for path in record.coverage_paths
+                )
+                hunks_done = all(
+                    hunk.index in prior_reviewed_hunks for hunk in record.hunks
+                )
+                if paths_done and hunks_done:
+                    continue
             records.append(record)
     summaries: list[str] = []
     comments: list[ReviewComment] = []
     proposals: list[LearningProposal] = []
+    if (prior_reviewed_files or prior_reviewed_hunks) and prior_partial is not None:
+        base_summary = prior_partial.summary.split("\n\nContext admission digest:")[0]
+        base_summary = base_summary.split("\n\nRequired work pending:")[0].strip()
+        if base_summary:
+            summaries.append(base_summary)
+        comments.extend(prior_partial.comments)
+        proposals.extend(prior_partial.learning_proposals)
     stage_summary: dict[str, str] = {}
     failed = False
     comment_stage = False
@@ -192,6 +213,20 @@ def discover(
         )
 
     subdivision_allowance = SubdivisionAllowance()
+    active_stage_count = sum(
+        1
+        for candidate_stage in service.stages
+        if not candidate_stage.categories
+        or any(
+            request.active_category_ids is None
+            or category.id in request.active_category_ids
+            for category in candidate_stage.categories
+        )
+    )
+    window_batch_limit = max(
+        1,
+        tracker.budget.max_provider_calls // max(1, active_stage_count),
+    )
     for stage in service.stages:
         categories = tuple(
             category
@@ -308,6 +343,8 @@ def discover(
                 # Reassessment never uses this path: stored v1 findings have
                 # no authoritative hunk location.
                 for hunk in record.hunks:
+                    if hunk.index in prior_reviewed_hunks:
+                        continue
                     part = _hunk_record(record, hunk)
                     fragment = replace(
                         EvidenceRecord.from_diff_record(part, snapshot),
@@ -369,7 +406,7 @@ def discover(
             requirements,
             budgets=budgets,
             render=render,
-            max_batches=min(work.max_chunks, max(1, tracker.budget.max_provider_calls)),
+            max_batches=min(work.max_chunks, window_batch_limit),
             correction=_PROVIDER_OUTPUT_CORRECTION,
             authority_digest=evidence_digest(
                 {
@@ -636,7 +673,7 @@ def discover(
             # is separate from the planner's internal pending diagnostics.
             diagnostic = (
                 "provider-call-budget"
-                if reason == "provider_call_limit"
+                if reason in {"provider_call_limit", "provider-call-budget"}
                 else "chunk-failed"
             )
             for key in item.evidence_ids:
@@ -678,6 +715,31 @@ def discover(
     )
     if mandatory_refused_documents:
         refusal_summary += f"\nMandatory document overflow: {len(mandatory_refused_documents)} unique document(s), {sum(mandatory_refused_documents.values())} UTF-8 payload bytes."
+    no_progress_detected = False
+    has_prior_partial = (
+        prior_partial is not None
+        and prior_partial.review_status == "partial"
+        and prior_partial.coverage is not None
+        and prior_partial.coverage.enumeration_complete
+    )
+    if (
+        has_prior_partial or prior_reviewed_files or prior_reviewed_hunks
+    ) and not coverage.fully_reviewed:
+        now_reviewed_files = sum(
+            1 for entry in coverage.files if entry.outcome == "reviewed"
+        )
+        now_reviewed_hunks = sum(
+            1 for entry in coverage.hunks if entry.outcome == "reviewed"
+        )
+        if now_reviewed_files <= len(
+            prior_reviewed_files
+        ) and now_reviewed_hunks <= len(prior_reviewed_hunks):
+            no_progress_detected = True
+            refusal_summary += (
+                "\nNo progress on remaining unreviewed coverage; next action: "
+                "@reviewsensei accept-coverage-uncertainty --reason <reason> "
+                "or @reviewsensei pause."
+            )
     try:
         result = service._finalize_result(
             request,
@@ -713,13 +775,17 @@ def discover(
             context_admission=context_admission,
         )
     service._provider_calls = tracker.provider_calls
+    run_status = service._run_outcome_for_result(result)[0]
+    run_diagnostic = "partial_coverage" if status != "complete" else None
+    if no_progress_detected:
+        run_diagnostic = "no-progress"
     return service._finish_run(
         tracker=tracker,
-        status=service._run_outcome_for_result(result)[0],
+        status=run_status,
         stage_summary=stage_summary,
         result=result,
         repository=request.repository,
         pull_request_number=request.pull_request_number,
-        diagnostic="partial_coverage" if status != "complete" else None,
+        diagnostic=run_diagnostic,
         context_admission=context_admission,
     )

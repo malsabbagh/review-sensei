@@ -1099,14 +1099,17 @@ class ExpectedFinding:
 
 
 def _without_derived_coverage(document: dict[str, object]) -> dict[str, object]:
-    """Drop derived lifecycle metadata and a default coverage mode.
+    """Drop derived service provenance, lifecycle metadata and default coverage.
 
     ``finding_lifecycles`` is an additive v1 field computed from finding
     identity, and ``full`` is the default coverage mode, so a legacy fixture
     that omits both still describes the same deterministic review.
+    ``continuation_scope_digest`` binds the service's review inputs rather than
+    provider output; the fixture corpus asserts exact review content instead.
     """
 
     normalized = dict(document)
+    normalized.pop("continuation_scope_digest", None)
     normalized.pop("finding_lifecycles", None)
     if normalized.get("coverage_mode") == "full":
         normalized.pop("coverage_mode")

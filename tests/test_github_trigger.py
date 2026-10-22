@@ -171,6 +171,8 @@ def command_corpus() -> list[str]:
         f"defer {fingerprint64} --reason x",
         f"accept-risk {fingerprint16} --reason x",
         "I reviewed the media files and I approve",
+        "accept-coverage-uncertainty --reason x",
+        "review accept-coverage-uncertainty --reason x",
         "override RS-ABCDEF acceptable risk",
         "override RS-ABCDEF",
         "RS-ABCDEF is acceptable risk",
@@ -291,13 +293,13 @@ class GitHubTriggerTests(unittest.TestCase):
             for separator in ("\u00a0", "\u2003", "\u3000"):
                 with self.subTest(alias=alias, separator=separator):
                     body = f"{separator}{alias}{separator}re-scan"
-                    self.assertTrue(issue_comment_requests_rescan(body))
+                    self.assertFalse(issue_comment_requests_rescan(body))
                     self.assertEqual(
-                        resolve_issue_comment(body, _pull()).operation, "review"
+                        resolve_issue_comment(body, _pull()).operation, "reply"
                     )
                     command = f"{separator}{alias}{separator}review pause"
                     self.assertEqual(
-                        resolve_issue_comment(command, _pull()).operation, "command"
+                        resolve_issue_comment(command, _pull()).operation, "reply"
                     )
                     self.assertIsNone(parse_maintainer_command(command, actor="alice"))
 
@@ -357,16 +359,15 @@ class GitHubTriggerTests(unittest.TestCase):
         self.assertEqual(resolution.operation, "reply")
 
     def test_command_body_byte_boundary_is_inclusive_at_4096(self):
-        # 1359 ideographic spaces are 4077 bytes and are stripped by str.strip(),
-        # so the remainder still parses as a command. "@sensei"+"review pause"
-        # is 19 bytes, putting the body exactly on the 4096-byte ceiling.
-        padding = "\N{IDEOGRAPHIC SPACE}" * 1359
+        # 4077 ASCII spaces between @sensei and review pause keep the command
+        # standalone and ASCII-separated, putting the body on the 4096-byte ceiling.
+        padding = " " * 4077
         at_bound = "@sensei" + padding + "review pause"
         self.assertEqual(len(at_bound.encode("utf-8")), 4096)
         self.assertEqual(resolve_issue_comment(at_bound, _pull()).operation, "command")
 
-        # One extra ASCII space pushes the body to 4097 bytes; it is also
-        # stripped, so only the byte ceiling can route this one to reply.
+        # One extra ASCII space pushes the body to 4097 bytes, so the byte ceiling
+        # routes it to reply.
         over_bound = "@sensei" + padding + " " + "review pause"
         self.assertEqual(len(over_bound.encode("utf-8")), 4097)
         self.assertEqual(resolve_issue_comment(over_bound, _pull()).operation, "reply")
@@ -654,14 +655,9 @@ class InlineCallerResolverTests(unittest.TestCase):
             "@Sensei review pause",
             "@SENSEI review pause",
             "@SeNsEi review ReEnRoLl",
-            "@sensei review pause\n@sensei review pause",
-            "@sensei review pause\n@sensei verify",
             f'@sensei dismiss {fingerprint} --reason ""',
             f'@sensei dismiss {fingerprint} --reason "accepted"\u2003',
             f"@sensei dismiss {fingerprint} --reason " + "x" * 513,
-            "@sensei review\x1creenroll",
-            "@sensei review\x85reenroll",
-            "@sensei review\u2003reenroll",
         }
         # Preserve each raw handle in the snapshot. Rewriting actual bodies to
         # @sensei would conceal which alias introduced an unexpected shape.
@@ -671,22 +667,6 @@ class InlineCallerResolverTests(unittest.TestCase):
             if "@sensei" in body
             for alias in ("@reviewsensei", "@ReviewSensei", "@REVIEWSENSEI")
         }
-        expected.update(
-            {
-                "@ReviewSensei review pause\n@sensei verify",
-                "@sensei review pause\n@ReviewSensei verify",
-            }
-        )
-        expected.update(
-            body
-            for alias in ("@sensei", "@reviewsensei", "@ReviewSensei", "@REVIEWSENSEI")
-            for separator in ("\u00a0", "\u2003", "\u3000")
-            for body in (
-                f"{alias}{separator}review pause",
-                f"{separator}{alias} review pause",
-            )
-        )
-        expected.add("@reviewsensei override RS-AAAAAA\u00a0RS-BBBBBB acceptable risk")
         self.assertEqual(over_accepted, expected)
 
     def test_command_corpus_covers_every_maintainer_action(self):

@@ -132,6 +132,7 @@ class PublicationBudgetHttp(GitHubHttp):
         from .human_assessment import FeedbackBudgetHttp
 
         super().__init__(api_url=http.api_url, timeout=getattr(http, "timeout", 30))
+        self.primed_issue_comments = http.primed_issue_comments
         self.publication_budget = budget
         accounting_http = http
         while type(accounting_http) is _PaginationObservationHttp:
@@ -209,6 +210,18 @@ def publication_session_ledger(
         return ledger
     if ledger.evidence_budget is not None and ledger.evidence_budget is not budget:
         raise GitHubPublicationError("publication ledger budget identity mismatches")
+    if (
+        type(ledger.http) is _PaginationObservationHttp
+        and ledger.http.observation_budget is budget
+        and ledger.evidence_budget is budget
+        and type(ledger.http.transport)
+        not in {
+            PublicationBudgetHttp,
+            FeedbackBudgetHttp,
+            _PaginationObservationHttp,
+        }
+    ):
+        return ledger
     copied = copy(ledger)
     transport = copied.http
     while type(transport) in {
@@ -524,6 +537,7 @@ def _validate(
     configuration_context: Mapping[str, object],
     evidence_context: Mapping[str, object],
     policy: ReviewConvergencePolicy,
+    loaded: Any = None,
 ) -> ReviewResult:
     _payload(result)
     record = load_review_transaction_for_publication(
@@ -537,6 +551,7 @@ def _validate(
             configuration_context
         ),
         evidence_digest=ReviewTransaction.compute_evidence_digest(evidence_context),
+        loaded=loaded,
     )
     if (
         record.transaction is None
@@ -609,7 +624,13 @@ def recover_retained_review_result(
         )
         available = store.read_available(event_key=_event_key(identity, transaction))
         if available is None:
-            raise ReviewInputError("retained result is missing")
+            raise ReviewInputError(
+                "retained result is missing; historical result bytes do not exist for "
+                f"transaction {transaction.transaction_id}; do not reconstruct from an "
+                "old head; an authorized maintainer (maintain/admin) must comment "
+                "'@reviewsensei review reenroll' to record an irrecoverable-transaction "
+                "successor transition"
+            )
         _digest, payload = available
         document = json.loads(payload)
         if not isinstance(document, dict):
@@ -633,6 +654,99 @@ def recover_retained_review_result(
         ) from exc
 
 
+def retain_checkpoint_review_result(
+    *,
+    http: GitHubHttp,
+    token: str,
+    result: ReviewResult,
+    identity: SessionIdentity,
+    base_sha: str,
+    head_sha: str,
+    app_slug: str,
+    pending_transaction: ReviewTransaction,
+    configuration_context: Mapping[str, object] | None = None,
+    evidence_context: Mapping[str, object] | None = None,
+    policy: ReviewConvergencePolicy | None = None,
+) -> ReviewResult:
+    """Durably retain and readback-verify canonical result bytes before committing publication_pending."""
+    try:
+        effective_policy = policy or ReviewConvergencePolicy()
+        expected_config_digest = (
+            ReviewTransaction.compute_configuration_digest(configuration_context)
+            if configuration_context is not None
+            else pending_transaction.configuration_digest
+        )
+        expected_evidence_digest = (
+            ReviewTransaction.compute_evidence_digest(evidence_context)
+            if evidence_context is not None
+            else pending_transaction.evidence_digest
+        )
+        if not pending_transaction.identity_matches(
+            repository=identity.repository,
+            pull_request=identity.pull_request,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            policy_digest=effective_policy.digest(),
+            configuration_digest=expected_config_digest,
+            evidence_digest=expected_evidence_digest,
+        ):
+            raise ReviewInputError(
+                "review transaction identity or trusted context mismatches"
+            )
+        result_digest = result.content_digest()
+        if pending_transaction.result_sha256 != result_digest:
+            raise ReviewInputError("review result digest does not match transaction")
+        bound = replace(result, transaction=pending_transaction)
+        payload = _payload(bound)
+        event_key = _event_key(identity, pending_transaction)
+        store = _store(
+            http,
+            token=token,
+            identity=identity,
+            app_slug=app_slug,
+            base_sha=base_sha,
+            head_sha=head_sha,
+        )
+        available = store.read_available(event_key=event_key)
+        if available is None:
+            budget = getattr(http, "publication_budget", None)
+            if isinstance(budget, EvidenceReadBudget):
+                liability = 2 * ensure_result_part_capacity(len(payload)) + 30
+                if budget.calls + liability > 60:
+                    raise ReviewInputError(
+                        "retention request liability exceeds the original budget"
+                    )
+            try:
+                digest = store.write(
+                    event_key=event_key, result=payload, _check_existing=False
+                )
+            except Exception:
+                available = store.read_available(event_key=event_key)
+                if available is None or available[1] != payload:
+                    raise ReviewInputError(
+                        "retention write outcome unknown; recover the existing exact parts"
+                    ) from None
+                digest = available[0]
+            if store.read(event_key=event_key, payload_digest=digest) != payload:
+                raise ReviewInputError("retention readback mismatches")
+        else:
+            _digest, existing_payload = available
+            document = json.loads(existing_payload)
+            if not isinstance(document, dict):
+                raise ReviewInputError("retained result is invalid")
+            prior = ReviewResult.from_dict(document)
+            if (
+                _payload(prior) != existing_payload
+                or prior.content_digest() != bound.content_digest()
+            ):
+                raise ReviewInputError("retained result differs from checkpoint")
+        return bound
+    except (ValueError, ReviewInputError) as exc:
+        raise GitHubPublicationError(
+            "publication result not retained: " + str(exc)
+        ) from exc
+
+
 def retain_review_result(
     *,
     http: GitHubHttp,
@@ -646,6 +760,8 @@ def retain_review_result(
     configuration_context: Mapping[str, object],
     evidence_context: Mapping[str, object],
     policy: ReviewConvergencePolicy,
+    already_retained: bool = False,
+    _loaded: Any = None,
 ) -> None:
     """Persist a prior independently validated checkpoint before publication writes."""
     try:
@@ -658,8 +774,15 @@ def retain_review_result(
             configuration_context=configuration_context,
             evidence_context=evidence_context,
             policy=policy,
+            loaded=_loaded,
         )
         assert validated.transaction is not None
+        if already_retained:
+            if validated.transaction.phase == "publication_pending":
+                complete_review_publication(
+                    ledger, identity, validated.transaction, published=False
+                )
+            return
         event_key = _event_key(identity, validated.transaction)
         store = _store(
             http,
@@ -694,7 +817,9 @@ def retain_review_result(
                 ledger, identity, validated.transaction, published=False
             )
             try:
-                digest = store.write(event_key=event_key, result=payload)
+                digest = store.write(
+                    event_key=event_key, result=payload, _check_existing=False
+                )
             except Exception:
                 # An uncertain POST may have succeeded. Read the complete owned
                 # set once; never repeat the POST or create a new event identity.
@@ -727,6 +852,10 @@ def retain_review_result(
                 evidence_context=evidence_context,
                 policy=policy,
             )
+            if validated.transaction.phase == "publication_pending":
+                complete_review_publication(
+                    ledger, identity, validated.transaction, published=False
+                )
     except (ValueError, ReviewInputError) as exc:
         raise GitHubPublicationError(
             "publication result not retained: " + str(exc)

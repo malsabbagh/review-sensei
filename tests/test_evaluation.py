@@ -349,6 +349,51 @@ class EvaluationTests(unittest.TestCase):
 
         self.assertEqual(outcome["status"], "passed")
 
+    def test_continuation_provenance_preserves_exact_review_content_comparison(
+        self,
+    ) -> None:
+        from dataclasses import replace
+
+        result = ReviewResult(
+            summary="ok",
+            comments=(),
+            provider="fixture",
+            model="fixture-v1",
+            review_status="complete",
+            continuation_scope_digest="a" * 64,
+        )
+
+        class ResultService:
+            def review(self, _request):
+                return actual
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            corpus = load_corpus(_write_corpus(Path(temp_dir)))
+            for actual, expected_status in (
+                (result, "passed"),
+                (replace(result, summary="Different review."), "failed"),
+                (
+                    replace(
+                        result,
+                        comments=(
+                            ReviewComment(
+                                path="src/app.py", line=2, body="Unexpected finding."
+                            ),
+                        ),
+                    ),
+                    "failed",
+                ),
+                (replace(result, evidence_policy="confirmed"), "failed"),
+            ):
+                with self.subTest(actual=actual):
+                    outcome = run_case(
+                        corpus,
+                        corpus.document["cases"][0],
+                        ResultService(),
+                        MeasuredProvider(None),
+                    )
+                    self.assertEqual(outcome["status"], expected_status)
+
     def test_degraded_report_fails_named_thresholds(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             corpus = load_corpus(_write_corpus(Path(temp_dir)))

@@ -27,15 +27,19 @@ WORKFLOW = ROOT / ".github/workflows/review-sensei-run.yml"
 
 class TrustedRecoveryWorkflowTests(unittest.TestCase):
     def test_default_setup_and_installed_caller_use_exact_released_bytes(self):
-        from review_sensei_github.setup import SetupPlanBuilder
+        from review_sensei_github.setup import (
+            SetupPlanBuilder,
+            _pre_recovery_v5_workflow,
+        )
 
         old = (
             ROOT
             / "packages/python/review-sensei-github/src/review_sensei_github/fixtures/released-v5-pre-recovery-caller.yml"
         ).read_text()
-        self.assertEqual(SetupPlanBuilder().build("owner/repo").files[0].content, old)
+        self.assertEqual(_pre_recovery_v5_workflow("v5"), old)
         self.assertEqual(
-            (ROOT / ".github/workflows/review-sensei-review.yml").read_text(), old
+            SetupPlanBuilder().build("owner/repo").files[0].content,
+            (ROOT / ".github/workflows/review-sensei-review.yml").read_text(),
         )
 
     def test_default_caller_matches_selected_released_runner_input_types(self):

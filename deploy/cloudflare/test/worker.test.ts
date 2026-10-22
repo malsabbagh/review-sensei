@@ -330,4 +330,97 @@ describe("bounded broker operation telemetry", () => {
       expect(broker.exchange).toHaveBeenCalledTimes(2);
     } finally { log.mockRestore(); errorLog.mockRestore(); }
   });
+
+  it("bounds stalled request body streams by deadline and emits refusal observation", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const stalledStream = new ReadableStream<Uint8Array>({
+        start() {
+          // Never enqueues or closes; simulates a stalled client stream.
+        },
+      });
+      const expiredDeadline = Date.now() + 15;
+      const stalledRequest = new Request("https://github.reviewsensei.dev/github/token", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": "32",
+          "x-reviewsensei-deadline-unix-ms": String(expiredDeadline),
+          "cf-ray": "a4dd3d310f874964-LAX",
+        },
+        body: stalledStream,
+        duplex: "half",
+      } as RequestInit);
+      const response = await worker.fetch(stalledRequest, env);
+      expect(response.status).toBe(403);
+      const payload = await response.json();
+      expect(payload).toMatchObject({
+        error: "capability_not_issued",
+        diagnostic: {
+          code: "broker_request_deadline_exhausted",
+        },
+      });
+      const events = log.mock.calls.filter(call => call[0] === "github_broker_observation");
+      expect(events).toHaveLength(1);
+      expect(events[0][1]).toMatchObject({
+        operation: "exchange",
+        outcome: "refused",
+        code: "broker_request_deadline_exhausted",
+        correlation_id: "a4dd3d310f874964-LAX",
+      });
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("does not hang on never-settling stream cancellation across both Worker handlers", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      for (const [url, expectedOp] of [
+        ["https://github.reviewsensei.dev/github/token", "exchange"],
+        ["https://github.reviewsensei.dev/github/session-grant", "session_grant"],
+      ] as const) {
+        const neverCancellingStream = new ReadableStream<Uint8Array>({
+          start() {
+            // Stalled stream
+          },
+          cancel() {
+            return new Promise<void>(() => {
+              // Never settles
+            });
+          },
+        });
+        const deadline = Date.now() + 15;
+        const stalledReq = new Request(url, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "content-length": "32",
+            "x-reviewsensei-deadline-unix-ms": String(deadline),
+          },
+          body: neverCancellingStream,
+          duplex: "half",
+        } as RequestInit);
+        const response = await Promise.race([
+          worker.fetch(stalledReq, env),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("handler_hung_on_cancel")), 150),
+          ),
+        ]);
+        expect(response.status).toBe(403);
+        const body = await response.json();
+        expect(body).toMatchObject({
+          diagnostic: { code: "broker_request_deadline_exhausted" },
+        });
+        const opEvents = log.mock.calls.filter(
+          call =>
+            call[0] === "github_broker_observation" &&
+            (call[1] as { operation?: string }).operation === expectedOp,
+        );
+        expect(opEvents).toHaveLength(1);
+      }
+    } finally {
+      log.mockRestore();
+    }
+  });
 });

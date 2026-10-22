@@ -154,7 +154,7 @@ file uses the packaged defaults:
 | `github.learning` | `disabled` | Learning mode: `disabled`, `proposals`, or `pull-requests` |
 | `github.artifacts` | `none` | Artifact mode: `none` or `diagnostics` |
 | `github.publication_inventory` | `legacy` | `legacy` emits at most 64 findings; `complete` permits up to 250 within existing byte/path limits after every reader has been upgraded. See [rollout and recovery](validation/default-publication-recovery.md). |
-| `github.operation_entry` | `enabled` | Shared operation entry. `disabled` keeps the previous paths. The measured P1 profile does not fit 60 ordinary dispatches (#267). Caps stay 60/64 and 60 seconds. |
+| `github.operation_entry` | `enabled` | Shared operation routing and receipts. `disabled` does not disable mandatory result retention for identity-bound GitHub session-ledger publications. The measured P1 profile does not fit 60 ordinary dispatches (#267). Caps stay 60/64 and 60 seconds. |
 
 The packaged model for the selected backend applies unless `inference.model`
 names another one. `REVIEWSENSEI_PROVIDER` and `REVIEWSENSEI_MODEL` are the
@@ -416,8 +416,13 @@ generated learning proposals require `github.learning: proposals`, and
 draft PRs. `github.writes: true` also exposes the maintainer command
 surface, independently of `github.mentions`. An authorized human
 `OWNER`, `MEMBER`, or `COLLABORATOR` may post `@reviewsensei review
-status|pause|continue|reenroll`, `@reviewsensei verify`, or `@reviewsensei
-dismiss|defer|accept-risk <fingerprint> --reason <text>` on a pull request;
+status|pause|continue`, `@reviewsensei verify`, or `@reviewsensei
+dismiss|defer <fingerprint> --reason <text>` on a pull request, while
+elevated risk and budget decisions (`@reviewsensei accept-risk <fingerprint> --reason <text>`,
+`@reviewsensei override <id...> [acceptable risk]`, `@reviewsensei <id...> is|are acceptable risk`,
+`@reviewsensei [review] accept-coverage-uncertainty --reason <text>`,
+`@reviewsensei I reviewed the media files and I approve`, and `@reviewsensei review reenroll`)
+require `maintain` or `admin` permission (`OWNER` or `MEMBER` when live repository permission is not loaded);
 those comments take the command path whenever writes are enabled, while
 `github.mentions` continues to control only conversational
 replies. The command path is the pull-request conversation: an inline review
@@ -826,10 +831,11 @@ Choose the action that matches the work:
 An explicit analysis command may optionally name the current head:
 `@reviewsensei rescan commit <sha>`, using its full SHA or a prefix of 7-40
 hexadecimal characters. The legacy lowercase `@sensei` alias and standalone
-`re-scan` / `re scan` spellings remain supported. The entire trimmed body must
-be that command; prefixes such as “please,” trailing prose, quotes, code fences
-and malformed commit selectors do not request fresh analysis. Separators within
-the command cannot contain CR or LF.
+`re-scan` / `re scan` spellings remain supported. The command mention must start
+at index 0, with no leading whitespace. Trailing whitespace, including CR/LF,
+is accepted. Prefixes such as “please,” trailing prose, quotes, code fences and
+malformed commit selectors do not request fresh analysis. Tokens within the
+command must be separated by ASCII spaces or tabs, without CR or LF.
 
 Commands must be newly created, unedited comments of at most 4,096 UTF-8 bytes,
 including surrounding whitespace. Editing a comment does not trigger another

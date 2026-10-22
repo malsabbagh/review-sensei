@@ -2500,3 +2500,412 @@ class PublicationRecoveryTests(unittest.TestCase):
                         for check in state.check_runs[before_checks:]
                     )
                 )
+
+    def test_checkpoint_retains_before_committing_and_recovers_after_oidc_or_exchange_failure(
+        self,
+    ):
+        from review_sensei_github.publication_recovery import (
+            retain_checkpoint_review_result,
+        )
+
+        for failure in ("oidc", "exchange", "lost-retention-post", "crash-before-post"):
+            with (
+                self.subTest(failure=failure),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                ledger = LocalSessionLedger(Path(directory))
+                prepared = prepare_review_transaction(
+                    ledger,
+                    IDENTITY,
+                    POLICY,
+                    reservation_id="d" * 64,
+                    base_sha=BASE,
+                    head_sha=HEAD,
+                    configuration_digest=ReviewTransaction.compute_configuration_digest(
+                        CONFIGURATION
+                    ),
+                    evidence_digest=ReviewTransaction.compute_evidence_digest(EVIDENCE),
+                )
+                state = RetentionState()
+                state.reviews = []
+                if failure == "lost-retention-post":
+                    state.fail_part = "lost"
+                elif failure == "crash-before-post":
+                    state.fail_part = "crash-before"
+
+                raw_result = ReviewResult(
+                    summary="Complete.",
+                    comments=(
+                        ReviewComment(path="src/app.py", line=1, body="Finding 0."),
+                    ),
+                    provider="fixture",
+                    model="fixture-model",
+                    review_status="complete",
+                )
+                key = ReviewContextCacheKey(
+                    repository="owner/repo",
+                    pull_request=1,
+                    base_sha=BASE,
+                    head_sha=HEAD,
+                    engine="fixture",
+                    model="fixture-model",
+                    profile="default",
+                    stage_digest="1" * 64,
+                    context_digest="2" * 64,
+                    learning_digest="3" * 64,
+                )
+                baseline = ReviewBaseline(
+                    cache_key=key,
+                    policy_digest=POLICY.digest(),
+                    complete=True,
+                    coverage_complete=True,
+                    generation=prepared.record.generation + 1,
+                    findings=(baseline_finding_from_comment(raw_result.comments[0]),),
+                    reviewed_paths=("src/app.py",),
+                )
+
+                def retain_cb(pending_result):
+                    retain_checkpoint_review_result(
+                        http=state.http,
+                        token="session-token",
+                        result=pending_result,
+                        identity=IDENTITY,
+                        base_sha=BASE,
+                        head_sha=HEAD,
+                        app_slug=APP,
+                        pending_transaction=pending_result.transaction,
+                        configuration_context=CONFIGURATION,
+                        evidence_context=EVIDENCE,
+                        policy=POLICY,
+                    )
+
+                if failure == "crash-before-post":
+                    with self.assertRaises(KeyboardInterrupt):
+                        checkpoint_review_analysis(
+                            ledger,
+                            IDENTITY,
+                            prepared,
+                            raw_result,
+                            baseline=baseline,
+                            retain_result=retain_cb,
+                        )
+                    # Transaction must remain in analysis phase (never committed as publication_pending)
+                    self.assertEqual(
+                        ledger.load(IDENTITY).record.transaction.phase, "analysis"
+                    )
+                    continue
+
+                result = checkpoint_review_analysis(
+                    ledger,
+                    IDENTITY,
+                    prepared,
+                    raw_result,
+                    baseline=baseline,
+                    retain_result=retain_cb,
+                )
+                state.fail_part = None
+                self.assertEqual(state.part_requests.count("POST"), 1)
+                self.assertEqual(
+                    ledger.load(IDENTITY).record.transaction.phase,
+                    "publication_pending",
+                )
+
+                class FailingBroker:
+                    def request_oidc_token(self):
+                        if failure == "oidc":
+                            raise RuntimeError("OIDC provider unavailable")
+                        return "oidc"
+
+                    def exchange(self, token, *, capability=None):
+                        if failure == "exchange":
+                            raise RuntimeError("broker token exchange failed")
+                        return "capability-token"
+
+                failing_app = GitHubApplication(
+                    broker=FailingBroker(),
+                    http=state.http,
+                    reviewer=ReviewPublisher(http=state.http),
+                    learner=_Noop(),
+                    replier=_Noop(),
+                    session_ledger=ledger,
+                )
+                if failure in {"oidc", "exchange"}:
+                    with self.assertRaisesRegex(
+                        RuntimeError, "OIDC|broker token exchange"
+                    ):
+                        failing_app.publish_review(
+                            options=GitHubWriteOptions(
+                                auto_review=True,
+                                auto_approve=False,
+                                github_writes=True,
+                            ),
+                            oidc_token=None,
+                            repository="owner/repo",
+                            repository_id=1,
+                            pull_request=1,
+                            head_sha=HEAD,
+                            base_sha=BASE,
+                            base_branch="main",
+                            result=result,
+                            diff="diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n"
+                            + DIFF,
+                            app_slug=APP,
+                            convergence_policy=POLICY,
+                            current_key=key,
+                            configuration_context=CONFIGURATION,
+                            evidence_context=EVIDENCE,
+                        )
+
+                # Fresh process recovery with diagnostics/operation_entry disabled still recovers
+                fresh = LocalSessionLedger(Path(directory))
+                app = application(state, fresh)
+                restored = recover(app, fresh)
+                self.assertEqual(restored.content_digest(), result.content_digest())
+                outcome = publish(
+                    app,
+                    restored,
+                    key,
+                    options=GitHubWriteOptions(
+                        auto_review=True,
+                        auto_approve=False,
+                        github_writes=True,
+                        operation_entry="disabled",
+                    ),
+                )
+                self.assertEqual(outcome.status, "published")
+                self.assertEqual(len(state.reviews), 1)
+                # Duplicate recovery is a safe idempotent no-op
+                replay = publish(
+                    app,
+                    restored,
+                    key,
+                    options=GitHubWriteOptions(
+                        auto_review=True,
+                        auto_approve=False,
+                        github_writes=True,
+                        operation_entry="disabled",
+                    ),
+                )
+                self.assertEqual(replay.status, "already_published")
+                self.assertEqual(len(state.reviews), 1)
+
+    def test_missing_retained_bytes_reports_action_and_supports_authorized_successor(
+        self,
+    ):
+        from review_sensei.disposition import (
+            MaintainerCommand,
+            apply_session_command,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = LocalSessionLedger(Path(directory))
+            result, key = checkpoint(ledger, count=1)
+            state = RetentionState()
+            app = application(state, ledger)
+            with self.assertRaisesRegex(
+                GitHubPublicationError,
+                r"historical result bytes do not exist.*@reviewsensei review reenroll",
+            ):
+                recover(app, ledger)
+
+            # Authorized maintainer records irrecoverable-transaction successor transition
+            cmd = MaintainerCommand(
+                action="reenroll",
+                actor="maintainer-alice",
+                head_sha=HEAD,
+                command_id="cmd-reenroll-1",
+            )
+            updated, cmd_result = apply_session_command(ledger, IDENTITY, cmd)
+            self.assertTrue(cmd_result.applied)
+            self.assertIn("irrecoverable transaction retired", cmd_result.summary)
+            self.assertIsNone(updated.transaction)
+            self.assertEqual(updated.completed_initial_reviews, 1)
+            self.assertEqual(updated.failed_attempts, 1)
+            self.assertEqual(len(updated.continuation_grants), 1)
+
+            # Concurrent/duplicate reenroll on the same retired state is idempotent
+            dup_record, dup_result = apply_session_command(ledger, IDENTITY, cmd)
+            self.assertFalse(dup_result.applied)
+            self.assertEqual(dup_record.generation, updated.generation)
+            self.assertEqual(dup_record.failed_attempts, 1)
+
+            # Exactly one successor round is admitted on the same head
+            successor = prepare_review_transaction(
+                ledger,
+                IDENTITY,
+                POLICY,
+                reservation_id="d" * 64,
+                base_sha=BASE,
+                head_sha=HEAD,
+                configuration_digest=ReviewTransaction.compute_configuration_digest(
+                    CONFIGURATION
+                ),
+                evidence_digest=ReviewTransaction.compute_evidence_digest(EVIDENCE),
+            )
+            self.assertTrue(successor.decision.admit)
+            self.assertIsNotNone(successor.transaction)
+            self.assertNotEqual(
+                successor.transaction.transaction_id,
+                result.transaction.transaction_id,
+            )
+
+    def test_hosted_adapter_interrupted_first_retention_post_never_commits_analysis_early(
+        self,
+    ):
+        from review_sensei_github.session_ledger import (
+            GitHubIssueCommentSessionLedger,
+            render_session_comment,
+        )
+
+        for op_entry in ("enabled", "disabled"):
+            with (
+                self.subTest(operation_entry=op_entry),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                seed = LocalSessionLedger(Path(directory))
+                prepared = prepare_review_transaction(
+                    seed,
+                    IDENTITY,
+                    POLICY,
+                    reservation_id="a" * 64,
+                    base_sha=BASE,
+                    head_sha=HEAD,
+                    configuration_digest=ReviewTransaction.compute_configuration_digest(
+                        CONFIGURATION
+                    ),
+                    evidence_digest=ReviewTransaction.compute_evidence_digest(EVIDENCE),
+                )
+                assert prepared.transaction is not None
+                state = RetentionState()
+                state.session_comment = {
+                    "id": 600,
+                    "body": render_session_comment(
+                        repository_id=1,
+                        pull_request=1,
+                        record=seed.load(IDENTITY).record,
+                    ),
+                    "user": state.app_user,
+                    "issue_url": "https://api.github.test/repos/owner/repo/issues/1",
+                }
+                hosted_ledger = GitHubIssueCommentSessionLedger(
+                    http=state.http,
+                    token="session-token",
+                    app_slug=APP,
+                )
+                comments = tuple(
+                    ReviewComment(
+                        path="src/app.py",
+                        line=1,
+                        body=f"Independent required decision {i}.",
+                        symbol=f"operation_{i}",
+                        defect_kind=f"case-{i}",
+                        needs_human=True,
+                        blocking=False,
+                    )
+                    for i in range(9)
+                )
+                raw_result = ReviewResult(
+                    summary="First review.",
+                    comments=comments,
+                    provider="fixture",
+                    model="fixture-model",
+                    review_status="complete",
+                    transaction=prepared.transaction,
+                )
+                key = ReviewContextCacheKey(
+                    repository="owner/repo",
+                    pull_request=1,
+                    base_sha=BASE,
+                    head_sha=HEAD,
+                    engine="fixture",
+                    model="fixture-model",
+                    profile="default",
+                    stage_digest="1" * 64,
+                    context_digest="2" * 64,
+                    learning_digest="3" * 64,
+                )
+                baseline = ReviewBaseline(
+                    cache_key=key,
+                    policy_digest=POLICY.digest(),
+                    complete=True,
+                    coverage_complete=True,
+                    generation=prepared.record.generation + 1,
+                    findings=tuple(
+                        sorted(
+                            (baseline_finding_from_comment(c) for c in comments),
+                            key=lambda f: f.fingerprint,
+                        )
+                    ),
+                    reviewed_paths=("src/app.py",),
+                )
+                app = application(state, hosted_ledger)
+                for failure_mode in ("crash-before", "missing"):
+                    state.fail_part = failure_mode
+                    state.retention_fault_event = None
+                    expected_exc = (
+                        KeyboardInterrupt
+                        if failure_mode == "crash-before"
+                        else GitHubPublicationError
+                    )
+                    with self.assertRaises(expected_exc):
+                        publish(
+                            app,
+                            raw_result,
+                            key,
+                            baseline=baseline,
+                            options=GitHubWriteOptions(
+                                auto_review=True,
+                                auto_approve=False,
+                                github_writes=True,
+                                operation_entry=op_entry,
+                            ),
+                        )
+                    loaded_after_interrupt = hosted_ledger.load(IDENTITY).record
+                    self.assertIsNotNone(loaded_after_interrupt.transaction)
+                    self.assertEqual(
+                        loaded_after_interrupt.transaction.phase, "analysis"
+                    )
+                    self.assertEqual(
+                        loaded_after_interrupt.completed_initial_reviews, 0
+                    )
+                    self.assertEqual(
+                        [p for p in state.parts if RESULT_COMMENT_MARKER in p["body"]],
+                        [],
+                    )
+
+                # Subsequent retry retains the result first, then advances the ledger
+                state.fail_part = None
+                state.retention_fault_event = None
+                app.reviewer = type(
+                    "_FailReviewer",
+                    (),
+                    {
+                        "publish": staticmethod(
+                            lambda **kw: (_ for _ in ()).throw(
+                                GitHubPublicationError("finding index")
+                            )
+                        )
+                    },
+                )()
+                with self.assertRaisesRegex(GitHubPublicationError, "finding index"):
+                    publish(
+                        app,
+                        raw_result,
+                        key,
+                        baseline=baseline,
+                        options=GitHubWriteOptions(
+                            auto_review=True,
+                            auto_approve=False,
+                            github_writes=True,
+                            complete_inventory=True,
+                            operation_entry=op_entry,
+                        ),
+                    )
+                after_retain = hosted_ledger.load(IDENTITY).record
+                self.assertEqual(after_retain.transaction.phase, "publication_failed")
+                self.assertEqual(after_retain.completed_initial_reviews, 1)
+                restored = recover(app, hosted_ledger)
+                self.assertEqual(
+                    restored.content_digest(),
+                    raw_result.content_digest(),
+                )

@@ -20,7 +20,7 @@ from review_sensei.bounded_evidence import EvidenceReadBudget, canonical_bytes
 from review_sensei.errors import ReviewInputError
 from review_sensei.human_inventory import inventory_from_result_document
 from review_sensei.models import ReviewTransaction
-from review_sensei.session import SessionIdentity, SessionLedger
+from review_sensei.session import SessionIdentity, SessionLedger, SessionLoadResult
 
 from .http import GitHubHttp
 from .operation_comments import (
@@ -169,12 +169,18 @@ class HumanInventoryContext:
 
 
 def _transaction(
-    ledger: SessionLedger, context: HumanInventoryContext
+    ledger: SessionLedger,
+    context: HumanInventoryContext,
+    *,
+    loaded: Any | None = None,
 ) -> ReviewTransaction:
     context.budget.check()
-    loaded = ledger.load(
-        SessionIdentity(context.repository, context.pull_request, context.repository_id)
-    )
+    if loaded is None:
+        loaded = ledger.load(
+            SessionIdentity(
+                context.repository, context.pull_request, context.repository_id
+            )
+        )
     context.budget.check()
     record = loaded.record
     transaction = record.transaction if record is not None else None
@@ -266,6 +272,7 @@ def build_human_inventory_context(
     configuration_digest: str,
     evidence_digest: str,
     budget: EvidenceReadBudget,
+    _loaded: SessionLoadResult | None = None,
 ) -> HumanInventoryContext:
     """Select durable transaction independently, then authenticate live Bot and PR."""
     budget.check()
@@ -277,7 +284,7 @@ def build_human_inventory_context(
             "default human inventory configured Bot login is invalid"
         )
     ledger = publication_session_ledger(ledger, budget)
-    loaded = ledger.load(identity)
+    loaded = _loaded if _loaded is not None else ledger.load(identity)
     budget.check()
     transaction = loaded.record.transaction if loaded.record is not None else None
     if (
@@ -318,7 +325,7 @@ def build_human_inventory_context(
         evidence_digest,
         budget,
     )
-    _transaction(ledger, context)
+    _transaction(ledger, context, loaded=_loaded)
     _live_pr(transport, token, context)
     return context
 

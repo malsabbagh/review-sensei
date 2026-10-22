@@ -1421,10 +1421,28 @@ class ReviewResult:
     # coverage obligations are unsupported binary blobs or generated files
     # excluded by policy. Never model output.
     coverage_only_partial: bool = False
+    work_policy_digest: str | None = None
+    # Continuation provenance is separate from the frozen v1 content digest.
+    # Its owning service compares the exact current request before reusing work.
+    continuation_scope_digest: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.coverage_only_partial, bool):
             raise ReviewInputError("coverage-only partial flag is invalid")
+        if self.work_policy_digest is not None and (
+            not isinstance(self.work_policy_digest, str)
+            or not _SHA256.fullmatch(self.work_policy_digest)
+        ):
+            raise ReviewInputError(
+                "review result work_policy_digest must be a SHA-256 digest"
+            )
+        if self.continuation_scope_digest is not None and (
+            not isinstance(self.continuation_scope_digest, str)
+            or not _SHA256.fullmatch(self.continuation_scope_digest)
+        ):
+            raise ReviewInputError(
+                "review result continuation_scope_digest must be a SHA-256 digest"
+            )
         if self.coverage_only_partial:
             from .human_file_review import coverage_only_binary
 
@@ -1657,6 +1675,13 @@ class ReviewResult:
             value["coverage"] = self.coverage.to_dict()
         if self.coverage_only_partial:
             value["coverage_only_partial"] = True
+        work_policy_digest = self.work_policy_digest or getattr(
+            self, "_work_policy_digest", None
+        )
+        if isinstance(work_policy_digest, str) and work_policy_digest:
+            value["work_policy_digest"] = work_policy_digest
+        if self.continuation_scope_digest is not None:
+            value["continuation_scope_digest"] = self.continuation_scope_digest
         if self.transaction is not None:
             value["transaction"] = self.transaction.to_dict()
         return value
@@ -1834,6 +1859,11 @@ class ReviewResult:
         )
         if transaction_value is not None and transaction is None:
             raise ReviewInputError("review result transaction must be an object")
+        work_policy_digest = value.get("work_policy_digest")
+        if work_policy_digest is not None and not isinstance(work_policy_digest, str):
+            raise ReviewInputError(
+                "review result work_policy_digest must be a SHA-256 digest"
+            )
         return cls(
             summary=summary,
             comments=tuple(comment_values),
@@ -1849,6 +1879,10 @@ class ReviewResult:
             coverage=coverage,
             transaction=transaction,
             coverage_only_partial=cast(bool, value.get("coverage_only_partial", False)),
+            work_policy_digest=cast(str | None, work_policy_digest),
+            continuation_scope_digest=cast(
+                str | None, value.get("continuation_scope_digest")
+            ),
         )
 
 

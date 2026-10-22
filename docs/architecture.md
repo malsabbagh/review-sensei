@@ -17,12 +17,12 @@ Writers default to at most 64 findings; readers accept 250. Only trusted
 `github.publication_inventory: complete` enables larger emission after reader-first
 rollout. Preserve every identity/explanation within body/item/path/future-assessment
 bounds; refuse overflow without truncation. Exact replay verifies prose.
-With `github.operation_entry: enabled`, retain transaction-bound validated result bytes in owned PR comments
-before review/check mutation; never retain raw diffs/prompts/credentials or enable
-diagnostics. Recovery validates durable transaction and trusted exact-current-snapshot
-contexts, preserving admission/acceptance. One publication-attempt budget covers retention/reads/
-publication. Unconfirmed writes require complete owned readback; missing/conflicting
-parts refuse creation. Existing opt-outs remain. See ADR 0093.
+Retain bound result bytes in owned PR comments before GitHub-ledger
+`publication_pending`/review/check writes despite routing/diagnostics.
+Never retain diffs/prompts/credentials or write when writes-disabled.
+Recovery binds exact trusted transaction/admission/acceptance. One budget covers
+reads/writes; unconfirmed writes need complete owned readback. Missing/conflicting
+parts refuse. Unbound gains no checkpoint authority. See ADR 0093.
 
 The packaged v5 schema validates structure; explicit rescan uses the trusted reader
 and one original command read allowance.
@@ -1045,6 +1045,18 @@ eligibility payload version `2.0` inside the recognized `eligibility:v1` envelop
 the facts remain v1. Upgraded readers accept v1 and v2, and a latest unsupported
 record blocks older authority. Normal review publication continues writing v1.
 The work-policy digest extends transaction configuration only for opt-in runs.
+
+Partial-result continuation also requires a persisted source-context identity at
+the public `ReviewService.run` boundary. A domain-separated digest binds the full
+request, effective stage/provider/model routing, review profile, work/resource
+budgets, capabilities and incremental plan. The service checks it before planning
+or reusing coverage, including when a direct API result has no transaction.
+Continuation must verify full input scope; absent/changed scope refuses reuse.
+Same-input serialized continuation works.
+Nested chunk runs bind their aggregate to the outer request.
+The digest remains separate from the frozen v1 content digest and existing
+transaction fences, and consumes bytes under the original result ceiling. See
+[ADR 0102](adr/0102-bind-partial-continuation-to-review-input.md).
 
 Closed context requests permit one host-validated joint or discovery wave using
 the same planner and tracker. Broader discovery uses configured full-review

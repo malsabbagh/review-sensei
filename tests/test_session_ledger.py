@@ -1500,6 +1500,119 @@ class RoundPersistenceTests(unittest.TestCase):
 
 class GitHubSessionLedgerTests(unittest.TestCase):
     @staticmethod
+    def _retained_checkpoint_http(*, changed_summary=False, corrupt_payload=False):
+        import base64
+        import hashlib
+
+        from review_sensei_github.operation_host import (
+            RESULT_COMMENT_MARKER,
+            render_marked_comment,
+        )
+        from review_sensei_github.publication_recovery import _event_key
+
+        from review_sensei.bounded_evidence import canonical_bytes
+        from review_sensei.models import ReviewTransaction
+
+        result = ReviewResult(
+            provider="fixture", summary="Retained checkpoint.", comments=()
+        )
+        transaction = ReviewTransaction.create(
+            repository=IDENTITY.repository,
+            pull_request=IDENTITY.pull_request,
+            base_sha="b" * 40,
+            head_sha="a" * 40,
+            policy_digest="1" * 64,
+            configuration_digest="2" * 64,
+            evidence_digest="3" * 64,
+            reservation_id="4" * 64,
+            generation=1,
+        ).with_result(result.content_digest())
+        bound = replace(result, transaction=transaction)
+        document = bound.to_dict()
+        if changed_summary:
+            document["summary"] = "Different checkpoint."
+        payload = canonical_bytes(document)
+        payload_digest = hashlib.sha256(payload).hexdigest()
+        if corrupt_payload:
+            payload = payload.replace(b"Retained checkpoint.", b"Altered checkpoint.")
+        part = render_marked_comment(
+            RESULT_COMMENT_MARKER,
+            {
+                "count": 1,
+                "data": base64.b64encode(payload).decode("ascii"),
+                "event_key": _event_key(IDENTITY, transaction),
+                "index": 0,
+                "kind": "result",
+                "result_sha256": payload_digest,
+            },
+        )
+        http, calls = make_http(
+            [
+                json_response({"id": 42, "login": "sensei[bot]", "type": "Bot"}),
+                json_response(
+                    {
+                        "state": "open",
+                        "base": {
+                            "sha": transaction.base_sha,
+                            "repo": {"id": 99, "full_name": IDENTITY.repository},
+                        },
+                        "head": {"sha": transaction.head_sha},
+                    }
+                ),
+                json_response(
+                    [
+                        {
+                            "id": 701,
+                            "body": part,
+                            "user": {"id": 42, "type": "Bot"},
+                            "issue_url": "https://api.github.test/repos/owner/repo/issues/136",
+                        }
+                    ]
+                ),
+            ]
+        )
+        return http, calls, transaction, bound, payload_digest
+
+    def test_retained_checkpoint_distinguishes_payload_and_content_digests(self):
+        http, calls, transaction, bound, payload_digest = (
+            self._retained_checkpoint_http()
+        )
+        self.assertNotEqual(payload_digest, transaction.result_sha256)
+        ledger = GitHubIssueCommentSessionLedger(
+            http, token="token", app_slug="sensei[bot]"
+        )
+
+        loaded = ledger.load_retained_checkpoint_result(
+            IDENTITY, transaction=transaction, head_sha=transaction.head_sha
+        )
+
+        self.assertIsInstance(loaded, ReviewResult)
+        self.assertEqual(loaded.to_dict(), bound.to_dict())
+        self.assertEqual([method for method, _url, _body in calls], ["GET"] * 3)
+
+    def test_retained_checkpoint_rejects_corrupt_payload_digest(self):
+        http, _calls, transaction, _bound, _digest = self._retained_checkpoint_http(
+            corrupt_payload=True
+        )
+        ledger = GitHubIssueCommentSessionLedger(
+            http, token="token", app_slug="sensei[bot]"
+        )
+        with self.assertRaisesRegex(ValueError, "result part digest mismatch"):
+            ledger.load_retained_checkpoint_result(IDENTITY, transaction=transaction)
+
+    def test_retained_checkpoint_rejects_changed_content_with_valid_payload_digest(
+        self,
+    ):
+        http, _calls, transaction, _bound, _digest = self._retained_checkpoint_http(
+            changed_summary=True
+        )
+        ledger = GitHubIssueCommentSessionLedger(
+            http, token="token", app_slug="sensei[bot]"
+        )
+        with self.assertRaisesRegex(ReviewInputError, "result digest does not match"):
+            ledger.load_retained_checkpoint_result(IDENTITY, transaction=transaction)
+
+    @staticmethod
     def _grant_attestation(**overrides):
         attestation = {
             "version": 1,

@@ -1732,6 +1732,7 @@ class ReviewApprovalFinalizer:
         assume_inline_unresolved: frozenset[str] | None = None,
         partition_reader: PartitionReader | None = None,
         visible_reader: VisibleReader | None = None,
+        coverage_uncertainty_accepted: bool = False,
         _before_approval: Callable[[list[Any]], PublicationResult | None] | None = None,
     ) -> PublicationResult:
         """Emit at most one exact-head APPROVE from trusted eligibility.
@@ -1775,7 +1776,8 @@ class ReviewApprovalFinalizer:
                         eligibility.facts.has_blocking_findings
                         or bool(unresolved_inline)
                     ),
-                )
+                ),
+                coverage_uncertainty_accepted=coverage_uncertainty_accepted,
             )
             if "auto-approval-disabled" in static.blockers:
                 return PublicationResult(status="auto_approval_disabled")
@@ -1893,6 +1895,7 @@ class ReviewApprovalFinalizer:
             decision = eligibility.evaluate(
                 app_authored=write_preflight.app_authored,
                 has_open_review_threads=open_blocking,
+                coverage_uncertainty_accepted=coverage_uncertainty_accepted,
             )
             if not decision.approved:
                 return PublicationResult(
@@ -1981,13 +1984,34 @@ class ReviewApprovalFinalizer:
                 head_sha=head_sha,
                 base_sha=preflight.base_sha,
             )
+            approval_body = marker
+            if decision.outcome == "maintainer-coverage-exception":
+                gates = ",".join(decision.satisfied_gates)
+                exception_marker = (
+                    "<!-- reviewsensei:approval-exception:v1 "
+                    "outcome=maintainer-coverage-exception "
+                    f"result={eligibility.result_digest} "
+                    f"gates={gates} -->"
+                )
+                approval_body = (
+                    "Approved with maintainer coverage exception "
+                    f"(`outcome=maintainer-coverage-exception`, "
+                    f"`result={eligibility.result_digest}`, "
+                    f"`satisfied_gates={gates}`).\n\n"
+                    f"{marker}\n{exception_marker}"
+                )
             if self._reviews_have_app_head_state(
                 reviews,
                 head_sha=head_sha,
                 app_slug=app_slug,
                 state="APPROVED",
-                body=marker,
+                body=approval_body,
             ):
+                if decision.outcome == "maintainer-coverage-exception":
+                    return PublicationResult(
+                        status="already_approved",
+                        diagnostic="maintainer_coverage_exception",
+                    )
                 return PublicationResult(status="already_approved")
 
             approved_base_sha = preflight.base_sha
@@ -1998,7 +2022,7 @@ class ReviewApprovalFinalizer:
                     repository=repository,
                     pull_request=pull_request,
                     head_sha=head_sha,
-                    marker=marker,
+                    marker=approval_body,
                     app_slug=app_slug,
                 ):
                     return False
@@ -2015,12 +2039,12 @@ class ReviewApprovalFinalizer:
                     base_sha=approved_base_sha,
                 )
 
-            return self._post_head_review(
+            approval_result = self._post_head_review(
                 token=token,
                 repository=repository,
                 pull_request=pull_request,
                 head_sha=head_sha,
-                body=marker,
+                body=approval_body,
                 event="APPROVE",
                 already=already_approved,
                 success_status="approved",
@@ -2029,6 +2053,14 @@ class ReviewApprovalFinalizer:
                 permission="approval finalization lacks permission",
                 transient="approval finalization failed temporarily",
             )
+            if (
+                decision.outcome == "maintainer-coverage-exception"
+                and approval_result.status in {"approved", "already_approved"}
+            ):
+                return replace(
+                    approval_result, diagnostic="maintainer_coverage_exception"
+                )
+            return approval_result
         finally:
             if owns_operation_budget:
                 self._operation_budget = None
@@ -2071,6 +2103,8 @@ class ReviewApprovalFinalizer:
         finding_ids: Sequence[str],
         dispositions: Sequence[Any],
         reviews_policy: str = "auto-approve",
+        incomplete_coverage: Sequence[str] | None = None,
+        policy_digest: str | None = None,
     ) -> PublicationResult:
         """Re-evaluate one published head after an override, without a provider call.
 
@@ -2103,6 +2137,8 @@ class ReviewApprovalFinalizer:
                 finding_ids=finding_ids,
                 dispositions=dispositions,
                 reviews_policy=reviews_policy,
+                incomplete_coverage=incomplete_coverage,
+                policy_digest=policy_digest,
             )
         finally:
             if owns_operation_budget:
@@ -2150,6 +2186,8 @@ class ReviewApprovalFinalizer:
         finding_ids: Sequence[str],
         dispositions: Sequence[Any],
         reviews_policy: str = "auto-approve",
+        incomplete_coverage: Sequence[str] | None = None,
+        policy_digest: str | None = None,
     ) -> PublicationResult:
         from .checks import ReviewCheckPublisher, review_check_outcome
 
@@ -2249,6 +2287,23 @@ class ReviewApprovalFinalizer:
             has_human = bool(human.pending)
         else:
             has_human = eligibility.facts.has_human_adjudication_findings
+        from review_sensei.disposition import disposition_honors_coverage_uncertainty
+
+        effective_incomplete_coverage = incomplete_coverage
+        if effective_incomplete_coverage:
+            result_bindings = [
+                item.split(":", 1)[1]
+                for item in effective_incomplete_coverage
+                if isinstance(item, str) and item.startswith("result:")
+            ]
+            if result_bindings and eligibility.result_digest not in result_bindings:
+                effective_incomplete_coverage = ()
+        coverage_accepted = disposition_honors_coverage_uncertainty(
+            dispositions,
+            head_sha=head_sha,
+            incomplete_coverage=effective_incomplete_coverage,
+            policy_digest=policy_digest,
+        )
         adjusted = replace(
             eligibility,
             human_review=human,
@@ -2568,6 +2623,7 @@ class ReviewApprovalFinalizer:
                         review_status=adjusted.facts.review_status,
                         required_fixes=has_blocking,
                         required_decisions=has_human,
+                        coverage_uncertainty_accepted=coverage_accepted,
                     ),
                 )
             except (
@@ -2600,6 +2656,7 @@ class ReviewApprovalFinalizer:
                 eligibility=adjusted,
                 require_persisted=True,
                 honored_instances=honored_instances,
+                coverage_uncertainty_accepted=coverage_accepted,
                 _before_approval=final_capacity_guard if compacted else None,
             )
         except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
@@ -2761,6 +2818,8 @@ class ReviewApprovalFinalizer:
         head_sha: str,
         app_slug: str,
         eligibility: ReviewApprovalEligibility | None = None,
+        token: str | None = None,
+        repository: str | None = None,
     ) -> FindingIndex | None:
         """Find the original inventory bound to the latest eligibility result.
 
@@ -2773,6 +2832,9 @@ class ReviewApprovalFinalizer:
                 head_sha=head_sha,
                 app_slug=app_slug,
                 require_valid=True,
+                token=token,
+                repository=repository,
+                pull_request=pull_request,
             )
         indexes = []
         for review in reversed(reviews):

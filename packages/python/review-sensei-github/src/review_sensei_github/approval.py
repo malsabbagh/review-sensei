@@ -45,6 +45,13 @@ _COVERAGE_BLOCKER_STATES = frozenset(
         "unknown",
     }
 )
+MAINTAINER_COVERAGE_EXCEPTION_SATISFIED_GATES = frozenset(
+    {
+        "review-partial",
+        "review-unverified",
+        "coverage-partial",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +60,12 @@ class AutoApprovalDecision:
 
     approved: bool
     blockers: tuple[str, ...] = ()
+    outcome: str = "withheld"
+    satisfied_gates: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.outcome == "withheld" and self.approved:
+            object.__setattr__(self, "outcome", "approved")
 
 
 @dataclass(frozen=True)
@@ -417,7 +430,11 @@ class ReviewApprovalEligibility:
         return eligibility
 
     def evaluate(
-        self, *, app_authored: bool, has_open_review_threads: bool | None
+        self,
+        *,
+        app_authored: bool,
+        has_open_review_threads: bool | None,
+        coverage_uncertainty_accepted: bool = False,
     ) -> AutoApprovalDecision:
         """Evaluate the persisted facts with the live exact-head thread state."""
 
@@ -426,7 +443,8 @@ class ReviewApprovalEligibility:
                 self.facts,
                 app_authored=app_authored,
                 has_open_review_threads=has_open_review_threads,
-            )
+            ),
+            coverage_uncertainty_accepted=coverage_uncertainty_accepted,
         )
 
 
@@ -565,7 +583,11 @@ def approval_eligibility_from_result(
     )
 
 
-def evaluate_approval_facts(facts: ApprovalFacts) -> AutoApprovalDecision:
+def evaluate_approval_facts(
+    facts: ApprovalFacts,
+    *,
+    coverage_uncertainty_accepted: bool = False,
+) -> AutoApprovalDecision:
     """Apply the approval criteria to frozen facts.
 
     Check publication is reported separately because it controls merge-gate
@@ -573,6 +595,13 @@ def evaluate_approval_facts(facts: ApprovalFacts) -> AutoApprovalDecision:
     """
 
     blockers: list[str] = []
+    satisfied_gates: list[str] = []
+    coverage_exception_eligible = (
+        coverage_uncertainty_accepted is True
+        and facts.review_status == "partial"
+        and facts.persistence_status != "capacity-exceeded"
+        and facts.coverage_blocker in {None, "reviewed", "partial"}
+    )
     if not isinstance(facts.enabled, bool):
         blockers.append("auto-approval-enabled-invalid")
     if not isinstance(facts.app_authored, bool):
@@ -598,11 +627,18 @@ def evaluate_approval_facts(facts: ApprovalFacts) -> AutoApprovalDecision:
         blockers.append("review-threads-open")
     status = facts.review_status
     if status in {"partial", "incomplete", "summary-only"}:
-        blockers.append(
+        status_blocker = (
             "baseline-capacity-exceeded"
             if facts.persistence_status == "capacity-exceeded"
             else f"review-{status}"
         )
+        if (
+            coverage_exception_eligible
+            and status_blocker in MAINTAINER_COVERAGE_EXCEPTION_SATISFIED_GATES
+        ):
+            satisfied_gates.append(status_blocker)
+        else:
+            blockers.append(status_blocker)
     elif status != "complete":
         blockers.append("review-status-invalid")
     if facts.evidence_policy not in {"legacy", "confirmed"}:
@@ -611,12 +647,36 @@ def evaluate_approval_facts(facts: ApprovalFacts) -> AutoApprovalDecision:
     # above and add review-unverified so callers can distinguish evidence-
     # gated partial coverage from other partial reviews.
     elif facts.evidence_policy == "confirmed" and status != "complete":
-        blockers.append("review-unverified")
+        if (
+            coverage_exception_eligible
+            and "review-unverified" in MAINTAINER_COVERAGE_EXCEPTION_SATISFIED_GATES
+        ):
+            satisfied_gates.append("review-unverified")
+        else:
+            blockers.append("review-unverified")
     if facts.coverage_blocker is not None and facts.coverage_blocker != "reviewed":
-        blockers.append(f"coverage-{facts.coverage_blocker}")
+        cov_blocker = f"coverage-{facts.coverage_blocker}"
+        if (
+            coverage_exception_eligible
+            and cov_blocker in MAINTAINER_COVERAGE_EXCEPTION_SATISFIED_GATES
+        ):
+            satisfied_gates.append(cov_blocker)
+        else:
+            blockers.append(cov_blocker)
     if facts.qualification not in {"not-required", "qualified"}:
         blockers.append(f"qualification-{facts.qualification}")
-    return AutoApprovalDecision(approved=not blockers, blockers=tuple(blockers))
+    approved = not blockers
+    outcome = (
+        "maintainer-coverage-exception"
+        if approved and satisfied_gates
+        else ("approved" if approved else "withheld")
+    )
+    return AutoApprovalDecision(
+        approved=approved,
+        blockers=tuple(blockers),
+        outcome=outcome,
+        satisfied_gates=tuple(satisfied_gates),
+    )
 
 
 def restrict_result_qualification(result: ReviewResult, qualification: str) -> str:

@@ -14,8 +14,9 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import review_sensei_github as github
 from review_sensei_github.cli import main as github_main
@@ -34,6 +35,10 @@ from review_sensei_github.operation_host import (
 from review_sensei_github.publication import (
     ReviewApprovalFinalizer,
     parse_finding_index,
+)
+from review_sensei_github.session_ledger import (
+    GitHubIssueCommentSessionLedger,
+    render_session_comment,
 )
 
 import review_sensei.cli as engine_cli
@@ -56,6 +61,38 @@ from tests.test_publication_recovery import (
     checkpoint,
 )
 
+PR342_COMMENT_SIZES = (
+    6932,
+    59998,
+    59998,
+    670,
+    1228,
+    46978,
+    59998,
+    59998,
+    18750,
+    1228,
+    59998,
+    59998,
+    3694,
+    59998,
+    59998,
+    25098,
+    1228,
+    59998,
+    59998,
+    17078,
+)
+
+
+class _HostedBroker(_Broker):
+    def open_session(self, *args, **kwargs):
+        return SimpleNamespace(
+            token="synthetic-session",
+            state="known",
+            reservation_owner=None,
+        )
+
 
 class JourneyState(RetentionState):
     """Add canonical individual operation-comment GET/PATCH to the fixture API."""
@@ -71,6 +108,63 @@ class JourneyState(RetentionState):
                     item["body"] = json.loads(request.data)["body"]
                 if request.method in {"GET", "PATCH"}:
                     return json_response(item)
+        return super().open(request, timeout)
+
+
+class PR342JourneyState(JourneyState):
+    """Sanitized PR #342 comment distribution where page_size >= 20 exceeds 512 KiB."""
+
+    def __init__(self, record):
+        super().__init__()
+        body0 = render_session_comment(repository_id=1, pull_request=1, record=record)
+        self.session_comment = {
+            "id": 600,
+            "body": body0
+            + "\n"
+            + ("x" * max(0, PR342_COMMENT_SIZES[0] - len(body0) - 1)),
+            "user": self.app_user,
+            "updated_at": "2026-10-20T00:00:00Z",
+            "issue_url": "https://api.github.test/repos/owner/repo/issues/1",
+        }
+        for index, size in enumerate(PR342_COMMENT_SIZES[1:], start=1):
+            self.parts.append(
+                {
+                    "id": 600 + index,
+                    "body": "x" * size,
+                    "user": self.app_user,
+                    "updated_at": f"2026-10-20T00:00:{index:02d}Z",
+                    "issue_url": "https://api.github.test/repos/owner/repo/issues/1",
+                }
+            )
+
+    def open(self, request, timeout):
+        parsed = urlparse(request.full_url)
+        path = parsed.path
+        if path.endswith("/issues/1/comments") and request.method == "GET":
+            self.calls.append((request.method, request.full_url, None))
+            self.part_requests.append(request.method)
+            query = parse_qs(parsed.query)
+            page = int(query.get("page", [1])[0])
+            per_page = int(query.get("per_page", [30])[0])
+            since = query.get("since", [None])[0]
+            comments = (
+                [self.session_comment] if self.session_comment else []
+            ) + self.parts
+            if since is not None:
+                comments = [
+                    item for item in comments if item.get("updated_at", "9999") >= since
+                ]
+            return json_response(comments[(page - 1) * per_page : page * per_page])
+        if path.endswith("/issues/1/comments") and request.method == "POST":
+            response = super().open(request, timeout)
+            self.parts[-1]["updated_at"] = "2026-10-20T00:01:00Z"
+            return response
+        if (
+            self.session_comment is not None
+            and path.endswith("/issues/comments/600")
+            and request.method == "PATCH"
+        ):
+            self.session_comment["updated_at"] = "2026-10-20T00:01:00Z"
         return super().open(request, timeout)
 
 
@@ -101,7 +195,15 @@ class DefaultPublicationCliJourneyTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def invoke(self, root, state, *, recover=False, actions=False):
+    def invoke(
+        self,
+        root,
+        state,
+        *,
+        recover=False,
+        actions=False,
+        github_session_ledger=False,
+    ):
         arguments = [
             "publish",
             "--allow-write",
@@ -125,8 +227,11 @@ class DefaultPublicationCliJourneyTests(unittest.TestCase):
             APP,
             "--diff",
             str(root / "review.patch"),
-            "--session-ledger",
-            str(root / "ledger"),
+            *(
+                ["--github-session-ledger"]
+                if github_session_ledger
+                else ["--session-ledger", str(root / "ledger")]
+            ),
             "--review-mode",
             "merge-focused",
             "--configuration-context",
@@ -149,9 +254,12 @@ class DefaultPublicationCliJourneyTests(unittest.TestCase):
         if actions:
             environment["GITHUB_RUN_ID"] = "synthetic-publication-run"
         output, error = io.StringIO(), io.StringIO()
+        broker_cls = _HostedBroker if github_session_ledger else _Broker
         with (
             patch.dict(os.environ, environment, clear=True),
-            patch.multiple(github, GitHubHttp=lambda: state.http, BrokerClient=_Broker),
+            patch.multiple(
+                github, GitHubHttp=lambda: state.http, BrokerClient=broker_cls
+            ),
             patch.object(
                 engine_cli,
                 "default_registry",
@@ -335,3 +443,48 @@ class DefaultPublicationCliJourneyTests(unittest.TestCase):
                 else:
                     self.assertEqual(code, 0, (output, error))
                     self.assert_complete_publication(state, result)
+
+    def test_hosted_session_ledger_pr342_comment_shape_stages_and_publishes_within_budget(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result, before = self.setup_files(root)
+            state = PR342JourneyState(before)
+            self.accept_analysis(state, result)
+            for item in state.parts:
+                item.setdefault("updated_at", "2026-10-20T00:00:30Z")
+            self.configuration(root, "legacy")
+            before_legacy_calls = len(state.calls)
+            code, output, error = self.invoke(
+                root, state, actions=True, github_session_ledger=True
+            )
+            legacy_calls = len(state.calls) - before_legacy_calls
+            self.assertNotEqual(code, 0, (output, error))
+            self.assertNotIn("cannot stage complete inventory", error)
+            self.assertIn("finding index", error)
+            self.assertLessEqual(legacy_calls, 60)
+
+            (root / "result.json").unlink()
+            self.configuration(root, "complete")
+            before_recover_calls = len(state.calls)
+            code, output, error = self.invoke(
+                root,
+                state,
+                recover=True,
+                actions=True,
+                github_session_ledger=True,
+            )
+            recover_calls = len(state.calls) - before_recover_calls
+            self.assertEqual(code, 0, (output, error))
+            self.assertLessEqual(recover_calls, 60)
+            self.assert_complete_publication(state, result)
+            remote_after = (
+                GitHubIssueCommentSessionLedger(
+                    state.http, token="synthetic-read", app_slug=APP
+                )
+                .load(IDENTITY)
+                .record
+            )
+            self.assertIsNotNone(remote_after)
+            self.assertEqual(remote_after.transaction.phase, "publication_succeeded")

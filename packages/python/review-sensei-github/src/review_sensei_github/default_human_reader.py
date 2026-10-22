@@ -382,8 +382,12 @@ class DefaultHumanInventoryReader:
                 and item.get("pull_request_url") == original["pull_request_url"]
                 and finding.comment is not None
                 and item.get("path") == finding.comment.path
-                and item.get("line") == finding.comment.line
-                and item.get("side") == finding.comment.side
+                and (
+                    item.get("line") is None or item.get("line") == finding.comment.line
+                )
+                and (
+                    item.get("side") is None or item.get("side") == finding.comment.side
+                )
                 and finding_instance_from_body(item.get("body")) == finding.fingerprint
                 and isinstance(item.get("body"), str)
                 and explanation in item["body"]
