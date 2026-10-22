@@ -74,3 +74,4 @@ include tests/test_rich250_late_feedback.py
 include tests/test_media_cli_activation.py
 include tests/test_hosted_media_context.py
 include tests/test_github_human_file_review.py
+global-exclude *.py[cod]
