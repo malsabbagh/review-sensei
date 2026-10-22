@@ -6,6 +6,7 @@ Owners/Reviewers: Maintainers
 Approved by: not applicable
 GitHub Issue: release request tracked in PR #212
 GitHub PR: [#212](https://github.com/malsabbagh/review-sensei/pull/212)
+Bootstrap repair PR: [#346](https://github.com/malsabbagh/review-sensei/pull/346)
 
 ## Context
 
