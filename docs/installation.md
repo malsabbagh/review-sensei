@@ -416,8 +416,13 @@ generated learning proposals require `github.learning: proposals`, and
 draft PRs. `github.writes: true` also exposes the maintainer command
 surface, independently of `github.mentions`. An authorized human
 `OWNER`, `MEMBER`, or `COLLABORATOR` may post `@reviewsensei review
-status|pause|continue|reenroll`, `@reviewsensei verify`, or `@reviewsensei
-dismiss|defer|accept-risk <fingerprint> --reason <text>` on a pull request;
+status|pause|continue`, `@reviewsensei verify`, or `@reviewsensei
+dismiss|defer <fingerprint> --reason <text>` on a pull request, while
+elevated risk and budget decisions (`@reviewsensei accept-risk <fingerprint> --reason <text>`,
+`@reviewsensei override <id...> [acceptable risk]`, `@reviewsensei <id...> is|are acceptable risk`,
+`@reviewsensei [review] accept-coverage-uncertainty --reason <text>`,
+`@reviewsensei I reviewed the media files and I approve`, and `@reviewsensei review reenroll`)
+require `maintain` or `admin` permission (`OWNER` or `MEMBER` when live repository permission is not loaded);
 those comments take the command path whenever writes are enabled, while
 `github.mentions` continues to control only conversational
 replies. The command path is the pull-request conversation: an inline review

@@ -827,7 +827,7 @@ function resolveTriggerWorkflowTemplate(publicWorkflowTag: string): string {
   const tag = validatePublicWorkflowTag(publicWorkflowTag);
   return String.raw`# ReviewSensei setup version: 5
 name: ReviewSensei review
-run-name: "ReviewSensei @@{{ github.event.pull_request && format('PR #{0}', github.event.pull_request.number) || 'manual' }}"
+run-name: "ReviewSensei @@{{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || github.event_name == 'pull_request_review_comment' && format('PR #{0} inline comment ({1})', github.event.pull_request.number, github.event.comment.user.type == 'Bot' && 'bot skipped' || format('@{0}', github.actor)) || github.event_name == 'issue_comment' && (github.event.issue.pull_request && format('PR #{0} comment ({1})', github.event.issue.number, github.event.comment.user.type == 'Bot' && 'bot skipped' || format('@{0}', github.actor)) || format('issue #{0} comment (skipped)', github.event.issue.number)) || inputs.pull_request_number && format('PR #{0} manual', inputs.pull_request_number) || 'manual' }}"
 
 # Configuration lives in .reviewsensei.yml at the repository root of the
 # trusted policy commit (the repository default branch) that the reusable
@@ -990,7 +990,7 @@ jobs:
           sha_full = re.compile(r"^[a-f0-9]{40}$")
           sha_prefix = re.compile(r"^[a-f0-9]{7,39}$")
           ref = re.compile(r"^[A-Za-z0-9._/-]+$")
-          rescan = re.compile(r"(?:@sensei|(?ai:@reviewsensei))[^\S\r\n]+(?i:re(?:[^\S\r\n]|-)?scan)(?:[^\S\r\n]+(?ai:commit)[^\S\r\n]+(?P<commit>[a-fA-F0-9]{7,40}))?")
+          rescan = re.compile(r"\A(?:@sensei|(?ai:@reviewsensei))[ \t]+(?i:re(?:[ \t]|-)?scan)(?:[ \t]+(?ai:commit)[ \t]+(?P<commit>[a-fA-F0-9]{7,40}))?\s*\Z")
           pull = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
           event_name = sys.argv[2]
           comment_body = sys.argv[3] if len(sys.argv) > 3 else ""
@@ -1053,13 +1053,13 @@ jobs:
           elif event_name == "pull_request_review_comment":
               operation = "reply"
           elif event_name == "issue_comment":
-              match = rescan.fullmatch(comment_body.strip())
+              match = rescan.fullmatch(comment_body)
               if match is not None:
                   if len(comment_body.encode("utf-8")) > 4096:
                       print("::error::explicit rescan comment exceeds 4096 UTF-8 bytes", file=sys.stderr)
                       raise SystemExit(1)
                   resolved_head = choose_head(match.group("commit"))
-              elif isinstance(comment_body, str) and len(comment_body.encode("utf-8")) <= 4096 and re.search(r"(?m)(?<!\S)@(?:(?ai:reviewsensei)|sensei)\s+(?:review\s+(?:status|pause|continue|reenroll)|verify|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}\s+--reason\s+\S.*|i\s+reviewed\s+the\s+media\s+files\s+and\s+i\s+approve|override\s+(?:(?:rs-)?[a-f0-9]{6,64})(?:(?:\s*,\s*|\s+)(?:rs-)?[a-f0-9]{6,64}){0,9}(?:\s+acceptable\s+risk)?|(?:(?:rs-)?[a-f0-9]{6,64})(?:(?:\s*,\s*|\s+)(?:rs-)?[a-f0-9]{6,64}){0,9}\s+(?:is|are)\s+acceptable\s+risk)\s*\Z", comment_body, re.IGNORECASE):
+              elif isinstance(comment_body, str) and len(comment_body.encode("utf-8")) <= 4096 and re.search(r"\A@(?:(?ai:reviewsensei)|sensei)[ \t]+(?:review[ \t]+(?:status|pause|continue|reenroll)|verify|(?:dismiss|defer|accept-risk)[ \t]+[a-f0-9]{16,64}[ \t]+--reason[ \t]+\S[^\r\n]*|(?:review[ \t]+)?accept-coverage-uncertainty[ \t]+--reason[ \t]+\S[^\r\n]*|i[ \t]+reviewed[ \t]+the[ \t]+media[ \t]+files[ \t]+and[ \t]+i[ \t]+approve|override[ \t]+(?:(?:rs-)?[a-f0-9]{6,64})(?:(?:[ \t]*,[ \t]*|[ \t]+)(?:rs-)?[a-f0-9]{6,64}){0,9}(?:[ \t]+acceptable[ \t]+risk)?|(?:(?:rs-)?[a-f0-9]{6,64})(?:(?:[ \t]*,[ \t]*|[ \t]+)(?:rs-)?[a-f0-9]{6,64}){0,9}[ \t]+(?:is|are)[ \t]+acceptable[ \t]+risk)[ \t\r\n]*\Z", comment_body, re.IGNORECASE):
                   operation = "command"
               else:
                   operation = "reply"
@@ -1877,6 +1877,51 @@ export function buildPinnedV4SetupFiles(
   ];
 }
 
+const RECOVERY_DISPATCH_INPUTS =
+  "      recover_publication:\n" +
+  "        description: Publish the original retained result without inference\n" +
+  "        required: false\n" +
+  "        default: false\n" +
+  "        type: boolean\n" +
+  "      recovery_policy_commit:\n" +
+  "        description: Exact original trusted default-branch policy commit for recovery\n" +
+  "        required: false\n" +
+  "      recovery_expected_head:\n" +
+  "        description: Exact original pull-request head for recovery\n" +
+  "        required: false\n";
+
+const RECOVERY_WITH_BLOCK =
+  "      recover_publication: ${{ inputs.recover_publication || false }}\n" +
+  "      recovery_policy_commit: ${{ inputs.recovery_policy_commit || '' }}\n" +
+  "      recovery_expected_head: ${{ inputs.recovery_expected_head || '' }}\n";
+
+export function currentPreRecoveryV5WorkflowTemplate(
+  publicWorkflowTag: string,
+): string {
+  const prepared = resolveTriggerWorkflowTemplate(publicWorkflowTag);
+  const withoutInputs = prepared.replace(RECOVERY_DISPATCH_INPUTS, "");
+  const withoutWith = withoutInputs.replace(RECOVERY_WITH_BLOCK, "");
+  if (withoutInputs === prepared || withoutWith === withoutInputs) {
+    throw new Error("recovery block is missing from the prepared caller");
+  }
+  return withoutWith;
+}
+
+export function historicalPreparedRecoveryV5WorkflowTemplate(
+  publicWorkflowTag: string,
+): string {
+  const base = preRecoveryV5WorkflowTemplate(publicWorkflowTag);
+  return base
+    .replace(
+      "        options: [review]\n",
+      `        options: [review]\n${RECOVERY_DISPATCH_INPUTS}`,
+    )
+    .replace(
+      "      operation: ${{ needs.resolve-trigger.outputs.operation }}\n",
+      `      operation: \${{ needs.resolve-trigger.outputs.operation }}\n${RECOVERY_WITH_BLOCK}`,
+    );
+}
+
 export { resolveTriggerWorkflowTemplate as preparedRecoveryWorkflowTemplate };
 
 /** Released-compatible setup-v5 output, pending runner-first recovery activation. */
@@ -1885,7 +1930,10 @@ export function buildTaggedV4SetupFiles(
 ): readonly SetupFile[] {
   const tag = validatePublicWorkflowTag(publicWorkflowTag);
   return [
-    { path: SETUP_WORKFLOW_PATH, content: preRecoveryV5WorkflowTemplate(tag) },
+    {
+      path: SETUP_WORKFLOW_PATH,
+      content: currentPreRecoveryV5WorkflowTemplate(tag),
+    },
     {
       path: SETUP_UNINSTALL_WORKFLOW_PATH,
       content: currentUninstallWorkflow(),

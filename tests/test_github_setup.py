@@ -18,6 +18,7 @@ from review_sensei_github import (
 )
 from review_sensei_github.setup import (
     BROKER_ACCEPTED_PUBLIC_WORKFLOW_TAGS,
+    CALLER_CONTRACT_VERSION,
     CONFIG_PATH,
     LEGACY_CONFIG_PATH,
     RELEASED_RUNNER_SWITCH_V4_SHA256,
@@ -36,9 +37,14 @@ from review_sensei_github.setup import (
     _public_workflow_tag_from_job_ref,
     _released_minimal_v5_config_file,
     _released_runner_switch_v4_workflow,
+    _sensei_only_v5_workflow,
     _tagged_workflow,
     _v4_with_review_mode_config_file,
+    inspect_installed_caller_drift,
+    inspect_local_trigger_override,
+    migrate_caller_preserving_customizations,
 )
+from review_sensei_github.doctor import inspect_protection_policy_discrepancies
 
 BASE_SHA = "b" * 40
 PUBLIC_WORKFLOW_SHA = "a" * 40
@@ -939,7 +945,8 @@ class SetupPullRequestServiceTests(unittest.TestCase):
 
         tag = setup_module.DEFAULT_PUBLIC_WORKFLOW_TAG
         current = _tagged_workflow(tag)
-        self.assertEqual(current, setup_module._pre_recovery_v5_workflow(tag))
+        self.assertEqual(current, setup_module._current_pre_recovery_v5_workflow(tag))
+        self.assertNotEqual(current, setup_module._pre_recovery_v5_workflow(tag))
         self.assertNotEqual(current, setup_module._prepared_recovery_workflow(tag))
         reverted = current.replace(
             "# ReviewSensei setup version: 5",
@@ -2078,6 +2085,111 @@ class GitHubSetupClientTests(unittest.TestCase):
                         repository="owner/repo",
                         installation_token="ghs_opaque",
                     )
+
+    def test_caller_drift_detection_and_customization_preserving_migration(self):
+        stale = (
+            _sensei_only_v5_workflow("v5")
+            .replace("runs-on: ubuntu-latest", "runs-on: [self-hosted, linux, x64]")
+            .replace(
+                "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
+                "uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2",
+            )
+            + "      CUSTOM_ORG_TOKEN: ${{ secrets.CUSTOM_ORG_TOKEN }}\n"
+        )
+        drift = inspect_installed_caller_drift(stale, public_workflow_tag="v5")
+        self.assertFalse(drift.is_current)
+        self.assertIn("inline_comment_guard_alias", drift.stale_sections)
+        self.assertEqual(drift.customizations["runs_on"], "[self-hosted, linux, x64]")
+        self.assertIn(
+            "      CUSTOM_ORG_TOKEN: ${{ secrets.CUSTOM_ORG_TOKEN }}",
+            drift.customizations["extra_secrets"],
+        )
+
+        migrated, diff_text = migrate_caller_preserving_customizations(
+            stale, public_workflow_tag="v5"
+        )
+        self.assertTrue(diff_text)
+        self.assertIn("runs-on: [self-hosted, linux, x64]", migrated)
+        self.assertIn(
+            "uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2",
+            migrated,
+        )
+        self.assertIn("CUSTOM_ORG_TOKEN: ${{ secrets.CUSTOM_ORG_TOKEN }}", migrated)
+        post_drift = inspect_installed_caller_drift(
+            migrated, public_workflow_tag="v5"
+        )
+        self.assertTrue(post_drift.is_current)
+        self.assertEqual(post_drift.contract_version, CALLER_CONTRACT_VERSION)
+
+    def test_inspect_local_trigger_override_and_protection_discrepancies(self):
+        compliant = Path(
+            "src/review_sensei/hosting/github/trigger.py"
+        ).read_text(encoding="utf-8")
+        res_ok = inspect_local_trigger_override(compliant)
+        self.assertTrue(res_ok.is_current)
+        self.assertEqual(res_ok.missing_capabilities, ())
+
+        res_stale = inspect_local_trigger_override("# legacy custom trigger\n")
+        self.assertFalse(res_stale.is_current)
+        self.assertTrue(len(res_stale.missing_capabilities) >= 3)
+
+        policy = json.loads(
+            Path(".github/protection-policy.json").read_text(encoding="utf-8")
+        )
+        live_rulesets = [
+            {
+                "id": 21068957,
+                "name": "main-branch-protection",
+                "target": "branch",
+                "enforcement": "active",
+                "bypass_actors": [
+                    {"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}
+                ],
+                "rules": [
+                    {"type": "deletion"},
+                    {"type": "non_fast_forward"},
+                    {"type": "required_linear_history"},
+                    {
+                        "type": "pull_request",
+                        "parameters": {
+                            "required_approving_review_count": 0,
+                            "dismiss_stale_reviews_on_push": True,
+                            "require_code_owner_review": True,
+                            "require_last_push_approval": False,
+                            "required_review_thread_resolution": True,
+                        },
+                    },
+                    {
+                        "type": "required_status_checks",
+                        "parameters": {
+                            "strict_required_status_checks_policy": True,
+                            "required_status_checks": [
+                                {"context": "verify"},
+                                {"context": "codeql"},
+                                {"context": "dependency-review"},
+                            ],
+                        },
+                    },
+                ],
+            },
+            {
+                "id": 24763806,
+                "name": "release-tag-protection",
+                "target": "tag",
+                "enforcement": "active",
+                "bypass_actors": [
+                    {"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}
+                ],
+                "conditions": {"ref_name": {"include": ["refs/tags/v*"], "exclude": []}},
+                "rules": [{"type": "deletion"}, {"type": "non_fast_forward"}],
+            },
+        ]
+        discrepancies = inspect_protection_policy_discrepancies(
+            policy=policy, live_rulesets=live_rulesets
+        )
+        fields = {d["field"] for d in discrepancies}
+        self.assertIn("required_approving_review_count", fields)
+        self.assertIn("bypass_actors", fields)
 
 
 if __name__ == "__main__":

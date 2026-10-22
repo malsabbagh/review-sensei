@@ -788,6 +788,401 @@ class WorkContinuationTests(unittest.TestCase):
         self.assertTrue(work.inventory.pending)
         self.assertFalse(work.reply.decisions)
 
+    def test_multi_window_progression_9_and_33_provider_calls_complete_without_reanalyzing_prefix(
+        self,
+    ):
+        from review_sensei.validation import ReviewLimits, TotalWorkBudget
+
+        def build_multi_file_diff(file_count: int) -> str:
+            parts: list[str] = []
+            for idx in range(file_count):
+                body_lines = "\n".join(
+                    f"+value_{idx}_{line} = {line}  # padding text to keep file in single chunk"
+                    for line in range(12)
+                )
+                parts.append(
+                    f"diff --git a/src/mod_{idx:02d}.py b/src/mod_{idx:02d}.py\n"
+                    f"new file mode 100644\n"
+                    f"index 0000000..2222222\n"
+                    f"--- /dev/null\n"
+                    f"+++ b/src/mod_{idx:02d}.py\n"
+                    f"@@ -0,0 +1,12 @@\n"
+                    f"{body_lines}\n"
+                )
+            return "".join(parts)
+
+        class CountingChunkProvider:
+            name = "fixture"
+            model = "fixture"
+
+            def __init__(self) -> None:
+                self.calls = 0
+                self.seen_Files: list[str] = []
+
+            def complete(self, request):
+                self.calls += 1
+                for idx in range(40):
+                    marker = f"b/src/mod_{idx:02d}.py"
+                    if marker in request.prompt:
+                        self.seen_Files.append(f"src/mod_{idx:02d}.py")
+                return ProviderResponse(
+                    json.dumps(
+                        {
+                            "summary": f"Window chunk {self.calls} reviewed.",
+                            "comments": [],
+                        }
+                    ),
+                    self.name,
+                )
+
+        limits = ReviewLimits(
+            max_diff_bytes=950,
+            max_diff_lines=25,
+            max_diff_files=1,
+            max_diff_hunks=1,
+        )
+        work_budget = TotalWorkBudget(
+            max_total_diff_bytes=60_000,
+            max_total_diff_lines=2_000,
+            max_total_files=64,
+            max_total_hunks=64,
+            max_chunks=8,
+            max_provider_calls=8,
+        )
+
+        for total_files, expected_windows in ((9, 2), (33, 5)):
+            with self.subTest(total_files=total_files):
+                diff_text = build_multi_file_diff(total_files)
+                provider = CountingChunkProvider()
+                service = ReviewService(
+                    provider,
+                    stages=(
+                        Stage("review", "Review:\n{diff}", ("summary", "comments")),
+                    ),
+                    budget=ResourceBudget.create(max_provider_calls=8),
+                )
+                prior_result = None
+                windows_run = 0
+                while True:
+                    windows_run += 1
+                    run = service.run(
+                        ReviewRequest(
+                            diff=diff_text,
+                            limits=limits,
+                            work_budget=work_budget,
+                            orchestrate_large_changes=True,
+                        ),
+                        prior_partial=prior_result,
+                    )
+                    self.assertIsNotNone(run.result)
+                    prior_result = run.result
+                    if run.outcome.status == "reviewed":
+                        break
+                    self.assertEqual(run.outcome.status, "partial")
+                    self.assertLess(windows_run, expected_windows)
+
+                self.assertEqual(windows_run, expected_windows)
+                self.assertEqual(provider.calls, total_files)
+                self.assertEqual(
+                    provider.seen_Files,
+                    [f"src/mod_{idx:02d}.py" for idx in range(total_files)],
+                )
+                self.assertEqual(prior_result.review_status, "complete")
+                self.assertTrue(prior_result.coverage.fully_reviewed)
+
+    def test_six_partial_windows_plus_authorized_successor_grant_proceeds_on_seventh_window(
+        self,
+    ):
+        from review_sensei.convergence import ReviewConvergencePolicy
+        from review_sensei.coverage import CoverageManifest, FileCoverage, HunkCoverage
+        from review_sensei.disposition import (
+            MaintainerCommand,
+            apply_session_command,
+        )
+        from review_sensei.models import ReviewResult, ReviewTransaction
+        from review_sensei.rescan import AuthorizedRescan
+        from review_sensei.session import (
+            InMemorySessionLedger,
+            SessionIdentity,
+            checkpoint_review_analysis,
+            complete_review_publication,
+            prepare_review_transaction,
+            prepare_session_round,
+        )
+
+        ledger = InMemorySessionLedger()
+        identity = SessionIdentity(
+            repository="owner/repo", pull_request=7, repository_id=100
+        )
+        base_sha = "1" * 40
+        head_sha = "2" * 40
+        policy = ReviewConvergencePolicy()
+        config_digest = "4" * 64
+        evidence_digest = "5" * 64
+
+        last_published_tx = None
+        for window_idx in range(6):
+            rescan_req = None
+            if window_idx > 0:
+                rescan_req = AuthorizedRescan(
+                    kind="issue_comment",
+                    request_id=window_idx,
+                    source=last_published_tx,
+                    review_id=100 + window_idx,
+                )
+            prepared = prepare_review_transaction(
+                ledger,
+                identity,
+                policy,
+                reservation_id=f"{window_idx + 1:064x}",
+                base_sha=base_sha,
+                head_sha=head_sha,
+                configuration_digest=config_digest,
+                evidence_digest=evidence_digest,
+                rescan_request=rescan_req,
+            )
+            self.assertTrue(prepared.decision.admit)
+            tx = prepared.transaction
+            self.assertIsNotNone(tx)
+            partial_res = ReviewResult(
+                summary=f"Partial window {window_idx + 1}.",
+                comments=(),
+                provider="fixture",
+                review_status="partial",
+                coverage=CoverageManifest(
+                    files=(
+                        FileCoverage("src/done.py", "reviewed"),
+                        FileCoverage(
+                            "src/pending.py",
+                            "budget-exhausted",
+                            "provider-call-budget",
+                        ),
+                    ),
+                    hunks=(
+                        HunkCoverage(1, "src/done.py", "reviewed"),
+                        HunkCoverage(
+                            2,
+                            "src/pending.py",
+                            "budget-exhausted",
+                            "provider-call-budget",
+                        ),
+                    ),
+                    enumeration_complete=True,
+                    enumerated_paths=("src/done.py", "src/pending.py"),
+                ),
+            )
+            bound = checkpoint_review_analysis(
+                ledger, identity, prepared, partial_res
+            )
+            published_record = complete_review_publication(
+                ledger, identity, bound.transaction, published=True
+            )
+            last_published_tx = published_record.transaction
+
+        exhausted_record = ledger.load(identity).record
+        self.assertEqual(exhausted_record.failed_attempts, 6)
+
+        blocked_rescan = AuthorizedRescan(
+            kind="issue_comment",
+            request_id=99,
+            source=last_published_tx,
+            review_id=199,
+        )
+        blocked_prep = prepare_session_round(
+            ledger,
+            identity,
+            policy,
+            reservation_id="9" * 64,
+            head_sha=head_sha,
+            rescan_request=blocked_rescan,
+        )
+        self.assertFalse(blocked_prep.decision.admit)
+        self.assertEqual(
+            blocked_prep.decision.handoff_reason, "failed-attempt-budget-exhausted"
+        )
+
+        # Collaborator continue only unpauses and does not restore eligibility
+        _, collab_outcome = apply_session_command(
+            ledger,
+            identity,
+            MaintainerCommand(
+                action="continue",
+                actor="collab",
+                head_sha=head_sha,
+                command_id="cmd-collab",
+            ),
+            actor_role="COLLABORATOR",
+        )
+        self.assertFalse(collab_outcome.applied)
+        self.assertIn(
+            "failed-attempt budget remains exhausted", collab_outcome.summary
+        )
+
+        # Maintainer/admin continue grants bounded successor continuation
+        granted_record, maint_outcome = apply_session_command(
+            ledger,
+            identity,
+            MaintainerCommand(
+                action="continue",
+                actor="admin-user",
+                head_sha=head_sha,
+                command_id="cmd-maint-grant",
+            ),
+            actor_role="maintain",
+        )
+        self.assertTrue(maint_outcome.applied)
+        self.assertIn("successor continuation granted", maint_outcome.summary)
+        self.assertEqual(granted_record.failed_attempts, 6)
+
+        # Duplicate/concurrent successor grant is idempotent
+        dup_record, dup_outcome = apply_session_command(
+            ledger,
+            identity,
+            MaintainerCommand(
+                action="reenroll",
+                actor="admin-user",
+                head_sha=head_sha,
+                command_id="cmd-maint-dup",
+            ),
+            actor_role="admin",
+        )
+        self.assertFalse(dup_outcome.applied)
+        self.assertEqual(dup_record.generation, granted_record.generation)
+
+        # 7th window now admits and consumes the single successor grant
+        seventh_prep = prepare_session_round(
+            ledger,
+            identity,
+            policy,
+            reservation_id="7" * 64,
+            head_sha=head_sha,
+        )
+        self.assertTrue(seventh_prep.decision.admit)
+        self.assertIsNotNone(seventh_prep.reservation_id)
+        retained_prior = ledger.load_retained_checkpoint_result(
+            identity, head_sha=head_sha
+        )
+        self.assertIsNotNone(retained_prior)
+        self.assertEqual(retained_prior.review_status, "partial")
+
+    def test_changed_head_cannot_inherit_stale_partial_coverage_and_no_progress_suspends_with_remedy(
+        self,
+    ):
+        from review_sensei.coverage import CoverageManifest, FileCoverage, HunkCoverage
+        from review_sensei.errors import ReviewInputError
+        from review_sensei.models import ReviewResult
+        from review_sensei.session import ReviewTransaction
+        from review_sensei.validation import ReviewLimits, TotalWorkBudget
+
+        diff_text = (
+            "diff --git a/src/a.py b/src/a.py\n"
+            "new file mode 100644\n"
+            "index 0000000..2222222\n"
+            "--- /dev/null\n"
+            "+++ b/src/a.py\n"
+            "@@ -0,0 +1,5 @@\n"
+            "+a1 = 1\n+a2 = 2\n+a3 = 3\n+a4 = 4\n+a5 = 5\n"
+            "diff --git a/src/b.py b/src/b.py\n"
+            "new file mode 100644\n"
+            "index 0000000..2222222\n"
+            "--- /dev/null\n"
+            "+++ b/src/b.py\n"
+            "@@ -0,0 +1,5 @@\n"
+            "+b1 = 1\n+b2 = 2\n+b3 = 3\n+b4 = 4\n+b5 = 5\n"
+        )
+        prior_partial = ReviewResult(
+            summary="Reviewed src/a.py.",
+            comments=(),
+            provider="fixture",
+            review_status="partial",
+            coverage=CoverageManifest(
+                files=(
+                    FileCoverage("src/a.py", "reviewed"),
+                    FileCoverage(
+                        "src/b.py", "budget-exhausted", "provider-call-budget"
+                    ),
+                ),
+                hunks=(
+                    HunkCoverage(1, "src/a.py", "reviewed"),
+                    HunkCoverage(
+                        2,
+                        "src/b.py",
+                        "budget-exhausted",
+                        "provider-call-budget",
+                    ),
+                ),
+                enumeration_complete=True,
+                enumerated_paths=("src/a.py", "src/b.py"),
+            ),
+            transaction=ReviewTransaction.create(
+                repository="owner/repo",
+                pull_request=1,
+                base_sha="1" * 40,
+                head_sha="2" * 40,
+                policy_digest="3" * 64,
+                configuration_digest="4" * 64,
+                evidence_digest="5" * 64,
+                reservation_id="6" * 64,
+                generation=2,
+            ),
+        )
+
+        class FailingProvider:
+            name = "fixture"
+            model = "fixture"
+
+            def complete(self, request):
+                return ProviderResponse("not valid json", self.name)
+
+        service = ReviewService(
+            FailingProvider(),
+            stages=(Stage("review", "Review:\n{diff}", ("summary", "comments")),),
+        )
+        # Stale head is rejected immediately
+        with self.assertRaisesRegex(
+            ReviewInputError, "does not match current base or head"
+        ):
+            service.run(
+                ReviewRequest(
+                    diff=diff_text,
+                    base_sha="1" * 40,
+                    head_sha="9" * 40,
+                    orchestrate_large_changes=True,
+                ),
+                prior_partial=prior_partial,
+            )
+
+        # Matching head with failing chunk produces no-progress diagnostic and remedy
+        no_prog_run = service.run(
+            ReviewRequest(
+                diff=diff_text,
+                base_sha="1" * 40,
+                head_sha="2" * 40,
+                limits=ReviewLimits(
+                    max_diff_bytes=200,
+                    max_diff_lines=12,
+                    max_diff_files=1,
+                    max_diff_hunks=1,
+                ),
+                work_budget=TotalWorkBudget(
+                    max_total_diff_bytes=5000,
+                    max_total_diff_lines=100,
+                    max_total_files=10,
+                    max_total_hunks=10,
+                    max_chunks=8,
+                    max_provider_calls=8,
+                ),
+                orchestrate_large_changes=True,
+            ),
+            prior_partial=prior_partial,
+        )
+        self.assertEqual(no_prog_run.outcome.status, "partial")
+        self.assertEqual(no_prog_run.outcome.diagnostic, "no-progress")
+        self.assertIn(
+            "accept-coverage-uncertainty --reason",
+            no_prog_run.result.summary,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

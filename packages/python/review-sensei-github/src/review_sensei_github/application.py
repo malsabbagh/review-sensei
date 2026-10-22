@@ -522,7 +522,9 @@ class GitHubApplication:
         expected_configuration_digest: str | None = None
         expected_evidence_digest: str | None = None
 
-        def load_transaction(source_ledger: SessionLedger):
+        def load_transaction(
+            source_ledger: SessionLedger, *, commit_analysis: bool = True
+        ):
             """Translate durable transaction validation into a publication error."""
 
             if (
@@ -542,6 +544,7 @@ class GitHubApplication:
                     policy_digest=policy.digest(),
                     configuration_digest=expected_configuration_digest,
                     evidence_digest=expected_evidence_digest,
+                    commit_analysis=commit_analysis,
                 )
             except ReviewInputError as exc:
                 raise GitHubPublicationError(
@@ -588,7 +591,9 @@ class GitHubApplication:
                     transaction_ledger = publication_session_ledger(
                         transaction_ledger, budget
                     )
-                transaction_record = load_transaction(transaction_ledger)
+                transaction_record = load_transaction(
+                    transaction_ledger, commit_analysis=False
+                )
                 if (
                     transaction_record.transaction is not None
                     and transaction_record.transaction.phase == "publication_succeeded"
@@ -675,7 +680,7 @@ class GitHubApplication:
             # A local preflight ledger is not authoritative once the broker
             # selects a different token-bound ledger.  Revalidate the result
             # against that ledger before rebinding or short-circuiting.
-            transaction_record = load_transaction(ledger)
+            transaction_record = load_transaction(ledger, commit_analysis=False)
             if (
                 transaction_record.transaction is not None
                 and transaction_record.transaction.phase == "publication_succeeded"
@@ -694,15 +699,16 @@ class GitHubApplication:
                 raise GitHubPublicationError(
                     "durable transaction requires an identity-bound result"
                 )
-            if (
-                durable_transaction.result_sha256 is None
-                or result.content_digest() != durable_transaction.result_sha256
-            ):
-                raise GitHubPublicationError(
-                    "review result digest does not match durable transaction"
-                )
-            if result.transaction != durable_transaction:
-                result = replace(result, transaction=durable_transaction)
+            if durable_transaction.phase != "analysis":
+                if (
+                    durable_transaction.result_sha256 is None
+                    or result.content_digest() != durable_transaction.result_sha256
+                ):
+                    raise GitHubPublicationError(
+                        "review result digest does not match durable transaction"
+                    )
+                if result.transaction != durable_transaction:
+                    result = replace(result, transaction=durable_transaction)
         if (
             transaction_record is not None
             and transaction_record.transaction is not None
@@ -949,7 +955,8 @@ class GitHubApplication:
         may_start_human_inventory = bool(
             transaction_record is not None
             and transaction_record.transaction is not None
-            and transaction_record.transaction.phase == "publication_pending"
+            and transaction_record.transaction.phase
+            in {"analysis", "publication_pending"}
             and isinstance(result, ReviewResult)
         )
         result_retained = False
@@ -958,7 +965,10 @@ class GitHubApplication:
         try:
             retention_context_required = (
                 validated_transaction_recovery
-                and options.operation_entry == "enabled"
+                and (
+                    options.operation_entry == "enabled"
+                    or options.github_session_ledger
+                )
                 and self.http is not None
             )
             retention_required = (
@@ -980,6 +990,41 @@ class GitHubApplication:
                     reviewer.finalizer.evidence_budget = budget
                     reviewer.checks = copy(reviewer.checks)
                     reviewer.checks.http = transport
+            if (
+                transaction_record is not None
+                and transaction_record.transaction is not None
+                and transaction_record.transaction.phase == "analysis"
+                and ledger is not None
+            ):
+                if retention_required:
+                    from .publication_recovery import retain_checkpoint_review_result
+
+                    if configuration_context is None or evidence_context is None:
+                        raise GitHubPublicationError(
+                            "publication retention context is incomplete"
+                        )
+                    pending_preview = replace(
+                        transaction_record.transaction.with_result(
+                            result.content_digest()
+                        ),
+                        generation=transaction_record.generation + 1,
+                    )
+                    retain_checkpoint_review_result(
+                        http=transport,
+                        token=token,
+                        result=result,
+                        identity=identity,
+                        base_sha=base_sha,
+                        head_sha=head_sha,
+                        app_slug=app_slug,
+                        pending_transaction=pending_preview,
+                        configuration_context=configuration_context,
+                        evidence_context=evidence_context,
+                        policy=policy,
+                    )
+                transaction_record = load_transaction(ledger, commit_analysis=True)
+                if transaction_record.transaction is not None:
+                    result = replace(result, transaction=transaction_record.transaction)
             if retention_required:
                 from .publication_recovery import retain_review_result
 
@@ -1727,7 +1772,13 @@ class GitHubApplication:
         if command is None:
             raise GitHubPublicationError("maintainer command reconstruction failed")
         if (
-            command.action == "approve-media"
+            command.action
+            in {
+                "approve-media",
+                "accept-risk",
+                "accept-coverage-uncertainty",
+                "reenroll",
+            }
             or command.finding_reference
             or command.finding_references
         ):

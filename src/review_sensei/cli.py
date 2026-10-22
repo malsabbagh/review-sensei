@@ -2869,6 +2869,7 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
             admission_diagnostic,
             checkpoint_baseline_capacity,
             checkpoint_review_analysis,
+            has_irrecoverable_transaction_grant,
             prepare_review_transaction,
             prepare_session_round,
             record_session_failed_attempt,
@@ -3415,6 +3416,13 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
         # identity-bound transaction/artifact request. Legacy operator runs
         # keep their prior full-review behavior until that flag is selected.
         baseline_enforcement_requested = transaction_requested
+        irrecoverable_grant = (
+            has_irrecoverable_transaction_grant(
+                prepared_round.record, resolved_head_sha
+            )
+            if prepared_round is not None
+            else None
+        )
         if (
             ledger is not None
             and identity is not None
@@ -3446,7 +3454,17 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
             # so the publication boundary of the same run needs the exact
             # baseline and current key this analysis admitted with. The
             # transaction alone cannot reconstruct either.
-            admission_baseline = persisted_baseline
+            if (
+                irrecoverable_grant is not None
+                and isinstance(irrecoverable_grant.get("consumed_generation"), int)
+                and persisted_baseline.generation
+                == int(irrecoverable_grant["consumed_generation"]) - 1
+                and prepared_round.record.completed_initial_reviews == 1
+                and prepared_round.record.completed_verification_rounds == 0
+            ):
+                admission_baseline = None
+            else:
+                admission_baseline = persisted_baseline
             current_key = build_review_context_cache_key(
                 _checkpoint_cache_request(
                     request,
@@ -3457,7 +3475,7 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 stages=service.stages,
                 profile=effective_profile,
             )
-            if rescan_request is None:
+            if rescan_request is None and irrecoverable_grant is None:
                 scope = plan_verification_scope(
                     policy=policy,
                     baseline=persisted_baseline,
@@ -3773,6 +3791,30 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                             checkpoint_baseline
                             if checkpoint_baseline is not None
                             and checkpoint_baseline.complete
+                            else None
+                        ),
+                        retain_result=(
+                            (
+                                lambda pending_result: (
+                                    hosted_hooks.retain_checkpoint_result(  # type: ignore[attr-defined]
+                                        args,
+                                        ledger,
+                                        identity,
+                                        pending_result,
+                                        base_sha=effective_base_sha,
+                                        head_sha=head_sha,
+                                        configuration_context=transaction_configuration_context,
+                                        evidence_context={
+                                            "evidence_policy": "legacy",
+                                            "snapshot_sha256": None,
+                                        },
+                                        policy=policy,
+                                    )
+                                )
+                            )
+                            if hosted_session_ledger
+                            and hosted_hooks is not None
+                            and hasattr(hosted_hooks, "retain_checkpoint_result")
                             else None
                         ),
                     )

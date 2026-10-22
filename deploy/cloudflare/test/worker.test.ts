@@ -330,4 +330,46 @@ describe("bounded broker operation telemetry", () => {
       expect(broker.exchange).toHaveBeenCalledTimes(2);
     } finally { log.mockRestore(); errorLog.mockRestore(); }
   });
+
+  it("bounds stalled request body streams by deadline and emits refusal observation", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const stalledStream = new ReadableStream<Uint8Array>({
+        start() {
+          // Never enqueues or closes; simulates a stalled client stream.
+        },
+      });
+      const expiredDeadline = Date.now() + 15;
+      const stalledRequest = new Request("https://github.reviewsensei.dev/github/token", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": "32",
+          "x-reviewsensei-deadline-unix-ms": String(expiredDeadline),
+          "cf-ray": "a4dd3d310f874964-LAX",
+        },
+        body: stalledStream,
+        duplex: "half",
+      } as RequestInit);
+      const response = await worker.fetch(stalledRequest, env);
+      expect(response.status).toBe(403);
+      const payload = await response.json();
+      expect(payload).toMatchObject({
+        error: "capability_not_issued",
+        diagnostic: {
+          code: "broker_request_deadline_exhausted",
+        },
+      });
+      const events = log.mock.calls.filter(call => call[0] === "github_broker_observation");
+      expect(events).toHaveLength(1);
+      expect(events[0][1]).toMatchObject({
+        operation: "exchange",
+        outcome: "refused",
+        code: "broker_request_deadline_exhausted",
+        correlation_id: "a4dd3d310f874964-LAX",
+      });
+    } finally {
+      log.mockRestore();
+    }
+  });
 });

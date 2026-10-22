@@ -114,7 +114,8 @@ def _doctor(arguments: list[str]) -> int:
                 allow_data_egress=parsed.allow_data_egress,
                 session_ledger=parsed.session_ledger,
                 pull_request=parsed.pull_request,
-            )
+            ),
+            context_root=parsed.context_root,
         )
         sys.stdout.write(render_diagnostic(report, as_json=parsed.as_json))
         if report["status"] == "action":

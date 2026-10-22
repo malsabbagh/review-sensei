@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Mapping, TextIO
 
@@ -14,11 +15,11 @@ _GIT_SHA_FULL = re.compile(r"^[a-f0-9]{40}$")
 _GIT_SHA_PREFIX = re.compile(r"^[a-f0-9]{7,39}$")
 _GIT_REF = re.compile(r"^[A-Za-z0-9._/-]+$")
 _RESCAN_COMMAND = re.compile(
-    r"(?:@sensei|(?ai:@reviewsensei))[^\S\r\n]+(?i:re(?:[^\S\r\n]|-)?scan)(?:[^\S\r\n]+(?ai:commit)[^\S\r\n]+(?P<commit>[a-fA-F0-9]{7,40}))?"
+    r"\A(?:@sensei|(?ai:@reviewsensei))[ \t]+(?i:re(?:[ \t]|-)?scan)(?:[ \t]+(?ai:commit)[ \t]+(?P<commit>[a-fA-F0-9]{7,40}))?\s*\Z"
 )
 _COMMIT_SHA = re.compile(r"\bcommit\s+([a-f0-9]{7,40})\b", re.IGNORECASE)
 _REVIEWSENSEI_MENTION = re.compile(r"(?:^|\s)(?ai:@reviewsensei)(?:$|\s|[.,!?])")
-_SENSEI_COMMAND = re.compile(r"(?m)(?<!\S)(?:@sensei|(?ai:@reviewsensei))(?=\s+)")
+_SENSEI_COMMAND = re.compile(r"\A(?:@sensei|(?ai:@reviewsensei))(?=[ \t]+)")
 # Grammar and dispatch move together: every token below must be handled by
 # `parse_maintainer_command` and dispatched by `apply_maintainer_command`, and
 # `reenroll` is the sharp one - the ledger retires state only for an expired or
@@ -26,15 +27,16 @@ _SENSEI_COMMAND = re.compile(r"(?m)(?<!\S)(?:@sensei|(?ai:@reviewsensei))(?=\s+)
 # added here without a dispatcher would parse and then be ignored.
 _MAINTAINER_COMMAND = re.compile(
     r"(?:"
-    r"review\s+(?:status|pause|continue|reenroll)"
+    r"review[ \t]+(?:status|pause|continue|reenroll)"
     r"|verify"
-    r"|(?:dismiss|defer|accept-risk)\s+[a-f0-9]{16,64}"
-    r"\s+--reason\s+(?P<reason>\S.*)"
-    r"|i\s+reviewed\s+the\s+media\s+files\s+and\s+i\s+approve"
-    r"|override\s+(?:(?:rs-)?[a-f0-9]{6,64})(?:(?:\s*,\s*|\s+)(?:rs-)?[a-f0-9]{6,64}){0,9}(?:\s+acceptable\s+risk)?"
-    r"|(?:(?:rs-)?[a-f0-9]{6,64})(?:(?:\s*,\s*|\s+)(?:rs-)?[a-f0-9]{6,64}){0,9}\s+(?:is|are)\s+acceptable\s+risk"
+    r"|(?:dismiss|defer|accept-risk)[ \t]+[a-f0-9]{16,64}"
+    r"[ \t]+--reason[ \t]+(?P<reason>\S[^\r\n]*)"
+    r"|(?:review[ \t]+)?accept-coverage-uncertainty[ \t]+--reason[ \t]+(?P<coverage_reason>\S[^\r\n]*)"
+    r"|i[ \t]+reviewed[ \t]+the[ \t]+media[ \t]+files[ \t]+and[ \t]+i[ \t]+approve"
+    r"|override[ \t]+(?:(?:rs-)?[a-f0-9]{6,64})(?:(?:[ \t]*,[ \t]*|[ \t]+)(?:rs-)?[a-f0-9]{6,64}){0,9}(?:[ \t]+acceptable[ \t]+risk)?"
+    r"|(?:(?:rs-)?[a-f0-9]{6,64})(?:(?:[ \t]*,[ \t]*|[ \t]+)(?:rs-)?[a-f0-9]{6,64}){0,9}[ \t]+(?:is|are)[ \t]+acceptable[ \t]+risk"
     r")\Z",
-    re.IGNORECASE | re.DOTALL,
+    re.IGNORECASE,
 )
 
 
@@ -79,7 +81,7 @@ def issue_comment_requests_rescan(body: str) -> bool:
     return (
         isinstance(body, str)
         and len(body.encode("utf-8")) <= 4096
-        and _RESCAN_COMMAND.fullmatch(body.strip()) is not None
+        and _RESCAN_COMMAND.fullmatch(body) is not None
     )
 
 
@@ -111,20 +113,27 @@ def _is_maintainer_command(body: object) -> bool:
 
     if not isinstance(body, str) or len(body.encode("utf-8")) > 4096:
         return False
-    mention = _SENSEI_COMMAND.search(body)
+    mention = _SENSEI_COMMAND.match(body)
     if mention is None:
         return False
-    match = _MAINTAINER_COMMAND.fullmatch(body[mention.end() :].strip())
+    remainder = body[mention.end() :].lstrip(" \t").rstrip(" \t\r\n")
+    if not remainder or "\r" in remainder or "\n" in remainder:
+        return False
+    match = _MAINTAINER_COMMAND.fullmatch(remainder)
     if match is None:
         return False
-    reason = match.group("reason")
+    reason = match.group("reason") or match.group("coverage_reason")
     if reason is None:
         return True
-    normalized = reason.strip().strip('"').strip("'")
+    normalized = reason.strip(" \t\r\n").strip('"').strip("'").strip(" \t\r\n")
     return (
         bool(normalized)
         and len(normalized.encode("utf-8")) <= 512
         and normalized.isprintable()
+        and not any(
+            character != " " and unicodedata.category(character).startswith("Z")
+            for character in normalized
+        )
     )
 
 
@@ -202,7 +211,7 @@ def resolve_issue_comment(
 ) -> TriggerResolution:
     """Resolve a PR issue comment into review or mention-reply operation inputs."""
 
-    rescan = _RESCAN_COMMAND.fullmatch(body.strip())
+    rescan = _RESCAN_COMMAND.fullmatch(body)
     if rescan is not None:
         if len(body.encode("utf-8")) > 4096:
             raise ValueError("explicit rescan comment exceeds 4096 UTF-8 bytes")

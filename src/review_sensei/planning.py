@@ -738,12 +738,60 @@ def _reconcile_file_outcomes_from_hunks(
             file_outcomes[path] = ("reviewed", None)
 
 
+def extract_prior_reviewed_coverage(
+    analysis: DiffAnalysis,
+    prior_partial: object | None,
+    *,
+    limits: ReviewLimits = DEFAULT_REVIEW_LIMITS,
+) -> tuple[set[str], set[int]]:
+    """Return validated already-reviewed file paths and hunk indexes from ``prior_partial``."""
+
+    if prior_partial is None:
+        return set(), set()
+    status = getattr(prior_partial, "review_status", None)
+    coverage = getattr(prior_partial, "coverage", None)
+    if (
+        status != "partial"
+        or not isinstance(coverage, CoverageManifest)
+        or not coverage.enumeration_complete
+    ):
+        return set(), set()
+    if set(coverage.enumerated_paths) != set(analysis.changed_paths):
+        raise ReviewInputError(
+            "prior partial review coverage paths do not match current diff"
+        )
+    reviewed_files = {
+        entry.path for entry in coverage.files if entry.outcome == "reviewed"
+    }
+    reviewed_hunks = {
+        entry.index for entry in coverage.hunks if entry.outcome == "reviewed"
+    }
+    if not reviewed_files and not reviewed_hunks:
+        return set(), set()
+    has_unreviewed_reviewable = False
+    for record in analysis.file_records or ():
+        outcome, _reason = _classify_file(record, analysis=analysis, limits=limits)
+        if outcome != "reviewable":
+            continue
+        paths_done = bool(record.coverage_paths) and all(
+            path in reviewed_files for path in record.coverage_paths
+        )
+        hunks_done = all(hunk.index in reviewed_hunks for hunk in record.hunks)
+        if not (paths_done and hunks_done):
+            has_unreviewed_reviewable = True
+            break
+    if not has_unreviewed_reviewable:
+        return set(), set()
+    return reviewed_files, reviewed_hunks
+
+
 def plan_change(
     diff: str,
     *,
     limits: ReviewLimits = DEFAULT_REVIEW_LIMITS,
     work_budget: TotalWorkBudget = DEFAULT_TOTAL_WORK_BUDGET,
     orchestrate: bool = False,
+    prior_partial: object | None = None,
 ) -> LargeChangePlan:
     """Build a coverage plan, optionally partitioning into bounded chunks."""
 
@@ -763,6 +811,12 @@ def plan_change(
         )
     else:
         analysis = analyze_diff(diff, limits=limits)
+
+    prior_reviewed_files, prior_reviewed_hunks = (
+        extract_prior_reviewed_coverage(analysis, prior_partial, limits=limits)
+        if orchestrate
+        else (set(), set())
+    )
 
     file_outcomes: dict[str, tuple[str, str | None]] = {}
     hunk_outcomes: dict[int, tuple[str, str | None]] = {}
@@ -789,6 +843,27 @@ def plan_change(
             for hunk in record.hunks:
                 hunk_outcomes[hunk.index] = (outcome, reason)
             continue
+        if prior_reviewed_files or prior_reviewed_hunks:
+            paths_done = bool(record.coverage_paths) and all(
+                path in prior_reviewed_files for path in record.coverage_paths
+            )
+            hunks_done = all(
+                hunk.index in prior_reviewed_hunks for hunk in record.hunks
+            )
+            if paths_done and hunks_done:
+                for hunk in record.hunks:
+                    hunk_outcomes[hunk.index] = ("reviewed", None)
+                continue
+            remaining_hunks = tuple(
+                hunk
+                for hunk in record.hunks
+                if hunk.index not in prior_reviewed_hunks
+            )
+            if record.hunks and len(remaining_hunks) < len(record.hunks):
+                for hunk in record.hunks:
+                    if hunk.index in prior_reviewed_hunks:
+                        hunk_outcomes[hunk.index] = ("reviewed", None)
+                record = _slice_record(record, remaining_hunks)
         reviewable.append(record)
 
     chunks: tuple[ReviewChunk, ...] = ()

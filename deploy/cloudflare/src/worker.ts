@@ -128,22 +128,55 @@ function brokerRayId(request: Request): string | undefined {
 }
 
 const MAX_BROKER_REQUEST_BYTES = 64 * 1024;
+const MAX_BODY_READ_MS = 10_000;
 
-async function readBoundedBody(request: Request, maximum: number): Promise<ArrayBuffer> {
+async function readBoundedBody(
+  request: Request,
+  maximum: number,
+  deadlineUnixMs?: number,
+): Promise<ArrayBuffer> {
   if (request.body === null) {
     return new ArrayBuffer(0);
   }
+  const effectiveDeadline =
+    deadlineUnixMs === undefined
+      ? Date.now() + MAX_BODY_READ_MS
+      : Math.min(Date.now() + MAX_BODY_READ_MS, deadlineUnixMs);
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
   while (true) {
-    const next = await reader.read();
+    const remaining = effectiveDeadline - Date.now();
+    if (remaining <= 0) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error("broker_request_deadline_exhausted");
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let next: ReadableStreamReadResult<Uint8Array>;
+    try {
+      next = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("broker_request_deadline_exhausted")),
+            remaining,
+          );
+        }),
+      ]);
+    } catch (error) {
+      await reader.cancel().catch(() => undefined);
+      throw error;
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    }
     if (next.done) {
       break;
     }
     total += next.value.byteLength;
     if (total > maximum) {
-      await reader.cancel();
+      await reader.cancel().catch(() => undefined);
       throw new Error("request_body_too_large");
     }
     chunks.push(next.value);
@@ -158,36 +191,95 @@ async function readBoundedBody(request: Request, maximum: number): Promise<Array
 }
 
 async function token(request: Request, env: WorkerEnv): Promise<Response> {
-  if (request.headers.has("origin") || request.headers.has("access-control-request-method")) {
-    return response({ error: "cors_not_supported", diagnostic: brokerDiagnostic(new Error("broker_cors_not_supported"), brokerRayId(request)) }, 400, true);
+  const observation = new BrokerObservation("exchange", brokerRayId(request));
+  const refuse = (
+    errorCode: string,
+    diagnosticError: Error,
+    status: number,
+  ): Response => {
+    observation.finish("refused", diagnosticError);
+    return response(
+      {
+        error: errorCode,
+        diagnostic: brokerDiagnostic(diagnosticError, brokerRayId(request)),
+      },
+      status,
+      true,
+    );
+  };
+  if (
+    request.headers.has("origin") ||
+    request.headers.has("access-control-request-method")
+  ) {
+    return refuse(
+      "cors_not_supported",
+      new Error("broker_cors_not_supported"),
+      400,
+    );
   }
   const length = request.headers.get("content-length");
   if (length === null) {
-    return response({ error: "content_length_required", diagnostic: brokerDiagnostic(new Error("broker_content_length_required"), brokerRayId(request)) }, 411, true);
+    return refuse(
+      "content_length_required",
+      new Error("broker_content_length_required"),
+      411,
+    );
   }
   if (!/^\d+$/.test(length) || Number(length) > MAX_BROKER_REQUEST_BYTES) {
-    return response({ error: "payload_too_large", diagnostic: brokerDiagnostic(new Error("broker_payload_too_large"), brokerRayId(request)) }, 413, true);
+    return refuse(
+      "payload_too_large",
+      new Error("broker_payload_too_large"),
+      413,
+    );
   }
+  const deadlineHeader = request.headers.get("x-reviewsensei-deadline-unix-ms");
+  const parsedDeadline =
+    deadlineHeader !== null && /^[0-9]{1,13}$/.test(deadlineHeader)
+      ? Number(deadlineHeader)
+      : undefined;
   let body: unknown;
   try {
-    const bytes = await readBoundedBody(request, MAX_BROKER_REQUEST_BYTES);
+    const bytes = await readBoundedBody(
+      request,
+      MAX_BROKER_REQUEST_BYTES,
+      parsedDeadline,
+    );
     if (bytes.byteLength === 0 || bytes.byteLength > MAX_BROKER_REQUEST_BYTES) {
-      return response({ error: "payload_too_large", diagnostic: brokerDiagnostic(new Error("broker_payload_too_large"), brokerRayId(request)) }, 413, true);
+      return refuse(
+        "payload_too_large",
+        new Error("broker_payload_too_large"),
+        413,
+      );
     }
-    body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
-  } catch {
-    return response({ error: "invalid_request", diagnostic: brokerDiagnostic(new Error("broker_invalid_request"), brokerRayId(request)) }, 400, true);
+    body = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+    ) as unknown;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === "broker_request_deadline_exhausted"
+    ) {
+      return refuse("capability_not_issued", error, 403);
+    }
+    if (error instanceof Error && error.message === "request_body_too_large") {
+      return refuse(
+        "payload_too_large",
+        new Error("broker_payload_too_large"),
+        413,
+      );
+    }
+    return refuse("invalid_request", new Error("broker_invalid_request"), 400);
   }
-  const observation = new BrokerObservation("exchange", brokerRayId(request));
   let failure: unknown;
   let outcome: "success" | "refused" = "success";
   try {
-    const deadlineHeader = request.headers.get("x-reviewsensei-deadline-unix-ms");
-    if (deadlineHeader !== null && !/^[0-9]{1,13}$/.test(deadlineHeader)) throw new Error("broker_request_deadline_invalid");
+    if (deadlineHeader !== null && parsedDeadline === undefined) {
+      throw new Error("broker_request_deadline_invalid");
+    }
     const result = await new TokenBroker(env, undefined, observation).exchange(
       body as Record<string, unknown>,
       request.headers.get("cf-connecting-ip") ?? undefined,
-      deadlineHeader === null ? undefined : Number(deadlineHeader),
+      parsedDeadline,
     );
     return response(result, 200, true);
   } catch (error) {
@@ -197,21 +289,35 @@ async function token(request: Request, env: WorkerEnv): Promise<Response> {
     const status = message === "configuration_unavailable" ? 503 : 403;
     const rayId = brokerRayId(request);
     const diagnostic = brokerDiagnostic(error, rayId);
-    const lookup = error instanceof WorkflowLookupError ? error.lookup : undefined;
+    const lookup =
+      error instanceof WorkflowLookupError ? error.lookup : undefined;
     console.error("github_broker_failed", {
-      ...(lookup === undefined ? {} : {lookup}),
+      ...(lookup === undefined ? {} : { lookup }),
       error_code: diagnostic.code,
       stage: diagnostic.stage,
       action: diagnostic.action,
-      ...("upstream_status" in diagnostic ? { upstream_status: diagnostic.upstream_status } : {}),
+      ...("upstream_status" in diagnostic
+        ? { upstream_status: diagnostic.upstream_status }
+        : {}),
       capability: brokerCapability(body),
       ...(rayId === undefined ? {} : { cf_ray: rayId }),
     });
-    const errorCode = message === "configuration_unavailable"
-      ? "configuration_unavailable"
-      : "capability_not_issued";
-    return response({ error: errorCode, diagnostic, ...(lookup === undefined ? {} : {lookup}) }, status, true);
-  } finally { observation.finish(outcome, failure); }
+    const errorCode =
+      message === "configuration_unavailable"
+        ? "configuration_unavailable"
+        : "capability_not_issued";
+    return response(
+      {
+        error: errorCode,
+        diagnostic,
+        ...(lookup === undefined ? {} : { lookup }),
+      },
+      status,
+      true,
+    );
+  } finally {
+    observation.finish(outcome, failure);
+  }
 }
 
 /**
@@ -219,31 +325,95 @@ async function token(request: Request, env: WorkerEnv): Promise<Response> {
  * mutation. The response contains only the immutable, already-attested scope;
  * it never echoes the bearer grant or an installation capability token.
  */
-async function sessionGrant(request: Request, env: WorkerEnv): Promise<Response> {
-  if (request.headers.has("origin") || request.headers.has("access-control-request-method")) {
-    return response({ error: "cors_not_supported", diagnostic: brokerDiagnostic(new Error("broker_cors_not_supported"), brokerRayId(request)) }, 400, true);
+async function sessionGrant(
+  request: Request,
+  env: WorkerEnv,
+): Promise<Response> {
+  const observation = new BrokerObservation(
+    "session_grant",
+    brokerRayId(request),
+  );
+  const refuse = (
+    errorCode: string,
+    diagnosticError: Error,
+    status: number,
+  ): Response => {
+    observation.finish("refused", diagnosticError);
+    return response(
+      {
+        error: errorCode,
+        diagnostic: brokerDiagnostic(diagnosticError, brokerRayId(request)),
+      },
+      status,
+      true,
+    );
+  };
+  if (
+    request.headers.has("origin") ||
+    request.headers.has("access-control-request-method")
+  ) {
+    return refuse(
+      "cors_not_supported",
+      new Error("broker_cors_not_supported"),
+      400,
+    );
   }
   const length = request.headers.get("content-length");
   if (length === null) {
-    return response({ error: "content_length_required", diagnostic: brokerDiagnostic(new Error("broker_content_length_required"), brokerRayId(request)) }, 411, true);
+    return refuse(
+      "content_length_required",
+      new Error("broker_content_length_required"),
+      411,
+    );
   }
   if (!/^\d+$/.test(length) || Number(length) > MAX_BROKER_REQUEST_BYTES) {
-    return response({ error: "payload_too_large", diagnostic: brokerDiagnostic(new Error("broker_payload_too_large"), brokerRayId(request)) }, 413, true);
+    return refuse(
+      "payload_too_large",
+      new Error("broker_payload_too_large"),
+      413,
+    );
   }
+  const deadlineHeader = request.headers.get("x-reviewsensei-deadline-unix-ms");
+  const parsedDeadline =
+    deadlineHeader !== null && /^[0-9]{1,13}$/.test(deadlineHeader)
+      ? Number(deadlineHeader)
+      : undefined;
   let body: unknown;
   try {
-    const bytes = await readBoundedBody(request, MAX_BROKER_REQUEST_BYTES);
+    const bytes = await readBoundedBody(
+      request,
+      MAX_BROKER_REQUEST_BYTES,
+      parsedDeadline,
+    );
     if (bytes.byteLength === 0 || bytes.byteLength > MAX_BROKER_REQUEST_BYTES) {
-      return response({ error: "payload_too_large", diagnostic: brokerDiagnostic(new Error("broker_payload_too_large"), brokerRayId(request)) }, 413, true);
+      return refuse(
+        "payload_too_large",
+        new Error("broker_payload_too_large"),
+        413,
+      );
     }
-    body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
-  } catch {
-    return response({ error: "invalid_request", diagnostic: brokerDiagnostic(new Error("broker_invalid_request"), brokerRayId(request)) }, 400, true);
+    body = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+    ) as unknown;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === "broker_request_deadline_exhausted"
+    ) {
+      return refuse("session_grant_not_verified", error, 403);
+    }
+    if (error instanceof Error && error.message === "request_body_too_large") {
+      return refuse(
+        "payload_too_large",
+        new Error("broker_payload_too_large"),
+        413,
+      );
+    }
+    return refuse("invalid_request", new Error("broker_invalid_request"), 400);
   }
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
-    return response({ error: "invalid_request", diagnostic: brokerDiagnostic(new Error("broker_invalid_request"), brokerRayId(request)) }, 400, true);
+    return refuse("invalid_request", new Error("broker_invalid_request"), 400);
   }
-  const observation = new BrokerObservation("session_grant", brokerRayId(request));
   let failure: unknown;
   let outcome: "success" | "refused" = "success";
   try {
@@ -256,13 +426,32 @@ async function sessionGrant(request: Request, env: WorkerEnv): Promise<Response>
     ) {
       outcome = "refused";
       failure = new Error("broker_invalid_request");
-      return response({ error: "invalid_request", diagnostic: brokerDiagnostic(new Error("broker_invalid_request"), brokerRayId(request)) }, 400, true);
+      return response(
+        {
+          error: "invalid_request",
+          diagnostic: brokerDiagnostic(
+            new Error("broker_invalid_request"),
+            brokerRayId(request),
+          ),
+        },
+        400,
+        true,
+      );
     }
-    const control = values.control_budget === undefined ? undefined : new BrokerDispatchControl(values.control_budget);
-    const deadlineHeader = request.headers.get("x-reviewsensei-deadline-unix-ms");
-    if (deadlineHeader !== null && !/^[0-9]{1,13}$/.test(deadlineHeader)) throw new Error("broker_request_deadline_invalid");
+    const control =
+      values.control_budget === undefined
+        ? undefined
+        : new BrokerDispatchControl(values.control_budget);
+    if (deadlineHeader !== null && parsedDeadline === undefined) {
+      throw new Error("broker_request_deadline_invalid");
+    }
     const broker = new TokenBroker(env, undefined, observation);
-    const attestation = await broker.verifySessionGrant(values.session_grant, values.session_attestation, control, deadlineHeader === null ? undefined : Number(deadlineHeader));
+    const attestation = await broker.verifySessionGrant(
+      values.session_grant,
+      values.session_attestation,
+      control,
+      parsedDeadline,
+    );
     return response({ session_attestation: attestation, ...(control === undefined ? {} : { control_receipt: control.receipt() }) }, 200, true);
   } catch (error) {
     failure = error;

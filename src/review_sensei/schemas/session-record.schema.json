@@ -89,11 +89,29 @@
         "required": ["fingerprint", "action", "reason", "actor", "head_sha", "expires_at"],
         "properties": {
           "fingerprint": {"type": "string", "pattern": "^[a-f0-9]{16,64}$"},
-          "action": {"enum": ["dismiss", "defer", "accept-risk"]},
+          "action": {"enum": ["dismiss", "defer", "accept-risk", "accept-coverage-uncertainty"]},
           "reason": {"type": "string", "minLength": 1, "maxLength": 512},
           "actor": {"type": "string", "minLength": 1, "maxLength": 256},
           "head_sha": {"type": ["string", "null"], "pattern": "^[a-f0-9]{40,64}$"},
-          "expires_at": {"type": ["string", "null"], "format": "date-time"}
+          "expires_at": {"type": ["string", "null"], "format": "date-time"},
+          "actor_role": {"type": ["string", "null"], "maxLength": 64},
+          "finding_reference": {"type": ["string", "null"], "pattern": "^(?:RS-)?[A-Fa-f0-9]{6,64}$"},
+          "recorded_at": {"type": ["string", "null"], "format": "date-time"},
+          "policy_digest": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+          "provenance": {"type": ["string", "null"], "maxLength": 256},
+          "resolution_kind": {
+            "type": ["string", "null"],
+            "enum": ["disputed", "deferred", "accepted_unresolved", "coverage_uncertainty_accepted", null]
+          },
+          "target_kind": {
+            "type": ["string", "null"],
+            "enum": ["finding", "coverage_uncertainty", null]
+          },
+          "incomplete_coverage": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {"type": "string", "minLength": 1, "maxLength": 256}
+          }
         }
       }
     },

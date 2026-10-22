@@ -579,6 +579,37 @@ def _legacy_inventory(
     return tuple(entries)
 
 
+def _collaborator_permission(
+    http: object,
+    *,
+    token: str,
+    repository: str,
+    actor: str,
+) -> str:
+    """Read live collaborator permission for a repository actor."""
+
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,39}", actor):
+        raise ReviewInputError("maintainer actor is invalid")
+    permission_status, permission_body = http.request(  # type: ignore[attr-defined]
+        "GET",
+        http.repository_path(  # type: ignore[attr-defined]
+            repository, f"/collaborators/{actor}/permission"
+        ),
+        token=token,
+    )
+    permission = (
+        permission_body.get("permission") if isinstance(permission_body, dict) else None
+    )
+    if permission_status != 200 or not isinstance(permission, str):
+        raise ReviewInputError("collaborator permission is unavailable")
+    # GitHub projects the built-in maintain role onto legacy permission=write.
+    # Only that exact pair supplies maintain authority; ordinary write and
+    # custom roles retain their legacy permission and the existing denial.
+    if permission == "write" and permission_body.get("role_name") == "maintain":
+        permission = "maintain"
+    return permission
+
+
 def _override_facts(
     http: object,
     *,
@@ -603,25 +634,12 @@ def _override_facts(
     from review_sensei_github.http import MAX_PAGINATION_PAGES
     from review_sensei_github.operation_entry import finding_inventory_for_head
 
-    if not re.fullmatch(r"[A-Za-z0-9-]{1,39}", actor):
-        raise ReviewInputError("maintainer actor is invalid")
-    permission_status, permission_body = http.request(  # type: ignore[attr-defined]
-        "GET",
-        http.repository_path(  # type: ignore[attr-defined]
-            repository, f"/collaborators/{actor}/permission"
-        ),
+    permission = _collaborator_permission(
+        http,
         token=token,
+        repository=repository,
+        actor=actor,
     )
-    permission = (
-        permission_body.get("permission") if isinstance(permission_body, dict) else None
-    )
-    if permission_status != 200 or not isinstance(permission, str):
-        raise ReviewInputError("collaborator permission is unavailable")
-    # GitHub projects the built-in maintain role onto legacy permission=write.
-    # Only that exact pair supplies maintain authority; ordinary write and
-    # custom roles retain their legacy permission and the existing denial.
-    if permission == "write" and permission_body.get("role_name") == "maintain":
-        permission = "maintain"
     try:
         reviews = http.paginate(  # type: ignore[attr-defined]
             path=http.repository_path(  # type: ignore[attr-defined]
@@ -781,6 +799,38 @@ def _write_step_summary(text: str) -> None:
         return
 
 
+def _is_app_receipt_comment(
+    comment: object,
+    *,
+    app_slug: str,
+    expected_user_id: int | None = None,
+) -> bool:
+    if not isinstance(comment, dict):
+        return False
+    user = comment.get("user")
+    if not isinstance(user, dict):
+        return False
+    login = user.get("login")
+    user_type = user.get("type")
+    if not isinstance(login, str) or login != app_slug or user_type != "Bot":
+        return False
+    if expected_user_id is not None:
+        user_id = user.get("id")
+        if type(user_id) is not int or user_id != expected_user_id:
+            return False
+    return True
+
+
+def _has_terminal_receipt_marker(body: object, marker: str) -> bool:
+    if not isinstance(body, str):
+        return False
+    stripped = body.rstrip()
+    if not stripped:
+        return False
+    terminal_line = stripped.rsplit("\n", 1)[-1].strip()
+    return terminal_line == marker
+
+
 def _post_command_receipt(
     http: object,
     broker: object,
@@ -793,8 +843,10 @@ def _post_command_receipt(
     actor: str,
     receipts: tuple[object, ...],
     ledger_written: bool,
+    app_slug: str = "reviewsensei[bot]",
+    expected_app_user_id: int | None = None,
 ) -> None:
-    """Post one receipt comment. A failed post does not undo a recorded command."""
+    """Post or reconcile one App-owned receipt comment with readback verification."""
 
     if (
         broker is None
@@ -827,27 +879,66 @@ def _post_command_receipt(
         )
         if not isinstance(token, str) or not token.strip():
             raise ReviewInputError("issue reply capability is unavailable")
+        clean_token = token.strip()
         comments = http.paginate(  # type: ignore[attr-defined]
             path=http.repository_path(  # type: ignore[attr-defined]
                 repository, f"/issues/{pull_request}/comments"
             ),
-            token=token.strip(),
+            token=clean_token,
             max_requests=MAX_PAGINATION_PAGES,
             timeout_seconds=60,
         )
+        existing_comment_id: int | None = None
         for comment in comments:
-            if isinstance(comment, dict) and marker in str(comment.get("body") or ""):
+            if not _is_app_receipt_comment(
+                comment,
+                app_slug=app_slug,
+                expected_user_id=expected_app_user_id,
+            ):
+                continue
+            body_text = comment.get("body")
+            if not _has_terminal_receipt_marker(body_text, marker):
+                continue
+            if isinstance(body_text, str) and body_text.strip() == text.strip():
                 return
-        status, _payload = http.request(  # type: ignore[attr-defined]
-            "POST",
-            http.repository_path(  # type: ignore[attr-defined]
-                repository, f"/issues/{pull_request}/comments"
-            ),
-            token=token.strip(),
-            body={"body": text},
-        )
+            cid = comment.get("id")
+            if type(cid) is int and cid > 0:
+                existing_comment_id = cid
+                break
+        if existing_comment_id is not None:
+            status, payload = http.request(  # type: ignore[attr-defined]
+                "PATCH",
+                http.repository_path(  # type: ignore[attr-defined]
+                    repository, f"/issues/comments/{existing_comment_id}"
+                ),
+                token=clean_token,
+                body={"body": text},
+            )
+        else:
+            status, payload = http.request(  # type: ignore[attr-defined]
+                "POST",
+                http.repository_path(  # type: ignore[attr-defined]
+                    repository, f"/issues/{pull_request}/comments"
+                ),
+                token=clean_token,
+                body={"body": text},
+            )
         if status not in {200, 201}:
             _write_step_summary(text)
+            return
+        if isinstance(payload, dict) and payload.get("body") is not None:
+            if (
+                str(payload.get("body") or "").strip() != text.strip()
+                or (
+                    payload.get("user") is not None
+                    and not _is_app_receipt_comment(
+                        payload,
+                        app_slug=app_slug,
+                        expected_user_id=expected_app_user_id,
+                    )
+                )
+            ):
+                _write_step_summary(text)
     except Exception:
         _write_step_summary(text)
 
@@ -881,6 +972,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
         from review_sensei.disposition import (
             apply_session_command,
             authorized_maintainer,
+            authorized_override,
             parse_maintainer_command,
         )
         from review_sensei.session import SessionIdentity
@@ -897,6 +989,22 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             user_type=args.actor_type,
             association=args.association,
             app_slug=args.app_slug,
+        ):
+            raise ReviewInputError("maintainer command is unauthorized")
+        if (
+            not getattr(args, "github_session_ledger", False)
+            and (
+                parsed.action
+                in {
+                    "approve-media",
+                    "accept-risk",
+                    "accept-coverage-uncertainty",
+                    "reenroll",
+                }
+                or parsed.finding_reference
+                or parsed.finding_references
+            )
+            and not authorized_override(association=args.association)
         ):
             raise ReviewInputError("maintainer command is unauthorized")
         if parsed.action != "status" and not args.allow_write:
@@ -992,6 +1100,25 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     (head, tuple(_identity_from_indexed(item) for item in entries))
                     for head, entries in facts.prior_heads
                 )
+            elif parsed.action in {
+                "accept-risk",
+                "accept-coverage-uncertainty",
+                "reenroll",
+            }:
+                read_token = os.environ.get("GITHUB_TOKEN") or os.environ.get(
+                    "GH_TOKEN"
+                )
+                if isinstance(read_token, str) and read_token.strip():
+                    actor_permission = _collaborator_permission(
+                        http,
+                        token=read_token.strip(),
+                        repository=args.repository,
+                        actor=args.actor,
+                    )
+                elif parsed.action in {"accept-risk", "accept-coverage-uncertainty"}:
+                    raise ReviewInputError(
+                        "maintainer override requires GitHub metadata access"
+                    )
             application = GitHubApplication(
                 broker=BrokerClient(),
                 http=http,
@@ -1042,6 +1169,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     actor=args.actor,
                     receipts=exc.receipts,
                     ledger_written=False,
+                    app_slug=args.app_slug,
                 )
                 raise
             print(result.summary)
@@ -1056,6 +1184,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 actor=args.actor,
                 receipts=tuple(getattr(result, "receipts", ()) or ()),
                 ledger_written=bool(getattr(result, "applied", False)),
+                app_slug=args.app_slug,
             )
             from review_sensei.disposition import command_exit_code
 
@@ -1288,7 +1417,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 "context reconstruction requires original trusted source and cannot replace supplied context documents"
             )
         if args.recover_retained or args.reconstruct_contexts:
-            if operation_entry != "enabled":
+            if not args.github_session_ledger and operation_entry != "enabled":
                 raise ReviewInputError(
                     "retained result recovery requires operation_entry: enabled"
                 )

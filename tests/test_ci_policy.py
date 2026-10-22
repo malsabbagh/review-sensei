@@ -424,7 +424,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(text.count("review-sensei-run.yml@" + "v5"), 1)
         self.assertIn("resolve-trigger:", text)
         self.assertIn("operation: ${{ needs.resolve-trigger.outputs.operation }}", text)
-        self.assertIn("match = rescan.fullmatch(comment_body.strip())", text)
+        self.assertIn("match = rescan.fullmatch(comment_body)", text)
         self.assertNotIn("rescan.search(comment_body)", text)
 
     def test_generated_review_workflow_routes_comments_read_only(self):
@@ -1895,9 +1895,11 @@ class ActionPinPolicyTests(unittest.TestCase):
             if line.startswith("run-name:")
         )
         worker_source = (
-            root / "deploy" / "cloudflare" / "src" / "setup-content.ts"
-        ).read_text(encoding="utf-8")
-        marker = 'run-name: "ReviewSensei @@{{ github.event.pull_request && format('
+            (root / "deploy" / "cloudflare" / "src" / "setup-content.ts")
+            .read_text(encoding="utf-8")
+            .split("function resolveTriggerWorkflowTemplate(", 1)[1]
+        )
+        marker = 'run-name: "ReviewSensei @@{{ github.event_name == '
         start = worker_source.index(marker)
         end = worker_source.index('"', start + len('run-name: "'))
         worker_line = worker_source[start : end + 1].replace("@@{{", "${{")
@@ -1905,8 +1907,16 @@ class ActionPinPolicyTests(unittest.TestCase):
 
     def test_run_name_quotes_hash_so_yaml_does_not_comment_it_out(self):
         quoted = (
-            'run-name: "ReviewSensei ${{ github.event.pull_request && '
-            "format('PR #{0}', github.event.pull_request.number) || 'manual' }}\""
+            'run-name: "ReviewSensei ${{ github.event_name == \'pull_request\' && '
+            "format('PR #{0}', github.event.pull_request.number) || "
+            "github.event_name == 'pull_request_review_comment' && "
+            "format('PR #{0} inline comment ({1})', github.event.pull_request.number, "
+            "github.event.comment.user.type == 'Bot' && 'bot skipped' || format('@{0}', github.actor)) || "
+            "github.event_name == 'issue_comment' && "
+            "(github.event.issue.pull_request && format('PR #{0} comment ({1})', github.event.issue.number, "
+            "github.event.comment.user.type == 'Bot' && 'bot skipped' || format('@{0}', github.actor)) || "
+            "format('issue #{0} comment (skipped)', github.event.issue.number)) || "
+            "inputs.pull_request_number && format('PR #{0} manual', inputs.pull_request_number) || 'manual' }}\""
         )
         root = Path(__file__).resolve().parents[1]
         for relative in (

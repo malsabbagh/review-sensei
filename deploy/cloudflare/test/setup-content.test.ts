@@ -16,6 +16,7 @@ import {
   buildHistoricalTaggedV4SetupFiles,
   buildTaggedV4SetupFiles,
   buildSetupFiles,
+  currentPreRecoveryV5WorkflowTemplate,
   historicalV4UninstallWorkflow,
   importLegacySetupConfiguration,
   mergeFocusedV4ConfigFile,
@@ -54,7 +55,7 @@ function inlineCommandPrefilter(text: string): string {
     throw new Error("inline command prefilter terminator is missing");
   }
   const literal = text.slice(patternStart, end);
-  if (!literal.startsWith("(?m)") || !literal.endsWith("\\Z")) {
+  if (!literal.startsWith("\\A") || !literal.endsWith("\\Z")) {
     throw new Error(
       "inline command prefilter anchors changed; update the JavaScript translation",
     );
@@ -64,14 +65,14 @@ function inlineCommandPrefilter(text: string): string {
     throw new Error("canonical ASCII case scope changed; update the JavaScript translation");
   }
   const translated = literal
-    .slice("(?m)".length, -"\\Z".length)
+    .slice("\\A".length, -"\\Z".length)
     .replace(canonical, "reviewsensei");
-  if (/[\^$]/.test(translated)) {
+  if (/(?:^|[^\[])\^|\$/.test(translated)) {
     throw new Error(
       "inline command prefilter uses an inner anchor; the JavaScript translation is not equivalent",
     );
   }
-  return translated + "$";
+  return "^" + translated + "$";
 }
 
 interface CommandParityCase {
@@ -128,12 +129,13 @@ describe("setup-v4 public boundary", () => {
     ).toBeNull();
   });
 
-  it("stages default emission at exact released pre-recovery caller bytes", () => {
-    expect(createHash("sha256").update(buildSetupFiles("v5")[0].content).digest("hex"))
+  it("stages default emission at current contract-5.2 pre-recovery caller bytes while retaining frozen pre-recovery recognition", () => {
+    expect(createHash("sha256").update(preRecoveryV5WorkflowTemplate("v5")).digest("hex"))
       .toBe("a1728c81138d371c66b2d2693c3f09972f2e305aa23d16aa7d09e53ca82d9b8f");
     for (const tag of ["v5", "stable"]) {
       const workflow = buildSetupFiles(tag)[0].content;
-      expect(workflow).toBe(preRecoveryV5WorkflowTemplate(tag));
+      expect(workflow).toBe(currentPreRecoveryV5WorkflowTemplate(tag));
+      expect(workflow).toContain("accept-coverage-uncertainty");
       expect(workflow).not.toContain("recover_publication:");
       expect(workflow).not.toContain("recovery_policy_commit:");
       expect(workflow).not.toContain("recovery_expected_head:");
@@ -432,7 +434,7 @@ describe("setup-v4 public boundary", () => {
     expect(buildHistoricalProviderParityV4SetupFiles(tag)[2].content).toContain(
       "version: 0.1.1",
     );
-    expect(workflow).toBe(preRecoveryV5WorkflowTemplate(tag));
+    expect(workflow).toBe(currentPreRecoveryV5WorkflowTemplate(tag));
   });
 });
 

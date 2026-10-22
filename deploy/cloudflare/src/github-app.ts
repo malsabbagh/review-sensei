@@ -28,6 +28,7 @@ import {
   senseiOnlyV5WorkflowTemplate,
   keywordRescanV5WorkflowTemplate,
   preRecoveryV5WorkflowTemplate,
+  historicalPreparedRecoveryV5WorkflowTemplate,
   preparedRecoveryWorkflowTemplate,
   mergeFocusedV4ConfigFile,
   mergeFocusedV4WorkflowTemplate,
@@ -362,6 +363,7 @@ function looksLikeManagedV5Setup(path: string, content: string): boolean {
         content === senseiOnlyV5WorkflowTemplate(publicWorkflowTag) ||
         content === keywordRescanV5WorkflowTemplate(publicWorkflowTag) ||
         content === preRecoveryV5WorkflowTemplate(publicWorkflowTag) ||
+        content === historicalPreparedRecoveryV5WorkflowTemplate(publicWorkflowTag) ||
         content === preparedRecoveryWorkflowTemplate(publicWorkflowTag)
       );
     } catch {

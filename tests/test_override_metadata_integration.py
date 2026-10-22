@@ -742,6 +742,31 @@ class HostedOverrideMetadataTests(unittest.TestCase):
                 result.broker.authorize_session_mutation.assert_not_called()
                 result.ledger_factory.assert_not_called()
 
+    def test_legacy_accept_risk_and_coverage_uncertainty_require_live_maintain_or_admin(self):
+        for body in (
+            f"@sensei accept-risk {FINGERPRINT} --reason known issue",
+            f"@sensei override {FINGERPRINT} acceptable risk",
+            "@reviewsensei accept-coverage-uncertainty --reason bounded window",
+        ):
+            with self.subTest(body=body, role="write"):
+                rejected = self._run(
+                    comment_body=body,
+                    permission={"permission": "write", "role_name": "write"},
+                    environment={"GITHUB_TOKEN": "synthetic-read-token"},
+                )
+                self.assertEqual(rejected.status, 0, rejected.output)
+                self.assertIn("unauthorized", rejected.output)
+                rejected.ledger_factory.assert_not_called()
+                self.assertIsNone(rejected.ledger.load(IDENTITY).record)
+            with self.subTest(body=body, role="maintain"):
+                accepted = self._run(
+                    comment_body=body,
+                    permission={"permission": "write", "role_name": "maintain"},
+                    environment={"GITHUB_TOKEN": "synthetic-read-token"},
+                )
+                self.assertEqual(accepted.status, 0, accepted.output)
+                accepted.broker.authorize_session_mutation.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

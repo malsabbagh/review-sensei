@@ -42,5 +42,43 @@ class GitHubReviewHooks:
     ) -> object:
         return run_hosted_provider(service, request, **kwargs)
 
+    def retain_checkpoint_result(
+        self,
+        args: argparse.Namespace,
+        ledger: SessionLedger,
+        identity: object,
+        result: object,
+        *,
+        base_sha: str,
+        head_sha: str,
+        configuration_context: object,
+        evidence_context: object,
+        policy: object,
+    ) -> None:
+        from .publication_recovery import retain_checkpoint_review_result
+        from .session_ledger import GitHubIssueCommentSessionLedger
+
+        if not isinstance(ledger, GitHubIssueCommentSessionLedger):
+            return
+        app_slug = (
+            ledger.app_slug or getattr(args, "app_slug", None) or "reviewsensei[bot]"
+        )
+        pending_transaction = getattr(result, "transaction", None)
+        if pending_transaction is None:
+            return
+        retain_checkpoint_review_result(
+            http=ledger.http,
+            token=ledger.token,
+            result=result,  # type: ignore[arg-type]
+            identity=identity,  # type: ignore[arg-type]
+            base_sha=base_sha,
+            head_sha=head_sha,
+            app_slug=app_slug,
+            pending_transaction=pending_transaction,
+            configuration_context=configuration_context,  # type: ignore[arg-type]
+            evidence_context=evidence_context,  # type: ignore[arg-type]
+            policy=policy,  # type: ignore[arg-type]
+        )
+
     def report_failure(self, error: BaseException, args: argparse.Namespace) -> bool:
         return bool(report_broker_failure(error, args))

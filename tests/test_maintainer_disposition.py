@@ -22,6 +22,8 @@ from review_sensei.disposition import (
     authorized_maintainer,
     authorized_override,
     command_exit_code,
+    disposition_honors_coverage_uncertainty,
+    disposition_honors_fingerprint,
     parse_maintainer_command,
     render_convergence_summary,
     resolve_finding_reference,
@@ -131,20 +133,17 @@ class MaintainerCommandParseTests(unittest.TestCase):
             )
         )
 
-    def test_mention_boundary_accepts_markdown_and_whitespace(self):
-        self.assertEqual(
-            parse_maintainer_command(
-                "**operator note** @sensei\nreview pause", actor="alice"
-            ).action,
-            "pause",
-        )
-        self.assertEqual(
-            parse_maintainer_command(
-                "note @sensei\treview pause", actor="alice"
-            ).action,
-            "pause",
-        )
+    def test_mention_boundary_rejects_surrounding_prose_quotes_and_indentation(self):
         for body in (
+            "**operator note** @sensei\nreview pause",
+            "note @sensei\treview pause",
+            "> @reviewsensei override RS-ABCDEF acceptable risk",
+            ">> @sensei review continue",
+            "```\n@reviewsensei override RS-ABCDEF acceptable risk\n```",
+            "    @reviewsensei override RS-ABCDEF acceptable risk",
+            "  @reviewsensei review pause",
+            "\t@sensei review continue",
+            "\n@reviewsensei override RS-ABCDEF acceptable risk",
             "@sensei!review pause",
             "@sensei-review pause",
             "@senseis review pause",
@@ -1286,6 +1285,301 @@ class FindingOverrideTests(unittest.TestCase):
         )
         self.assertEqual(result.summary, "unauthorized")
         self.assertFalse(result.applied)
+
+    def test_quoted_indented_fenced_and_prose_commands_never_mutate_ledger(self):
+        fingerprint = "abc123" + "0" * 58
+        for body in (
+            "> @reviewsensei override RS-ABC123 acceptable risk",
+            "  > @sensei accept-risk " + fingerprint + " --reason accepted",
+            "    @reviewsensei override RS-ABC123 acceptable risk",
+            "\t@sensei review reenroll",
+            "```\n@reviewsensei override RS-ABC123 acceptable risk\n```",
+            "Example:\n@reviewsensei override RS-ABC123 acceptable risk",
+            "Please run `@reviewsensei override RS-ABC123 acceptable risk`",
+        ):
+            with self.subTest(body=body):
+                self.assertIsNone(parse_maintainer_command(body, actor="alice"))
+                ledger = InMemorySessionLedger()
+                application = GitHubApplication(
+                    broker=object(),
+                    http=None,
+                    reviewer=object(),
+                    learner=object(),
+                    replier=object(),
+                    session_ledger=ledger,
+                )
+                result = application.apply_maintainer_command(
+                    options=GitHubWriteOptions(github_writes=False),
+                    oidc_token=None,
+                    repository="owner/repo",
+                    repository_id=99,
+                    pull_request=136,
+                    head_sha="b" * 40,
+                    body=body,
+                    actor_login="alice",
+                    association="OWNER",
+                    app_slug="reviewsensei[bot]",
+                )
+                self.assertFalse(result.applied)
+                self.assertEqual(result.summary, "not-a-command")
+                self.assertIsNone(ledger.load(IDENTITY).record)
+
+    def test_unified_role_matrix_across_legacy_and_short_commands(self):
+        fingerprint = "abc123456789def0" + "0" * 48
+        elevated_commands = (
+            f"@sensei accept-risk {fingerprint} --reason tracked",
+            f"@reviewsensei accept-risk {fingerprint} --reason tracked",
+            "@reviewsensei override RS-ABC123 acceptable risk",
+            f"@sensei override {fingerprint} acceptable risk",
+            f"@reviewsensei {fingerprint} is acceptable risk",
+            "@reviewsensei accept-coverage-uncertainty --reason remaining slices bounded",
+            "@sensei I reviewed the media files and I approve",
+            "@reviewsensei review reenroll",
+        )
+        collaborator_commands = (
+            f"@sensei dismiss {fingerprint} --reason false positive",
+            f"@reviewsensei defer {fingerprint} --reason follow-up issue",
+            "@sensei verify",
+            "@reviewsensei review pause",
+            "@sensei review continue",
+        )
+        for body in elevated_commands:
+            for assoc, perm in (
+                ("COLLABORATOR", None),
+                ("MEMBER", "write"),
+                ("CONTRIBUTOR", "admin"),
+            ):
+                with self.subTest(body=body, assoc=assoc, perm=perm):
+                    ledger = InMemorySessionLedger()
+                    app = GitHubApplication(
+                        broker=object(),
+                        http=None,
+                        reviewer=object(),
+                        learner=object(),
+                        replier=object(),
+                        session_ledger=ledger,
+                    )
+                    res = app.apply_maintainer_command(
+                        options=GitHubWriteOptions(github_writes=False),
+                        oidc_token=None,
+                        repository="owner/repo",
+                        repository_id=99,
+                        pull_request=136,
+                        head_sha="b" * 40,
+                        body=body,
+                        actor_login="alice",
+                        association=assoc,
+                        actor_permission=perm,
+                        app_slug="reviewsensei[bot]",
+                        finding_fingerprints=(fingerprint,),
+                    )
+                    self.assertFalse(res.applied)
+                    self.assertEqual(res.summary, "unauthorized")
+
+        for body in collaborator_commands:
+            with self.subTest(body=body):
+                ledger = InMemorySessionLedger()
+                app = GitHubApplication(
+                    broker=object(),
+                    http=None,
+                    reviewer=object(),
+                    learner=object(),
+                    replier=object(),
+                    session_ledger=ledger,
+                )
+                res = app.apply_maintainer_command(
+                    options=GitHubWriteOptions(github_writes=False),
+                    oidc_token=None,
+                    repository="owner/repo",
+                    repository_id=99,
+                    pull_request=136,
+                    head_sha="b" * 40,
+                    body=body,
+                    actor_login="alice",
+                    association="COLLABORATOR",
+                    app_slug="reviewsensei[bot]",
+                    finding_fingerprints=(fingerprint,),
+                )
+                self.assertNotEqual(res.summary, "unauthorized")
+
+    def test_coverage_uncertainty_and_finding_risk_dispositions_are_distinct_and_audited(self):
+        fingerprint = "abc123456789def0" + "0" * 48
+        ledger = InMemorySessionLedger()
+        cov_cmd = parse_maintainer_command(
+            "@reviewsensei accept-coverage-uncertainty --reason large generated protobufs",
+            actor="alice",
+            head_sha="b" * 40,
+        )
+        assert cov_cmd is not None
+        self.assertEqual(cov_cmd.action, "accept-coverage-uncertainty")
+        record, result = apply_session_command(
+            ledger,
+            IDENTITY,
+            cov_cmd,
+            now=FIXED_NOW,
+            actor_role="maintain",
+            policy_digest="c" * 64,
+            provenance="comment:901",
+            incomplete_coverage=("unit-3", "unit-4"),
+        )
+        self.assertTrue(result.applied)
+        dispositions = session_dispositions(record)
+        self.assertEqual(len(dispositions), 1)
+        cov_disp = dispositions[0]
+        self.assertTrue(
+            disposition_honors_coverage_uncertainty(dispositions, head_sha="b" * 40)
+        )
+        self.assertFalse(
+            disposition_honors_fingerprint(
+                dispositions, fingerprint=fingerprint, head_sha="b" * 40
+            )
+        )
+        self.assertFalse(
+            disposition_honors_coverage_uncertainty(dispositions, head_sha="c" * 40)
+        )
+        trail = cov_disp.audit_trail(identity=IDENTITY)
+        self.assertEqual(trail["actor"], "alice")
+        self.assertEqual(trail["actor_role"], "maintain")
+        self.assertEqual(trail["repository"], "owner/repo")
+        self.assertEqual(trail["pull_request"], 136)
+        self.assertEqual(trail["target_kind"], "coverage_uncertainty")
+        self.assertEqual(trail["incomplete_coverage"], ["unit-3", "unit-4"])
+        self.assertEqual(trail["resolution_kind"], "coverage_uncertainty_accepted")
+        self.assertEqual(trail["invalidation_behavior"], "invalidated_on_new_push")
+
+    def test_post_command_receipt_requires_app_ownership_and_reconciles_stale_outcome(
+        self,
+    ):
+        from review_sensei.disposition import OverrideReceipt
+        from review_sensei.presentation import render_command_receipt
+        from review_sensei_github.command_bodies import _post_command_receipt
+
+        comment_body = "@reviewsensei override RS-ABCD1234 --reason accepted"
+        digest = sha256(comment_body.encode("utf-8")).hexdigest()
+        receipts = (OverrideReceipt("RS-ABCD1234", "a" * 64, "recorded"),)
+        failed_text = render_command_receipt(
+            actor="alice",
+            source_comment_id=55,
+            command_digest=digest,
+            receipts=receipts,
+            ledger_written=False,
+        )
+        succeeded_text = render_command_receipt(
+            actor="alice",
+            source_comment_id=55,
+            command_digest=digest,
+            receipts=receipts,
+            ledger_written=True,
+        )
+
+        class FakeBroker:
+            def request_oidc_token(self):
+                return "oidc"
+
+            def exchange(self, token, *, capability=None):
+                return "ghs_reply_token"
+
+        class FakeHttp:
+            def __init__(self, comments):
+                self.comments = list(comments)
+                self.requests = []
+
+            def repository_path(self, repo, suffix):
+                return f"/repos/{repo}{suffix}"
+
+            def paginate(self, *, path, token, max_requests, timeout_seconds):
+                return list(self.comments)
+
+            def request(self, method, path, *, token, body):
+                self.requests.append((method, path, body["body"]))
+                return 200, {
+                    "id": 999,
+                    "body": body["body"],
+                    "user": {"login": "reviewsensei[bot]", "type": "Bot", "id": 777},
+                }
+
+        # 1. Spoofed human comment with matching marker is ignored -> POSTs fresh receipt
+        http_spoof = FakeHttp(
+            [
+                {
+                    "id": 101,
+                    "body": succeeded_text,
+                    "user": {"login": "attacker", "type": "User", "id": 666},
+                }
+            ]
+        )
+        _post_command_receipt(
+            http_spoof,
+            FakeBroker(),
+            oidc_token="oidc",
+            repository="owner/repo",
+            pull_request=12,
+            source_comment_id=55,
+            comment_body=comment_body,
+            actor="alice",
+            receipts=receipts,
+            ledger_written=True,
+            app_slug="reviewsensei[bot]",
+        )
+        self.assertEqual(len(http_spoof.requests), 1)
+        self.assertEqual(http_spoof.requests[0][0], "POST")
+
+        # 2. Prior failed App receipt (ledger_written=False) is reconciled via PATCH when ledger_written=True
+        http_reconcile = FakeHttp(
+            [
+                {
+                    "id": 202,
+                    "body": failed_text,
+                    "user": {"login": "reviewsensei[bot]", "type": "Bot", "id": 777},
+                }
+            ]
+        )
+        _post_command_receipt(
+            http_reconcile,
+            FakeBroker(),
+            oidc_token="oidc",
+            repository="owner/repo",
+            pull_request=12,
+            source_comment_id=55,
+            comment_body=comment_body,
+            actor="alice",
+            receipts=receipts,
+            ledger_written=True,
+            app_slug="reviewsensei[bot]",
+            expected_app_user_id=777,
+        )
+        self.assertEqual(len(http_reconcile.requests), 1)
+        self.assertEqual(http_reconcile.requests[0][0], "PATCH")
+        self.assertEqual(
+            http_reconcile.requests[0][1], "/repos/owner/repo/issues/comments/202"
+        )
+        self.assertEqual(http_reconcile.requests[0][2], succeeded_text)
+
+        # 3. Exact matching App receipt causes zero additional writes
+        http_exact = FakeHttp(
+            [
+                {
+                    "id": 202,
+                    "body": succeeded_text,
+                    "user": {"login": "reviewsensei[bot]", "type": "Bot", "id": 777},
+                }
+            ]
+        )
+        _post_command_receipt(
+            http_exact,
+            FakeBroker(),
+            oidc_token="oidc",
+            repository="owner/repo",
+            pull_request=12,
+            source_comment_id=55,
+            comment_body=comment_body,
+            actor="alice",
+            receipts=receipts,
+            ledger_written=True,
+            app_slug="reviewsensei[bot]",
+            expected_app_user_id=777,
+        )
+        self.assertEqual(http_exact.requests, [])
 
 
 if __name__ == "__main__":
