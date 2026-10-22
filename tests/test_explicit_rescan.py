@@ -1096,6 +1096,93 @@ class RescanHostTests(SessionFixtureClockMixin, unittest.TestCase):
             self.assertFalse((root / filename).exists(), filename)
         self.assertEqual(ledger.load(tx.IDENTITY).record, before)
 
+    def test_full_rescan_uses_real_engine_without_mismatched_partial_scope(self):
+        self._assert_full_rescan_without_partial_reuse("0" * 64)
+
+    def test_full_rescan_uses_real_engine_without_legacy_partial_scope(self):
+        self._assert_full_rescan_without_partial_reuse(None)
+
+    def _assert_full_rescan_without_partial_reuse(self, scope):
+        from review_sensei.service import ReviewService
+
+        root = Path(self.temp.name)
+        argv = cli_arguments(root)
+
+        class RetainingHooks(type(ledger_hooks(self.ledger))):
+            def retain_checkpoint_result(
+                self, args, ledger, identity, result, **kwargs
+            ):
+                ledger.retain_checkpoint_result(result)
+
+        hooks = RetainingHooks()
+        prior = replace(partial.partial_result(), continuation_scope_digest=scope)
+        with (
+            patch.object(
+                ReviewService,
+                "run",
+                return_value=ReviewRun(
+                    RunOutcome(
+                        "partial", diagnostic="partial_coverage", provider_calls=1
+                    ),
+                    result=prior,
+                ),
+            ) as initial_engine,
+            redirect_stderr(io.StringIO()) as errors,
+        ):
+            self.assertEqual(main(argv, hosted_hooks=hooks), 0, errors.getvalue())
+            self.assertEqual(initial_engine.call_count, 1)
+        record = self.ledger.load(tx.IDENTITY).record
+        retained = self.ledger.load_retained_checkpoint_result(
+            tx.IDENTITY, transaction=record.transaction, head_sha=tx.HEAD_SHA
+        )
+        self.assertTrue(
+            retained.transaction.logical_identity_matches(record.transaction)
+        )
+        self.assertEqual(retained.continuation_scope_digest, scope)
+        complete_review_publication(
+            self.ledger, tx.IDENTITY, record.transaction, published=True
+        )
+
+        # A distinct authorized comment requests full analysis of the same head.
+        self.http = AuthorityHTTP(retained)
+        self.ledger.http = self.http
+        self.http.comment["id"] = 21
+        os.environ["GITHUB_EVENT_NAME"] = "issue_comment"
+        self.event.update(
+            action="created", issue={"number": 146}, comment=dict(self.http.comment)
+        )
+        self.write_event()
+        real_run = ReviewService.run
+        with (
+            patch.object(
+                ReviewService, "run", autospec=True, side_effect=real_run
+            ) as engine,
+            redirect_stderr(io.StringIO()) as errors,
+        ):
+            self.assertEqual(main(argv, hosted_hooks=hooks), 0, errors.getvalue())
+            self.assertEqual(engine.call_count, 1)
+            self.assertIsNone(engine.call_args.kwargs["prior_partial"])
+            self.assertIsNone(engine.call_args.kwargs["incremental"])
+            current = self.ledger.load(tx.IDENTITY).record
+            result = self.ledger.load_retained_checkpoint_result(
+                tx.IDENTITY, transaction=current.transaction, head_sha=tx.HEAD_SHA
+            )
+            self.assertEqual(result.review_status, "complete")
+            self.assertEqual(result.transaction.head_sha, retained.transaction.head_sha)
+            self.assertNotEqual(
+                result.transaction.transaction_id, retained.transaction.transaction_id
+            )
+            complete_review_publication(
+                self.ledger, tx.IDENTITY, current.transaction, published=True
+            )
+            self.ledger.http = AuthorityHTTP(result, complete=True)
+            self.ledger.http.comment["id"] = 21
+            self.assertEqual(main(argv, hosted_hooks=hooks), 0, errors.getvalue())
+            self.assertEqual(engine.call_count, 1)
+            self.assertEqual(
+                json.loads((root / "outcome.json").read_text())["provider_calls"], 0
+            )
+
     def test_real_cli_published_partial_rescan_and_duplicate_delivery(self):
         root = Path(self.temp.name)
         ledger = self.ledger

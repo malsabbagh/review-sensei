@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Treat an authorized same-head rescan as fresh analysis instead of reusing a
+  retained partial review with a missing or incompatible continuation scope.
+  Keep ordinary continuation scope validation, request authority, consumed
+  request receipts and duplicate-delivery suppression unchanged.
+
 - Honor the trusted caller's `hosted_runner` for read-only reusable bootstrap,
   so an opted-in Linux runner can start the workflow when GitHub-hosted billing
   is unavailable. Preserve the GitHub default, first-step label validation,
