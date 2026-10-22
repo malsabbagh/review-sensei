@@ -65,9 +65,45 @@ imports must resolve inside that environment's `site-packages`. The existing
 five suites exercise config precedence, machine output, exit status, limits,
 error paths, fixture/loopback transport/cancellation and mocked operation safety.
 Zero/inconsistent receipts, timeouts, nonzero exit and failed cases fail jobs.
+The installed lifecycle inventory runs through two isolated processes within
+the existing 300-second suite deadline. Every declared contract module,
+including cases added by its `load_tests` hook, stays in the inventory. Each
+worker starts with a fresh interpreter (`spawn`), then rechecks exact installed
+versions and import boundaries; the parent
+compares discovered and executed test IDs and rejects missing, duplicate,
+empty, skipped or failed evidence. This avoids serial lifecycle overrun without
+increasing the deadline or reducing coverage.
+Every report includes the full discovered inventory and declared contracts.
+Unconfirmed worker execution is explicit: `tests_run` is unknown (`null`),
+`known_tests_run` counts only validated worker reports, and `execution_complete`
+is false. Skips and expected/unexpected failures use `FAIL` rows with a specific
+`kind`; multiple failing subtests retain one canonical parent-test row and a
+failure count. Failure records must cover their exact assigned inventory too.
+Skipped subtests also belong to their active parent method's failing row;
+`skip_events` retains their count. A failing row's `kind` records its first
+failure category, while later failures leave its status sticky at `FAIL`.
+Confirmed execution means a structurally validated report, not passing
+assertions: full execution with failed assertions can be complete and still
+fails qualification through its failed rows and nonzero exit.
+Each worker must execute the discovered method IDs in their declared loader
+traversal order; reordering is rejected along with missing or duplicate methods.
+Reports distinguish submitted, unsubmitted and confirmed contracts. Submission
+does not prove a worker started or completed: submitted but unconfirmed work
+has unknown execution, including reports not collected after another worker fails.
+A pool creation/entry failure precedes contract submission: it reports zero
+confirmed tests, a `worker-pool` failure and `execution_complete: false`.
+Consumers must inspect failure/completion fields, not treat a non-null count
+as successful qualification.
 Sanitized artifacts are retained on failure; environments and binaries are not.
 Every gate or recheck requires a fresh output directory. An existing evidence
 directory is rejected before reads and its receipt is left unchanged.
+The gate exposes its uploaded receipt artifact ID to final validation. A retry
+of an installed lane retains that exact same-run artifact, even when the gate
+itself succeeded in an earlier attempt; it does not construct a new artifact
+name from the retry attempt. Final identity and lane-result rechecks still run.
+This reuse applies only to installed-lane retries of a successful gate in the
+same workflow run. A skipped/failed gate or missing upload fails closed; a new
+workflow run must qualify anew and cannot borrow an earlier run's receipt.
 
 All lanes freeze validation code to one protected default-branch checkout SHA.
 Same-channel concurrency cancels older runs. The final job requires every CLI
