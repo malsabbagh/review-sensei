@@ -2125,7 +2125,7 @@ class GitHubSetupClientTests(unittest.TestCase):
 
         from review_sensei_github.cli import main as github_main
 
-        custom_secrets = (
+        custom_bindings = (
             "\n"
             "# Organization-specific credentials\n"
             "      CUSTOM_ORG_TOKEN: ${{ secrets.CUSTOM_ORG_TOKEN }}\n"
@@ -2135,7 +2135,7 @@ class GitHubSetupClientTests(unittest.TestCase):
             "        ${{ secrets.CUSTOM_FOLDED_TOKEN }}\n"
         )
         sibling_permissions = "    permissions:\n      packages: read\n"
-        stale = _sensei_only_v5_workflow("v5") + custom_secrets + sibling_permissions
+        stale = _sensei_only_v5_workflow("v5") + custom_bindings + sibling_permissions
         with tempfile.TemporaryDirectory() as tmp:
             workflow_path = Path(tmp) / WORKFLOW_PATH
             workflow_path.parent.mkdir(parents=True)
@@ -2146,7 +2146,7 @@ class GitHubSetupClientTests(unittest.TestCase):
                 )
             self.assertEqual(status, 0)
             migrated = workflow_path.read_text(encoding="utf-8")
-        self.assertIn(custom_secrets, migrated)
+        self.assertIn(custom_bindings, migrated)
         self.assertNotIn(sibling_permissions, migrated)
         self.assertTrue(inspect_installed_caller_drift(migrated).is_current)
         repeated, difference = migrate_caller_preserving_customizations(migrated)
@@ -2183,7 +2183,7 @@ class GitHubSetupClientTests(unittest.TestCase):
 
         from review_sensei_github.cli import main as github_main
 
-        before_secrets = _sensei_only_v5_workflow("v5").split("    secrets:\n", 1)[0]
+        before_bindings = _sensei_only_v5_workflow("v5").split("    secrets:\n", 1)[0]
         for declaration in (
             "    secrets: inherit\n",
             '    secrets: { CUSTOM_ORG_TOKEN: "${{ secrets.CUSTOM_ORG_TOKEN }}" }\n',
@@ -2192,7 +2192,7 @@ class GitHubSetupClientTests(unittest.TestCase):
                 self.subTest(declaration=declaration),
                 tempfile.TemporaryDirectory() as tmp,
             ):
-                stale = before_secrets + declaration
+                stale = before_bindings + declaration
                 workflow_path = Path(tmp) / WORKFLOW_PATH
                 workflow_path.parent.mkdir(parents=True)
                 workflow_path.write_text(stale, encoding="utf-8")
