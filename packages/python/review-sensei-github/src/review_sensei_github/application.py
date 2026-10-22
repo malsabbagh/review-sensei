@@ -198,15 +198,24 @@ def _assessment_from_bytes(payload: bytes) -> HumanAssessmentReply:
     )
 
 
-def _approval_bytes(value: object) -> bytes:
+def _media_approval_fields(value: object) -> tuple[bool, tuple[str, ...]]:
     approval = getattr(value, "approval", None)
-    approved = bool(getattr(approval, "approved", False))
+    approved = getattr(approval, "approved", None)
     raw_blockers = getattr(approval, "blockers", ())
-    blockers = (
-        [str(item) for item in raw_blockers if isinstance(item, str)]
-        if isinstance(raw_blockers, (tuple, list))
-        else []
-    )
+    if (
+        not isinstance(approved, bool)
+        or not isinstance(raw_blockers, (tuple, list))
+        or any(not isinstance(item, str) for item in raw_blockers)
+        or (approved and bool(raw_blockers))
+    ):
+        raise GitHubPublicationError(
+            "media approval assessment is unavailable or invalid"
+        )
+    return approved, tuple(raw_blockers)
+
+
+def _approval_bytes(value: object) -> bytes:
+    approved, blockers = _media_approval_fields(value)
     payload: dict[str, object] = {"approved": approved}
     if blockers:
         payload["blockers"] = blockers
@@ -215,24 +224,30 @@ def _approval_bytes(value: object) -> bytes:
 
 def _approval_from_bytes(payload: bytes) -> object:
     loaded = json.loads(payload)
-    approved = isinstance(loaded, dict) and loaded.get("approved") is True
-    raw_blockers = loaded.get("blockers", ()) if isinstance(loaded, dict) else ()
-    blockers = (
-        tuple(str(item) for item in raw_blockers if isinstance(item, str))
-        if isinstance(raw_blockers, list)
-        else ()
-    )
+    if (
+        not isinstance(loaded, dict)
+        or not isinstance(loaded.get("approved"), bool)
+        or set(loaded) - {"approved", "blockers"}
+    ):
+        raise GitHubPublicationError(
+            "media approval assessment is unavailable or invalid"
+        )
+    approved = loaded["approved"]
+    raw_blockers = loaded.get("blockers", ())
 
     class _Approval:
         def __init__(self) -> None:
             self.approved = approved
-            self.blockers = blockers
+            self.blockers = raw_blockers
 
     class _Assessment:
         def __init__(self) -> None:
             self.approval = _Approval()
 
-    return _Assessment()
+    assessment = _Assessment()
+    _, blockers = _media_approval_fields(assessment)
+    assessment.approval.blockers = blockers
+    return assessment
 
 
 def _command_bytes(value: object) -> bytes:
@@ -1894,6 +1909,7 @@ class GitHubApplication:
                     applied=False,
                     operator_paused=False,
                     summary="media approval requires the current review result",
+                    evaluation_failed=True,
                 )
             media_digest = sha256(
                 f"{repository_id}:{pull_request}:{head_sha}".encode()
@@ -1967,6 +1983,7 @@ class GitHubApplication:
                     applied=False,
                     operator_paused=False,
                     summary="media approval requires the current review result",
+                    evaluation_failed=True,
                 )
             extra_kwargs = {"enabled": False} if not auto_approve_enabled else {}
             assessment = approver(
@@ -2303,14 +2320,16 @@ class GitHubApplication:
         )
         from .checks import ReviewCheckPublisher, check_outcome_for_result
 
-        approval = getattr(assessment, "approval", None)
-        approved = bool(getattr(approval, "approved", False))
-        raw_blockers = getattr(approval, "blockers", ())
-        blockers = (
-            tuple(str(item) for item in raw_blockers if isinstance(item, str))
-            if isinstance(raw_blockers, (list, tuple))
-            else ()
-        )
+        try:
+            approved, blockers = _media_approval_fields(assessment)
+        except GitHubPublicationError:
+            return MaintainerCommandResult(
+                action="approve-media",
+                applied=False,
+                operator_paused=False,
+                summary="media approval assessment is unavailable or invalid",
+                evaluation_failed=True,
+            )
         non_coverage_structural_blockers = set(blockers) - {
             "auto-approval-disabled",
             "blocking-findings-open",

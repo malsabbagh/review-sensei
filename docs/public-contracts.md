@@ -1157,6 +1157,16 @@ The marker, App slug, exact head commit, and repository identity form the
 idempotency boundary; stale, fork, duplicate, ambiguous, or invalid writes
 fail closed.
 
+The media sentence requires an authenticated current result, owned file-review
+request and qualified publisher composition. Missing context or an invalid
+assessment is an evaluation failure and exits nonzero; a completed evaluation
+that withholds approval remains distinct. The existing human-file adapter caps
+one complete inventory at 32 changes. Command recognition does not activate a
+larger inventory, refill the original request budget, or replace fresh approval
+facts. The public hosted composition remains unqualified; directly injecting a
+library publisher is not deployed end-to-end evidence. See
+[ADR 0077](adr/0077-explicit-human-file-review.md).
+
 The publication boundary resolves an omitted convergence policy to the
 `merge-focused` default and binds the same policy digest as preparation; a
 prepared result bound to a different policy is rejected rather than silently
