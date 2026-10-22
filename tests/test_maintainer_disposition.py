@@ -2196,6 +2196,14 @@ class FindingOverrideTests(unittest.TestCase):
         )
         self.assertEqual(len(reviews), 2)
         self.assertEqual(reviews[-1]["state"], "APPROVED")
+        self.assertIn(
+            "Approved with maintainer coverage exception",
+            reviews[-1]["body"],
+        )
+        self.assertIn(
+            f"<!-- reviewsensei:approval-exception:v1 outcome=maintainer-coverage-exception result={partial_v1.content_digest()} gates=review-partial,coverage-partial -->",
+            reviews[-1]["body"],
+        )
         persisted_eligibility = approval_eligibility_from_body(reviews[0]["body"])
         assert persisted_eligibility is not None
         self.assertEqual(persisted_eligibility.facts.review_status, "partial")
@@ -2210,6 +2218,184 @@ class FindingOverrideTests(unittest.TestCase):
         self.assertEqual(
             set(decision.satisfied_gates), {"review-partial", "coverage-partial"}
         )
+
+        # 2b. Full file/hunk enumeration with overall partial status (e.g. skipped context/stages)
+        # binds acceptance to the result digest and status/evidence_policy scope without a generic head fallback.
+        from dataclasses import replace
+
+        from review_sensei.coverage import HunkCoverage
+        from review_sensei.disposition import incomplete_coverage_from_result
+
+        full_enum_partial_v1 = ReviewResult(
+            summary="Partial analysis with full file/hunk coverage.",
+            comments=(),
+            provider="fixture",
+            model="fixture-model",
+            review_status="partial",
+            evidence_policy="legacy",
+            coverage=CoverageManifest(
+                enumerated_paths=("src/a.py",),
+                files=(FileCoverage(path="src/a.py", outcome="reviewed"),),
+                hunks=(
+                    HunkCoverage(
+                        index=1,
+                        path="src/a.py",
+                        outcome="reviewed",
+                    ),
+                ),
+                enumeration_complete=True,
+            ),
+        )
+        full_enum_partial_v2 = ReviewResult(
+            summary="Different partial analysis on the same head.",
+            comments=(),
+            provider="fixture",
+            model="fixture-model",
+            review_status="partial",
+            evidence_policy="legacy",
+            coverage=full_enum_partial_v1.coverage,
+        )
+        self.assertEqual(
+            incomplete_coverage_from_result(full_enum_partial_v1),
+            (
+                f"result:{full_enum_partial_v1.content_digest()}",
+                "status:partial:evidence_policy:legacy",
+            ),
+        )
+        # Capacity-exceeded persistence status is not a coverage uncertainty
+        self.assertEqual(
+            incomplete_coverage_from_result(
+                replace(full_enum_partial_v1, persistence_status="capacity-exceeded")
+            ),
+            (),
+        )
+        reviews[:] = [
+            {
+                "id": 15,
+                "commit_id": head,
+                "state": "COMMENTED",
+                "user": {"login": "reviewsensei[bot]", "type": "Bot"},
+                "body": (
+                    "Review summary\n\n"
+                    + finding_index_marker(
+                        repository_id=IDENTITY.repository_id,
+                        pull_request=IDENTITY.pull_request,
+                        head_sha=head,
+                        base_sha=base,
+                        result_digest=full_enum_partial_v1.content_digest(),
+                        entries=(),
+                    )
+                    + "\n\n"
+                    + approval_eligibility_marker(
+                        ReviewApprovalEligibility(
+                            head_sha=head,
+                            result_digest=full_enum_partial_v1.content_digest(),
+                            facts=ApprovalFacts(
+                                enabled=True,
+                                app_authored=False,
+                                check_published=True,
+                                qualification="not-required",
+                                review_status="partial",
+                                evidence_policy="legacy",
+                                has_open_review_threads=False,
+                                has_blocking_findings=False,
+                                has_human_adjudication_findings=False,
+                                coverage_blocker=None,
+                                provider="fixture",
+                            ),
+                        )
+                    )
+                ),
+            }
+        ]
+        full_enum_accept = app.apply_maintainer_command(
+            options=GitHubWriteOptions(github_writes=True, mention_replies=True),
+            oidc_token="oidc",
+            body="@reviewsensei accept-coverage-uncertainty --reason supplemental stage skipped safely",
+            actor_login="maint-alice",
+            actor_type="User",
+            association="COLLABORATOR",
+            repository=IDENTITY.repository,
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            head_sha=head,
+            app_slug="reviewsensei[bot]",
+            source_comment_id=810,
+            finding_fingerprints=(),
+            review_result=full_enum_partial_v1,
+            convergence_policy=policy_v1,
+        )
+        self.assertTrue(full_enum_accept.applied)
+        self.assertIn(
+            "approval submitted (maintainer-coverage-exception)",
+            full_enum_accept.summary,
+        )
+        self.assertEqual(reviews[-1]["state"], "APPROVED")
+        self.assertIn(
+            f"<!-- reviewsensei:approval-exception:v1 outcome=maintainer-coverage-exception result={full_enum_partial_v1.content_digest()} gates=review-partial -->",
+            reviews[-1]["body"],
+        )
+        # A different partial result on the same head is not satisfied by the prior acceptance
+        reviews[:] = [
+            {
+                "id": 18,
+                "commit_id": head,
+                "state": "COMMENTED",
+                "user": {"login": "reviewsensei[bot]", "type": "Bot"},
+                "body": (
+                    "Review summary\n\n"
+                    + finding_index_marker(
+                        repository_id=IDENTITY.repository_id,
+                        pull_request=IDENTITY.pull_request,
+                        head_sha=head,
+                        base_sha=base,
+                        result_digest=full_enum_partial_v2.content_digest(),
+                        entries=(),
+                    )
+                    + "\n\n"
+                    + approval_eligibility_marker(
+                        ReviewApprovalEligibility(
+                            head_sha=head,
+                            result_digest=full_enum_partial_v2.content_digest(),
+                            facts=ApprovalFacts(
+                                enabled=True,
+                                app_authored=False,
+                                check_published=True,
+                                qualification="not-required",
+                                review_status="partial",
+                                evidence_policy="legacy",
+                                has_open_review_threads=False,
+                                has_blocking_findings=False,
+                                has_human_adjudication_findings=False,
+                                coverage_blocker=None,
+                                provider="fixture",
+                            ),
+                        )
+                    )
+                ),
+            }
+        ]
+        full_enum_changed = app.apply_maintainer_command(
+            options=GitHubWriteOptions(github_writes=True, mention_replies=True),
+            oidc_token="oidc",
+            body="@reviewsensei verify",
+            actor_login="maint-alice",
+            actor_type="User",
+            association="COLLABORATOR",
+            repository=IDENTITY.repository,
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            head_sha=head,
+            app_slug="reviewsensei[bot]",
+            source_comment_id=811,
+            finding_fingerprints=(),
+            review_result=full_enum_partial_v2,
+            convergence_policy=policy_v1,
+        )
+        self.assertIn(
+            "approval withheld (review_incomplete)", full_enum_changed.summary
+        )
+        self.assertEqual(len(reviews), 1)
 
         # 3. If coverage/result changes on the same head after acceptance, acceptance is withheld!
         reviews[:] = [

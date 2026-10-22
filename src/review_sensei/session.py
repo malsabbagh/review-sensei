@@ -2478,6 +2478,7 @@ def load_review_transaction_for_publication(
     baseline: object | None = None,
     now: datetime | None = None,
     commit_analysis: bool = True,
+    loaded: SessionLoadResult | None = None,
 ) -> SessionRecord:
     """Validate a result against durable state, recovering a crash checkpoint.
 
@@ -2514,7 +2515,8 @@ def load_review_transaction_for_publication(
     result_digest = result.content_digest()
     if transaction.result_sha256 not in {None, result_digest}:
         raise ReviewInputError("review result digest does not match transaction")
-    loaded = ledger.load(identity, now=now)
+    if loaded is None:
+        loaded = ledger.load(identity, now=now)
     if loaded.status not in {"ok", "migrated"} or loaded.record is None:
         raise ReviewInputError(f"session ledger load failed: {loaded.status}")
     record = loaded.record

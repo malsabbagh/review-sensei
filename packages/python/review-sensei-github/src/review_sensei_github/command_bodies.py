@@ -364,14 +364,14 @@ def _require_accepted_result(
     operation_entry: str | None = None,
     publication_http: Any = None,
     checkpoint: dict[str, Any] | None = None,
-) -> None:
+) -> list[Any] | None:
     """Refuse publication when an operation record accepted different bytes."""
 
     if not os.environ.get("GITHUB_RUN_ID", "").strip():
-        return
+        return None
     configuration = load_configuration(None)
     if (operation_entry or configuration.github.operation_entry) != "enabled":
-        return
+        return None
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if not isinstance(token, str) or not token.strip():
         raise ReviewInputError("operation record is unavailable")
@@ -380,10 +380,12 @@ def _require_accepted_result(
     from review_sensei_github.operation_entry import accepted_payload_matches
 
     http = publication_http if publication_http is not None else GitHubHttp()
+    comments_path = http.repository_path(repository, f"/issues/{pull_request}/comments")
     try:
         comments = http.paginate(
-            path=http.repository_path(repository, f"/issues/{pull_request}/comments"),
+            path=comments_path,
             token=token.strip(),
+            page_sizes=(100, 50, 20, 10, 5, 1),
             max_requests=MAX_PAGINATION_PAGES,
             timeout_seconds=60,
         )
@@ -422,7 +424,22 @@ def _require_accepted_result(
         # transaction envelope. Only an independently validated durable
         # transaction permits that one normalization; retained part hashes do
         # not constitute an operation acceptance proof.
-        load_review_transaction_for_publication(result=result, **checkpoint)
+        checkpoint_ledger = checkpoint.get("ledger")
+        ledger_http = getattr(checkpoint_ledger, "http", None)
+        primed_map = getattr(ledger_http, "primed_issue_comments", None)
+        primed = False
+        if (
+            isinstance(primed_map, dict)
+            and getattr(checkpoint_ledger, "token", None) == token.strip()
+            and comments_path not in primed_map
+        ):
+            primed_map[comments_path] = list(comments)
+            primed = True
+        try:
+            load_review_transaction_for_publication(result=result, **checkpoint)
+        finally:
+            if primed and isinstance(primed_map, dict):
+                primed_map.pop(comments_path, None)
         original = result.to_dict()
         original.pop("transaction", None)
         original_digest = hashlib.sha256(
@@ -433,6 +450,7 @@ def _require_accepted_result(
         raise ReviewInputError(
             "published result does not match the accepted operation record"
         )
+    return list(comments)
 
 
 def _identity_from_indexed(item: Any) -> Any:
@@ -1647,6 +1665,9 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 if args.recover_retained or args.reconstruct_contexts:
                     acceptance_ledger = recovery_ledger
                 if acceptance_ledger is None and args.github_session_ledger:
+                    from review_sensei_github.publication_recovery import (
+                        publication_session_ledger,
+                    )
                     from review_sensei_github.session_ledger import (
                         GitHubIssueCommentSessionLedger,
                     )
@@ -1656,13 +1677,23 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     )
                     if not isinstance(read_token, str) or not read_token.strip():
                         raise ReviewInputError("operation record is unavailable")
-                    acceptance_ledger = GitHubIssueCommentSessionLedger(
-                        http,
-                        token=read_token.strip(),
-                        app_slug=args.app_slug,
-                        evidence_budget=publication_budget,
+                    acceptance_ledger = publication_session_ledger(
+                        GitHubIssueCommentSessionLedger(
+                            http,
+                            token=read_token.strip(),
+                            app_slug=args.app_slug,
+                            evidence_budget=publication_budget,
+                        ),
+                        publication_budget,
                     )
                 if acceptance_ledger is not None:
+                    from review_sensei_github.publication_recovery import (
+                        publication_session_ledger,
+                    )
+
+                    acceptance_ledger = publication_session_ledger(
+                        acceptance_ledger, publication_budget
+                    )
                     acceptance_checkpoint = dict(
                         ledger=acceptance_ledger,
                         identity=SessionIdentity(
@@ -1682,7 +1713,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                             else {"evidence_policy": "legacy", "snapshot_sha256": None}
                         ),
                     )
-        _require_accepted_result(
+        accepted_comments = _require_accepted_result(
             result,
             repository=args.repository,
             pull_request=args.pull_request,
@@ -1691,6 +1722,18 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             publication_http=acceptance_http,
             checkpoint=acceptance_checkpoint,
         )
+        primed_comments_path: str | None = None
+        if (
+            accepted_comments is not None
+            and getattr(args, "github_session_ledger", False)
+            and session_ledger is None
+        ):
+            comments_path = http.repository_path(
+                args.repository, f"/issues/{args.pull_request}/comments"
+            )
+            if comments_path not in http.primed_issue_comments:
+                http.primed_issue_comments[comments_path] = list(accepted_comments)
+                primed_comments_path = comments_path
         try:
             review_outcome = application.publish_review(
                 options=GitHubWriteOptions(
@@ -1739,6 +1782,9 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             print(f"review-sensei: {exc}", file=sys.stderr)
             print(outcome.status)
             return run_outcome_exit_code(outcome.status)
+        finally:
+            if primed_comments_path is not None:
+                http.primed_issue_comments.pop(primed_comments_path, None)
         learning_outcomes: tuple[LearningPRResult, ...] = ()
         review_allows_learning = not args.enable_review or review_outcome.status in {
             "published",

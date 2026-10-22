@@ -132,6 +132,7 @@ class PublicationBudgetHttp(GitHubHttp):
         from .human_assessment import FeedbackBudgetHttp
 
         super().__init__(api_url=http.api_url, timeout=getattr(http, "timeout", 30))
+        self.primed_issue_comments = http.primed_issue_comments
         self.publication_budget = budget
         accounting_http = http
         while type(accounting_http) is _PaginationObservationHttp:
@@ -209,6 +210,18 @@ def publication_session_ledger(
         return ledger
     if ledger.evidence_budget is not None and ledger.evidence_budget is not budget:
         raise GitHubPublicationError("publication ledger budget identity mismatches")
+    if (
+        type(ledger.http) is _PaginationObservationHttp
+        and ledger.http.observation_budget is budget
+        and ledger.evidence_budget is budget
+        and type(ledger.http.transport)
+        not in {
+            PublicationBudgetHttp,
+            FeedbackBudgetHttp,
+            _PaginationObservationHttp,
+        }
+    ):
+        return ledger
     copied = copy(ledger)
     transport = copied.http
     while type(transport) in {
@@ -524,6 +537,7 @@ def _validate(
     configuration_context: Mapping[str, object],
     evidence_context: Mapping[str, object],
     policy: ReviewConvergencePolicy,
+    loaded: Any = None,
 ) -> ReviewResult:
     _payload(result)
     record = load_review_transaction_for_publication(
@@ -537,6 +551,7 @@ def _validate(
             configuration_context
         ),
         evidence_digest=ReviewTransaction.compute_evidence_digest(evidence_context),
+        loaded=loaded,
     )
     if (
         record.transaction is None
@@ -702,7 +717,9 @@ def retain_checkpoint_review_result(
                         "retention request liability exceeds the original budget"
                     )
             try:
-                digest = store.write(event_key=event_key, result=payload)
+                digest = store.write(
+                    event_key=event_key, result=payload, _check_existing=False
+                )
             except Exception:
                 available = store.read_available(event_key=event_key)
                 if available is None or available[1] != payload:
@@ -723,11 +740,6 @@ def retain_checkpoint_review_result(
                 or prior.content_digest() != bound.content_digest()
             ):
                 raise ReviewInputError("retained result differs from checkpoint")
-            if (
-                store.read(event_key=event_key, payload_digest=_digest)
-                != existing_payload
-            ):
-                raise ReviewInputError("retention readback mismatches")
         return bound
     except (ValueError, ReviewInputError) as exc:
         raise GitHubPublicationError(
@@ -749,6 +761,7 @@ def retain_review_result(
     evidence_context: Mapping[str, object],
     policy: ReviewConvergencePolicy,
     already_retained: bool = False,
+    _loaded: Any = None,
 ) -> None:
     """Persist a prior independently validated checkpoint before publication writes."""
     try:
@@ -761,6 +774,7 @@ def retain_review_result(
             configuration_context=configuration_context,
             evidence_context=evidence_context,
             policy=policy,
+            loaded=_loaded,
         )
         assert validated.transaction is not None
         if already_retained:
@@ -803,7 +817,9 @@ def retain_review_result(
                 ledger, identity, validated.transaction, published=False
             )
             try:
-                digest = store.write(event_key=event_key, result=payload)
+                digest = store.write(
+                    event_key=event_key, result=payload, _check_existing=False
+                )
             except Exception:
                 # An uncertain POST may have succeeded. Read the complete owned
                 # set once; never repeat the POST or create a new event identity.

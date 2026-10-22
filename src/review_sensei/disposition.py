@@ -1544,23 +1544,32 @@ def incomplete_coverage_from_result(
     """Derive the canonical incomplete-coverage scope bound to one ReviewResult."""
     from .models import ReviewResult
 
-    if not isinstance(result, ReviewResult) or result.coverage is None:
+    if not isinstance(result, ReviewResult):
         return ()
     incomplete_items: list[str] = []
-    for fcov in result.coverage.files:
-        if fcov.outcome != "reviewed":
-            incomplete_items.append(
-                f"file:{fcov.path}:{fcov.outcome}"
-                + (f":{fcov.reason}" if fcov.reason else "")
-            )
-    for hcov in result.coverage.hunks:
-        if hcov.outcome != "reviewed":
-            incomplete_items.append(
-                f"hunk:{hcov.path}:{hcov.index}:{hcov.outcome}"
-                + (f":{hcov.reason}" if hcov.reason else "")
-            )
-    if not result.coverage.enumeration_complete:
-        incomplete_items.append("enumeration:incomplete")
+    if result.coverage is not None:
+        for fcov in result.coverage.files:
+            if fcov.outcome != "reviewed":
+                incomplete_items.append(
+                    f"file:{fcov.path}:{fcov.outcome}"
+                    + (f":{fcov.reason}" if fcov.reason else "")
+                )
+        for hcov in result.coverage.hunks:
+            if hcov.outcome != "reviewed":
+                incomplete_items.append(
+                    f"hunk:{hcov.path}:{hcov.index}:{hcov.outcome}"
+                    + (f":{hcov.reason}" if hcov.reason else "")
+                )
+        if not result.coverage.enumeration_complete:
+            incomplete_items.append("enumeration:incomplete")
+    if (
+        not incomplete_items
+        and result.review_status == "partial"
+        and result.persistence_status != "capacity-exceeded"
+    ):
+        incomplete_items.append(
+            f"status:partial:evidence_policy:{result.evidence_policy}"
+        )
     if not incomplete_items:
         return ()
     incomplete_items.append(f"result:{result.content_digest()}")

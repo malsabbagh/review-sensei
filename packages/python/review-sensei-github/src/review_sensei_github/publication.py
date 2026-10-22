@@ -1984,13 +1984,40 @@ class ReviewApprovalFinalizer:
                 head_sha=head_sha,
                 base_sha=preflight.base_sha,
             )
+            approval_body = marker
+            if decision.outcome == "maintainer-coverage-exception":
+                gates = ",".join(decision.satisfied_gates)
+                exception_marker = (
+                    "<!-- reviewsensei:approval-exception:v1 "
+                    "outcome=maintainer-coverage-exception "
+                    f"result={eligibility.result_digest} "
+                    f"gates={gates} -->"
+                )
+                approval_body = (
+                    "Approved with maintainer coverage exception "
+                    f"(`outcome=maintainer-coverage-exception`, "
+                    f"`result={eligibility.result_digest}`, "
+                    f"`satisfied_gates={gates}`).\n\n"
+                    f"{marker}\n{exception_marker}"
+                )
             if self._reviews_have_app_head_state(
+                reviews,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                state="APPROVED",
+                body=approval_body,
+            ) or self._reviews_have_app_head_state(
                 reviews,
                 head_sha=head_sha,
                 app_slug=app_slug,
                 state="APPROVED",
                 body=marker,
             ):
+                if decision.outcome == "maintainer-coverage-exception":
+                    return PublicationResult(
+                        status="already_approved",
+                        diagnostic="maintainer_coverage_exception",
+                    )
                 return PublicationResult(status="already_approved")
 
             approved_base_sha = preflight.base_sha
@@ -2001,7 +2028,7 @@ class ReviewApprovalFinalizer:
                     repository=repository,
                     pull_request=pull_request,
                     head_sha=head_sha,
-                    marker=marker,
+                    marker=approval_body,
                     app_slug=app_slug,
                 ):
                     return False
@@ -2023,7 +2050,7 @@ class ReviewApprovalFinalizer:
                 repository=repository,
                 pull_request=pull_request,
                 head_sha=head_sha,
-                body=marker,
+                body=approval_body,
                 event="APPROVE",
                 already=already_approved,
                 success_status="approved",

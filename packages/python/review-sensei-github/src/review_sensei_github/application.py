@@ -523,7 +523,10 @@ class GitHubApplication:
         expected_evidence_digest: str | None = None
 
         def load_transaction(
-            source_ledger: SessionLedger, *, commit_analysis: bool = True
+            source_ledger: SessionLedger,
+            *,
+            commit_analysis: bool = True,
+            loaded: Any = None,
         ):
             """Translate durable transaction validation into a publication error."""
 
@@ -546,6 +549,7 @@ class GitHubApplication:
                     evidence_digest=expected_evidence_digest,
                     baseline=baseline,
                     commit_analysis=commit_analysis,
+                    loaded=loaded,
                 )
             except ReviewInputError as exc:
                 raise GitHubPublicationError(
@@ -651,14 +655,16 @@ class GitHubApplication:
             app_slug=app_slug,
             evidence_budget=budget,
         )
-        _require_present_marker(ledger, identity, session_state)
+        present_loaded = _require_present_marker(ledger, identity, session_state)
         if (
             transaction_record is None
             and ledger is not None
             and isinstance(result, ReviewResult)
             and result.transaction is not None
         ):
-            transaction_record = load_transaction(ledger, commit_analysis=False)
+            transaction_record = load_transaction(
+                ledger, commit_analysis=False, loaded=present_loaded
+            )
             transaction_ledger = ledger
             if (
                 transaction_record.transaction is not None
@@ -1056,6 +1062,8 @@ class GitHubApplication:
                         )
                     result = replace(result, transaction=transaction_record.transaction)
             if retention_required:
+                from review_sensei.session import SessionLoadResult
+
                 from .publication_recovery import retain_review_result
 
                 if (
@@ -1079,6 +1087,14 @@ class GitHubApplication:
                     evidence_context=evidence_context,
                     policy=policy,
                     already_retained=result_retained,
+                    _loaded=(
+                        SessionLoadResult(status="ok", record=transaction_record)
+                        if transaction_record is not None
+                        and isinstance(
+                            unwrapped_ledger, GitHubIssueCommentSessionLedger
+                        )
+                        else None
+                    ),
                 )
                 result_retained = True
                 transaction_record = load_transaction(ledger)
@@ -1092,6 +1108,8 @@ class GitHubApplication:
                 and result.transaction is not None
                 and isinstance(reviewer, ReviewPublisher)
             ):
+                from review_sensei.session import SessionLoadResult
+
                 from .default_human_inventory import (
                     HumanInventoryStore,
                     build_human_inventory_context,
@@ -1115,6 +1133,14 @@ class GitHubApplication:
                     configuration_digest=transaction.configuration_digest,
                     evidence_digest=transaction.evidence_digest,
                     budget=budget,
+                    _loaded=(
+                        SessionLoadResult(status="ok", record=transaction_record)
+                        if transaction_record is not None
+                        and isinstance(
+                            unwrapped_ledger, GitHubIssueCommentSessionLedger
+                        )
+                        else None
+                    ),
                 )
                 admitted_inventory_store = HumanInventoryStore(
                     transport, token, ledger, context
@@ -3495,23 +3521,23 @@ def _require_present_marker(
     ledger: SessionLedger | None,
     identity: SessionIdentity,
     session_state: str | None,
-) -> None:
+) -> Any:
     """Fail closed when the broker witnessed a marker the ledger cannot find."""
 
-    if (
-        ledger is not None
-        and session_state == "known"
-        and ledger.load(identity).status == "missing"
-    ):
-        # The broker's authenticated witness says this session already
-        # exists, so a missing marker means the comment was deleted. Fail
-        # closed before any ledger call below can re-create it, and name
-        # the recovery command so an operator does not have to infer it.
-        raise GitHubPublicationError(
-            "session ledger marker is missing; authenticated recovery is "
-            "required: a maintainer must comment `@reviewsensei review reenroll` "
-            "to re-establish this session"
-        )
+    if ledger is not None and session_state == "known":
+        loaded = ledger.load(identity)
+        if loaded.status == "missing":
+            # The broker's authenticated witness says this session already
+            # exists, so a missing marker means the comment was deleted. Fail
+            # closed before any ledger call below can re-create it, and name
+            # the recovery command so an operator does not have to infer it.
+            raise GitHubPublicationError(
+                "session ledger marker is missing; authenticated recovery is "
+                "required: a maintainer must comment `@reviewsensei review reenroll` "
+                "to re-establish this session"
+            )
+        return loaded
+    return None
 
 
 def resolve_hosted_session_ledger(

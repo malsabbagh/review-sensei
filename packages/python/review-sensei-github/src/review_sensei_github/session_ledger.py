@@ -90,7 +90,7 @@ from .errors import (
 )
 from .http import MAX_PAGINATION_ITEMS, GitHubHttp
 
-_COMMENT_PAGE_SIZES = (100, 20, 5, 1)
+_COMMENT_PAGE_SIZES = (100, 20, 10, 5, 1)
 _FENCE_PAGE_SIZE = 100
 _SINCE_MARGIN = timedelta(seconds=2)
 _UPDATED_AT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
