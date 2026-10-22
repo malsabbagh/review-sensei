@@ -46,6 +46,7 @@ def load_contracts(tests, selected=None):
     """
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
+    suite.contract_inventory = {}
     root = tests.resolve()
     lane = (root / "dist_safe").resolve()
     if lane != root / "dist_safe":
@@ -75,7 +76,9 @@ def load_contracts(tests, selected=None):
         spec.loader.exec_module(module)
         # Keep each declared module's load_tests additions in its own group;
         # imported incident regressions need not use the module's ID prefix.
-        suite.addTest(loader.loadTestsFromModule(module))
+        group = loader.loadTestsFromModule(module)
+        suite.contract_inventory[name] = test_ids(group)
+        suite.addTest(group)
     return suite
 
 
@@ -83,8 +86,9 @@ def assert_installed(tests, version, github_version):
     # Test code is supplied by the qualification ref; runtime code must come
     # from these exact installed wheels. Neither src directory is added.
     tests = Path(tests)
-    sys.path.insert(0, str(tests / "dist_safe"))
-    sys.path.insert(0, str(tests))
+    for path in (tests / "dist_safe", tests):
+        if str(path) not in sys.path:
+            sys.path.insert(0, str(path))
     from packaging_guard import assert_distribution_import
 
     assert_distribution_import()
@@ -110,6 +114,16 @@ def execute_suite(suite):
     rows = []
     executed = []
 
+    def note(test, status, kind=None):
+        row = next((row for row in rows if row["id"] == test.id()), None)
+        if row is None:
+            row = {"id": test.id(), "status": status}
+            rows.append(row)
+        if status == "FAIL":
+            row["status"] = status
+            row.setdefault("kind", kind)
+        return row
+
     class Evidence(unittest.TextTestResult):
         def startTest(self, test):
             executed.append(test.id())
@@ -117,24 +131,33 @@ def execute_suite(suite):
 
         def addSuccess(self, test):
             super().addSuccess(test)
-            rows.append({"id": test.id(), "status": "PASS"})
+            note(test, "PASS")
 
         def addFailure(self, test, err):
             super().addFailure(test, err)
-            rows.append({"id": test.id(), "status": "FAIL", "kind": "assertion"})
+            note(test, "FAIL", "assertion")
 
         def addError(self, test, err):
             super().addError(test, err)
-            rows.append({"id": test.id(), "status": "FAIL", "kind": "error"})
+            note(test, "FAIL", "error")
 
         def addSkip(self, test, reason):
             super().addSkip(test, reason)
-            rows.append({"id": test.id(), "status": "FAIL", "kind": "skipped"})
+            note(test, "FAIL", "skipped")
+
+        def addExpectedFailure(self, test, err):
+            super().addExpectedFailure(test, err)
+            note(test, "FAIL", "expected-failure")
+
+        def addUnexpectedSuccess(self, test):
+            super().addUnexpectedSuccess(test)
+            note(test, "FAIL", "unexpected-success")
 
         def addSubTest(self, test, subtest, err):
             super().addSubTest(test, subtest, err)
             if err is not None:
-                rows.append({"id": str(subtest), "status": "FAIL", "kind": "subtest"})
+                row = note(test, "FAIL", "subtest")
+                row["subtest_failures"] = row.get("subtest_failures", 0) + 1
 
     log = io.StringIO()
     result = unittest.TextTestRunner(verbosity=2, resultclass=Evidence, stream=log).run(
@@ -144,7 +167,8 @@ def execute_suite(suite):
         "rows": rows,
         "executed_ids": executed,
         "tests_run": result.testsRun,
-        "successful": result.wasSuccessful(),
+        "successful": result.wasSuccessful()
+        and all(row["status"] == "PASS" for row in rows),
         "log": log.getvalue(),
     }
 
@@ -167,12 +191,17 @@ def validate_execution(record, expected):
     ):
         raise ValueError("lifecycle worker did not execute its exact inventory")
     rows = record["rows"]
-    if any(row.get("status") not in {"PASS", "FAIL"} for row in rows):
-        raise ValueError("invalid lifecycle worker result")
-    if record.get("successful") is True and (
-        len(rows) != len(expected) or {row.get("id") for row in rows} != set(expected)
+    if any(
+        not isinstance(row, dict) or row.get("status") not in {"PASS", "FAIL"}
+        for row in rows
     ):
+        raise ValueError("invalid lifecycle worker result")
+    if len(rows) != len(expected) or {row.get("id") for row in rows} != set(expected):
         raise ValueError("lifecycle worker omitted or duplicated test evidence")
+    if type(record.get("successful")) is not bool or record["successful"] != all(
+        row["status"] == "PASS" for row in rows
+    ):
+        raise ValueError("lifecycle worker success flag conflicts with its evidence")
     return record.get("successful") is True and all(
         row["status"] == "PASS" for row in rows
     )
@@ -191,6 +220,11 @@ def main():
     executed = []
     successful = False
     load_error = None
+    inventory = []
+    confirmed_contracts = []
+    workers_started = False
+    worker_contract = None
+    stage = "inventory"
     try:
         suite = load_contracts(tests)
     except Exception as error:
@@ -203,13 +237,24 @@ def main():
         inventory = test_ids(suite)
         if inventory:
             try:
-                by_contract = {
-                    name: test_ids(group)
-                    for name, group in zip(CONTRACTS, suite, strict=True)
-                }
+                by_contract = suite.contract_inventory
+                if (
+                    set(by_contract) != set(CONTRACTS)
+                    or any(not ids for ids in by_contract.values())
+                    or len(set(inventory)) != len(inventory)
+                ):
+                    raise ValueError("declared lifecycle inventory is incomplete")
+                if [
+                    identity for name in CONTRACTS for identity in by_contract[name]
+                ] != inventory:
+                    raise ValueError(
+                        "declared lifecycle inventory differs from discovery"
+                    )
                 # Processes isolate module globals and installed imports. Keep
                 # the complete inventory and the outer 300-second deadline.
                 with concurrent.futures.ProcessPoolExecutor(max_workers=2) as pool:
+                    stage = "worker-pool"
+                    workers_started = True
                     futures = [
                         pool.submit(
                             run_contract,
@@ -222,9 +267,12 @@ def main():
                     ]
                     successful = True
                     for name, future in zip(CONTRACTS, futures):
+                        stage = "worker-result"
+                        worker_contract = name
                         record = future.result()
                         expected = by_contract[name]
                         successful = validate_execution(record, expected) and successful
+                        confirmed_contracts.append(name)
                         rows.extend(record["rows"])
                         executed.extend(record["executed_ids"])
                         sys.stderr.write(record["log"])
@@ -234,9 +282,13 @@ def main():
                 successful = False
                 rows.append(
                     {
-                        "id": "worker-execution",
+                        "id": "inventory-discovery"
+                        if stage == "inventory"
+                        else "worker-execution",
                         "status": "FAIL",
                         "kind": type(error).__name__,
+                        "contract": worker_contract,
+                        "stage": stage,
                     }
                 )
     if not rows:
@@ -250,8 +302,22 @@ def main():
         "pass": len(rows) - failed,
         "fail": failed,
         "rows": rows,
-        "tests_run": len(executed),
+        "tests_run": None
+        if workers_started and len(confirmed_contracts) != len(CONTRACTS)
+        else len(executed),
+        "known_tests_run": len(executed),
         "executed_ids": executed,
+        "expected_inventory": inventory,
+        "expected_contracts": list(CONTRACTS),
+        "unconfirmed_contracts": [
+            name for name in CONTRACTS if name not in confirmed_contracts
+        ]
+        if workers_started
+        else [],
+        "execution_complete": bool(inventory)
+        and sorted(executed) == sorted(inventory)
+        and len(confirmed_contracts) == len(CONTRACTS),
+        "workers_started": workers_started,
         "workers": 2,
         "load_error": load_error,
         "boundary": "installed wheels / synthetic broker and provider only",

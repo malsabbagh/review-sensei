@@ -72,6 +72,12 @@ worker rechecks exact installed versions and import boundaries; the parent
 compares discovered and executed test IDs and rejects missing, duplicate,
 empty, skipped or failed evidence. This avoids serial lifecycle overrun without
 increasing the deadline or reducing coverage.
+Every report includes the full discovered inventory and declared contracts.
+Unconfirmed worker execution is explicit: `tests_run` is unknown (`null`),
+`known_tests_run` counts only validated worker reports, and `execution_complete`
+is false. Skips and expected/unexpected failures use `FAIL` rows with a specific
+`kind`; multiple failing subtests retain one canonical parent-test row and a
+failure count. Failure records must cover their exact assigned inventory too.
 Sanitized artifacts are retained on failure; environments and binaries are not.
 Every gate or recheck requires a fresh output directory. An existing evidence
 directory is rejected before reads and its receipt is left unchanged.

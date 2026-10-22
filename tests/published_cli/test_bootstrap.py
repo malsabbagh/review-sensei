@@ -564,9 +564,14 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
         ):
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 module.validate_execution(deepcopy(record) | mutation, expected)
-        self.assertFalse(
+        failed = deepcopy(record) | {"successful": False}
+        failed["rows"][1]["status"] = "FAIL"
+        self.assertFalse(module.validate_execution(failed, expected))
+        for rows in (failed["rows"][:1], [failed["rows"][1]] * 2):
+            with self.subTest(rows=rows), self.assertRaises(ValueError):
+                module.validate_execution(failed | {"rows": rows}, expected)
+        with self.assertRaises(ValueError):
             module.validate_execution(record | {"successful": False}, expected)
-        )
 
     def test_worker_records_subtest_failures_and_skips_as_failure(self):
         module = self.lifecycle_module()
@@ -576,21 +581,37 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                 pass
 
             def test_subtest(self):
-                with self.subTest(case="synthetic"):
-                    self.fail("synthetic failure")
+                for case in (1, 2):
+                    with self.subTest(case=case):
+                        self.fail("synthetic failure")
 
             def test_skip(self):
                 self.skipTest("synthetic skip")
+
+            @unittest.expectedFailure
+            def test_expected_failure(self):
+                self.fail("synthetic expected failure")
+
+            @unittest.expectedFailure
+            def test_unexpected_success(self):
+                pass
 
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(Contract)
         expected = module.test_ids(suite)
         result = module.execute_suite(suite)
         self.assertEqual(result["executed_ids"], expected)
-        self.assertEqual(result["tests_run"], 3)
+        self.assertEqual(result["tests_run"], 5)
+        self.assertEqual(len(result["rows"]), 5)
         self.assertFalse(module.validate_execution(result, expected))
         self.assertEqual(
             {row.get("kind") for row in result["rows"] if row["status"] == "FAIL"},
-            {"subtest", "skipped"},
+            {"subtest", "skipped", "expected-failure", "unexpected-success"},
+        )
+        self.assertEqual(
+            next(row for row in result["rows"] if row.get("kind") == "subtest")[
+                "subtest_failures"
+            ],
+            2,
         )
 
     def test_contract_files_win_over_same_named_modules_on_the_search_path(self):
@@ -710,12 +731,14 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                 lane = tests / "dist_safe"
                 lane.mkdir(parents=True)
                 # Let the real file loader raise, then load the declared real empty files.
-                for fault in ("load-error", "empty-suite"):
+                for fault in ("load-error", "empty-suite", "worker-error"):
                     with self.subTest(fault=fault):
                         for name in names:
                             (lane / (name + ".py")).write_text(
                                 "raise RuntimeError('private module detail')\n"
                                 if fault == "load-error"
+                                else "import unittest\nclass Contract(unittest.TestCase):\n    def test_contract(self): pass\n"
+                                if fault == "worker-error"
                                 else ""
                             )
                         report = root / fault
@@ -749,16 +772,41 @@ class LifecycleModuleLoadingContracts(unittest.TestCase):
                             patch.object(sys, "argv", argv),
                             patch.object(sys, "path", list(sys.path)),
                             patch.object(sys, "stderr", io.StringIO()),
+                            patch.object(
+                                module.concurrent.futures, "ProcessPoolExecutor"
+                            ) as pool,
                         ):
+                            pool.return_value.__enter__.return_value.submit.return_value.result.side_effect = TimeoutError(
+                                "private worker detail"
+                            )
                             version.side_effect = lambda name: (
                                 "0.8.1" if name == "review-sensei" else "0.3.1"
                             )
                             self.assertEqual(module.main(), 1)
                         receipt = json.loads((report / "results.json").read_text())
-                        self.assertEqual(receipt["tests_run"], 0)
+                        self.assertEqual(
+                            receipt["tests_run"], None if fault == "worker-error" else 0
+                        )
+                        self.assertEqual(receipt["known_tests_run"], 0)
+                        self.assertFalse(receipt["execution_complete"])
                         self.assertEqual(receipt["pass"], 0)
                         self.assertEqual(receipt["fail"], 1)
-                        self.assertEqual(receipt["rows"][0]["kind"], fault)
+                        self.assertEqual(
+                            receipt["rows"][0]["kind"],
+                            "TimeoutError" if fault == "worker-error" else fault,
+                        )
+                        if fault == "worker-error":
+                            self.assertEqual(
+                                len(receipt["expected_inventory"]), len(names)
+                            )
+                            self.assertEqual(receipt["expected_contracts"], list(names))
+                            self.assertEqual(
+                                receipt["unconfirmed_contracts"], list(names)
+                            )
+                            self.assertEqual(receipt["rows"][0]["contract"], names[0])
+                            self.assertNotIn(
+                                "private worker detail", json.dumps(receipt)
+                            )
                         self.assertEqual(
                             receipt["load_error"],
                             "RuntimeError" if fault == "load-error" else None,
