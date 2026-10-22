@@ -1,8 +1,7 @@
-"""Opt-in, exact-snapshot human binary-file review and metadata-only audit.
+"""Exact-snapshot human binary-file review, audit and mixed approval.
 
-No existing eligibility marker is rewritten and this adapter never APPROVEs.
-An explicit host may evaluate combined coverage after fresh live authentication.
-Default workflows and the legacy approval finalizer remain unchanged.
+Human confirmations preserve the partial AI result and existing eligibility
+markers. Trusted hosts provide current approval facts and one original IO guard.
 """
 
 from __future__ import annotations
@@ -20,22 +19,32 @@ from urllib.parse import quote
 from review_sensei.errors import ReviewInputError
 from review_sensei.human_file_review import (
     MAX_DOCUMENT_BYTES,
-    MAX_FILES,
     MAX_SOURCE_BYTES,
     FileReviewReceipt,
+    FileReviewReceiptValue,
     FileReviewRequest,
+    FileReviewRequestValue,
     UnsupportedFile,
+    build_receipt,
+    build_request_group,
     canonical,
     display_path,
     is_blanket_media_approval,
     is_human_confirmable_file,
     parse_confirmation,
+    parse_receipt,
+    parse_request,
     positive,
     sha,
     validate_inventory,
 )
-from review_sensei.mixed_coverage import BinaryConfirmation, evaluate_mixed_coverage
+from review_sensei.mixed_coverage import (
+    BinaryConfirmation,
+    CurrentFindingFacts,
+    evaluate_mixed_coverage,
+)
 from review_sensei.models import ReviewResult
+from review_sensei.validation import validate_repository_path
 
 from .approval import (
     AutoApprovalDecision,
@@ -52,6 +61,8 @@ from .publication import (
 
 REQUEST_PREFIX = "<!-- reviewsensei:human-files:request:v1 "
 RECEIPT_PREFIX = "<!-- reviewsensei:human-files:receipt:v1 "
+REQUEST_GROUP_PREFIX = "<!-- reviewsensei:human-files:request-group:v1 "
+RECEIPT_GROUP_PREFIX = "<!-- reviewsensei:human-files:receipt-group:v1 "
 MAX_BODY_BYTES = 65536
 MAX_PAGES = 10
 
@@ -71,13 +82,14 @@ class HumanFileReviewPolicy:
 class HumanFileReviewAssessment:
     """Freshly evaluated status, not a durable approval grant or AI result."""
 
-    request: FileReviewRequest
+    request: FileReviewRequestValue
     receipt_ids: tuple[int, ...]
     human_reviewed_ids: tuple[str, ...]
     pending_ids: tuple[str, ...]
     ai_reviewed_paths: tuple[str, ...]
     invalidated_receipt_ids: tuple[int, ...]
     approval: AutoApprovalDecision
+    current_findings: CurrentFindingFacts | None = None
 
     def render(self) -> str:
         lines = [
@@ -159,6 +171,10 @@ class HumanFileReviewPublisher:
         token: str,
         before_request: Callable[[], float],
         policy: HumanFileReviewPolicy = HumanFileReviewPolicy(),
+        approval_facts_provider: Callable[..., Mapping[str, object]] | None = None,
+        eligibility_reader: Callable[..., ReviewApprovalEligibility] | None = None,
+        snapshot_validator: Callable[[Mapping[str, Any]], None] | None = None,
+        before_approval: Callable[[int], None] | None = None,
     ) -> None:
         # Validate context through the same domain constructor without giving
         # placeholder values any authorizing role.
@@ -194,6 +210,24 @@ class HumanFileReviewPublisher:
         self.token, self.before_request, self.policy = token, before_request, policy
         self.prefix = f"/repos/{repository}"
         self._last_reviews: list[Mapping[str, Any]] = []
+        if approval_facts_provider is not None and not callable(
+            approval_facts_provider
+        ):
+            raise ReviewInputError("human file approval facts provider is invalid")
+        if eligibility_reader is not None and not callable(eligibility_reader):
+            raise ReviewInputError("human file eligibility reader is invalid")
+        if snapshot_validator is not None and not callable(snapshot_validator):
+            raise ReviewInputError("human file snapshot validator is invalid")
+        if before_approval is not None and not callable(before_approval):
+            raise ReviewInputError("human file approval tail guard is invalid")
+        self.before_approval = before_approval
+        self.snapshot_validator = snapshot_validator
+        self.eligibility_reader = eligibility_reader
+        self.approval_facts_provider = approval_facts_provider
+        # Only immutable, exact-commit inventory is reused within this invocation.
+        # Mutable source, request, permission and latest-root fences never use it.
+        self._prepared: dict[tuple[str, str, int, str], FileReviewRequestValue] = {}
+        self._requested: dict[int, FileReviewRequestValue] = {}
 
     def _io(self, method: str, path: str, body: dict[str, object] | None = None) -> Any:
         remaining = self.before_request()
@@ -266,9 +300,13 @@ class HumanFileReviewPublisher:
         return x
 
     def _snapshot(self) -> tuple[str, str]:
-        repo = self._object("")
         pr = self._object(f"/pulls/{self.pull_request}")
         base, head = pr.get("base"), pr.get("head")
+        repo = base.get("repo") if isinstance(base, Mapping) else None
+        # Older explicit library transports may not project base.repo; retain
+        # the independently authenticated repository read for those callers.
+        if not isinstance(repo, Mapping):
+            repo = self._object("")
         if (
             type(repo.get("id")) is not int
             or repo.get("id") != self.repository_id
@@ -282,6 +320,8 @@ class HumanFileReviewPublisher:
             or not sha(head.get("sha"))
         ):
             raise ReviewInputError("human file live snapshot is invalid")
+        if self.snapshot_validator is not None:
+            self.snapshot_validator(pr)
         return cast(str, base["sha"]), cast(str, head["sha"])
 
     def _root(
@@ -289,7 +329,14 @@ class HumanFileReviewPublisher:
     ) -> ReviewApprovalEligibility:
         if not positive(review_id):
             raise ReviewInputError("human file review ID is invalid")
-        root = self._object(f"/pulls/{self.pull_request}/reviews/{review_id}")
+        reviews = self._list(f"/pulls/{self.pull_request}/reviews")
+        self._last_reviews = reviews
+        roots = [
+            x for x in reviews if type(x.get("id")) is int and x["id"] == review_id
+        ]
+        if len(roots) != 1:
+            raise ReviewInputError("human file review root is missing or ambiguous")
+        root = roots[0]
         if (
             not self._owned(root)
             or type(root.get("id")) is not int
@@ -298,7 +345,13 @@ class HumanFileReviewPublisher:
             or root.get("state") != "COMMENTED"
         ):
             raise ReviewInputError("human file review root is not owned or current")
-        eligibility = approval_eligibility_from_body(root.get("body"))
+        eligibility = (
+            self.eligibility_reader(
+                root=root, reviews=reviews, result=result, head_sha=head
+            )
+            if self.eligibility_reader is not None
+            else approval_eligibility_from_body(root.get("body"))
+        )
         if (
             eligibility is None
             or eligibility.head_sha != head
@@ -308,8 +361,6 @@ class HumanFileReviewPublisher:
             raise ReviewInputError(
                 "human file result lacks an authenticated review root"
             )
-        reviews = self._list(f"/pulls/{self.pull_request}/reviews")
-        self._last_reviews = reviews
         candidates = [
             x
             for x in reviews
@@ -358,8 +409,52 @@ class HumanFileReviewPublisher:
                     raise ReviewInputError(
                         "human file immutable tree evidence is incomplete"
                     )
+                for item in items:
+                    path = validate_repository_path(
+                        item["path"],
+                        allow_glob_chars=True,
+                        label="human file shallow tree path",
+                    )
+                    if "/" in path:
+                        raise ReviewInputError(
+                            "human file shallow tree path is not immediate"
+                        )
                 trees[identifier] = items
             return trees[identifier]
+
+        # A whole recursive repository can exceed the unchanged response bound
+        # even when the selected files are small. Prove their common directory
+        # through complete shallow trees, then recurse only into that subtree.
+        # Disjoint selections keep the existing bounded shallow path walk.
+        common = paths[0].split("/")[:-1] if paths else []
+        for path in paths[1:]:
+            parent = path.split("/")[:-1]
+            while common and parent[: len(common)] != common:
+                common.pop()
+        if common:
+            identifier = tree["sha"]
+            for part in common:
+                prefix_node = next(
+                    (item for item in entries(identifier) if item["path"] == part), None
+                )
+                if prefix_node is None:
+                    return {path: None for path in paths}
+                if (
+                    prefix_node.get("type") != "tree"
+                    or prefix_node.get("mode") != "040000"
+                ):
+                    raise ReviewInputError("human file path is not a regular tree path")
+                identifier = prefix_node["sha"]
+            prefix = "/".join(common) + "/"
+            if any(not path.startswith(prefix) for path in paths):
+                raise ReviewInputError(
+                    "human file selected path escapes its proven subtree"
+                )
+            relative = tuple(path[len(prefix) :] for path in paths)
+            scoped = self._recursive_blobs(identifier, relative)
+            return {
+                path: scoped[item] for path, item in zip(paths, relative, strict=True)
+            }
 
         result: dict[str, tuple[str, str] | None] = {}
         for path in paths:
@@ -387,7 +482,86 @@ class HumanFileReviewPublisher:
             result[path] = None if found is None else (found["sha"], found["mode"])
         return result
 
-    def prepare(self, *, review_id: int, result: ReviewResult) -> FileReviewRequest:
+    def _recursive_blobs(
+        self, tree_sha: str, paths: tuple[str, ...]
+    ) -> dict[str, tuple[str, str] | None]:
+        """Read one complete, bounded immutable subtree for nested selections.
+
+        The caller already proved the common prefix from the commit root.
+        Recursive Git tree responses include every relative directory ancestor. A
+        truncated or inconsistent response proves neither presence nor absence,
+        so it refuses without a second strategy or a new allowance. The
+        ordinary physical response bound and original IO guard still apply.
+        """
+
+        data = self._object(f"/git/trees/{tree_sha}?recursive=1")
+        items = data.get("tree")
+        if (
+            data.get("sha") != tree_sha
+            or data.get("truncated") is not False
+            or not isinstance(items, list)
+        ):
+            raise ReviewInputError("human file recursive tree evidence is incomplete")
+        kinds = {
+            "040000": "tree",
+            "100644": "blob",
+            "100755": "blob",
+            "120000": "blob",
+            "160000": "commit",
+        }
+        entries: dict[str, Mapping[str, Any]] = {}
+        for item in items:
+            if not isinstance(item, Mapping):
+                raise ReviewInputError("human file recursive tree entry is invalid")
+            path = validate_repository_path(
+                item.get("path"),
+                allow_glob_chars=True,
+                label="human file recursive tree path",
+            )
+            mode = item.get("mode")
+            if (
+                path in entries
+                or not sha(item.get("sha"))
+                or not isinstance(mode, str)
+                or mode not in kinds
+                or item.get("type") != kinds[mode]
+            ):
+                raise ReviewInputError("human file recursive tree evidence conflicts")
+            entries[path] = item
+        for path in entries:
+            parts = path.split("/")
+            for index in range(1, len(parts)):
+                ancestor = entries.get("/".join(parts[:index]))
+                if ancestor is None:
+                    raise ReviewInputError(
+                        "human file recursive tree ancestor is missing"
+                    )
+                if ancestor.get("type") != "tree" or ancestor.get("mode") != "040000":
+                    raise ReviewInputError("human file path is not a regular tree path")
+        result: dict[str, tuple[str, str] | None] = {}
+        for path in paths:
+            parts = path.split("/")
+            for index in range(1, len(parts)):
+                ancestor = entries.get("/".join(parts[:index]))
+                if ancestor is not None and (
+                    ancestor.get("type") != "tree" or ancestor.get("mode") != "040000"
+                ):
+                    raise ReviewInputError("human file path is not a regular tree path")
+            selected = entries.get(path)
+            if selected is None:
+                result[path] = None
+            elif selected["type"] != "blob" or selected["mode"] not in {
+                "100644",
+                "100755",
+            }:
+                raise ReviewInputError("human file evidence is not a regular blob")
+            else:
+                result[path] = (selected["sha"], selected["mode"])
+        return result
+
+    def prepare(
+        self, *, review_id: int, result: ReviewResult
+    ) -> FileReviewRequestValue:
         if not isinstance(result, ReviewResult) or result.coverage is None:
             raise ReviewInputError(
                 "human file request requires complete coverage inventory"
@@ -399,6 +573,13 @@ class HumanFileReviewPublisher:
             )
         base, head = self._snapshot()
         self._root(review_id, result, head)
+        key = (base, head, review_id, review_result_digest(result))
+        if key in self._prepared:
+            request = self._prepared[key]
+            validate_inventory(request, result.coverage)
+            if self._snapshot() != (base, head):
+                raise ReviewInputError("human file snapshot changed during preparation")
+            return request
         records = self._list(f"/pulls/{self.pull_request}/files")
         if any(
             not isinstance(x.get("filename"), str)
@@ -425,8 +606,8 @@ class HumanFileReviewPublisher:
             for x in records
             if x.get("filename") in paths or x.get("previous_filename") in paths
         ]
-        if not 1 <= len(selected) <= MAX_FILES:
-            raise ReviewInputError("human file inventory exceeds its bound")
+        if not selected:
+            raise ReviewInputError("human file inventory is empty")
         all_paths = tuple(sorted(paths))
         old, new = self._blobs(base, all_paths), self._blobs(head, all_paths)
         files: list[UnsupportedFile] = []
@@ -458,7 +639,7 @@ class HumanFileReviewPublisher:
             ):
                 raise ReviewInputError("human file rename inventory conflicts")
             files.append(item)
-        request = FileReviewRequest(
+        request = build_request_group(
             self.repository,
             self.repository_id,
             self.pull_request,
@@ -471,9 +652,10 @@ class HumanFileReviewPublisher:
         validate_inventory(request, result.coverage)
         if self._snapshot() != (base, head):
             raise ReviewInputError("human file snapshot changed during preparation")
+        self._prepared[key] = request
         return request
 
-    def _request_body(self, request: FileReviewRequest) -> str:
+    def _request_body(self, request: FileReviewRequestValue) -> str:
         note = (
             ""
             if self.policy.allow_confirmations
@@ -483,17 +665,27 @@ class HumanFileReviewPublisher:
             request.render()
             + note
             + "\n\n"
-            + _marker(REQUEST_PREFIX, request.to_dict())
+            + _marker(
+                REQUEST_PREFIX
+                if isinstance(request, FileReviewRequest)
+                else REQUEST_GROUP_PREFIX,
+                request.to_dict(),
+            )
         )
 
-    def _receipt_body(self, receipt: FileReviewReceipt) -> str:
+    def _receipt_body(self, receipt: FileReviewReceiptValue) -> str:
         return (
             f"Human file review recorded for {len(receipt.selected_ids)} selected file change(s); "
             "not AI-reviewed. Other findings and approval checks remain in force.\n"
             f"Reviewer: {receipt.actor} (numeric user {receipt.actor_id}); source comment {receipt.source_comment_id}.\n"
             + "\n".join(f"- `{key}`: human-reviewed." for key in receipt.selected_ids)
             + "\n\n"
-            + _marker(RECEIPT_PREFIX, receipt.to_dict())
+            + _marker(
+                RECEIPT_PREFIX
+                if isinstance(receipt, FileReviewReceipt)
+                else RECEIPT_GROUP_PREFIX,
+                receipt.to_dict(),
+            )
         )
 
     def _publish(self, body: str) -> int:
@@ -511,7 +703,7 @@ class HumanFileReviewPublisher:
 
     def request_review(
         self, *, review_id: int, result: ReviewResult
-    ) -> tuple[int, FileReviewRequest]:
+    ) -> tuple[int, FileReviewRequestValue]:
         request = self.prepare(review_id=review_id, result=result)
         body = self._request_body(request)
         for x in self._list(f"/issues/{self.pull_request}/comments"):
@@ -523,6 +715,7 @@ class HumanFileReviewPublisher:
                     != body
                 ):
                     raise ReviewInputError("human file request readback disagrees")
+                self._requested[cast(int, identifier)] = request
                 return cast(int, identifier), request
         if self._snapshot() != (request.base_sha, request.head_sha):
             raise ReviewInputError("human file request snapshot is stale")
@@ -531,12 +724,18 @@ class HumanFileReviewPublisher:
             raise ReviewInputError(
                 "human file request snapshot changed after publication"
             )
+        self._requested[identifier] = request
         return identifier, request
 
-    def _request(self, identifier: int, result: ReviewResult) -> FileReviewRequest:
+    def _request(self, identifier: int, result: ReviewResult) -> FileReviewRequestValue:
         comment = self._comment(identifier, owned=True)
-        request = FileReviewRequest.from_dict(
-            _document(comment["body"], REQUEST_PREFIX)
+        request = parse_request(
+            _document(
+                comment["body"],
+                REQUEST_GROUP_PREFIX
+                if REQUEST_GROUP_PREFIX in comment["body"]
+                else REQUEST_PREFIX,
+            )
         )
         if (
             comment["body"] != self._request_body(request)
@@ -546,8 +745,8 @@ class HumanFileReviewPublisher:
         return request
 
     def _source(
-        self, identifier: int, request_id: int, request: FileReviewRequest
-    ) -> FileReviewReceipt:
+        self, identifier: int, request_id: int, request: FileReviewRequestValue
+    ) -> FileReviewReceiptValue:
         x = self._comment(identifier, owned=False)
         user = x.get("user")
         if (
@@ -567,15 +766,15 @@ class HumanFileReviewPublisher:
             raise ReviewInputError(
                 "human file confirmation requires exact selected file IDs"
             )
-        receipt = FileReviewReceipt(
-            request.digest,
-            request_id,
-            identifier,
-            cast(str, x.get("updated_at")),
-            hashlib.sha256(x["body"].encode("utf-8")).hexdigest(),
-            user["id"],
-            cast(str, user.get("login")),
-            selection,
+        receipt = build_receipt(
+            request,
+            request_comment_id=request_id,
+            source_comment_id=identifier,
+            source_updated_at=cast(str, x.get("updated_at")),
+            source_sha256=hashlib.sha256(x["body"].encode("utf-8")).hexdigest(),
+            actor_id=user["id"],
+            actor=cast(str, user.get("login")),
+            selected_ids=selection,
         )
         permission = self._object(
             f"/collaborators/{quote(receipt.actor, safe='')}/permission"
@@ -609,10 +808,20 @@ class HumanFileReviewPublisher:
             if (
                 not self._owned(x)
                 or not isinstance(x.get("body"), str)
-                or RECEIPT_PREFIX not in x["body"]
+                or not any(
+                    prefix in x["body"]
+                    for prefix in (RECEIPT_PREFIX, RECEIPT_GROUP_PREFIX)
+                )
             ):
                 continue
-            prior = FileReviewReceipt.from_dict(_document(x["body"], RECEIPT_PREFIX))
+            prior = parse_receipt(
+                _document(
+                    x["body"],
+                    RECEIPT_GROUP_PREFIX
+                    if RECEIPT_GROUP_PREFIX in x["body"]
+                    else RECEIPT_PREFIX,
+                )
+            )
             if prior.source_comment_id == source_comment_id:
                 if prior != receipt or x["body"] != self._receipt_body(prior):
                     raise ReviewInputError(
@@ -663,16 +872,26 @@ class HumanFileReviewPublisher:
         confirmed: set[str] = set()
         receipt_ids: list[int] = []
         invalidated: list[int] = []
-        valid_receipts: list[tuple[int, FileReviewReceipt]] = []
+        valid_receipts: list[tuple[int, FileReviewReceiptValue]] = []
         seen_sources: set[int] = set()
         for x in self._list(f"/issues/{self.pull_request}/comments"):
             if (
                 not self._owned(x)
                 or not isinstance(x.get("body"), str)
-                or RECEIPT_PREFIX not in x["body"]
+                or not any(
+                    prefix in x["body"]
+                    for prefix in (RECEIPT_PREFIX, RECEIPT_GROUP_PREFIX)
+                )
             ):
                 continue
-            receipt = FileReviewReceipt.from_dict(_document(x["body"], RECEIPT_PREFIX))
+            receipt = parse_receipt(
+                _document(
+                    x["body"],
+                    RECEIPT_GROUP_PREFIX
+                    if RECEIPT_GROUP_PREFIX in x["body"]
+                    else RECEIPT_PREFIX,
+                )
+            )
             if (
                 receipt.request_digest != request.digest
                 or receipt.request_comment_id != request_comment_id
@@ -719,6 +938,110 @@ class HumanFileReviewPublisher:
             else:
                 invalidated.append(identifier)
         eligibility = self._root(request.review_id, result, request.head_sha)
+        facts = self._current_facts(
+            request,
+            result,
+            eligibility,
+            enabled=enabled,
+            app_authored=app_authored,
+            has_open_review_threads=has_open_review_threads,
+            qualification=qualification,
+        )
+        eligibility = self._root(request.review_id, result, request.head_sha)
+        if self._snapshot() != (request.base_sha, request.head_sha):
+            raise ReviewInputError("human file evaluation snapshot is stale")
+        return self._assess(
+            request,
+            result,
+            eligibility,
+            confirmed,
+            receipt_ids,
+            invalidated,
+            request_comment_id=request_comment_id,
+            enabled=cast(bool, facts["enabled"]) and enabled,
+            app_authored=cast(bool, facts["app_authored"]) or app_authored,
+            has_open_review_threads=cast(bool | None, facts["has_open_review_threads"]),
+            qualification=cast(str, facts["qualification"]),
+            current_findings=cast(
+                CurrentFindingFacts | None, facts.get("current_findings")
+            ),
+        )
+
+    def _current_facts(
+        self,
+        request: FileReviewRequestValue,
+        result: ReviewResult,
+        eligibility: ReviewApprovalEligibility,
+        *,
+        enabled: bool,
+        app_authored: bool,
+        has_open_review_threads: bool | None,
+        qualification: str,
+    ) -> Mapping[str, object]:
+        facts: Mapping[str, object] = dict(
+            enabled=enabled,
+            app_authored=app_authored,
+            has_open_review_threads=has_open_review_threads,
+            qualification=qualification,
+        )
+        if self.approval_facts_provider is not None:
+            facts = self.approval_facts_provider(
+                request=request, result=result, eligibility=eligibility
+            )
+        if (
+            not isinstance(facts, Mapping)
+            or not {
+                "enabled",
+                "app_authored",
+                "has_open_review_threads",
+                "qualification",
+            }
+            <= set(facts)
+            or not set(facts)
+            <= {
+                "enabled",
+                "app_authored",
+                "has_open_review_threads",
+                "qualification",
+                "current_findings",
+            }
+            or type(facts["enabled"]) is not bool
+            or type(facts["app_authored"]) is not bool
+            or (
+                facts["has_open_review_threads"] is not None
+                and type(facts["has_open_review_threads"]) is not bool
+            )
+            or facts["qualification"]
+            not in {"not-required", "qualified", "missing", "unverified"}
+        ):
+            raise ReviewInputError("human file current approval facts are invalid")
+        if "current_findings" in facts and (
+            type(facts["current_findings"]) is not CurrentFindingFacts
+            or cast(CurrentFindingFacts, facts["current_findings"]).result_digest
+            != result.content_digest()
+        ):
+            raise ReviewInputError(
+                "human file current finding facts are invalid or stale"
+            )
+        return facts
+
+    def _assess(
+        self,
+        request: FileReviewRequestValue,
+        result: ReviewResult,
+        eligibility: ReviewApprovalEligibility,
+        confirmed: set[str],
+        receipt_ids: list[int],
+        invalidated: list[int],
+        *,
+        request_comment_id: int,
+        enabled: bool,
+        app_authored: bool,
+        has_open_review_threads: bool | None,
+        qualification: str,
+        current_findings: CurrentFindingFacts | None = None,
+    ) -> HumanFileReviewAssessment:
+        known = {item.file_id for item in request.files}
         original = eligibility.facts
         current = approval_facts_from_result(
             result,
@@ -727,6 +1050,19 @@ class HumanFileReviewPublisher:
             has_open_review_threads=has_open_review_threads,
             qualification=qualification,
         )
+        if current_findings is not None:
+            if (
+                type(current_findings) is not CurrentFindingFacts
+                or current_findings.result_digest != result.content_digest()
+            ):
+                raise ReviewInputError(
+                    "human file current finding facts are invalid or stale"
+                )
+            current = replace(
+                current,
+                has_blocking_findings=current_findings.has_blocking_findings,
+                has_human_adjudication_findings=current_findings.has_human_adjudication_findings,
+            )
         facts = replace(
             original,
             enabled=original.enabled and current.enabled,
@@ -736,9 +1072,15 @@ class HumanFileReviewPublisher:
             has_human_adjudication_findings=original.has_human_adjudication_findings
             or current.has_human_adjudication_findings
             or bool(eligibility.human_review and eligibility.human_review.pending),
-            qualification=original.qualification
-            if original.qualification != "not-required"
-            else current.qualification,
+            qualification=(
+                "missing"
+                if "missing" in {original.qualification, current.qualification}
+                else "unverified"
+                if "unverified" in {original.qualification, current.qualification}
+                else "qualified"
+                if "qualified" in {original.qualification, current.qualification}
+                else "not-required"
+            ),
             has_open_review_threads=(
                 True
                 if original.has_open_review_threads is True
@@ -770,6 +1112,7 @@ class HumanFileReviewPublisher:
             source_context_incomplete=source_incomplete,
             unresolved_threads=facts.has_open_review_threads,
             qualification=facts.qualification,
+            current_findings=current_findings,
         )
         waivable = {"review-partial", "coverage-partial"}
         other = tuple(item for item in standard.blockers if item not in waivable)
@@ -787,8 +1130,6 @@ class HumanFileReviewPublisher:
                 approved=False,
                 blockers=tuple(dict.fromkeys((*standard.blockers, *mixed.blockers))),
             )
-        if self._snapshot() != (request.base_sha, request.head_sha):
-            raise ReviewInputError("human file evaluation snapshot is stale")
         return HumanFileReviewAssessment(
             request,
             tuple(receipt_ids),
@@ -799,6 +1140,7 @@ class HumanFileReviewPublisher:
             else (),
             tuple(invalidated),
             decision,
+            current_findings,
         )
 
     def publish_mixed_approval(
@@ -824,51 +1166,64 @@ class HumanFileReviewPublisher:
             has_open_review_threads=has_open_review_threads,
             qualification=qualification,
         )
+        return self._publish_approval(assessment, result)
+
+    def _publish_approval(
+        self, assessment: HumanFileReviewAssessment, result: ReviewResult
+    ) -> HumanFileReviewAssessment:
+        request = assessment.request
+        if self._snapshot() != (request.base_sha, request.head_sha):
+            raise ReviewInputError("human file approval snapshot changed")
         if not assessment.approval.approved:
             return assessment
         if result.review_status != "partial":
             raise ReviewInputError("mixed approval requires a partial AI result")
-        head = assessment.request.head_sha
-        if self._snapshot()[1] != head:
-            raise ReviewInputError("human file approval head changed")
         body = (
             assessment.render()
             + "\n\nAI-reviewed text; human-reviewed selected media; "
             "mixed coverage sufficient. AI result status remains partial."
         )
-        existing = next(
-            (
-                item
-                for item in reversed(self._last_reviews)
-                if self._owned(item)
-                and item.get("commit_id") == head
-                and item.get("state") == "APPROVED"
-                and item.get("body") == body
-                and positive(item.get("id"))
-            ),
-            None,
-        )
-        if existing is not None:
-            readback = self._object(
-                f"/pulls/{self.pull_request}/reviews/{existing['id']}"
-            )
+        existing = [
+            item
+            for item in self._last_reviews
+            if self._owned(item)
+            and item.get("commit_id") == request.head_sha
+            and item.get("state") == "APPROVED"
+            and item.get("body") == body
+            and positive(item.get("id"))
+        ]
+        if len(existing) > 1:
+            raise ReviewInputError("mixed approval has duplicate owned reviews")
+        # Admit the complete native write/readback/snapshot tail before its
+        # first irreversible request. The host also retains the original
+        # reserved check-finalization calls; this guard never refills or refunds.
+        if self.before_approval is not None:
+            self.before_approval(2 if existing else 3)
+        if existing:
+            identifier = existing[0]["id"]
         else:
             response = self._io(
                 "POST",
                 f"/pulls/{self.pull_request}/reviews",
-                {"commit_id": head, "event": "APPROVE", "body": body},
+                {"commit_id": request.head_sha, "event": "APPROVE", "body": body},
             )
             if not isinstance(response, Mapping) or not positive(response.get("id")):
                 raise ReviewInputError("mixed approval outcome is unknown")
-            readback = self._object(
-                f"/pulls/{self.pull_request}/reviews/{response['id']}"
-            )
+            identifier = response["id"]
+        readback = self._object(f"/pulls/{self.pull_request}/reviews/{identifier}")
         if (
-            readback.get("commit_id") != head
+            not self._owned(readback)
+            or type(readback.get("id")) is not int
+            or readback.get("id") != identifier
+            or readback.get("commit_id") != request.head_sha
             or readback.get("body") != body
             or readback.get("state") != "APPROVED"
         ):
             raise ReviewInputError("mixed approval readback disagrees")
+        if self._snapshot() != (request.base_sha, request.head_sha):
+            raise ReviewInputError(
+                "human file approval snapshot changed after publication"
+            )
         if result.review_status != "partial":
             raise ReviewInputError("mixed approval changed the AI result")
         return assessment
@@ -885,22 +1240,151 @@ class HumanFileReviewPublisher:
     ) -> HumanFileReviewAssessment:
         """Confirm every file named by the source comment, then post one APPROVE.
 
-        The blanket sentence selects the whole current request. The AI result
-        stays partial. Unrelated blockers still withhold the review. Both
-        calls share this publisher's original guard and refuse when that guard
-        cannot hold them. A host can confirm, then call ``publish_mixed_approval``
-        on a later invocation of the same comment.
+        The blanket sentence selects the whole authenticated request group.
+        Immutable inventory is acquired once; fresh mutable root, request,
+        source, permission and snapshot fences surround the audit and approval
+        writes. Every physical request uses this publisher's original guard.
+        The AI result stays partial and unrelated blockers still withhold.
         """
 
-        self.confirm(
-            request_comment_id=request_comment_id,
-            source_comment_id=source_comment_id,
-            result=result,
-        )
-        return self.publish_mixed_approval(
-            request_comment_id=request_comment_id,
-            result=result,
+        if not self.policy.allow_confirmations:
+            raise ReviewInputError("human file confirmations are disabled")
+        # request_review may have just authenticated and read back this exact
+        # request in the same invocation. It remains reference data: fresh root,
+        # request, source/permission and full snapshot fences below still gate
+        # every write. No cache crosses publishers or invocation budgets.
+        request = self._requested.get(request_comment_id)
+        if request is None:
+            request = self._request(request_comment_id, result)
+        if request.result_digest != review_result_digest(result):
+            raise ReviewInputError("human file request result changed")
+        receipt = self._source(source_comment_id, request_comment_id, request)
+        prior_id = None
+        for item in self._list(f"/issues/{self.pull_request}/comments"):
+            if not self._owned(item) or not isinstance(item.get("body"), str):
+                continue
+            if not any(
+                prefix in item["body"]
+                for prefix in (RECEIPT_PREFIX, RECEIPT_GROUP_PREFIX)
+            ):
+                continue
+            prior = self._parse_receipt_body(item["body"])
+            if prior.source_comment_id == source_comment_id:
+                if prior_id is not None:
+                    raise ReviewInputError("human file audit evidence is conflicting")
+                if prior != receipt or item["body"] != self._receipt_body(prior):
+                    raise ReviewInputError(
+                        "human file source event was already bound differently"
+                    )
+                if not positive(item.get("id")):
+                    raise ReviewInputError("human file audit evidence is conflicting")
+                prior_id = item["id"]
+        eligibility = self._root(request.review_id, result, request.head_sha)
+        if self._snapshot() != (request.base_sha, request.head_sha):
+            raise ReviewInputError("human file confirmation snapshot is stale")
+        if self._source(source_comment_id, request_comment_id, request) != receipt:
+            raise ReviewInputError("human file source changed before publication")
+        receipt_body = self._receipt_body(receipt)
+        if prior_id is None:
+            prior_id = self._publish(receipt_body)
+        elif self._comment(prior_id, owned=True).get("body") != receipt_body:
+            raise ReviewInputError("human file receipt readback disagrees")
+
+        # Re-enumerate after the write/readback to detect duplicate or conflicting
+        # audit records. Authenticate every source against this same frozen group.
+        known = {item.file_id for item in request.files}
+        receipt_ids: list[int] = []
+        invalidated: list[int] = []
+        candidates: list[tuple[int, FileReviewReceiptValue]] = []
+        seen: set[int] = set()
+        for item in self._list(f"/issues/{self.pull_request}/comments"):
+            if not self._owned(item) or not isinstance(item.get("body"), str):
+                continue
+            if not any(
+                prefix in item["body"]
+                for prefix in (RECEIPT_PREFIX, RECEIPT_GROUP_PREFIX)
+            ):
+                continue
+            audit = self._parse_receipt_body(item["body"])
+            if (
+                audit.request_digest != request.digest
+                or audit.request_comment_id != request_comment_id
+            ):
+                continue
+            identifier = item.get("id")
+            if (
+                not positive(identifier)
+                or audit.source_comment_id in seen
+                or not set(audit.selected_ids) <= known
+                or item["body"] != self._receipt_body(audit)
+            ):
+                raise ReviewInputError("human file audit evidence is conflicting")
+            identifier = cast(int, identifier)
+            if identifier == prior_id:
+                if audit != receipt or item["body"] != receipt_body:
+                    raise ReviewInputError("human file receipt readback disagrees")
+            elif self._comment(identifier, owned=True).get("body") != item["body"]:
+                raise ReviewInputError("human file receipt readback disagrees")
+            seen.add(audit.source_comment_id)
+            receipt_ids.append(identifier)
+            candidates.append((identifier, audit))
+        if prior_id not in receipt_ids:
+            raise ReviewInputError("human file receipt vanished during evaluation")
+        confirmed: set[str] = set()
+        for identifier, audit in candidates:
+            try:
+                current = (
+                    self._source(audit.source_comment_id, request_comment_id, request)
+                    == audit
+                )
+            except ReviewInputError:
+                current = False
+            if current:
+                confirmed.update(audit.selected_ids)
+            else:
+                invalidated.append(identifier)
+        if self._comment(request_comment_id, owned=True).get(
+            "body"
+        ) != self._request_body(request):
+            raise ReviewInputError("human file request changed during evaluation")
+        facts = self._current_facts(
+            request,
+            result,
+            eligibility,
             enabled=enabled,
+            app_authored=False,
             has_open_review_threads=has_open_review_threads,
             qualification=qualification,
+        )
+        # A callback may dispatch mutable reads. Re-authenticate the latest
+        # owned root after it, then use the existing full PR snapshot as the
+        # final native-publication fence. No earlier root observation is a grant.
+        eligibility = self._root(request.review_id, result, request.head_sha)
+        assessment = self._assess(
+            request,
+            result,
+            eligibility,
+            confirmed,
+            receipt_ids,
+            invalidated,
+            request_comment_id=request_comment_id,
+            enabled=cast(bool, facts["enabled"]) and enabled,
+            app_authored=cast(bool, facts["app_authored"]),
+            has_open_review_threads=cast(bool | None, facts["has_open_review_threads"]),
+            qualification=cast(str, facts["qualification"]),
+            current_findings=cast(
+                CurrentFindingFacts | None, facts.get("current_findings")
+            ),
+        )
+        return self._publish_approval(assessment, result)
+
+    @staticmethod
+    def _parse_receipt_body(body: str) -> FileReviewReceiptValue:
+        return parse_receipt(
+            _document(
+                body,
+                RECEIPT_GROUP_PREFIX
+                if RECEIPT_GROUP_PREFIX in body
+                else RECEIPT_PREFIX,
+            )
         )

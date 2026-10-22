@@ -1090,6 +1090,27 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 )
                 session_attestation = loaded_attestation
             http = GitHubHttp()
+            media_budget = None
+            media_read_token = None
+            command_broker = None
+            if parsed.action == "approve-media":
+                from review_sensei.bounded_evidence import EvidenceReadBudget
+                from review_sensei_github.broker_control import BrokerDispatchAccounting
+                from review_sensei_github.media_budget import media_http
+                from review_sensei_github.publication_recovery import publication_http
+
+                http = media_http(http)
+                media_budget = EvidenceReadBudget()
+                command_broker = BrokerClient(
+                    control=BrokerDispatchAccounting(
+                        media_budget,
+                        hashlib.sha256(
+                            f"media:{args.repository_id}:{args.pull_request}:{args.head_sha}:{source_comment_id}".encode()
+                        ).hexdigest(),
+                        10,
+                        1,
+                    )
+                )
             actor_permission = None
             finding_fingerprints = None
             finding_inventory = None
@@ -1106,24 +1127,33 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     raise ReviewInputError(
                         "maintainer override requires GitHub metadata access"
                     )
-                facts = _override_facts(
-                    http,
-                    token=read_token.strip(),
-                    repository=args.repository,
-                    repository_id=args.repository_id,
-                    pull_request=args.pull_request,
-                    head_sha=args.head_sha,
-                    actor=args.actor,
-                    app_slug=args.app_slug,
-                )
-                actor_permission = facts.permission
-                finding_inventory = tuple(
-                    _identity_from_indexed(item) for item in facts.inventory
-                )
-                prior_inventories = tuple(
-                    (head, tuple(_identity_from_indexed(item) for item in entries))
-                    for head, entries in facts.prior_heads
-                )
+                if parsed.action == "approve-media":
+                    media_read_token = read_token.strip()
+                    actor_permission = _collaborator_permission(
+                        publication_http(http, media_budget),
+                        token=media_read_token,
+                        repository=args.repository,
+                        actor=args.actor,
+                    )
+                else:
+                    facts = _override_facts(
+                        http,
+                        token=read_token.strip(),
+                        repository=args.repository,
+                        repository_id=args.repository_id,
+                        pull_request=args.pull_request,
+                        head_sha=args.head_sha,
+                        actor=args.actor,
+                        app_slug=args.app_slug,
+                    )
+                    actor_permission = facts.permission
+                    finding_inventory = tuple(
+                        _identity_from_indexed(item) for item in facts.inventory
+                    )
+                    prior_inventories = tuple(
+                        (head, tuple(_identity_from_indexed(item) for item in entries))
+                        for head, entries in facts.prior_heads
+                    )
             elif parsed.action in {
                 "accept-risk",
                 "accept-coverage-uncertainty",
@@ -1155,7 +1185,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                         "maintainer override requires GitHub metadata access"
                     )
             application = GitHubApplication(
-                broker=BrokerClient(),
+                broker=command_broker if command_broker is not None else BrokerClient(),
                 http=http,
                 reviewer=ReviewPublisher(http=http),
                 learner=LearningPRPublisher(http=http),
@@ -1196,6 +1226,9 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     finding_fingerprints=finding_fingerprints,
                     finding_inventory=finding_inventory,
                     prior_inventories=prior_inventories,
+                    media_budget=media_budget,
+                    media_read_token=media_read_token,
+                    reviews_policy=command_configuration.github.reviews,
                     convergence_policy=command_convergence_policy,
                     operation_entry=command_configuration.github.operation_entry,
                     app_id=_actions_app_id(),

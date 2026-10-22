@@ -284,6 +284,186 @@ class FileReviewRequest:
         return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class FileReviewRequestGroup:
+    """One exact inventory composed of unchanged, bounded v1 request parts.
+
+    The group is one request identity, never separate authority for a subset.
+    Its complete canonical document keeps the existing document byte ceiling.
+    """
+
+    parts: tuple[FileReviewRequest, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.parts, tuple)
+            or not 2 <= len(self.parts) <= MAX_FILES
+            or any(not isinstance(part, FileReviewRequest) for part in self.parts)
+        ):
+            raise ReviewInputError("human file request group is invalid")
+        first = self.parts[0]
+        for part in self.parts:
+            if any(
+                getattr(part, field) != getattr(first, field)
+                for field in (
+                    "repository",
+                    "repository_id",
+                    "pull_request",
+                    "base_sha",
+                    "head_sha",
+                    "review_id",
+                    "result_digest",
+                )
+            ):
+                raise ReviewInputError("human file request group snapshots conflict")
+        files = self.files
+        if (
+            any(len(part.files) != MAX_FILES for part in self.parts[:-1])
+            or files != tuple(sorted(files, key=lambda item: item.path))
+            or len({item.file_id for item in files}) != len(files)
+            or len({path for item in files for path in item.paths})
+            != sum(len(item.paths) for item in files)
+        ):
+            raise ReviewInputError("human file request group parts conflict")
+        if len(canonical(self.to_dict()).encode("utf-8")) > MAX_DOCUMENT_BYTES:
+            raise ReviewInputError(
+                "human file request group exceeds the document bound"
+            )
+
+    @property
+    def files(self) -> tuple[UnsupportedFile, ...]:
+        return tuple(item for part in self.parts for item in part.files)
+
+    @property
+    def repository(self) -> str:
+        return self.parts[0].repository
+
+    @property
+    def repository_id(self) -> int:
+        return self.parts[0].repository_id
+
+    @property
+    def pull_request(self) -> int:
+        return self.parts[0].pull_request
+
+    @property
+    def base_sha(self) -> str:
+        return self.parts[0].base_sha
+
+    @property
+    def head_sha(self) -> str:
+        return self.parts[0].head_sha
+
+    @property
+    def review_id(self) -> int:
+        return self.parts[0].review_id
+
+    @property
+    def result_digest(self) -> str:
+        return self.parts[0].result_digest
+
+    @property
+    def digest(self) -> str:
+        return evidence_digest(self.to_dict())
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": "human-file-review-group-v1",
+            "parts": [part.to_dict() for part in self.parts],
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> FileReviewRequestGroup:
+        fields = _closed(value, {"schema_version", "parts"})
+        if fields["schema_version"] != "human-file-review-group-v1" or not isinstance(
+            fields["parts"], list
+        ):
+            raise ReviewInputError("human file request group schema is invalid")
+        if not 2 <= len(fields["parts"]) <= MAX_FILES:
+            raise ReviewInputError("human file request group exceeds its part bound")
+        return cls(tuple(FileReviewRequest.from_dict(part) for part in fields["parts"]))
+
+    def render(self) -> str:
+        header = (
+            f"Human review requested for one complete inventory in {len(self.parts)} "
+            f"bounded parts ({len(self.files)} file changes); not AI-reviewed.\n"
+            f"Snapshot: base `{self.base_sha}`, head `{self.head_sha}`.\n"
+            f"Request digest: `{self.digest}`.\n"
+        )
+        listing = "\n".join(
+            f"- {display_path(item.path)} ({item.change}): file ID `{item.file_id}`; "
+            f"old blob `{item.old_blob or 'absent'}`, new blob `{item.new_blob or 'absent'}`; "
+            f"modes `{item.old_mode or 'absent'}` → `{item.new_mode or 'absent'}`"
+            + (
+                f"; previous path {display_path(item.old_path)}"
+                if item.old_path
+                else ""
+            )
+            for item in self.files
+        )
+        return (
+            header
+            + listing
+            + (
+                "\n\nA maintainer or admin who reviewed every file in this complete "
+                "group may reply with this exact sentence:\n"
+                "`@reviewsensei I reviewed the media files and I approve`\n"
+                "The sentence selects every file in the entire group. "
+                "Text findings and other approval checks remain open. "
+                "Any snapshot or review-result change requires a fresh confirmation."
+            )
+        )
+
+
+FileReviewRequestValue = FileReviewRequest | FileReviewRequestGroup
+
+
+def build_request_group(
+    repository: str,
+    repository_id: int,
+    pull_request: int,
+    base_sha: str,
+    head_sha: str,
+    review_id: int,
+    result_digest: str,
+    files: tuple[UnsupportedFile, ...],
+) -> FileReviewRequestValue:
+    """Preserve v1 identity, or partition a larger complete inventory."""
+    if not isinstance(files, tuple) or any(
+        not isinstance(item, UnsupportedFile) for item in files
+    ):
+        raise ReviewInputError("human file inventory is invalid")
+    context = (
+        repository,
+        repository_id,
+        pull_request,
+        base_sha,
+        head_sha,
+        review_id,
+        result_digest,
+    )
+    if len(files) <= MAX_FILES:
+        return FileReviewRequest(*context, files)
+    if len(files) > MAX_FILES * MAX_FILES:
+        raise ReviewInputError("human file request group exceeds its part bound")
+    ordered = tuple(sorted(files, key=lambda item: item.path))
+    return FileReviewRequestGroup(
+        tuple(
+            FileReviewRequest(*context, ordered[start : start + MAX_FILES])
+            for start in range(0, len(ordered), MAX_FILES)
+        )
+    )
+
+
+def parse_request(value: object) -> FileReviewRequestValue:
+    if (
+        isinstance(value, Mapping)
+        and value.get("schema_version") == "human-file-review-group-v1"
+    ):
+        return FileReviewRequestGroup.from_dict(value)
+    return FileReviewRequest.from_dict(value)
+
+
 def is_blanket_media_approval(body: object) -> bool:
     """The whole comment approves every file on the current request."""
 
@@ -300,7 +480,7 @@ def is_blanket_media_approval(body: object) -> bool:
 
 
 def parse_confirmation(
-    body: object, request: FileReviewRequest
+    body: object, request: FileReviewRequestValue
 ) -> tuple[str, ...] | None:
     """A whole literal command only; prose, code fences, URLs and wildcards refuse."""
     if not isinstance(body, str):
@@ -400,7 +580,9 @@ def coverage_only_binary(coverage: CoverageManifest) -> bool:
     )
 
 
-def validate_inventory(request: FileReviewRequest, coverage: CoverageManifest) -> None:
+def validate_inventory(
+    request: FileReviewRequestValue, coverage: CoverageManifest
+) -> None:
     expected = {
         entry.path for entry in coverage.files if is_human_confirmable_file(entry)
     }
@@ -502,3 +684,161 @@ class FileReviewReceipt:
             raise ReviewInputError("human file receipt schema is invalid")
         x["selected_ids"] = tuple(x["selected_ids"])
         return cls(**x)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True)
+class FileReviewReceiptGroup:
+    """One human source event bound to one complete grouped request identity."""
+
+    request_digest: str
+    parts: tuple[FileReviewReceipt, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not digest(self.request_digest)
+            or not isinstance(self.parts, tuple)
+            or not 1 <= len(self.parts) <= MAX_FILES
+            or any(not isinstance(part, FileReviewReceipt) for part in self.parts)
+        ):
+            raise ReviewInputError("human file receipt group is invalid")
+        first = self.parts[0]
+        if (
+            self.parts
+            != tuple(sorted(self.parts, key=lambda part: part.request_digest))
+            or len({part.request_digest for part in self.parts}) != len(self.parts)
+            or len(set(self.selected_ids)) != len(self.selected_ids)
+            or any(
+                getattr(part, field) != getattr(first, field)
+                for part in self.parts
+                for field in (
+                    "request_comment_id",
+                    "source_comment_id",
+                    "source_updated_at",
+                    "source_sha256",
+                    "actor_id",
+                    "actor",
+                )
+            )
+        ):
+            raise ReviewInputError("human file receipt group parts conflict")
+        if len(canonical(self.to_dict()).encode("utf-8")) > MAX_DOCUMENT_BYTES:
+            raise ReviewInputError(
+                "human file receipt group exceeds the document bound"
+            )
+
+    @property
+    def request_comment_id(self) -> int:
+        return self.parts[0].request_comment_id
+
+    @property
+    def source_comment_id(self) -> int:
+        return self.parts[0].source_comment_id
+
+    @property
+    def source_updated_at(self) -> str:
+        return self.parts[0].source_updated_at
+
+    @property
+    def source_sha256(self) -> str:
+        return self.parts[0].source_sha256
+
+    @property
+    def actor_id(self) -> int:
+        return self.parts[0].actor_id
+
+    @property
+    def actor(self) -> str:
+        return self.parts[0].actor
+
+    @property
+    def selected_ids(self) -> tuple[str, ...]:
+        return tuple(
+            identifier for part in self.parts for identifier in part.selected_ids
+        )
+
+    @property
+    def digest(self) -> str:
+        return evidence_digest(self.to_dict())
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": "human-file-receipt-group-v1",
+            "request_digest": self.request_digest,
+            "parts": [part.to_dict() for part in self.parts],
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> FileReviewReceiptGroup:
+        fields = _closed(value, {"schema_version", "request_digest", "parts"})
+        if (
+            fields["schema_version"] != "human-file-receipt-group-v1"
+            or not isinstance(fields["request_digest"], str)
+            or not isinstance(fields["parts"], list)
+        ):
+            raise ReviewInputError("human file receipt group schema is invalid")
+        if not 1 <= len(fields["parts"]) <= MAX_FILES:
+            raise ReviewInputError("human file receipt group exceeds its part bound")
+        return cls(
+            fields["request_digest"],
+            tuple(FileReviewReceipt.from_dict(part) for part in fields["parts"]),
+        )
+
+
+FileReviewReceiptValue = FileReviewReceipt | FileReviewReceiptGroup
+
+
+def build_receipt(
+    request: FileReviewRequestValue,
+    *,
+    request_comment_id: int,
+    source_comment_id: int,
+    source_updated_at: str,
+    source_sha256: str,
+    actor_id: int,
+    actor: str,
+    selected_ids: tuple[str, ...],
+) -> FileReviewReceiptValue:
+    """Bind a source to exact part identities without enlarging v1 receipts."""
+    if (
+        not isinstance(request, (FileReviewRequest, FileReviewRequestGroup))
+        or not isinstance(selected_ids, tuple)
+        or not selected_ids
+        or not all(digest(identifier) for identifier in selected_ids)
+        or len(set(selected_ids)) != len(selected_ids)
+        or any(
+            identifier not in {item.file_id for item in request.files}
+            for identifier in selected_ids
+        )
+    ):
+        raise ReviewInputError("human file receipt selection is invalid")
+    context = (
+        request_comment_id,
+        source_comment_id,
+        source_updated_at,
+        source_sha256,
+        actor_id,
+        actor,
+    )
+    if isinstance(request, FileReviewRequest):
+        return FileReviewReceipt(request.digest, *context, selected_ids)
+    parts = tuple(
+        FileReviewReceipt(
+            part.digest,
+            *context,
+            tuple(item.file_id for item in part.files if item.file_id in selected_ids),
+        )
+        for part in request.parts
+        if any(item.file_id in selected_ids for item in part.files)
+    )
+    return FileReviewReceiptGroup(
+        request.digest, tuple(sorted(parts, key=lambda part: part.request_digest))
+    )
+
+
+def parse_receipt(value: object) -> FileReviewReceiptValue:
+    if (
+        isinstance(value, Mapping)
+        and value.get("schema_version") == "human-file-receipt-group-v1"
+    ):
+        return FileReviewReceiptGroup.from_dict(value)
+    return FileReviewReceipt.from_dict(value)

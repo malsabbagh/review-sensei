@@ -112,6 +112,8 @@ Process: `docs/process/adr-process.md`
 
 | [0098](0098-operation-local-admitted-inventory-handoff.md) | Proposed | Reuse same-operation admitted inventory context with complete fresh fences | PR #316 composed-publication budget evidence | No response or authority cache; all mutable storage and prose checks remain fresh |
 
+| [0103](0103-bounded-hosted-media-confirmation.md) | Proposed | Compose retained media confirmation within the original hosted budget | User-authorized media command repair | Grouped v1 parts, fresh authority and exact source audit; no limit increase |
+
 ## Policy
 
 New proposal: [0084 - Lossless packed assessment queue carrier](0084-packed-assessment-queue-carrier.md)

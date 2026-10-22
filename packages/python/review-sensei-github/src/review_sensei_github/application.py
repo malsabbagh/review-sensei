@@ -1717,6 +1717,8 @@ class GitHubApplication:
         media_publisher: object | None = None,
         review_result: object | None = None,
         request_comment_id: int | None = None,
+        media_budget: EvidenceReadBudget | None = None,
+        media_read_token: str | None = None,
         operation_entry: str = "disabled",
         app_id: int | None = None,
         run_id: str | None = None,
@@ -1844,6 +1846,7 @@ class GitHubApplication:
                     applied=False,
                     operator_paused=False,
                     summary="unauthorized",
+                    evaluation_failed=command.action == "approve-media",
                 )
         if command is None:
             raise GitHubPublicationError("maintainer command reconstruction failed")
@@ -1880,7 +1883,89 @@ class GitHubApplication:
                     applied=False,
                     operator_paused=False,
                     summary="unauthorized",
+                    evaluation_failed=command.action == "approve-media",
                 )
+        media_check_token = None
+        media_check_prepared = False
+        if (
+            command.action == "approve-media"
+            and hosted_mutation
+            and media_budget is not None
+            and operation_store is not None
+        ):
+            # The supported CLI reconciles exact owned publications afresh.
+            # Its assessment must not be replaced by a cached approval boolean
+            # which cannot revalidate source, permissions, threads or policy.
+            return MaintainerCommandResult(
+                action="approve-media",
+                applied=False,
+                operator_paused=False,
+                summary="hosted media approval requires fresh publication reconciliation; cached operation assessments are unsupported",
+                evaluation_failed=True,
+            )
+        if (
+            command.action == "approve-media"
+            and hosted_mutation
+            and media_publisher is None
+            and review_result is None
+            and request_comment_id is None
+            and media_budget is not None
+            and media_read_token is not None
+        ):
+            from .hosted_media import prepare_hosted_media_context
+
+            # The supported command must fund its check capability before any
+            # media publication. Both exchanges keep the original allowance;
+            # a cold/fallback broker refuses before an unfunded subrequest.
+            check_broker = self.broker
+            if type(check_broker) is BrokerClient:
+                from .broker_control import BrokerDispatchAccounting
+
+                control = check_broker.control
+                if control is None or control.budget is not media_budget:
+                    raise GitHubPublicationError(
+                        "media command broker accounting is unavailable"
+                    )
+                check_broker = copy(check_broker)
+                check_broker.control = BrokerDispatchAccounting(
+                    media_budget,
+                    control.operation_id,
+                    5,
+                    control.verification_liability,
+                )
+            media_check_token = self._check_capability_token(
+                command_exchange_input, broker=check_broker
+            )
+            if not isinstance(media_check_token, str) or not media_check_token.strip():
+                return MaintainerCommandResult(
+                    action="approve-media",
+                    applied=False,
+                    operator_paused=False,
+                    summary="media approval could not fund its check capability; retry the original media command",
+                    evaluation_failed=True,
+                )
+            media_check_prepared = True
+
+            context = prepare_hosted_media_context(
+                application=self,
+                options=options,
+                http=self.http,
+                budget=media_budget,
+                session_token=token,
+                read_token=media_read_token,
+                repository=repository,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                source_comment_id=cast(int, source_comment_id),
+                actor_login=command.actor,
+                body=body,
+                app_slug=app_slug,
+                reviews_policy=reviews_policy or options.review_policy(),
+            )
+            media_publisher = context.publisher
+            review_result = context.result
+            request_comment_id = context.request_comment_id
         if (
             command.action == "approve-media"
             and operation_entry == "enabled"
@@ -1960,6 +2045,9 @@ class GitHubApplication:
                 repository=repository,
                 head_sha=head_sha,
                 app_slug=app_slug,
+                evidence_budget=media_budget,
+                prepared_check_token=media_check_token,
+                check_prepared=media_check_prepared,
             )
         if command.action == "approve-media":
             effective_policy = (
@@ -2002,6 +2090,9 @@ class GitHubApplication:
                 repository=repository,
                 head_sha=head_sha,
                 app_slug=app_slug,
+                evidence_budget=media_budget,
+                prepared_check_token=media_check_token,
+                check_prepared=media_check_prepared,
             )
         identity = SessionIdentity(
             repository=repository,
@@ -2309,6 +2400,9 @@ class GitHubApplication:
         repository: str,
         head_sha: str,
         app_slug: str,
+        evidence_budget: EvidenceReadBudget | None = None,
+        prepared_check_token: str | None = None,
+        check_prepared: bool = False,
     ) -> object:
         """Reconcile the merge-gate check run after a human media confirmation."""
 
@@ -2376,11 +2470,32 @@ class GitHubApplication:
                 summary=base_summary,
             )
 
-        try:
-            exchange_input = oidc_token or self.broker.request_oidc_token()
-            check_token = self._check_capability_token(exchange_input)
-        except Exception:
-            check_token = None
+        if evidence_budget is not None and not check_prepared:
+            return MaintainerCommandResult(
+                action="approve-media",
+                applied=applied,
+                operator_paused=False,
+                summary=(
+                    f"{base_summary}; gate re-evaluation failed: "
+                    "bounded media finalization requires its prepaid check capability"
+                ),
+                evaluation_failed=True,
+            )
+
+        if evidence_budget is not None:
+            from .media_budget import MediaCheckFinalizationHttp
+
+            http = MediaCheckFinalizationHttp(
+                http, evidence_budget, repository=repository, head_sha=head_sha
+            )
+
+        check_token = prepared_check_token
+        if not check_prepared:
+            try:
+                exchange_input = oidc_token or self.broker.request_oidc_token()
+                check_token = self._check_capability_token(exchange_input)
+            except Exception:
+                check_token = None
 
         if not check_token:
             return MaintainerCommandResult(
@@ -2395,15 +2510,38 @@ class GitHubApplication:
                 evaluation_failed=True,
             )
 
+        current_findings = getattr(assessment, "current_findings", None)
+        if current_findings is not None:
+            from review_sensei.mixed_coverage import CurrentFindingFacts
+
+            if (
+                not isinstance(current_findings, CurrentFindingFacts)
+                or current_findings.result_digest != review_result.content_digest()
+            ):
+                return MaintainerCommandResult(
+                    action="approve-media",
+                    applied=False,
+                    operator_paused=False,
+                    summary="media approval current finding evidence is invalid",
+                    evaluation_failed=True,
+                )
         req_fixes = (
             "blocking-findings-open" in blockers
             or "blocking-findings" in blockers
-            or has_blocking_findings(review_result)
+            or (
+                current_findings.has_blocking_findings
+                if current_findings is not None
+                else has_blocking_findings(review_result)
+            )
         )
         req_decisions = (
             "human-adjudication-open" in blockers
             or "human-adjudication-findings" in blockers
-            or has_human_adjudication_findings(review_result)
+            or (
+                current_findings.has_human_adjudication_findings
+                if current_findings is not None
+                else has_human_adjudication_findings(review_result)
+            )
         )
         outcome = check_outcome_for_result(
             review_result,
