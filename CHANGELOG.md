@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.9 - 2026-10-22
+
 - Split core Python and npm publication into independently retryable workflow
   runs started by the Release Marshal's single signed tag. Preserve matching
   core versions/source, exact artifacts/provenance, protected approvals, npm
@@ -13,6 +15,10 @@
   pin approval/dependency and same-run recovery guarantees in regression tests.
   Hold npm until the original Python channel run reaches terminal success,
   including its independent result recording.
+
+## review-sensei-github 0.3.9 - 2026-10-22
+
+- Pin `review-sensei==0.8.9`.
 
 ## 0.8.8 - 2026-10-21
 
