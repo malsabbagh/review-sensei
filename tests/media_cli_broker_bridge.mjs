@@ -29,6 +29,7 @@ registerHooks({
 const { consumingBroker, SHA, WORKFLOW } = await import("../deploy/cloudflare/test/epic238-consuming-broker-fixture.ts");
 const { TokenBroker } = await import("../deploy/cloudflare/src/token-broker.ts");
 const { GitHubApi } = await import("../deploy/cloudflare/src/github-api.ts");
+const { resetOidcJwksCacheForTesting } = await import("../deploy/cloudflare/src/oidc.ts");
 const { brokerDiagnostic } = await import("../deploy/cloudflare/src/broker-diagnostics.ts");
 const fixture = await consumingBroker();
 // The existing fixture owns a generated test-only private key and real signer.
@@ -68,6 +69,11 @@ for await (const line of lines) {
   try {
     if (request.action === "oidc") {
       result = await fixture.oidcToken({ repository: "owner/repo", repository_owner: "owner", repository_id: "1", actor: "alice", actor_id: "123", run_id: "123", workflow_ref: "owner/repo/.github/workflows/review-sensei-review.yml@refs/heads/main", job_workflow_ref: WORKFLOW, job_workflow_sha: SHA });
+    } else if (request.action === "reset_oidc_cache") {
+      // A new cold Worker invocation is an independent fixture condition, not
+      // an uncharged fetch or a refund from the measured command allowance.
+      resetOidcJwksCacheForTesting();
+      result = null;
     } else if (request.action === "exchange") {
       authority = request.authority;
       result = await broker.exchange(request.body);

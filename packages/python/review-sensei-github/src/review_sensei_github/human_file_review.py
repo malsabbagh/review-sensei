@@ -44,6 +44,7 @@ from review_sensei.mixed_coverage import (
     evaluate_mixed_coverage,
 )
 from review_sensei.models import ReviewResult
+from review_sensei.validation import validate_repository_path
 
 from .approval import (
     AutoApprovalDecision,
@@ -408,8 +409,52 @@ class HumanFileReviewPublisher:
                     raise ReviewInputError(
                         "human file immutable tree evidence is incomplete"
                     )
+                for item in items:
+                    path = validate_repository_path(
+                        item["path"],
+                        allow_glob_chars=True,
+                        label="human file shallow tree path",
+                    )
+                    if "/" in path:
+                        raise ReviewInputError(
+                            "human file shallow tree path is not immediate"
+                        )
                 trees[identifier] = items
             return trees[identifier]
+
+        # A whole recursive repository can exceed the unchanged response bound
+        # even when the selected files are small. Prove their common directory
+        # through complete shallow trees, then recurse only into that subtree.
+        # Disjoint selections keep the existing bounded shallow path walk.
+        common = paths[0].split("/")[:-1] if paths else []
+        for path in paths[1:]:
+            parent = path.split("/")[:-1]
+            while common and parent[: len(common)] != common:
+                common.pop()
+        if common:
+            identifier = tree["sha"]
+            for part in common:
+                prefix_node = next(
+                    (item for item in entries(identifier) if item["path"] == part), None
+                )
+                if prefix_node is None:
+                    return {path: None for path in paths}
+                if (
+                    prefix_node.get("type") != "tree"
+                    or prefix_node.get("mode") != "040000"
+                ):
+                    raise ReviewInputError("human file path is not a regular tree path")
+                identifier = prefix_node["sha"]
+            prefix = "/".join(common) + "/"
+            if any(not path.startswith(prefix) for path in paths):
+                raise ReviewInputError(
+                    "human file selected path escapes its proven subtree"
+                )
+            relative = tuple(path[len(prefix) :] for path in paths)
+            scoped = self._recursive_blobs(identifier, relative)
+            return {
+                path: scoped[item] for path, item in zip(paths, relative, strict=True)
+            }
 
         result: dict[str, tuple[str, str] | None] = {}
         for path in paths:
@@ -435,6 +480,83 @@ class HumanFileReviewPublisher:
                 ):
                     raise ReviewInputError("human file evidence is not a regular blob")
             result[path] = None if found is None else (found["sha"], found["mode"])
+        return result
+
+    def _recursive_blobs(
+        self, tree_sha: str, paths: tuple[str, ...]
+    ) -> dict[str, tuple[str, str] | None]:
+        """Read one complete, bounded immutable subtree for nested selections.
+
+        The caller already proved the common prefix from the commit root.
+        Recursive Git tree responses include every relative directory ancestor. A
+        truncated or inconsistent response proves neither presence nor absence,
+        so it refuses without a second strategy or a new allowance. The
+        ordinary physical response bound and original IO guard still apply.
+        """
+
+        data = self._object(f"/git/trees/{tree_sha}?recursive=1")
+        items = data.get("tree")
+        if (
+            data.get("sha") != tree_sha
+            or data.get("truncated") is not False
+            or not isinstance(items, list)
+        ):
+            raise ReviewInputError("human file recursive tree evidence is incomplete")
+        kinds = {
+            "040000": "tree",
+            "100644": "blob",
+            "100755": "blob",
+            "120000": "blob",
+            "160000": "commit",
+        }
+        entries: dict[str, Mapping[str, Any]] = {}
+        for item in items:
+            if not isinstance(item, Mapping):
+                raise ReviewInputError("human file recursive tree entry is invalid")
+            path = validate_repository_path(
+                item.get("path"),
+                allow_glob_chars=True,
+                label="human file recursive tree path",
+            )
+            mode = item.get("mode")
+            if (
+                path in entries
+                or not sha(item.get("sha"))
+                or not isinstance(mode, str)
+                or mode not in kinds
+                or item.get("type") != kinds[mode]
+            ):
+                raise ReviewInputError("human file recursive tree evidence conflicts")
+            entries[path] = item
+        for path in entries:
+            parts = path.split("/")
+            for index in range(1, len(parts)):
+                ancestor = entries.get("/".join(parts[:index]))
+                if ancestor is None:
+                    raise ReviewInputError(
+                        "human file recursive tree ancestor is missing"
+                    )
+                if ancestor.get("type") != "tree" or ancestor.get("mode") != "040000":
+                    raise ReviewInputError("human file path is not a regular tree path")
+        result: dict[str, tuple[str, str] | None] = {}
+        for path in paths:
+            parts = path.split("/")
+            for index in range(1, len(parts)):
+                ancestor = entries.get("/".join(parts[:index]))
+                if ancestor is not None and (
+                    ancestor.get("type") != "tree" or ancestor.get("mode") != "040000"
+                ):
+                    raise ReviewInputError("human file path is not a regular tree path")
+            selected = entries.get(path)
+            if selected is None:
+                result[path] = None
+            elif selected["type"] != "blob" or selected["mode"] not in {
+                "100644",
+                "100755",
+            }:
+                raise ReviewInputError("human file evidence is not a regular blob")
+            else:
+                result[path] = (selected["sha"], selected["mode"])
         return result
 
     def prepare(

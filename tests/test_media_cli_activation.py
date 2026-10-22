@@ -125,6 +125,9 @@ class SyntheticBrokerProtocol:
     def oidc(self):
         return "synthetic-fixture-oidc"
 
+    def cold_invocation(self):
+        pass
+
     def open(self, request, timeout):
         assert 0 < timeout <= 60
         payload = json.loads(request.data)
@@ -216,6 +219,10 @@ class ProductionMediaBrokerBridge(SyntheticBrokerProtocol):
         reply = self.call("oidc")
         assert reply["status"] == 200
         return reply["result"]
+
+    def cold_invocation(self):
+        reply = self.call("reset_oidc_cache")
+        assert reply["status"] == 200
 
     def open(self, request, timeout):
         assert 0 < timeout <= 60
@@ -420,13 +427,119 @@ class MediaCLIActivationTests(unittest.TestCase):
                     media_count=media_count,
                     text_count=text_count,
                     long_text_paths=media_count == 41,
+                    nested_media=media_count == 41,
+                    oversized_root=media_count == 41,
                 )
+                if media_count == 41:
+                    self.assertEqual(
+                        sum(
+                            RESULT_COMMENT_MARKER in value["body"]
+                            for value in self.state.comments.values()
+                        ),
+                        2,
+                    )
+                original_source = copy.deepcopy(self.state.comments[20])
+                if media_count == 41:
+                    self.broker.cold_invocation()
+                    self.assertEqual(self.activate(), 1, self.last_output)
+                    self.assertEqual(self.approvals(), [])
+                    self.assertEqual(self.receipt_count(), 1)
+                    self.assertEqual(
+                        self.state.check_runs[0]["conclusion"], "action_required"
+                    )
+                    self.assertLessEqual(self.budgets[-1].calls, 60)
+                    self.assertEqual(
+                        self.budgets[-1].calls, self.last_http + self.last_admitted
+                    )
+                    if self.production_broker:
+                        self.assertEqual(self.last_physical, self.budgets[-1].calls)
+                self.broker.cold_invocation()
                 self.assertEqual(self.activate(), 0, self.last_output)
                 self.assert_success()
                 prefix = REQUEST_PREFIX if media_count == 2 else REQUEST_GROUP_PREFIX
                 self.assertEqual(
                     sum(prefix in x["body"] for x in self.state.comments.values()), 1
                 )
+                if media_count == 41:
+                    media_paths = {
+                        item.path
+                        for item in self.state.result.coverage.files
+                        if item.reason == "binary"
+                    }
+                    self.assertEqual(len(media_paths), 41)
+                    self.assertEqual(
+                        {path.rsplit("/", 1)[0] for path in media_paths},
+                        {
+                            "docs/execution/quieter-workspace/after/desktop",
+                            "docs/execution/quieter-workspace/after/mobile",
+                            "docs/execution/quieter-workspace/before/desktop",
+                            "docs/execution/quieter-workspace/before/mobile",
+                            "docs/execution/quieter-workspace/zoom",
+                        },
+                    )
+                    self.assertEqual(len(self.state.tree_requests), 14)
+                    self.assertEqual(
+                        sorted(recursive for _, recursive in self.state.tree_requests),
+                        [False] * 12 + [True] * 2,
+                    )
+                    self.assertTrue(
+                        all(
+                            not recursive
+                            for identifier, recursive in self.state.tree_requests
+                            if identifier in {"1" * 40, "2" * 40}
+                        )
+                    )
+                    self.broker.cold_invocation()
+                    self.assertEqual(self.activate(), 0, self.last_output)
+                    self.assert_success()
+                    self.assertEqual(self.state.comments[20], original_source)
+                    if self.production_broker:
+                        self.assertEqual(self.last_physical, self.budgets[-1].calls)
+
+    def test_nested_recursive_tree_proof_refuses_truncated_or_missing_ancestors(self):
+        for field, value in (
+            ("recursive_tree_truncated", True),
+            ("recursive_tree_missing_ancestor", "after"),
+        ):
+            with self.subTest(field=field):
+                self.state = MediaCLIState(
+                    media_count=41,
+                    text_count=61,
+                    long_text_paths=True,
+                    nested_media=True,
+                    oversized_root=True,
+                )
+                setattr(self.state, field, value)
+                self.assertEqual(self.activate(), 1, self.last_output)
+                self.assertEqual(self.approvals(), [])
+                self.assertEqual(self.receipt_count(), 0)
+                self.assertEqual(
+                    self.state.check_runs[0]["conclusion"], "action_required"
+                )
+                self.assertFalse(
+                    any(
+                        method != "GET" and path != "/graphql"
+                        for method, path, _, _ in self.state.physical
+                    )
+                )
+                self.assertEqual(len(self.state.tree_requests), 7)
+                self.assertEqual(
+                    sorted(recursive for _, recursive in self.state.tree_requests),
+                    [False] * 6 + [True],
+                )
+                self.assertTrue(
+                    all(
+                        not recursive
+                        for identifier, recursive in self.state.tree_requests
+                        if identifier in {"1" * 40, "2" * 40}
+                    )
+                )
+                self.assertLessEqual(self.budgets[-1].calls, 60)
+                self.assertEqual(
+                    self.budgets[-1].calls, self.last_http + self.last_admitted
+                )
+                if self.production_broker:
+                    self.assertLessEqual(self.last_physical, self.budgets[-1].calls)
 
     def test_explicit_retry_is_idempotent(self):
         self.assertEqual(self.activate(), 0, self.last_output)

@@ -24,6 +24,24 @@ import test_media_cli_activation as media_contract  # noqa: E402
 class InstalledMediaCLIActivationTests(media_contract.MediaCLIActivationTests):
     """Ordinary synthetic transport; production broker is qualified separately."""
 
+    def tearDown(self):
+        super().tearDown()
+        if is_disarmed():
+            return
+        prefix = Path(sys.prefix).resolve()
+        for name, module in tuple(sys.modules.items()):
+            if name.split(".", 1)[0] not in {
+                "review_sensei",
+                "review_sensei_github",
+            }:
+                continue
+            location = getattr(module, "__file__", None)
+            if location is not None:
+                self.assertTrue(
+                    Path(location).resolve().is_relative_to(prefix),
+                    f"media journey imported checkout runtime: {name}: {location}",
+                )
+
 
 def setUpModule():
     global _network

@@ -204,3 +204,10 @@ exhausted allowances remain failures; an explicit retry of the original command
 reconciles owned publications and repeats current authorization. No human
 assessment is repeated or invocation budget silently renewed. See
 [ADR 0103](adr/0103-bounded-hosted-media-confirmation.md).
+
+Nested media reads prove the shared directory from complete shallow Git trees
+and then read its bounded recursive subtree. Oversized or truncated evidence
+refuses. If a request and genuine receipt fit but approval readback does not,
+the invocation fails before native approval and preserves both audit records.
+An explicit retry of the original command rechecks current authorization and
+reuses those records; it does not ask for another visual assessment.

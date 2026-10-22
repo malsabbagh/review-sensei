@@ -157,16 +157,58 @@ class State:
                 "tree": {"sha": "1" * 40 if commit == BASE else "2" * 40},
             }
         elif path.startswith("/git/trees/"):
-            tree = path.rsplit("/", 1)[1]
-            blobs = self.old if tree == "1" * 40 else self.new
-            value = {
-                "sha": tree,
-                "truncated": False,
-                "tree": [
-                    {"path": path, "type": "blob", "sha": sha, "mode": mode}
-                    for path, (sha, mode) in blobs.items()
-                ],
-            }
+            tree, _, query = path.rsplit("/", 1)[1].partition("?")
+            info = None
+            for blobs, root, offset in (
+                (self.old, "1" * 40, 10000),
+                (self.new, "2" * 40, 20000),
+            ):
+                ancestors = sorted(
+                    {
+                        "/".join(parts[:index])
+                        for name in blobs
+                        for parts in [name.split("/")]
+                        for index in range(1, len(parts))
+                    }
+                )
+                identifiers = {
+                    "": root,
+                    **{
+                        name: f"{offset + index:040x}"
+                        for index, name in enumerate(ancestors)
+                    },
+                }
+                scope = next(
+                    (name for name, sha in identifiers.items() if sha == tree), None
+                )
+                if scope is not None:
+                    info = (blobs, identifiers, scope)
+                    break
+            if info is None:
+                raise AssertionError(path)
+            blobs, identifiers, scope = info
+            prefix = scope + "/" if scope else ""
+            entries = []
+            for name, (sha, mode) in blobs.items():
+                if name.startswith(prefix):
+                    relative = name[len(prefix) :]
+                    if query == "recursive=1" or "/" not in relative:
+                        entries.append(
+                            {"path": relative, "type": "blob", "sha": sha, "mode": mode}
+                        )
+            for name, sha in identifiers.items():
+                if name and name != scope and name.startswith(prefix):
+                    relative = name[len(prefix) :]
+                    if query == "recursive=1" or "/" not in relative:
+                        entries.append(
+                            {
+                                "path": relative,
+                                "type": "tree",
+                                "sha": sha,
+                                "mode": "040000",
+                            }
+                        )
+            value = {"sha": tree, "truncated": False, "tree": entries}
         else:
             raise AssertionError(path)
         return 200, copy.deepcopy(value)
@@ -772,12 +814,29 @@ class GitHubHumanFileReviewTests(unittest.TestCase):
             "body": "@reviewsensei I reviewed the media files and I approve",
         }
 
-    def many_files(self, count):
-        paths = tuple(f"media-{n:03}.png" for n in range(count))
-        self.state.old = {}
+    def many_files(self, count, nested=False):
+        buckets = (
+            "after/desktop",
+            "after/mobile",
+            "before/desktop",
+            "before/mobile",
+            "zoom",
+        )
+        paths = tuple(
+            f"docs/execution/quieter-workspace/{buckets[n // 10]}/media-{n:03}.png"
+            if nested
+            else f"media-{n:03}.png"
+            for n in range(count)
+        )
+        self.state.old = (
+            {"docs/execution/existing-not-media.txt": ("f" * 40, "100644")}
+            if nested
+            else {}
+        )
         self.state.new = {
             path: (f"{n + 100:040x}", "100644") for n, path in enumerate(paths)
         }
+        self.state.new.update(self.state.old)
         self.state.files = [{"filename": path, "status": "added"} for path in paths]
         self.state.set_result(
             replace(
@@ -790,6 +849,240 @@ class GitHubHumanFileReviewTests(unittest.TestCase):
                 ),
             )
         )
+
+    def test_nested_forty_one_files_use_complete_recursive_tree_proof(self):
+        self.many_files(41, nested=True)
+        self.blanket_source()
+        publisher = self.publisher()
+        identifier, request = publisher.request_review(
+            review_id=10, result=self.state.result
+        )
+        assessment = publisher.approve_reviewed_media(
+            request_comment_id=identifier,
+            source_comment_id=20,
+            result=self.state.result,
+            has_open_review_threads=False,
+        )
+        self.assertTrue(assessment.approval.approved)
+        self.assertEqual(len(assessment.human_reviewed_ids), 41)
+        self.assertEqual(
+            {item.path for item in request.files},
+            {item["filename"] for item in self.state.files},
+        )
+        self.assertEqual(self.budget.calls, len(self.state.calls))
+        self.assertEqual(self.budget.calls, 36)
+        trees = [path for _, path, _ in self.state.calls if "/git/trees/" in path]
+        self.assertEqual(
+            trees,
+            [
+                f"{REPO}/git/trees/{'1' * 40}",
+                f"{REPO}/git/trees/{10000:040x}",
+                f"{REPO}/git/trees/{10001:040x}",
+                f"{REPO}/git/trees/{'2' * 40}",
+                f"{REPO}/git/trees/{20000:040x}",
+                f"{REPO}/git/trees/{20001:040x}",
+                f"{REPO}/git/trees/{20002:040x}?recursive=1",
+            ],
+        )
+        self.assertEqual([len(part.files) for part in request.parts], [32, 9])
+        self.assertEqual(self.state.result.review_status, "partial")
+
+    def test_nested_scoped_read_never_attempts_oversized_whole_repository_tree(self):
+        self.many_files(41, nested=True)
+        self.blanket_source()
+        real = self.state.request
+
+        def root_too_large(method, path, **kwargs):
+            status, value = real(method, path, **kwargs)
+            if path.endswith(f"/git/trees/{'2' * 40}?recursive=1"):
+                value["padding"] = "x" * (512 * 1024)
+            return status, value
+
+        self.state.request = root_too_large
+        publisher = self.publisher()
+        identifier, _ = publisher.request_review(review_id=10, result=self.state.result)
+        outcome = publisher.approve_reviewed_media(
+            request_comment_id=identifier,
+            source_comment_id=20,
+            result=self.state.result,
+            has_open_review_threads=False,
+        )
+        self.assertTrue(outcome.approval.approved)
+        self.assertFalse(
+            any(
+                path.endswith(f"/git/trees/{root}?recursive=1")
+                for _, path, _ in self.state.calls
+                for root in ("1" * 40, "2" * 40)
+            )
+        )
+        self.assertEqual(self.budget.calls, 36)
+
+    def test_nested_shallow_prefix_requires_complete_regular_directory_chain(self):
+        for mutation in (
+            "truncated",
+            "sha",
+            "duplicate",
+            "non-immediate",
+            "symlink",
+            "submodule",
+            "missing",
+        ):
+            with self.subTest(mutation=mutation):
+                self.setUp()
+                self.many_files(41, nested=True)
+                real = self.state.request
+
+                def broken(method, path, **kwargs):
+                    status, value = real(method, path, **kwargs)
+                    if path.endswith(f"/git/trees/{'2' * 40}"):
+                        if mutation == "truncated":
+                            value["truncated"] = True
+                        elif mutation == "sha":
+                            value["sha"] = "f" * 40
+                        elif mutation == "duplicate":
+                            value["tree"].append(dict(value["tree"][0]))
+                        elif mutation == "non-immediate":
+                            value["tree"][0]["path"] = "docs/execution"
+                        elif mutation in {"symlink", "submodule"}:
+                            value["tree"][0].update(
+                                type="blob" if mutation == "symlink" else "commit",
+                                mode="120000" if mutation == "symlink" else "160000",
+                            )
+                        else:
+                            value["tree"] = []
+                    return status, value
+
+                self.state.request = broken
+                publisher = self.publisher()
+                with self.assertRaises(ReviewInputError):
+                    publisher.request_review(review_id=10, result=self.state.result)
+                self.assertEqual(self.posts(), 0)
+                self.assertEqual(self.budget.calls, len(self.state.calls))
+                self.assertFalse(
+                    any("?recursive=1" in path for _, path, _ in self.state.calls)
+                )
+
+    def test_nested_recursive_tree_refuses_incomplete_or_conflicting_proof(self):
+        for mutation in (
+            "truncated",
+            "tree-sha",
+            "list-shape",
+            "entry-shape",
+            "missing-ancestor",
+            "symlink",
+            "ancestor-blob",
+            "duplicate",
+            "traversal",
+            "bad-mode",
+            "bad-type",
+            "missing-leaf",
+            "response-bound",
+        ):
+            with self.subTest(mutation=mutation):
+                self.setUp()
+                self.many_files(41, nested=True)
+                self.blanket_source()
+                real = self.state.request
+
+                def invalid(method, path, **kwargs):
+                    status, value = real(method, path, **kwargs)
+                    if path.endswith("?recursive=1"):
+                        if mutation == "truncated":
+                            value["truncated"] = True
+                        elif mutation == "tree-sha":
+                            value["sha"] = "f" * 40
+                        elif mutation == "list-shape":
+                            value["tree"] = {}
+                        elif mutation == "entry-shape":
+                            value["tree"].append(None)
+                        elif mutation == "missing-ancestor":
+                            value["tree"] = [
+                                x for x in value["tree"] if x["path"] != "after"
+                            ]
+                        elif mutation == "symlink":
+                            value["tree"][0]["mode"] = "120000"
+                        elif mutation == "ancestor-blob":
+                            ancestor = next(
+                                x for x in value["tree"] if x["path"] == "after"
+                            )
+                            ancestor.update(type="blob", mode="100644")
+                        elif mutation == "duplicate":
+                            value["tree"].append(dict(value["tree"][0]))
+                        elif mutation == "traversal":
+                            value["tree"].append(
+                                dict(
+                                    path="docs/../escape.png",
+                                    type="blob",
+                                    mode="100644",
+                                    sha="f" * 40,
+                                )
+                            )
+                        elif mutation == "bad-mode":
+                            value["tree"][0]["mode"] = "100777"
+                        elif mutation == "bad-type":
+                            value["tree"][0]["type"] = "tree"
+                        elif mutation == "missing-leaf":
+                            value["tree"].pop(0)
+                        else:
+                            value["padding"] = "x" * (512 * 1024)
+                    return status, value
+
+                self.state.request = invalid
+                publisher = self.publisher()
+                with self.assertRaises(ReviewInputError):
+                    publisher.request_review(review_id=10, result=self.state.result)
+                self.assertEqual(self.budget.calls, len(self.state.calls))
+                self.assertEqual(self.posts(), 0)
+                self.assertFalse(
+                    any(x["state"] == "APPROVED" for x in self.state.reviews)
+                )
+                self.assertEqual(
+                    len(
+                        [
+                            path
+                            for _, path, _ in self.state.calls
+                            if "?recursive=1" in path
+                        ]
+                    ),
+                    1,
+                )
+
+    def test_nested_absent_old_path_requires_unconflicted_ancestor_proof(self):
+        for conflict in (False, True):
+            with self.subTest(conflict=conflict):
+                self.setUp()
+                self.many_files(41, nested=True)
+                self.state.old = {
+                    "docs" if conflict else "unrelated-link": ("f" * 40, "120000")
+                }
+                publisher = self.publisher()
+                if conflict:
+                    with self.assertRaisesRegex(ReviewInputError, "regular tree path"):
+                        publisher.request_review(review_id=10, result=self.state.result)
+                    self.assertEqual(self.posts(), 0)
+                else:
+                    _, request = publisher.request_review(
+                        review_id=10, result=self.state.result
+                    )
+                    self.assertTrue(all(x.old_blob is None for x in request.files))
+
+    def test_nested_recursive_dispatch_respects_original_exhaustion_without_approval(
+        self,
+    ):
+        self.many_files(41, nested=True)
+        self.blanket_source()
+        publisher = self.publisher()
+        for _ in range(48):
+            self.budget.consume()
+        with self.assertRaises(ReviewInputError):
+            publisher.request_review(review_id=10, result=self.state.result)
+        self.assertEqual(self.budget.calls, 60)
+        self.assertEqual(len(self.state.calls), 12)
+        self.assertEqual(
+            self.state.calls[-1][1], f"{REPO}/git/trees/{20002:040x}?recursive=1"
+        )
+        self.assertEqual(self.posts(), 0)
+        self.assertFalse(any(x["state"] == "APPROVED" for x in self.state.reviews))
 
     def test_compound_request_confirmation_approval_fits_one_original_budget(self):
         for count in (2, 41):

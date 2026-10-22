@@ -388,6 +388,42 @@ class MediaCommandReportingTests(unittest.TestCase):
                     self.assertEqual(broker.capabilities, ["check_publish"])
                     self.assertFalse(calls)
 
+    def test_bounded_finalizer_cannot_exchange_an_unfunded_check_capability(self):
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+
+        broker, http = Mock(), Mock()
+        app = GitHubApplication(
+            broker=broker,
+            http=http,
+            reviewer=object(),
+            learner=object(),
+            replier=object(),
+        )
+        budget = EvidenceReadBudget()
+        result = app._finalize_media_command_result(
+            assessment=SimpleNamespace(
+                approval=SimpleNamespace(approved=True, blockers=())
+            ),
+            review_result=ReviewResult(
+                summary="synthetic reviewed files", comments=(), provider="fixture"
+            ),
+            media_publisher=None,
+            options=GitHubWriteOptions(github_writes=True),
+            effective_policy="auto-approve",
+            oidc_token="synthetic-oidc",
+            repository="owner/repo",
+            head_sha="a" * 40,
+            app_slug="reviewsensei[bot]",
+            evidence_budget=budget,
+        )
+        self.assertTrue(result.applied)
+        self.assertTrue(result.evaluation_failed)
+        self.assertIn("requires its prepaid check capability", result.summary)
+        self.assertEqual(command_exit_code(result), 1)
+        self.assertEqual(budget.calls, 0)
+        self.assertFalse(broker.mock_calls)
+        self.assertFalse(http.mock_calls)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -35,6 +35,9 @@ retain their existing maximum of 32 literal IDs.
 Use one publisher and one original budget throughout each invocation. Reuse
 only exact-commit inventory inside that invocation. Recheck mutable request,
 receipt, source, permission, latest review and full PR state before approval.
+For nested media, prove the common directory through complete shallow Git trees,
+then read only its complete recursive subtree. Keep the 512 KiB response bound;
+do not enumerate an oversized whole repository or infer absence from truncation.
 The host supplies fresh thread, draft/fork/App-author and provider qualification
 facts. Resolved inline findings require the authenticated exact-result finding
 index and positive current thread-resolution evidence; a frozen false flag
@@ -52,6 +55,10 @@ Unknown writes are not automatically retried. A later explicit invocation of
 the original supported command reconciles owned requests, receipts and reviews,
 then performs fresh authorization and finalization. A missing or invalid
 assessment, exhausted budget or unfinished check remains a command failure.
+The 41-file nested profile may retain its request and genuine receipt before
+the approval tail no longer fits. That invocation fails before native approval;
+an explicit retry reconciles those records and can finish under a fresh original
+invocation allowance. It never resets an allowance inside one invocation.
 
 ## Scope
 

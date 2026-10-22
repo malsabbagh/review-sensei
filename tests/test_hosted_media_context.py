@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import unittest
 from dataclasses import replace
@@ -17,6 +18,7 @@ from review_sensei_github import (
 )
 from review_sensei_github.errors import GitHubPublicationError
 from review_sensei_github.hosted_media import prepare_hosted_media_context
+from review_sensei_github.human_file_review import RECEIPT_GROUP_PREFIX
 from review_sensei_github.operation_host import RESULT_COMMENT_MARKER
 from review_sensei_github.publication import (
     IndexedFinding,
@@ -40,6 +42,13 @@ from tests.test_github_human_file_review import ALICE, API, BASE, BOT, HEAD, REP
 
 BODY = "@reviewsensei I reviewed the media files and I approve"
 IDENTITY = SessionIdentity("owner/repo", 2, repository_id=1)
+MEDIA_DIRECTORIES = (
+    "docs/execution/quieter-workspace/after/desktop",
+    "docs/execution/quieter-workspace/after/mobile",
+    "docs/execution/quieter-workspace/before/desktop",
+    "docs/execution/quieter-workspace/before/mobile",
+    "docs/execution/quieter-workspace/zoom",
+)
 
 
 class HostedMediaState(State):
@@ -53,10 +62,38 @@ class HostedMediaState(State):
         blocking_finding=False,
         resolved_inline=False,
         finding_index=True,
+        nested_media=False,
+        oversized_root=False,
     ):
         super().__init__()
-        if media_count != 2 or text_count != 1 or long_text_paths:
-            media = tuple(f"media-{index:03}.png" for index in range(media_count))
+        self.nested_media = nested_media
+        self.tree_requests = []
+        self.recursive_tree_truncated = False
+        self.recursive_tree_missing_ancestor = None
+        self.recursive_tree_entry_overrides = {}
+        self.tree_extra_blobs = {"1" * 40: {}, "2" * 40: {}}
+        if nested_media:
+            self.tree_extra_blobs["1" * 40] = {
+                "docs/execution/existing-not-media.txt": ("3" * 40, "100644")
+            }
+            if oversized_root:
+                self.tree_extra_blobs["2" * 40] = {
+                    "unrelated/"
+                    + "repository-history-"
+                    + "x" * 150
+                    + f"-{index:04d}.txt": (f"{index + 50000:040x}", "100644")
+                    for index in range(2000)
+                }
+        if media_count != 2 or text_count != 1 or long_text_paths or nested_media:
+            media = tuple(
+                (
+                    MEDIA_DIRECTORIES[index % len(MEDIA_DIRECTORIES)] + "/"
+                    if nested_media
+                    else ""
+                )
+                + f"media-{index:03}.png"
+                for index in range(media_count)
+            )
             text_prefix = "text/" + "documentation/" * 25 if long_text_paths else ""
             text = tuple(
                 f"{text_prefix}module-{index:03}.py" for index in range(text_count)
@@ -66,6 +103,13 @@ class HostedMediaState(State):
                 path: (f"{index + 10:040x}", "100644")
                 for index, path in enumerate(media)
             }
+            if nested_media:
+                self.new.update(
+                    {
+                        path: (f"{index + 10000:040x}", "100644")
+                        for index, path in enumerate(text)
+                    }
+                )
             self.files = [
                 {"filename": path, "status": "added"} for path in (*media, *text)
             ]
@@ -215,6 +259,66 @@ class HostedMediaState(State):
         self.physical.clear()
         self.calls.clear()
 
+    def tree_document(self, identifier, *, recursive):
+        """Complete immutable roots and subtrees for the nested repository.
+
+        Both traversal styles describe the same synthetic Git tree. Recursive
+        reads include every directory ancestor and every regular file rather
+        than flattening names into a root that cannot be traversed.
+        """
+        for root, selected_blobs in (("1" * 40, self.old), ("2" * 40, self.new)):
+            blobs = selected_blobs | self.tree_extra_blobs[root]
+            directories = {""}
+            for path in blobs:
+                parts = path.split("/")
+                directories.update(
+                    "/".join(parts[:index]) for index in range(1, len(parts))
+                )
+            identities = {
+                path: hashlib.sha1(f"{root}:{path}".encode()).hexdigest()
+                for path in directories
+                if path
+            } | {"": root}
+            selected = next(
+                (path for path, value in identities.items() if value == identifier),
+                None,
+            )
+            if selected is None:
+                continue
+            prefix = selected + "/" if selected else ""
+            records = [
+                {
+                    "path": path,
+                    "type": "tree",
+                    "mode": "040000",
+                    "sha": identities[path],
+                }
+                for path in sorted(directories)
+                if path
+            ] + [
+                {"path": path, "type": "blob", "mode": mode, "sha": sha}
+                for path, (sha, mode) in sorted(blobs.items())
+            ]
+            descendants = []
+            for entry in records:
+                if not entry["path"].startswith(prefix) or entry["path"] == selected:
+                    continue
+                path = entry["path"][len(prefix) :]
+                if recursive or "/" not in path:
+                    descendants.append(entry | {"path": path})
+            if recursive:
+                descendants = [
+                    entry | self.recursive_tree_entry_overrides.get(entry["path"], {})
+                    for entry in descendants
+                    if entry["path"] != self.recursive_tree_missing_ancestor
+                ]
+            return {
+                "sha": identifier,
+                "truncated": self.recursive_tree_truncated if recursive else False,
+                "tree": descendants,
+            }
+        raise AssertionError("unexpected synthetic immutable tree identity")
+
     def open(self, request, timeout):
         parsed = urlsplit(request.full_url)
         path = unquote(parsed.path)
@@ -253,6 +357,11 @@ class HostedMediaState(State):
                     }
                 }
             )
+        if path.startswith(REPO + "/git/trees/") and self.nested_media:
+            identifier = path.rsplit("/", 1)[1]
+            recursive = parse_qs(parsed.query).get("recursive") == ["1"]
+            self.tree_requests.append((identifier, recursive))
+            return json_response(self.tree_document(identifier, recursive=recursive))
         status, payload = self.request(
             request.method,
             parsed.path + ("?" + parsed.query if parsed.query else ""),
@@ -475,6 +584,143 @@ class HostedMediaContextTests(unittest.TestCase):
         self.assertEqual(self.budget.calls, len(self.state.physical))
         self.assertLessEqual(self.budget.calls, 60)
         self.assertEqual(self.state.result.review_status, "partial")
+
+    def test_nested_41_media_complete_102_file_trees_fit_original_budget(self):
+        self.setup_state(
+            media_count=41,
+            text_count=61,
+            long_text_paths=True,
+            nested_media=True,
+            oversized_root=True,
+        )
+        retained = [
+            item
+            for item in self.state.comments.values()
+            if RESULT_COMMENT_MARKER in item["body"]
+        ]
+        self.assertEqual(len(retained), 2)
+        media = [
+            item.path
+            for item in self.state.result.coverage.files
+            if item.outcome == "unsupported"
+        ]
+        self.assertEqual(len(self.state.files), 102)
+        self.assertEqual(len(self.state.new), 102)
+        self.assertEqual(
+            {path.rsplit("/", 1)[0] for path in media}, set(MEDIA_DIRECTORIES)
+        )
+        self.assertEqual(max(path.count("/") for path in media), 5)
+        root_tree = self.state.tree_document("2" * 40, recursive=True)
+        self.assertGreater(len(canonical_bytes(root_tree)), 512 * 1024)
+        original = self.state.result.to_dict()
+        context = self.context()
+        assessment = context.publisher.approve_reviewed_media(
+            request_comment_id=context.request_comment_id,
+            source_comment_id=20,
+            result=context.result,
+        )
+        self.assertTrue(assessment.approval.approved)
+        self.assertEqual(len(assessment.human_reviewed_ids), 41)
+        prefix = "docs/execution/quieter-workspace"
+        expected_tree_requests = []
+        for root in ("1" * 40, "2" * 40):
+            expected_tree_requests.extend(
+                [(root, False)]
+                + [
+                    (hashlib.sha1(f"{root}:{path}".encode()).hexdigest(), False)
+                    for path in ("docs", "docs/execution")
+                ]
+            )
+        expected_tree_requests.append(
+            (hashlib.sha1(f"{'2' * 40}:{prefix}".encode()).hexdigest(), True)
+        )
+        self.assertEqual(self.state.tree_requests, expected_tree_requests)
+        self.assertEqual(self.budget.calls, len(self.state.physical))
+        self.assertLessEqual(self.budget.calls, 46)
+        self.assertEqual(self.state.result.to_dict(), original)
+        self.assertEqual(self.state.result.review_status, "partial")
+
+    def test_incomplete_or_non_tree_nested_ancestor_refuses_before_request_write(self):
+        for corruption in ("truncated", "missing-ancestor", "non-tree-ancestor"):
+            with self.subTest(corruption=corruption):
+                self.setup_state(media_count=41, text_count=61, nested_media=True)
+                if corruption == "truncated":
+                    self.state.recursive_tree_truncated = True
+                elif corruption == "missing-ancestor":
+                    self.state.recursive_tree_missing_ancestor = "after"
+                else:
+                    self.state.recursive_tree_entry_overrides = {
+                        "after": {"type": "blob", "mode": "100644"}
+                    }
+                with self.assertRaises(ReviewInputError):
+                    self.context()
+                self.assertEqual(self.budget.calls, len(self.state.physical))
+                self.assertFalse(
+                    any(method != "GET" for method, _, _, _ in self.state.physical)
+                )
+                self.assertFalse(
+                    any(item["state"] == "APPROVED" for item in self.state.reviews)
+                )
+
+    def test_nested_41_media_retains_receipt_then_explicit_retry_funds_native_tail(
+        self,
+    ):
+        self.setup_state(
+            media_count=41,
+            text_count=61,
+            long_text_paths=True,
+            nested_media=True,
+            oversized_root=True,
+        )
+        prior_dispatches = 17
+        for _ in range(prior_dispatches):
+            self.budget.consume()
+        context = self.context()
+        with self.assertRaisesRegex(
+            ReviewInputError, "retry the same supported media command"
+        ):
+            context.publisher.approve_reviewed_media(
+                request_comment_id=context.request_comment_id,
+                source_comment_id=20,
+                result=context.result,
+            )
+        self.assertEqual(self.budget.calls, len(self.state.physical) + prior_dispatches)
+        self.assertEqual(self.budget.calls, 60)
+        self.assertFalse(
+            any(item["state"] == "APPROVED" for item in self.state.reviews)
+        )
+        receipts = [
+            item["id"]
+            for item in self.state.comments.values()
+            if RECEIPT_GROUP_PREFIX in item["body"]
+        ]
+        self.assertEqual(len(receipts), 1)
+        # An explicit new invocation reuses the authenticated request and receipt
+        # group instead of repeating their four publication/readback dispatches.
+        self.budget = EvidenceReadBudget()
+        self.state.physical.clear()
+        for _ in range(prior_dispatches):
+            self.budget.consume()
+        retry = self.context()
+        assessment = retry.publisher.approve_reviewed_media(
+            request_comment_id=retry.request_comment_id,
+            source_comment_id=20,
+            result=retry.result,
+        )
+        self.assertTrue(assessment.approval.approved)
+        self.assertEqual(
+            sum(item["state"] == "APPROVED" for item in self.state.reviews), 1
+        )
+        self.assertEqual(
+            [
+                item["id"]
+                for item in self.state.comments.values()
+                if RECEIPT_GROUP_PREFIX in item["body"]
+            ],
+            receipts,
+        )
+        self.assertEqual(self.budget.calls, len(self.state.physical) + prior_dispatches)
+        self.assertLessEqual(self.budget.calls, 60)
 
     def test_only_exact_index_and_positive_live_thread_resolution_clear_inline_finding(
         self,

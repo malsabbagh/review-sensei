@@ -2470,6 +2470,18 @@ class GitHubApplication:
                 summary=base_summary,
             )
 
+        if evidence_budget is not None and not check_prepared:
+            return MaintainerCommandResult(
+                action="approve-media",
+                applied=applied,
+                operator_paused=False,
+                summary=(
+                    f"{base_summary}; gate re-evaluation failed: "
+                    "bounded media finalization requires its prepaid check capability"
+                ),
+                evaluation_failed=True,
+            )
+
         if evidence_budget is not None:
             from .media_budget import MediaCheckFinalizationHttp
 
