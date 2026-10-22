@@ -4,7 +4,7 @@
 - Date: 2026-10-22
 - Decision owner / reviewers: ReviewSensei maintainers
 - Linked GitHub Issue: No separate issue; user-authorized npm integration follow-up
-- Linked PR: Follow-up draft PR pending
+- Linked PR: [#344](https://github.com/malsabbagh/review-sensei/pull/344)
 
 ## Context
 
