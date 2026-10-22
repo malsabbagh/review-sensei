@@ -224,6 +224,8 @@ def _setup(arguments: list[str]) -> int:
     )
     parser.add_argument("--json", action="store_true", dest="as_json")
     parsed = parser.parse_args(arguments)
+    if parsed.write and not parsed.migrate:
+        parser.error("--write requires --migrate")
     try:
         workflow_path = (
             parsed.workflow_file

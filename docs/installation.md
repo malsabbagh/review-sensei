@@ -831,10 +831,11 @@ Choose the action that matches the work:
 An explicit analysis command may optionally name the current head:
 `@reviewsensei rescan commit <sha>`, using its full SHA or a prefix of 7-40
 hexadecimal characters. The legacy lowercase `@sensei` alias and standalone
-`re-scan` / `re scan` spellings remain supported. The entire trimmed body must
-be that command; prefixes such as “please,” trailing prose, quotes, code fences
-and malformed commit selectors do not request fresh analysis. Separators within
-the command cannot contain CR or LF.
+`re-scan` / `re scan` spellings remain supported. The command mention must start
+at index 0, with no leading whitespace. Trailing whitespace, including CR/LF,
+is accepted. Prefixes such as “please,” trailing prose, quotes, code fences and
+malformed commit selectors do not request fresh analysis. Tokens within the
+command must be separated by ASCII spaces or tabs, without CR or LF.
 
 Commands must be newly created, unedited comments of at most 4,096 UTF-8 bytes,
 including surrounding whitespace. Editing a comment does not trigger another

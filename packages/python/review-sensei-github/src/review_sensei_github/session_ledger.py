@@ -2532,13 +2532,14 @@ class GitHubIssueCommentSessionLedger:
         if available is None:
             return None
         stored_digest, payload = available
+        # The retained-parts digest covers the full serialized envelope; the
+        # transaction digest covers only ReviewResult's content projection.
+        if hashlib.sha256(payload).hexdigest() != stored_digest:
+            raise ReviewInputError("retained result payload digest does not match")
         document = json.loads(payload)
         if not isinstance(document, dict):
             raise ReviewInputError("retained result is invalid")
         result = ReviewResult.from_dict(document)
-        if (
-            stored_digest != target_tx.result_sha256
-            or result.content_digest() != target_tx.result_sha256
-        ):
+        if result.content_digest() != target_tx.result_sha256:
             raise ReviewInputError("retained result digest does not match transaction")
         return replace(result, transaction=target_tx)

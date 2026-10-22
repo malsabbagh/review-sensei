@@ -2119,6 +2119,92 @@ class GitHubSetupClientTests(unittest.TestCase):
         self.assertTrue(post_drift.is_current)
         self.assertEqual(post_drift.contract_version, CALLER_CONTRACT_VERSION)
 
+    def test_setup_migration_preserves_secret_comments_and_blank_lines(self):
+        import tempfile
+        from contextlib import redirect_stdout
+
+        from review_sensei_github.cli import main as github_main
+
+        custom_secrets = (
+            "\n"
+            "# Organization-specific credentials\n"
+            "      CUSTOM_ORG_TOKEN: ${{ secrets.CUSTOM_ORG_TOKEN }}\n"
+            "\n"
+            "    # A folded value belongs to this secret\n"
+            "      CUSTOM_FOLDED_TOKEN: >-\n"
+            "        ${{ secrets.CUSTOM_FOLDED_TOKEN }}\n"
+        )
+        sibling_permissions = "    permissions:\n      packages: read\n"
+        stale = _sensei_only_v5_workflow("v5") + custom_secrets + sibling_permissions
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow_path = Path(tmp) / WORKFLOW_PATH
+            workflow_path.parent.mkdir(parents=True)
+            workflow_path.write_text(stale, encoding="utf-8")
+            with redirect_stdout(io.StringIO()):
+                status = github_main(
+                    ["setup", "--migrate", "--write", "--context-root", tmp]
+                )
+            self.assertEqual(status, 0)
+            migrated = workflow_path.read_text(encoding="utf-8")
+        self.assertIn(custom_secrets, migrated)
+        self.assertNotIn(sibling_permissions, migrated)
+        self.assertTrue(inspect_installed_caller_drift(migrated).is_current)
+        repeated, difference = migrate_caller_preserving_customizations(migrated)
+        self.assertEqual(repeated, migrated)
+        self.assertEqual(difference, "")
+
+    def test_setup_write_requires_explicit_migration_and_preserves_file(self):
+        import tempfile
+        from contextlib import redirect_stderr, redirect_stdout
+
+        from review_sensei_github.cli import main as github_main
+
+        stale = _sensei_only_v5_workflow("v5")
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow_path = Path(tmp) / WORKFLOW_PATH
+            workflow_path.parent.mkdir(parents=True)
+            workflow_path.write_text(stale, encoding="utf-8")
+            for flags in (("--diff", "--write"), ("--write",)):
+                with self.subTest(flags=flags):
+                    stderr = io.StringIO()
+                    with (
+                        redirect_stdout(io.StringIO()),
+                        redirect_stderr(stderr),
+                        self.assertRaises(SystemExit) as raised,
+                    ):
+                        github_main(["setup", *flags, "--context-root", tmp])
+                    self.assertEqual(raised.exception.code, 2)
+                    self.assertIn("--write requires --migrate", stderr.getvalue())
+                    self.assertEqual(workflow_path.read_text(encoding="utf-8"), stale)
+
+    def test_setup_migration_refuses_unsupported_secret_declarations(self):
+        import tempfile
+        from contextlib import redirect_stderr, redirect_stdout
+
+        from review_sensei_github.cli import main as github_main
+
+        before_secrets = _sensei_only_v5_workflow("v5").split("    secrets:\n", 1)[0]
+        for declaration in (
+            "    secrets: inherit\n",
+            '    secrets: { CUSTOM_ORG_TOKEN: "${{ secrets.CUSTOM_ORG_TOKEN }}" }\n',
+        ):
+            with (
+                self.subTest(declaration=declaration),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                stale = before_secrets + declaration
+                workflow_path = Path(tmp) / WORKFLOW_PATH
+                workflow_path.parent.mkdir(parents=True)
+                workflow_path.write_text(stale, encoding="utf-8")
+                stderr = io.StringIO()
+                with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                    status = github_main(
+                        ["setup", "--migrate", "--write", "--context-root", tmp]
+                    )
+                self.assertEqual(status, 2)
+                self.assertIn("unsupported secrets declaration", stderr.getvalue())
+                self.assertEqual(workflow_path.read_text(encoding="utf-8"), stale)
+
     def test_multiline_runs_on_shapes_and_setup_cli_modes(self):
         import tempfile
         from contextlib import redirect_stdout
@@ -2135,10 +2221,21 @@ class GitHubSetupClientTests(unittest.TestCase):
             "        - self-hosted\n"
             "        - linux"
         )
+        commented_group_labels_runs_on = (
+            "    runs-on:\n"
+            "      group: ubuntu-runners\n"
+            "\n"
+            "# Preserve labels after a mapping comment\n"
+            "      labels:\n"
+            "    # Preserve the nested sequence too\n"
+            "        - self-hosted\n"
+            "        - linux"
+        )
         expr_runs_on = "    runs-on: ${{ fromJSON(vars.RUNNER_LABELS) }}"
         for custom_runs_on in (
             block_list_runs_on,
             group_labels_runs_on,
+            commented_group_labels_runs_on,
             expr_runs_on,
         ):
             with self.subTest(runs_on=custom_runs_on):
@@ -2213,9 +2310,10 @@ class GitHubSetupClientTests(unittest.TestCase):
             self.assertIn("current", ok_out.getvalue())
 
     def test_inspect_local_trigger_override_and_protection_discrepancies(self):
-        compliant = Path("src/review_sensei/hosting/github/trigger.py").read_text(
-            encoding="utf-8"
-        )
+        repository_root = Path(__file__).resolve().parents[1]
+        compliant = (
+            repository_root / "src/review_sensei/hosting/github/trigger.py"
+        ).read_text(encoding="utf-8")
         res_ok = inspect_local_trigger_override(compliant)
         self.assertTrue(res_ok.is_current)
         self.assertEqual(res_ok.missing_capabilities, ())
@@ -2225,7 +2323,9 @@ class GitHubSetupClientTests(unittest.TestCase):
         self.assertTrue(len(res_stale.missing_capabilities) >= 3)
 
         policy = json.loads(
-            Path(".github/protection-policy.json").read_text(encoding="utf-8")
+            (repository_root / ".github/protection-policy.json").read_text(
+                encoding="utf-8"
+            )
         )
         live_rulesets = [
             {

@@ -3033,31 +3033,63 @@ class TriggerOverrideDriftReport:
         }
 
 
+def _caller_job_setting_bounds(
+    lines: Sequence[str], *, setting: str, allow_inline: bool = False
+) -> tuple[int, int] | None:
+    suffix = r".*" if allow_inline else r"(?:#.*)?"
+    starts = []
+    for index, line in enumerate(lines):
+        if not line.startswith(f"    {setting}:"):
+            continue
+        if not re.fullmatch(rf"    {re.escape(setting)}:[ \t]*{suffix}", line):
+            raise GitHubSetupError(
+                f"unsupported {setting} declaration; refusing lossy migration"
+            )
+        starts.append(index)
+    if len(starts) > 1:
+        raise GitHubSetupError(
+            f"caller workflow defines multiple {setting} blocks; refusing ambiguous migration"
+        )
+    if not starts:
+        return None
+    start = starts[0] + 1
+    end = start
+    while end < len(lines):
+        line = lines[end]
+        if (
+            line.strip()
+            and not line.lstrip().startswith("#")
+            and len(line) - len(line.lstrip(" ")) <= 4
+        ):
+            break
+        end += 1
+    return start, end
+
+
 def _extract_caller_customizations(content: str) -> dict[str, object]:
     customizations: dict[str, object] = {}
-    runs_on_matches = list(
-        re.finditer(
-            r"(?m)^    runs-on:(?:[ \t]*([^\r\n]*))?((?:\r?\n      [^\r\n]*)*)",
-            content,
-        )
+    lines = content.splitlines()
+    runs_on_bounds = _caller_job_setting_bounds(
+        lines, setting="runs-on", allow_inline=True
     )
-    if len(runs_on_matches) > 1:
-        raise GitHubSetupError(
-            "caller workflow defines multiple job runs-on blocks; refusing ambiguous migration"
+    if runs_on_bounds is not None:
+        start, end = runs_on_bounds
+        runs_on_full = "\n".join(lines[start - 1 : end])
+        inline_value = lines[start - 1].split(":", 1)[1].strip()
+        if inline_value.startswith("#"):
+            inline_value = ""
+        block_lines = lines[start:end]
+        block_has_value = any(
+            line.strip() and not line.lstrip().startswith("#") for line in block_lines
         )
-    if runs_on_matches:
-        runs_on_match = runs_on_matches[0]
-        runs_on_full = runs_on_match.group(0)
-        inline_value = (runs_on_match.group(1) or "").strip()
-        block_value = runs_on_match.group(2) or ""
-        if not inline_value and not block_value.strip():
+        if not inline_value and not block_has_value:
             raise GitHubSetupError("caller workflow has an empty runs-on definition")
-        if inline_value and block_value.strip():
+        if inline_value and block_has_value:
             raise GitHubSetupError(
                 "caller workflow mixes inline and block runs-on values"
             )
-        if block_value.strip():
-            for raw_line in block_value.splitlines():
+        if block_has_value:
+            for raw_line in block_lines:
                 stripped = raw_line.strip()
                 if not stripped or stripped.startswith("#"):
                     continue
@@ -3077,7 +3109,11 @@ def _extract_caller_customizations(content: str) -> dict[str, object]:
                         raise GitHubSetupError(
                             f"unsupported nested runs-on customization: {stripped}"
                         )
-            customizations["runs_on"] = block_value.lstrip("\r\n")
+                else:
+                    raise GitHubSetupError(
+                        f"unsupported runs-on block indentation: {stripped}"
+                    )
+            customizations["runs_on"] = "\n".join(block_lines)
             customizations["runs_on_block"] = runs_on_full
         elif runs_on_full != _CANONICAL_RUNS_ON_LINE:
             if inline_value.startswith("{") and not inline_value.startswith("${{"):
@@ -3085,7 +3121,7 @@ def _extract_caller_customizations(content: str) -> dict[str, object]:
                     f"unsupported inline runs-on customization: {inline_value}"
                 )
             customizations["runs_on"] = inline_value
-            customizations["runs_on_block"] = f"    runs-on: {inline_value}"
+            customizations["runs_on_block"] = runs_on_full
     checkout_match = re.search(
         r"(?m)^        uses:[ \t]*actions/checkout@[^\r\n]+$", content
     )
@@ -3093,19 +3129,26 @@ def _extract_caller_customizations(content: str) -> dict[str, object]:
         checkout_line = checkout_match.group(0)
         if checkout_line != _CANONICAL_CHECKOUT_LINE:
             customizations["checkout_uses"] = checkout_line.split("uses:", 1)[1].strip()
-    mapping_block_match = re.search(
-        r"(?ms)^    secrets:\n((?:      [A-Za-z0-9_]+:[^\n]*\n)+)", content
-    )
-    if mapping_block_match is not None:
+    mapping_bounds = _caller_job_setting_bounds(lines, setting="secrets")
+    if mapping_bounds is not None:
         custom_job_lines: list[str] = []
-        for raw_line in mapping_block_match.group(1).splitlines():
+        keep_value = False
+        start, end = mapping_bounds
+        for raw_line in lines[start:end]:
             stripped = raw_line.strip()
-            if ":" not in stripped:
-                continue
-            entry_name = stripped.split(":", 1)[0].strip()
-            if entry_name and entry_name not in _STANDARD_WORKFLOW_BINDINGS:
+            if not stripped or stripped.startswith("#"):
                 custom_job_lines.append(raw_line)
-        if custom_job_lines:
+                continue
+            entry = re.fullmatch(r"      ([A-Za-z0-9_]+):(?:[ \t].*)?", raw_line)
+            if entry is not None:
+                keep_value = entry.group(1) not in _STANDARD_WORKFLOW_BINDINGS
+            elif not raw_line.startswith("        "):
+                raise GitHubSetupError(
+                    "unsupported secrets mapping customization; refusing lossy migration"
+                )
+            if keep_value:
+                custom_job_lines.append(raw_line)
+        if any(line.strip() for line in custom_job_lines):
             customizations["custom_job_lines"] = tuple(custom_job_lines)
     return customizations
 
@@ -3243,12 +3286,14 @@ def migrate_caller_preserving_customizations(
         )
     custom_job_lines = drift.customizations.get("custom_job_lines")
     if isinstance(custom_job_lines, tuple) and custom_job_lines:
-        extra_block = "\n".join(str(line) for line in custom_job_lines) + "\n"
-        target_Lines = target.splitlines(keepends=True)
-        if target_Lines and target_Lines[-1].startswith("      "):
-            target = "".join(target_Lines) + extra_block
-        else:
-            target = target + extra_block
+        target_lines = target.splitlines()
+        target_bounds = _caller_job_setting_bounds(target_lines, setting="secrets")
+        if target_bounds is None:
+            raise GitHubSetupError("current caller has no secrets mapping")
+        target_lines[target_bounds[1] : target_bounds[1]] = [
+            str(line) for line in custom_job_lines
+        ]
+        target = "\n".join(target_lines) + "\n"
 
     diff = "".join(
         difflib.unified_diff(

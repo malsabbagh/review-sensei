@@ -1225,9 +1225,10 @@ boundaries: ASCII case variants qualify, Unicode lookalikes do not.
 Explicit issue-comment reanalysis is a separate whole-body grammar:
 `@reviewsensei rescan`, optionally followed by `commit <7-40 hex SHA>`.
 The canonical case variants and lowercase `@sensei` alias are accepted, as are
-standalone `re-scan` and `re scan` spellings. Unicode whitespace remains valid
-between tokens except CR/LF; outer whitespace is trimmed only for syntax, not
-for the 4096 UTF-8 byte limit. Narratives, quoted/fenced examples, trailing text,
+standalone `re-scan` and `re scan` spellings. The command mention must start at
+index 0; leading whitespace is rejected. Tokens use ASCII spaces or tabs.
+Trailing whitespace, including CR/LF, is accepted and counts toward the 4096
+UTF-8 byte limit. Narratives, quoted/fenced examples, trailing text,
 and malformed selectors remain discussion. A valid selector must match the
 current head; it never silently falls back to another snapshot. The stdlib
 resolver and embedded current-caller fallbacks apply the same grammar and reject
