@@ -2006,12 +2006,6 @@ class ReviewApprovalFinalizer:
                 app_slug=app_slug,
                 state="APPROVED",
                 body=approval_body,
-            ) or self._reviews_have_app_head_state(
-                reviews,
-                head_sha=head_sha,
-                app_slug=app_slug,
-                state="APPROVED",
-                body=marker,
             ):
                 if decision.outcome == "maintainer-coverage-exception":
                     return PublicationResult(

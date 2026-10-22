@@ -2269,7 +2269,21 @@ class FindingOverrideTests(unittest.TestCase):
             ),
             (),
         )
+        from review_sensei_github.publication import approval_marker
+
         reviews[:] = [
+            {
+                "id": 14,
+                "commit_id": head,
+                "state": "APPROVED",
+                "user": {"login": "reviewsensei[bot]", "type": "Bot"},
+                "body": approval_marker(
+                    repository_id=IDENTITY.repository_id,
+                    pull_request=IDENTITY.pull_request,
+                    head_sha=head,
+                    base_sha=base,
+                ),
+            },
             {
                 "id": 15,
                 "commit_id": head,
@@ -2306,7 +2320,7 @@ class FindingOverrideTests(unittest.TestCase):
                         )
                     )
                 ),
-            }
+            },
         ]
         full_enum_accept = app.apply_maintainer_command(
             options=GitHubWriteOptions(github_writes=True, mention_replies=True),
@@ -2330,11 +2344,39 @@ class FindingOverrideTests(unittest.TestCase):
             "approval submitted (maintainer-coverage-exception)",
             full_enum_accept.summary,
         )
+        self.assertEqual(len(reviews), 3)
         self.assertEqual(reviews[-1]["state"], "APPROVED")
+        self.assertIn(
+            "Approved with maintainer coverage exception",
+            reviews[-1]["body"],
+        )
         self.assertIn(
             f"<!-- reviewsensei:approval-exception:v1 outcome=maintainer-coverage-exception result={full_enum_partial_v1.content_digest()} gates=review-partial -->",
             reviews[-1]["body"],
         )
+        # Retry idempotency: once the exact exception receipt exists, re-running verify does not post again
+        retry_verify = app.apply_maintainer_command(
+            options=GitHubWriteOptions(github_writes=True, mention_replies=True),
+            oidc_token="oidc",
+            body="@reviewsensei verify",
+            actor_login="maint-alice",
+            actor_type="User",
+            association="COLLABORATOR",
+            repository=IDENTITY.repository,
+            repository_id=IDENTITY.repository_id,
+            pull_request=IDENTITY.pull_request,
+            head_sha=head,
+            app_slug="reviewsensei[bot]",
+            source_comment_id=812,
+            finding_fingerprints=(),
+            review_result=full_enum_partial_v1,
+            convergence_policy=policy_v1,
+        )
+        self.assertIn(
+            "approval submitted (maintainer-coverage-exception)",
+            retry_verify.summary,
+        )
+        self.assertEqual(len(reviews), 3)
         # A different partial result on the same head is not satisfied by the prior acceptance
         reviews[:] = [
             {
