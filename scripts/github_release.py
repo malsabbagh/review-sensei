@@ -41,6 +41,7 @@ class Context:
     notes: str
 
 
+@docs.release_stage(docs.ReleaseStage.WRITE)
 def write_api(path: str, method: str, payload: dict[str, Any]) -> None:
     """Capture diagnostics: never echo a token or a server-supplied command."""
     subprocess.run(
@@ -60,6 +61,7 @@ def write_api(path: str, method: str, payload: dict[str, Any]) -> None:
     )
 
 
+@docs.release_stage(docs.ReleaseStage.RUN)
 def qualify_run(context: Context, *, publish: bool) -> None:
     run = docs.api(f"actions/runs/{context.run_id}")
     # Both commands execute inside the active Release attempt. A job rerun
@@ -225,6 +227,7 @@ def release_body_inventory(context: Context, inventory: dict[str, str]) -> str:
     )
 
 
+@docs.release_stage(docs.ReleaseStage.LOOKUP)
 def find_release(tag: str) -> dict[str, Any] | None:
     releases = [
         item for item in docs.api_pages("releases") if item.get("tag_name") == tag
@@ -234,6 +237,7 @@ def find_release(tag: str) -> dict[str, Any] | None:
     return releases[0] if releases else None
 
 
+@docs.release_stage(docs.ReleaseStage.IDENTITY)
 def verify_release(release: dict[str, Any], context: Context, body: str) -> None:
     if (
         type(release.get("id")) is not int
@@ -249,6 +253,7 @@ def verify_release(release: dict[str, Any], context: Context, body: str) -> None
         )
 
 
+@docs.release_stage(docs.ReleaseStage.ASSETS)
 def verify_assets(release: dict[str, Any], assets: dict[str, Path]) -> set[str]:
     remote = docs.api_pages(f"releases/{release['id']}/assets")
     seen: set[str] = set()
@@ -323,20 +328,21 @@ def manage(context: Context, assets: dict[str, Path], *, publish: bool) -> None:
         if name not in remaining:
             continue
         try:
-            subprocess.run(
-                [
-                    "gh",
-                    "release",
-                    "upload",
-                    context.tag,
-                    str(assets[name]),
-                    "--repo",
-                    docs.REPOSITORY,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            with docs.release_stage(docs.ReleaseStage.UPLOAD):
+                subprocess.run(
+                    [
+                        "gh",
+                        "release",
+                        "upload",
+                        context.tag,
+                        str(assets[name]),
+                        "--repo",
+                        docs.REPOSITORY,
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
         except subprocess.CalledProcessError:
             pass  # Reconcile only exact uploaded bytes; never --clobber.
         if name in verify_assets(fresh, assets):
@@ -378,9 +384,17 @@ def main() -> int:
     parser.add_argument("--tag", required=True)
     args = parser.parse_args()
     try:
-        context = qualify_source(args.root.resolve(), args.tag)
-        assets = bundle_assets(args.bundle, context)
-        manage(context, assets, publish=args.command == "publish")
+        with docs.release_stage(docs.ReleaseStage.SOURCE):
+            context = qualify_source(args.root.resolve(), args.tag)
+        with docs.release_stage(docs.ReleaseStage.BUNDLE):
+            assets = bundle_assets(args.bundle, context)
+        stage = (
+            docs.ReleaseStage.FINALIZE
+            if args.command == "publish"
+            else docs.ReleaseStage.DRAFT
+        )
+        with docs.release_stage(stage):
+            manage(context, assets, publish=args.command == "publish")
     except (ValueError, OSError, KeyError, subprocess.CalledProcessError):
         print(
             "GitHub release verification or operation failed; publication held",

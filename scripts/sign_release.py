@@ -344,7 +344,7 @@ def sign(
                 )
                 # Reconcile a dropped push response only against this exact
                 # verified object. Never delete, update or force a remote tag.
-                remote_object, remote_source = docs.tag_identity(tag)
+                remote_object, remote_source = docs.signed_python_tag_identity(tag)
                 if (remote_object, remote_source) != (tag_object, sha):
                     raise ValueError(
                         "remote signed tag does not match the exact created object"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 import re
 import subprocess
@@ -24,6 +25,47 @@ CONTEXT = RELEASE.Context("v1.2.3", "a" * 40, "b" * 40, 123, 2, "- Reviewed chan
 
 
 class GitHubReleaseTests(unittest.TestCase):
+    def test_cli_names_failed_phase_without_echoing_the_exception(self):
+        for failing, stage in (
+            ("qualify_source", "signed-source"),
+            ("bundle_assets", "python-bundle-and-attestations"),
+            ("manage", "github-draft"),
+        ):
+            with (
+                self.subTest(failing=failing),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "github_release.py",
+                        "draft",
+                        "--root",
+                        ".",
+                        "--bundle",
+                        ".",
+                        "--tag",
+                        "v1.2.3",
+                    ],
+                ),
+                patch.object(RELEASE, "qualify_source", return_value=CONTEXT),
+                patch.object(RELEASE, "bundle_assets", return_value={}),
+                patch.object(RELEASE, "manage") as write,
+                patch.object(RELEASE, failing, side_effect=ValueError("private-token")),
+                patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
+                self.assertEqual(RELEASE.main(), 1)
+                text = stderr.getvalue()
+                self.assertNotIn("private-token", text)
+                records = [
+                    json.loads(line)
+                    for line in text.splitlines()
+                    if line.startswith("{")
+                ]
+                self.assertEqual(records[-1]["stage"], stage)
+                self.assertEqual(records[-1]["outcome"], "failed")
+                if failing != "manage":
+                    write.assert_not_called()
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

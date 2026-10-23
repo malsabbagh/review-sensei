@@ -13,6 +13,10 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from enum import Enum
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -61,6 +65,76 @@ NPM_CONSUMER_JOBS = {
         "win32-x64",
     )
 }
+
+
+class ReleaseStage(Enum):
+    SOURCE = "signed-source"
+    BUNDLE = "python-bundle-and-attestations"
+    DRAFT = "github-draft"
+    FINALIZE = "github-finalize"
+    RUN = "github-run-prerequisites"
+    LOOKUP = "github-release-lookup"
+    WRITE = "github-release-write"
+    IDENTITY = "github-release-identity"
+    ASSETS = "github-asset-inventory"
+    UPLOAD = "github-asset-upload"
+    NPM = "npm-contract-and-bundle"
+    PYTHON = "matching-python-publication"
+    PYTHON_RUN = "matching-python-run-terminal-success"
+
+
+@contextmanager
+def release_stage(stage: ReleaseStage) -> Iterator[None]:
+    """Fixed labels, bounded numbers and timings; never exception text/output."""
+    if not isinstance(stage, ReleaseStage):
+        raise ValueError("release diagnostic stage must be an internal enum")
+    started = time.monotonic()
+
+    def emit(outcome: str, **fields: Any) -> None:
+        print(
+            json.dumps(
+                {
+                    "event": "release-stage",
+                    "stage": stage.value,
+                    "outcome": outcome,
+                    "elapsed_ms": max(0, round((time.monotonic() - started) * 1000)),
+                    **fields,
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+
+    emit("started")
+    try:
+        yield
+    except Exception as error:
+        fields: dict[str, Any] = {"category": "unexpected"}
+        if isinstance(error, subprocess.CalledProcessError):
+            fields["category"] = "command"
+            if type(error.returncode) is int and -255 <= error.returncode <= 255:
+                fields["exit_code"] = error.returncode
+            # gh's fixed HTTP suffix is the only remote diagnostic admitted.
+            # Do not emit commands, paths, exception messages or response bodies.
+            raw = error.stderr
+            if isinstance(raw, bytes):
+                raw = raw[:4096].decode("utf-8", errors="replace")
+            if isinstance(raw, str):
+                statuses = re.findall(r"\(HTTP ([45][0-9]{2})\)", raw[:4096])
+                if len(statuses) == 1:
+                    fields["http_status"] = int(statuses[0])
+        elif isinstance(error, subprocess.TimeoutExpired):
+            fields["category"] = "timeout"
+        elif isinstance(error, OSError):
+            fields["category"] = "io"
+        elif isinstance(error, (KeyError, TypeError)):
+            fields["category"] = "shape"
+        elif isinstance(error, ValueError):
+            fields["category"] = "validation"
+        emit("failed", **fields)
+        raise
+    else:
+        emit("passed")
 
 
 def version_tuple(tag: str) -> tuple[int, ...]:
@@ -172,6 +246,12 @@ def api_pages(path: str, key: str | None = None) -> list[dict[str, Any]]:
 
 def tag_identity(tag: str) -> tuple[str, str]:
     version_tuple(tag)
+    return signed_python_tag_identity(tag)
+
+
+def signed_python_tag_identity(tag: str) -> tuple[str, str]:
+    """Verify either immutable Python tag, retaining the full signed tag name."""
+    version_tuple(tag.removeprefix("github-"))
     ref = api(f"git/ref/tags/{tag}")
     if ref.get("ref") != f"refs/tags/{tag}" or ref["object"]["type"] != "tag":
         raise ValueError("release docs require an annotated tag")

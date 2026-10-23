@@ -665,6 +665,12 @@ bundle on retry. Public release metadata fits the existing Contents read grant;
 draft visibility and Contents write are unnecessary. See
 [ADR 0100](adr/0100-independent-release-channel-runs.md).
 
+Release helpers expose fixed internal phase/outcome/timing observations without
+raw exceptions or remote response bodies. Bounded numeric command/HTTP statuses
+help separate source, artifact, API and Python-publication holds. These records
+grant no authority and change no publication predicate or recovery behavior;
+see the safe-diagnostics amendment in [ADR 0069](adr/0069-verified-draft-github-release.md).
+
 For future signed releases containing this policy, npm channel completion also
 depends on a separate five-target registry-installed consumer matrix after
 publication. Signed qualifier outputs bind its exact version/source. Fresh

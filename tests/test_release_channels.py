@@ -60,6 +60,31 @@ def environment(channel="python"):
 
 
 class ReleaseChannelTests(unittest.TestCase):
+    def test_pending_or_failed_python_is_named_and_still_blocks_npm(self):
+        for status, conclusion in (("waiting", None), ("completed", "failure")):
+            with (
+                self.subTest(status=status),
+                patch.object(
+                    channels,
+                    "matching_run",
+                    return_value=run(status=status, conclusion=conclusion),
+                ),
+                patch.object(channels.releases, "find_release") as release,
+                patch("sys.stderr", new_callable=io.StringIO) as stderr,
+                self.assertRaisesRegex(ValueError, "must reach terminal success"),
+            ):
+                channels.verify_python_release(
+                    self.root, {"tag": TAG, "source_sha": SOURCE}
+                )
+            release.assert_not_called()
+            records = [json.loads(line) for line in stderr.getvalue().splitlines()]
+            failed = [r for r in records if r["outcome"] == "failed"]
+            self.assertEqual(
+                [r["stage"] for r in failed],
+                ["matching-python-run-terminal-success", "matching-python-publication"],
+            )
+            self.assertTrue(all(r["category"] == "validation" for r in failed))
+
     def test_missing_channel_is_a_usage_error_before_any_release_reads(self):
         for command in ("qualify", "record"):
             with (

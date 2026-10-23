@@ -345,13 +345,24 @@ class SigningOperationTests(unittest.TestCase):
             stack.enter_context(
                 patch.object(SIGN.subprocess, "run", side_effect=subprocess_run)
             )
-            stack.enter_context(
-                patch.object(
-                    SIGN.docs,
-                    "tag_identity",
-                    return_value=("d" * 40 if bad_remote else TAG_OBJECT, SHA),
-                )
-            )
+
+            def remote_api(path):
+                object_sha = "d" * 40 if bad_remote else TAG_OBJECT
+                if path.startswith("git/ref/tags/"):
+                    return {
+                        "ref": "refs/tags/" + path.removeprefix("git/ref/tags/"),
+                        "object": {"type": "tag", "sha": object_sha},
+                    }
+                self.assertEqual(path, "git/tags/" + object_sha)
+                pushed = [args[-1] for args in calls if "push" in args][-1]
+                return {
+                    "tag": pushed.split(":refs/tags/", 1)[1],
+                    "object": {"type": "commit", "sha": SHA},
+                    "verification": {"verified": True},
+                }
+
+            # Exercise the real canonical tag parser, not a mocked identity.
+            stack.enter_context(patch.object(SIGN.docs, "api", side_effect=remote_api))
             if github_version is not None:
                 stack.enter_context(patch.object(SIGN, "publication_gates"))
                 stack.enter_context(patch.object(SIGN.prep, "unused_github"))
