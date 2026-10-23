@@ -73,6 +73,7 @@ from .approval import (
     has_human_adjudication_findings,
     restrict_result_qualification,
 )
+from .approval_progress import ApprovalProgress, build_approval_progress
 from .checks import (
     REVIEW_POLICY_MODES,
     CheckOutcome,
@@ -1317,6 +1318,7 @@ class PublicationResult:
     diagnostic: str | None = None
     shadow: Mapping[str, object] | None = None
     thread_resolution: str | None = None
+    approval_progress: ApprovalProgress | None = None
     # A terminal no-progress handoff exposes the durable identity so an
     # at-least-once caller can distinguish persisted suppression from retryable
     # publication failure.
@@ -2611,20 +2613,27 @@ class ReviewApprovalFinalizer:
             return None
 
         check_failed = False
+        check_result = None
+        check_outcome = (
+            review_check_outcome(
+                policy=reviews_policy,
+                review_status=adjusted.facts.review_status,
+                required_fixes=has_blocking,
+                required_decisions=has_human,
+                coverage_uncertainty_accepted=coverage_accepted,
+            )
+            if check_token
+            else None
+        )
         if check_token:
+            assert check_outcome is not None
             try:
-                ReviewCheckPublisher(http=self.http).complete(
+                check_result = ReviewCheckPublisher(http=self.http).complete(
                     token=check_token,
                     repository=repository,
                     head_sha=head_sha,
                     app_slug=app_slug,
-                    outcome=review_check_outcome(
-                        policy=reviews_policy,
-                        review_status=adjusted.facts.review_status,
-                        required_fixes=has_blocking,
-                        required_decisions=has_human,
-                        coverage_uncertainty_accepted=coverage_accepted,
-                    ),
+                    outcome=check_outcome,
                 )
             except (
                 GitHubHTTPError,
@@ -2645,6 +2654,7 @@ class ReviewApprovalFinalizer:
             reviews=reviews,
             honored_instances=honored_instances,
         )
+        finalization_observed = True
         try:
             finalized = self.finalize(
                 token=token,
@@ -2659,6 +2669,9 @@ class ReviewApprovalFinalizer:
                 _before_approval=final_capacity_guard if compacted else None,
             )
         except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+            # The write may have committed before its response became unreadable.
+            # Preserve the legacy result, while keeping the observation unknown.
+            finalization_observed = False
             finalized = PublicationResult(
                 status="approval_withheld", diagnostic="approval_withheld"
             )
@@ -2669,16 +2682,46 @@ class ReviewApprovalFinalizer:
             if resolution.resolved
             else None
         )
+        progress = build_approval_progress(
+            head_sha=head_sha,
+            result_digest=adjusted.result_digest,
+            source_review_id=chosen["id"],
+            honored_findings=len(honored_instances),
+            pending_human_assessments=len(human.pending) if human is not None else None,
+            body_blocker_remaining=has_blocking,
+            review_status=adjusted.facts.review_status,
+            coverage_blocker=adjusted.facts.coverage_blocker,
+            recorded_qualification=adjusted.facts.qualification,
+            decided_thread_reconciliation="unconfirmed"
+            if resolution.unconfirmed
+            else "confirmed",
+            approval_status=finalized.status if finalization_observed else "unknown",
+            approval_review_id=finalized.review_id,
+            check_attempted=bool(check_token),
+            check_confirmed=not check_failed
+            and check_result is not None
+            and check_result.status in {"created", "updated"}
+            and type(check_result.check_run_id) is int
+            and check_result.check_run_id > 0,
+            check_run_id=check_result.check_run_id
+            if check_result is not None
+            else None,
+            requested_check_conclusion=check_outcome.conclusion
+            if check_outcome is not None
+            else None,
+        )
         if check_failed:
             return PublicationResult(
                 status="gate_reevaluation_failed",
                 diagnostic="check_reconciliation_failed",
                 review_id=finalized.review_id,
                 thread_resolution=thread_res,
+                approval_progress=progress,
             )
         return replace(
             finalized,
             thread_resolution=thread_res,
+            approval_progress=progress,
         )
 
     def _post_head_review(

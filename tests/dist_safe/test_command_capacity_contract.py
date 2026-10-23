@@ -20,6 +20,7 @@ if (
     raise ImportError("command capacity recovery requires the installed GitHub adapter")
 
 sys.path.insert(0, str(_TESTS.parent))
+import test_approval_progress  # noqa: E402
 import test_command_capacity_recovery  # noqa: E402
 import test_disposition_snapshots  # noqa: E402
 import test_publication_future_capacity  # noqa: E402
@@ -56,6 +57,16 @@ class InstalledRemainingCrashAccountingTests(
 
 class InstalledActualRemainingWindowTests(
     test_remaining_progress.ActualProductiveWindowTests
+):
+    pass
+
+
+class InstalledApprovalProgressTests(test_approval_progress.ApprovalProgressTests):
+    pass
+
+
+class InstalledActualFinalizerProgressTests(
+    test_approval_progress.ActualFinalizerProgressTests
 ):
     pass
 

@@ -266,3 +266,9 @@ remaining-coverage route in the recovery guide. Confirm installed version and
 caller applicability before requesting it. Serialize commands for one PR, retain
 the original source events, and verify actual native APPROVED/check/thread
 receipts; do not equate resolving comments, a green workflow or merge with approval.
+
+For finalization diagnostics, inspect the versioned `approval-progress`
+observation when available. Null means unknown, and decided-thread reconciliation
+is not a declaration that every native thread is resolved. Follow the indicated
+next action after reconciling uncertain writes; do not repeat unchanged commands
+or treat a requested check conclusion as a confirmed publication.
