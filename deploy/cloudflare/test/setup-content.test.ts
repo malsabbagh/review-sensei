@@ -255,6 +255,18 @@ describe("setup-v4 public boundary", () => {
     expect(prefilter.test("@revıewsensei review pause")).toBe(false);
   });
 
+  it("keeps remaining-coverage caller intent identical to the canonical installed example", () => {
+    const canonical = readFileSync(new URL("../../../examples/github-actions/review-sensei-review.yml", import.meta.url), "utf8");
+    const grammar = (content: string) => content.split("\n").find((line) => line.includes("remaining = re.compile"))?.trim();
+    expect(grammar(canonical)).toBeDefined();
+    for (const workflow of [buildSetupFiles()[0].content, preparedRecoveryWorkflowTemplate("v5")]) {
+      expect(grammar(workflow)).toBe(grammar(canonical));
+      expect(workflow).toContain("match = remaining.fullmatch(comment_body)");
+      expect(workflow).toContain("review_remaining:");
+      expect(workflow).toContain("Continue exact retained partial coverage with one bounded window");
+    }
+  });
+
   it("does not invent a SHA-based concurrency key; hosted reviews use the reusable workflow", () => {
     const workflow = buildTaggedV4SetupFiles("v5")[0].content;
     expect(workflow).toContain(
