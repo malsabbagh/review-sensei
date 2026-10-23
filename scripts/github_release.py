@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -231,7 +232,7 @@ def release_body_inventory(context: Context, inventory: dict[str, str]) -> str:
 @docs.release_stage(docs.ReleaseStage.LOOKUP)
 def find_release(tag: str) -> dict[str, Any] | None:
     # Every fence uses a unique inventory read, including reads after creation.
-    path = f"releases?release_readback={time.time_ns()}"
+    path = f"releases?release_readback={uuid.uuid4().hex}"
     releases = [item for item in docs.api_pages(path) if item.get("tag_name") == tag]
     if len(releases) > 1:
         raise ValueError("duplicate GitHub releases for the tag")

@@ -292,7 +292,10 @@ class GitHubReleaseTests(unittest.TestCase):
                 return []
             return original(path, key)
 
-        with patch.object(RELEASE.docs, "api_pages", side_effect=cached):
+        with (
+            patch.object(RELEASE.docs, "api_pages", side_effect=cached),
+            patch.object(RELEASE.time, "time_ns", return_value=42),
+        ):
             self.draft()
         self.assertEqual([method for _, method, _ in self.writes], ["POST"])
         self.assertEqual(len(self.remote_assets), 4)
