@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.10 - 2026-10-23
+
 - Fund the required hosted media check capability for a separate cold Worker
   and annotated-tag fallback within the original dispatch allowance. Reduce
   repeated shared-directory tree reads without accepting incomplete or oversized
@@ -22,6 +24,10 @@
   executed test inventories, including preserved incident regressions.
 - Retain the successful major-channel gate's exact uploaded artifact ID across
   installed-lane retries; preserve final signature, source and lane checks.
+
+## review-sensei-github 0.3.10 - 2026-10-23
+
+- Pin `review-sensei==0.8.10`.
 
 ## 0.8.9 - 2026-10-22
 
