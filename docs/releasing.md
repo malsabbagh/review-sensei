@@ -128,10 +128,16 @@ binding and four assets. npm never downloads Python's build artifact.
 Approve npm only after the original Python run reaches terminal success,
 including its result recorder. This intentionally orders npm publication after
 Python finalization and recording. Native/npm
-builds can run concurrently with Python. If npm reaches verification first,
-missing publication or failed/pending finalization holds that publisher; after
-Python recovery succeeds, retry the original npm publisher with its retained
-attested bundle. No polling loop, rebuild or new run is introduced. Python
+builds can run concurrently with Python. A separate read-only readiness job
+polls the exact original Python run for up to 90 minutes before the npm job
+requests protected approval. An owner retry of that Python run can satisfy the
+wait; a mismatched source, duplicate run or access failure holds immediately.
+Timeout holds the original npm run for recovery with its retained attested
+bundle. The protected publisher repeats all existing checks after approval.
+After publishing all six packages, a bounded read-only installation-index check
+requires their exact versions and attested integrity before the clean Linux
+installation and five native consumer lanes. This handles metadata propagation
+without republishing or accepting different bytes. Python
 finalization and qualification still do not wait for npm, and its run can become
 terminal and retry while the npm run is pending or failed.
 

@@ -19,10 +19,20 @@ Publication is durable before these consumer checks finish. A published package
 and a completed npm release channel therefore need separate observable states.
 Verification retries must not require publication again or a replacement tag.
 
+The 0.8.10 release recovery also observed successful exact-version registry
+readback followed by an install-index `ETARGET`. Exact endpoint visibility is
+not evidence that the install packument already lists the version.
+
 ## Decision
 
 Keep the native build matrix, all prepublication smoke tests, six-package
 tarball attestations, protected publisher and exact registry integrity readback.
+After launcher publication, wait with bounded read-only probes for all six
+exact versions in the install packuments, checking each integrity against the
+original attested bundle. Missing versions and transient registry failures can
+retry; conflicting bytes fail immediately. The deadline is ten minutes, with
+at most 30 probe rounds; no probe publishes or modifies the registry. Consumer
+tests start after this readiness check and successful publication.
 Add a separate read-only `verify-published` matrix after `qualify-source` and
 `publish-npm`. Use the signed qualifier outputs for the exact release version
 and source SHA; do not select a floating npm tag or independently supplied source.

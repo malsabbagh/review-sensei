@@ -49,9 +49,13 @@ covers canonical CLI dispatch and shared engine/reassessment/replay seams; it
 does not qualify live endpoints or a full installed/deployed configuration cross
 product. See `docs/validation/provider-common-flow.md` for the exact boundary.
 
-The `Qualify published CLI` workflow runs after `Release` completes. Its gate reads
+The `Qualify published CLI` workflow admits automatic verification only after
+`Release` completes successfully; failed/cancelled release attempts skip its
+jobs. Its gate reads
 the **same run attempt's** PyPI job from the GitHub API, requires its success, and
 reads the exact `workflow_run.head_sha` manifest as data to resolve the version.
+Before installed tests it waits up to 90 minutes for the matching exact-source
+`release-github.yml` publication to succeed, including an original-run retry.
 It does not execute or check out release-event code and does not download upstream
 artifacts. A failed/missing publication gate is an explicit failure and tests are
 not reported as passing. A manually dispatched run requires an exact version.
