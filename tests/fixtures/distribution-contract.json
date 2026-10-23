@@ -105,7 +105,8 @@
         "tests/test_rich250_late_feedback.py",
         "tests/test_media_cli_activation.py",
         "tests/test_hosted_media_context.py",
-        "tests/test_github_human_file_review.py"
+        "tests/test_github_human_file_review.py",
+        "tests/test_remaining_progress.py"
       ],
       "description": "Runs after pip install dist/*.whl from a directory that cannot import checkout src/. Tests load only packaged or generated assets."
     },

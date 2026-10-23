@@ -121,10 +121,12 @@ class WorkExecution(Generic[T]):
     attempted_ids: tuple[str, ...] = ()
     unknown_response_bytes: int = 0
     inflight_response_bytes: int = 0
+    attempt_accounting_complete: bool = False
 
     def __post_init__(self) -> None:
         if (
             not isinstance(self.plan, ReviewWorkPlan)
+            or type(self.attempt_accounting_complete) is not bool
             or not isinstance(self.completed, tuple)
             or not isinstance(self.pending, tuple)
         ):
@@ -158,6 +160,22 @@ class WorkExecution(Generic[T]):
             )
         ):
             raise ReviewInputError("work execution output reservation is invalid")
+
+    @property
+    def clean_bounded_outcome(self) -> bool:
+        """Known no-dispatch call limits only; failed/unknown liability dominates.
+
+        These inputs already survive authenticated work-recovery codecs. A last
+        failed dispatch relabeled as call-limit retains its attempted identity.
+        Deadline diagnostics are deliberately insufficient for this exemption.
+        """
+        return (
+            self.attempt_accounting_complete and self.response_bytes_reserved == 0
+        ) and all(
+            reason in {"provider_call_limit", "provider-call-budget"}
+            and identity not in self.attempted_ids
+            for identity, reason in self.pending
+        )
 
     @property
     def pending_ids(self) -> tuple[str, ...]:
@@ -628,6 +646,7 @@ def execute_plan(
                 tuple(attempted_ids),
                 accounting.unknown_response_bytes,
                 accounting.inflight_response_bytes,
+                prior is None or prior.attempt_accounting_complete,
             )
             counters = tuple(
                 getattr(tracker, name)
@@ -795,4 +814,5 @@ def execute_plan(
         tuple(attempted_ids),
         accounting.unknown_response_bytes,
         accounting.inflight_response_bytes,
+        prior is None or prior.attempt_accounting_complete,
     )

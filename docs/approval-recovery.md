@@ -1,6 +1,7 @@
 # Reaching approval with bounded recovery
 
-Version applicability: the durable decision snapshots and metadata phases below
+Version applicability: the durable decision snapshots, remaining-coverage windows
+and metadata phases below
 are **unreleased**. They are implemented by the approval-liveness repair; do not
 assume a checkout or a green workflow has updated the installed runtime. The
 release receipt must identify both Python versions and the signed `v5` source.
@@ -31,6 +32,43 @@ its byte limit. Never reset a session or discard decisions to get past that limi
 
 Check the resulting diagnostic before choosing another operation. A successful
 workflow can truthfully report that approval is withheld.
+
+## Continue a published partial text review
+
+The following operation is **unreleased**. It requires compatible core/hosted
+packages, the activated reusable runner and an updated caller. Updating `v5`
+alone cannot update an installed caller's embedded trigger parser. Inspect the
+caller with `review-sensei-github setup --help` and its supported migration flow;
+preserve custom runner labels, pins and secrets. The migration diagnostic names
+`remaining_coverage_routing` when this route is missing. Do not run the command
+against an older installed caller and interpret its discussion reply as analysis.
+
+```text
+@reviewsensei review remaining
+@reviewsensei review remaining commit abc1234
+```
+
+Replace `abc1234` with the current PR head or its 7–40-character prefix. Each new
+standalone human comment buys one normal bounded analysis window. It reloads the
+exact published partial artifact and reviews only pending reviewable text while
+retaining prior findings. Check the resulting coverage and publication receipt
+before submitting a new window. A retry of the same source event does not buy
+more inference; recover its retained publication first. Manual workflow dispatch
+may select `review_remaining: true`; do not simultaneously select full rescan.
+
+Productive windows that strictly extend the same finite coverage inventory and
+carry trusted bounded-execution evidence do not consume the failed-attempt
+allowance. They do not reset counters, extend one request's budget, accept any
+finding or grant approval. Failed/unknown dispatches and no-progress windows
+still count. Exhausted genuine failures require the separately authorized
+`review continue` mechanism; requesting remaining work cannot bypass it.
+
+A changed base/head, policy/configuration, provider/model, budget or source
+requires establishing compatible current evidence first. Missing/corrupt parent
+artifacts refuse instead of silently reviewing from the beginning. If a single
+atomic unit cannot fit or progress stops, repair the identified configuration or
+evidence issue. Fresh rescan remains a separate deliberate operation. Text
+coverage does not replace media/human assessment or independent approval gates.
 
 ## Record legitimate maintainer decisions in batches
 

@@ -44,6 +44,18 @@
     },
     "provider": {"type": "string", "minLength": 1},
     "persistence_status": {"const": "capacity-exceeded"},
+    "bounded_work_receipt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "outcome", "execution_identity", "provider_calls", "scope_digest", "inventory_digest", "reviewed_digest"],
+      "properties": {
+        "schema_version": {"const": "1.0"}, "outcome": {"const": "bounded-stop"},
+        "execution_identity": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+        "provider_calls": {"type": "integer", "minimum": 1, "maximum": 64},
+        "scope_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "inventory_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "reviewed_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
     "coverage_only_partial": {"type": "boolean"},
     "work_policy_digest": {
       "type": "string",

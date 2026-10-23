@@ -862,6 +862,11 @@ on:
       recovery_expected_head:
         description: Exact original pull-request head for recovery
         required: false
+      review_remaining:
+        description: Continue exact retained partial coverage with one bounded window
+        required: false
+        default: false
+        type: boolean
       pull_request_number:
         description: Pull request number to review
         required: true
@@ -991,6 +996,7 @@ jobs:
           sha_prefix = re.compile(r"^[a-f0-9]{7,39}$")
           ref = re.compile(r"^[A-Za-z0-9._/-]+$")
           rescan = re.compile(r"\A(?:@sensei|(?ai:@reviewsensei))[ \t]+(?i:re(?:[ \t]|-)?scan)(?:[ \t]+(?ai:commit)[ \t]+(?P<commit>[a-fA-F0-9]{7,40}))?\s*\Z")
+          remaining = re.compile(r"\A(?:@sensei|(?ai:@reviewsensei))[ \t]+(?ai:review)[ \t]+(?ai:remaining)(?:[ \t]+(?ai:commit)[ \t]+(?P<commit>[a-fA-F0-9]{7,40}))?[ \t\r\n]*\Z")
           pull = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
           event_name = sys.argv[2]
           comment_body = sys.argv[3] if len(sys.argv) > 3 else ""
@@ -1054,6 +1060,8 @@ jobs:
               operation = "reply"
           elif event_name == "issue_comment":
               match = rescan.fullmatch(comment_body)
+              if match is None:
+                  match = remaining.fullmatch(comment_body)
               if match is not None:
                   if len(comment_body.encode("utf-8")) > 4096:
                       print("::error::explicit rescan comment exceeds 4096 UTF-8 bytes", file=sys.stderr)

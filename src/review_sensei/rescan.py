@@ -36,10 +36,12 @@ class AuthorizedRescan:
     source: ReviewTransaction
     review_id: int
     ordinary_reservation: str | None = None
+    mode: str = "full"
 
     def __post_init__(self) -> None:
         if (
             self.kind not in KINDS
+            or self.mode not in {"full", "remaining"}
             or type(self.request_id) is not int
             or not 0 < self.request_id < 2**63
             or type(self.review_id) is not int
@@ -69,6 +71,13 @@ def validate_rescan_state(state: object) -> dict[str, object]:
             raise ReviewInputError("rescan source must be published")
         if receipt["request_id"] > state[receipt["kind"]]:
             raise ReviewInputError("rescan receipt exceeds replay watermark")
+        proof = receipt.get("progress")
+        if proof is not None and (
+            receipt.get("mode") != "remaining"
+            or proof["parent_digest"] != source.result_sha256
+            or proof["reviewed_after"] <= proof["reviewed_before"]
+        ):
+            raise ReviewInputError("remaining progress receipt does not match source")
     return json.loads(json.dumps(state))
 
 
@@ -124,8 +133,9 @@ def rescan_reservation(
         or source.pull_request != record.pull_request
     ):
         raise ReviewInputError("explicit rescan source changed")
+    domain = "remaining" if request.mode == "remaining" else "rescan"
     return hashlib.sha256(
-        f"rescan:{record.repository}:{record.pull_request}:{head_sha}:{request.kind}:{request.request_id}".encode()
+        f"{domain}:{record.repository}:{record.pull_request}:{head_sha}:{request.kind}:{request.request_id}".encode()
     ).hexdigest()
 
 
@@ -168,6 +178,7 @@ def consume_rescan_request(
     state["receipts"] = [
         *carried[-(MAX_RESCAN_RECEIPTS - 1) :],
         {
+            **({"mode": "remaining"} if request.mode == "remaining" else {}),
             "kind": request.kind,
             "request_id": request.request_id,
             "review_id": request.review_id,

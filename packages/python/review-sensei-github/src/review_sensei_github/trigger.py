@@ -17,6 +17,9 @@ _GIT_REF = re.compile(r"^[A-Za-z0-9._/-]+$")
 _RESCAN_COMMAND = re.compile(
     r"\A(?:@sensei|(?ai:@reviewsensei))[ \t]+(?i:re(?:[ \t]|-)?scan)(?:[ \t]+(?ai:commit)[ \t]+(?P<commit>[a-fA-F0-9]{7,40}))?\s*\Z"
 )
+_REMAINING_COMMAND = re.compile(
+    r"\A(?:@sensei|(?ai:@reviewsensei))[ \t]+(?ai:review)[ \t]+(?ai:remaining)(?:[ \t]+(?ai:commit)[ \t]+(?P<commit>[a-fA-F0-9]{7,40}))?[ \t\r\n]*\Z"
+)
 _COMMIT_SHA = re.compile(r"\bcommit\s+([a-f0-9]{7,40})\b", re.IGNORECASE)
 _REVIEWSENSEI_MENTION = re.compile(r"(?:^|\s)(?ai:@reviewsensei)(?:$|\s|[.,!?])")
 _SENSEI_COMMAND = re.compile(r"\A(?:@sensei|(?ai:@reviewsensei))(?=[ \t]+)")
@@ -82,6 +85,15 @@ def issue_comment_requests_rescan(body: str) -> bool:
         isinstance(body, str)
         and len(body.encode("utf-8")) <= 4096
         and _RESCAN_COMMAND.fullmatch(body) is not None
+    )
+
+
+def issue_comment_requests_remaining(body: str) -> bool:
+    """Recognize one standalone request to continue authenticated coverage."""
+    return (
+        isinstance(body, str)
+        and len(body.encode("utf-8")) <= 4096
+        and _REMAINING_COMMAND.fullmatch(body) is not None
     )
 
 
@@ -211,7 +223,7 @@ def resolve_issue_comment(
 ) -> TriggerResolution:
     """Resolve a PR issue comment into review or mention-reply operation inputs."""
 
-    rescan = _RESCAN_COMMAND.fullmatch(body)
+    rescan = _RESCAN_COMMAND.fullmatch(body) or _REMAINING_COMMAND.fullmatch(body)
     if rescan is not None:
         if len(body.encode("utf-8")) > 4096:
             raise ValueError("explicit rescan comment exceeds 4096 UTF-8 bytes")
