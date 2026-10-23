@@ -861,6 +861,50 @@ class HostedMediaContextTests(unittest.TestCase):
                 self.assertEqual(self.state.result.to_dict(), original)
                 self.assertEqual(self.budget.calls, len(self.state.physical))
 
+    def test_nonblocking_admission_cannot_clear_an_independent_live_blocking_thread(
+        self,
+    ):
+        for human in (False, True):
+            with self.subTest(resolved_human=human):
+                self.setup_state(
+                    blocking_finding=True,
+                    admitted_blocking=False,
+                    admitted_human=human,
+                    human_resolved=human,
+                )
+                comment = self.state.result.comments[0]
+                # The exact index downgrades the proposal, but a still-current
+                # blocking thread remains an independent live obligation.
+                self.state.threads[0]["comments"]["nodes"][0]["body"] = (
+                    finding_instance_marker(comment)
+                    + "\n"
+                    + finding_marker(
+                        repository_id=1,
+                        pull_request=2,
+                        head_sha=HEAD,
+                        base_sha=BASE,
+                        result=self.state.result,
+                        blocking=True,
+                        fingerprint=finding_lifecycle_for_comment(comment).fingerprint,
+                    )
+                )
+                context = self.context()
+                assessment = context.publisher.approve_reviewed_media(
+                    request_comment_id=context.request_comment_id,
+                    source_comment_id=20,
+                    result=context.result,
+                )
+                self.assertFalse(assessment.current_findings.has_blocking_findings)
+                self.assertFalse(
+                    assessment.current_findings.has_human_adjudication_findings
+                )
+                self.assertFalse(assessment.approval.approved)
+                self.assertIn("unresolved-thread", assessment.approval.blockers)
+                self.assertFalse(
+                    any(item["state"] == "APPROVED" for item in self.state.reviews)
+                )
+                self.assertEqual(self.budget.calls, len(self.state.physical))
+
     def test_optional_admission_does_not_replace_media_receipt_or_text_coverage(self):
         for complete_text in (True, False):
             with self.subTest(complete_text=complete_text):
