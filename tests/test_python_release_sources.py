@@ -171,27 +171,32 @@ class PythonReleaseSourceTests(unittest.TestCase):
             sources.core_equivalence(ENGINE, HOSTED)
 
     def test_metadata_dynamic_external_license_and_custom_setuptools_are_refused(self):
-        original = (ROOT / "pyproject.toml").read_bytes()
-        variants = (
-            original.replace(
-                b'build-backend = "setuptools.build_meta"',
-                b'build-backend = "setuptools.build_meta"\nbackend-path=["outside"]',
-            ),
-            original.replace(b"[project]\n", b'[project]\ndynamic=["version"]\n'),
-            original.replace(b'readme = "README.md"', b'readme = "OUTSIDE.md"'),
-            original.replace(b'license = "MIT"', b'license = {file="OUTSIDE"}'),
-            original + b'\n[tool.setuptools.data-files]\nroot=["outside"]\n',
-        )
-        for index, raw in enumerate(variants):
-            with self.subTest(index=index):
-                item = self.blob("pyproject.toml", raw)
-                self.root["tree"] = [
-                    item if old["path"] == "pyproject.toml" else old
-                    for old in self.root["tree"]
-                ]
-                self.other = {**copy.deepcopy(self.root), "sha": OTHER_TREE}
-                with self.assertRaises(ValueError):
-                    sources.core_equivalence(ENGINE, HOSTED)
+        canonical = (ROOT / "pyproject.toml").read_bytes().replace(b"\r\n", b"\n")
+        for newline in (b"\n", b"\r\n"):
+            original = canonical.replace(b"\n", newline)
+            variants = (
+                original.replace(
+                    b'build-backend = "setuptools.build_meta"',
+                    b'build-backend = "setuptools.build_meta"\nbackend-path=["outside"]',
+                ),
+                original.replace(b"[project]", b'[project]\ndynamic=["version"]'),
+                original.replace(b'readme = "README.md"', b'readme = "OUTSIDE.md"'),
+                original.replace(b'license = "MIT"', b'license = {file="OUTSIDE"}'),
+                original + b'\n[tool.setuptools.data-files]\nroot=["outside"]\n',
+            )
+            for index, raw in enumerate(variants):
+                with self.subTest(newline=newline, index=index):
+                    self.assertNotEqual(
+                        raw, original, "negative fixture must mutate input"
+                    )
+                    item = self.blob("pyproject.toml", raw)
+                    self.root["tree"] = [
+                        item if old["path"] == "pyproject.toml" else old
+                        for old in self.root["tree"]
+                    ]
+                    self.other = {**copy.deepcopy(self.root), "sha": OTHER_TREE}
+                    with self.assertRaises(ValueError):
+                        sources.core_equivalence(ENGINE, HOSTED)
 
     def test_root_inventory_truncation_and_duplicate_paths_are_refused(self):
         self.root["truncated"] = True
