@@ -3090,6 +3090,19 @@ class GitHubApplication:
             )
             return replace(result, summary=result.summary + suffix)
         diagnostic = getattr(publication, "diagnostic", None)
+        if diagnostic == "review_incomplete":
+            return replace(
+                result,
+                summary=(
+                    result.summary
+                    + "; approval withheld (review_incomplete); review evidence "
+                    "is still incomplete: verify rechecks finding decisions, "
+                    "not mixed media coverage. For unsupported-file coverage, "
+                    "use the original media confirmation to validate the "
+                    "current head/base and retained receipts. Other AI review "
+                    "gaps require review continuation."
+                ),
+            )
         if diagnostic:
             return replace(
                 result, summary=result.summary + f"; approval withheld ({diagnostic})"

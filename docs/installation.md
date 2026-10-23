@@ -824,7 +824,7 @@ Choose the action that matches the work:
 | Goal | What to post | Effect |
 | --- | --- | --- |
 | Discuss a finding or explain a fix | Reply in the finding thread with `@reviewsensei` and your question or exact fix commit; name the RS-id in a PR comment for a body-only finding | May generate an AI reply and verify the claim against the current head; does not request fresh review analysis or grant approval |
-| Recheck approval | A new standalone PR comment: `@reviewsensei verify` | Re-evaluates existing evidence without a new AI review; does not complete partial analysis |
+| Recheck approval | A new standalone PR comment: `@reviewsensei verify` | Rechecks finding decisions without a new AI review; partial AI analysis still withholds. For retained media confirmations, use the original media command's supported replay to evaluate mixed coverage. |
 | Request fresh analysis of an incomplete review | A new standalone PR comment: `@reviewsensei rescan` | Requests a new AI review within existing budgets and authority checks; does not replace required human decisions |
 | Record a maintainer assessment | Use the exact media-approval or finding-override command printed on the review | Records the authorized person's assessment for the current commit; an engineering explanation alone is not that assessment |
 
