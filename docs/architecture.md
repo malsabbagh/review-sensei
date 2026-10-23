@@ -934,6 +934,16 @@ marker/idempotency boundary are shared, so approval adds no credential or
 persistence boundary; ReviewSensei never calls a merge endpoint or enables
 auto-merge.
 
+Recorded-decision reconciliation discovers the complete bounded native thread
+inventory before changing threads. Matching already-resolved roots are observed
+without repeating mutation fences, so a resolved prefix cannot consume every
+subsequent verification window. Unresolved-thread writes still recheck the root,
+decision and live PR immediately before mutation. Final approval independently
+rechecks current eligibility and thread state; resolved observations do not grant
+coverage, waive missing decisions, or authorize stale source. Request and time
+limits remain unchanged, and a later authenticated verification can continue
+from durable decisions and the current native resolution state.
+
 [ADR 0059](adr/0059-dependency-review-and-partial-publication.md) permits
 validated partial analysis to cross the identity-bound checkpoint/publication
 boundary only with complete enumeration and evidence of reviewed work. The

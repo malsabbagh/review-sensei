@@ -349,9 +349,10 @@ class FindingThreadResolver:
             identity = node["id"] if old else instance
             assert isinstance(identity, str)
             if skip_resolved and node["isResolved"]:
-                # No write is needed. The opted-in caller has independently
-                # proven the complete native report and owns final approval
-                # fences; this is an observation, never a new decision grant.
+                # Complete discovery above authenticated this root's App and
+                # exact scope. No write is needed. The opted-in caller still
+                # owns fresh final approval fences; this observation grants
+                # no new decision and never resolves an unvisited thread.
                 resolved.append(identity)
                 continue
             try:

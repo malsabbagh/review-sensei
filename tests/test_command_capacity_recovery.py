@@ -59,15 +59,25 @@ IDENTITY = SessionIdentity("owner/repo", 1, 1)
 class CommandCapacityState:
     """Actual rendered legacy root and synthetic external owned GitHub records."""
 
-    def __init__(self, *, complete=False, schema="3", compact=False):
+    def __init__(
+        self,
+        *,
+        complete=False,
+        schema="3",
+        compact=False,
+        inline_range=(8, 21),
+        padded=True,
+    ):
         comments = []
         for number in range(56):
             human = number < (20 if schema in {"1", "2.0"} else 21)
             comments.append(
                 ReviewComment(
                     path=f"src/file{number}.py",
-                    line=1 if 8 <= number < 21 else None,
-                    side="RIGHT" if 8 <= number < 21 else "FILE",
+                    line=1 if inline_range[0] <= number < inline_range[1] else None,
+                    side="RIGHT"
+                    if inline_range[0] <= number < inline_range[1]
+                    else "FILE",
                     body=(
                         f"Concern {number}: verify the complete original evidence before allowing this operation to progress because an interrupted response can otherwise hide the unresolved condition in this exact file.\n\n"
                         + (
@@ -216,11 +226,18 @@ class CommandCapacityState:
             return "\n\n".join((summary, marker, index, eligibility_marker))
 
         initial = render(assembled)
-        self.unknown = "\n\nOpaque historical prose: " + "x" * max(
-            0, 64971 - len(initial.encode()) - len("\n\nOpaque historical prose: ")
+        self.unknown = (
+            "\n\nOpaque historical prose: "
+            + "x"
+            * max(
+                0, 64971 - len(initial.encode()) - len("\n\nOpaque historical prose: ")
+            )
+            if padded
+            else ""
         )
         self.body = initial + self.unknown
-        assert len(self.body.encode()) == 64971
+        if padded:
+            assert len(self.body.encode()) == 64971
         assert self.eligibility.to_dict()["schema_version"] == schema
         self.reviews = [
             {
@@ -432,6 +449,103 @@ class CommandCapacityState:
 
 
 class CommandCapacityRecoveryTests(unittest.TestCase):
+    def test_unpadded_twenty_thread_retries_finish_without_revisiting_resolved_prefix(
+        self,
+    ):
+        state = CommandCapacityState(
+            complete=True, schema="1", inline_range=(0, 20), padded=False
+        )
+        state.resolved_threads.clear()
+        progress = []
+        with tempfile.TemporaryDirectory() as directory:
+            dispositions = state.record(directory)
+            for _ in range(5):
+                outcome, budget, calls = state.verify(dispositions)
+                progress.append(len(state.resolved_threads))
+                self.assertEqual(budget.calls, len(calls))
+                self.assertLessEqual(budget.calls, 60)
+                if outcome.status == "approved":
+                    break
+            self.assertEqual(outcome.status, "approved", progress)
+            self.assertEqual(len(state.resolved_threads), 20)
+            replay, budget, calls = state.verify(dispositions)
+        self.assertEqual(replay.status, "already_approved")
+        self.assertLessEqual(budget.calls, 60)
+        self.assertFalse(
+            any(m == "GET" and "/pulls/comments/" in p for m, p, _ in calls)
+        )
+        self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 1)
+        self.assertEqual(state.checks[-1]["conclusion"], "success")
+
+    def test_thread_progress_does_not_clear_missing_coverage_or_stale_head(self):
+        state = CommandCapacityState(schema="1", inline_range=(0, 20), padded=False)
+        state.resolved_threads.clear()
+        with tempfile.TemporaryDirectory() as directory:
+            dispositions = state.record(directory)
+            for _ in range(5):
+                outcome, budget, _ = state.verify(dispositions)
+                self.assertLessEqual(budget.calls, 60)
+                if len(state.resolved_threads) == 20:
+                    break
+            self.assertEqual(len(state.resolved_threads), 20)
+            self.assertEqual(outcome.diagnostic, "review_incomplete")
+            self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+            state.head = "c" * 40
+            stale, _, _ = state.verify(dispositions)
+        self.assertEqual(stale.status, "skipped_stale_head")
+        self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+
+    def test_reopened_thread_reenters_cleanup_without_another_approval(self):
+        state = CommandCapacityState(
+            complete=True, schema="1", inline_range=(0, 20), padded=False
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            dispositions = state.record(directory)
+            first, _, _ = state.verify(dispositions)
+            self.assertEqual(first.status, "approved")
+            state.resolved_threads.remove(state.inline[-1]["id"])
+            replay, budget, _ = state.verify(dispositions)
+        self.assertEqual(len(state.resolved_threads), 20)
+        self.assertEqual(replay.status, "already_approved")
+        self.assertLessEqual(budget.calls, 60)
+        self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 1)
+
+    def test_resolved_observations_do_not_hide_base_or_eligibility_drift(self):
+        for fault in ("base", "eligibility"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                state = CommandCapacityState(
+                    complete=True, schema="1", inline_range=(0, 20), padded=False
+                )
+
+                def change_after_discovery(state, method, path, data):
+                    if (
+                        path == "/graphql"
+                        and data.get("operationName") == "FindingResolutionThreads"
+                    ):
+                        if fault == "base":
+                            state.base = "d" * 40
+                        else:
+                            current = approval_eligibility_from_body(
+                                state.reviews[0]["body"]
+                            )
+                            changed = replace(
+                                current,
+                                facts=replace(
+                                    current.facts, qualification="unverified"
+                                ),
+                            )
+                            state.reviews[0]["body"] = state.reviews[0]["body"].replace(
+                                approval_eligibility_marker(current),
+                                approval_eligibility_marker(changed),
+                            )
+                        state.hook = None
+
+                state.hook = change_after_discovery
+                outcome, budget, _ = state.verify(state.record(directory))
+                self.assertNotIn(outcome.status, {"approved", "already_approved"})
+                self.assertLessEqual(budget.calls, 60)
+                self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+
     def test_unreadable_expected_native_actor_holds_installed_recovery(self):
         for discriminator in ({}, {"__typename": None}, {"__typename": False}):
             with (
