@@ -3131,6 +3131,20 @@ class GitHubApplication:
                 replace(command_result, summary=command_result.summary + suffix),
                 publication,
             )
+        progress = getattr(publication, "approval_progress", None)
+        if (
+            getattr(progress, "approval_state", None) == "not-observed"
+            and getattr(publication, "diagnostic", None) == "approval_withheld"
+        ):
+            return render_command_progress(
+                replace(
+                    command_result,
+                    summary=command_result.summary
+                    + "; approval outcome unconfirmed; reconcile the existing native "
+                    "review, then comment `@reviewsensei verify` to retry",
+                ),
+                publication,
+            )
         diagnostic = getattr(publication, "diagnostic", None)
         if diagnostic == "review_incomplete":
             return render_command_progress(

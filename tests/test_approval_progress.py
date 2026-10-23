@@ -155,6 +155,37 @@ class ActualFinalizerProgressTests(unittest.TestCase):
         self.assertEqual(outcome.status, "approval_withheld")
         self.assertEqual(outcome.approval_progress.approval_state, "not-observed")
         self.assertIsNone(outcome.approval_progress.approval_review_id)
+        from review_sensei_github import GitHubApplication
+
+        app = GitHubApplication(
+            broker=SimpleNamespace(exchange=lambda *args, **kwargs: "synthetic"),
+            http=None,
+            reviewer=SimpleNamespace(
+                finalizer=SimpleNamespace(
+                    refinalize_with_dispositions=lambda **kwargs: outcome
+                )
+            ),
+            learner=SimpleNamespace(),
+            replier=SimpleNamespace(),
+        )
+        command = app._refinalize_command(
+            MaintainerCommandResult(
+                action="verify",
+                applied=True,
+                operator_paused=False,
+                summary="Decisions loaded",
+            ),
+            oidc_token="synthetic",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha="b" * 40,
+            app_slug="reviewsensei[bot]",
+            actor="alice",
+            record=SimpleNamespace(),
+        )
+        self.assertIn("approval outcome unconfirmed", command.summary)
+        self.assertNotIn("approval withheld", command.summary)
         self.assertEqual(replay.approval_progress.approval_state, "observed-existing")
         self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 1)
 
