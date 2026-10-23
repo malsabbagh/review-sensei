@@ -81,6 +81,11 @@ class ReleaseStage(Enum):
     NPM = "npm-contract-and-bundle"
     PYTHON = "matching-python-publication"
     PYTHON_RUN = "matching-python-run-terminal-success"
+    CHANNEL_EVENT = "channel-record-event"
+    CHANNEL_RUN = "channel-record-run"
+    CHANNEL_JOBS = "channel-record-jobs"
+    CHANNEL_ARTIFACTS = "channel-record-artifacts"
+    CHANNEL_WRITE = "channel-record-write"
 
 
 @contextmanager
