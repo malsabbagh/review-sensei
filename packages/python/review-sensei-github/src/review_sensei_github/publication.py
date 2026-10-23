@@ -2644,7 +2644,6 @@ class ReviewApprovalFinalizer:
             index=index,
             reviews=reviews,
             honored_instances=honored_instances,
-            _skip_resolved=compacted,
         )
         try:
             finalized = self.finalize(
@@ -2886,9 +2885,15 @@ class ReviewApprovalFinalizer:
         index: FindingIndex | None,
         reviews: Sequence[Any],
         honored_instances: frozenset[str] = frozenset(),
-        _skip_resolved: bool = False,
+        _skip_resolved: bool = True,
     ):
-        """Retry durable override, assessment and addressed decisions without AI."""
+        """Retry durable decisions, observing resolved threads without new writes.
+
+        Complete discovery still authenticates each root's App and exact scope.
+        Resolved observations need no mutation fence; fresh authority fences
+        remain mandatory for unresolved mutations and final approval. Repeating
+        those reads for the resolved prefix can starve every later retry.
+        """
         from .thread_resolution import (
             FindingThreadResolver,
             ThreadResolutionResult,
