@@ -1,0 +1,181 @@
+"""Prove recognized core build inputs unchanged when only hosted source moves."""
+
+from __future__ import annotations
+
+import ast
+import base64
+import hashlib
+import re
+import tomllib
+
+import release_docs as docs
+
+INPUTS = (
+    "src",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "MANIFEST.in",
+    "README.md",
+    "LICENSE",
+    ".gitattributes",
+)
+REQUIRED = {"src", "pyproject.toml", "MANIFEST.in", "README.md", "LICENSE"}
+SETUPTOOLS = {
+    "packages": {"find": {"where": ["src"]}},
+    "package-dir": {"": "src"},
+    "package-data": {
+        "review_sensei": [
+            "default_categories/*.json",
+            "default_stages/*.json",
+            "schemas/*.json",
+        ]
+    },
+}
+
+
+def root_inputs(source: str) -> dict:
+    if not docs.SHA.fullmatch(source):
+        raise ValueError("core equivalence needs exact immutable sources")
+    commit = docs.api(f"git/commits/{source}")
+    tree = commit.get("tree", {}).get("sha")
+    if (
+        commit.get("sha") != source
+        or not isinstance(tree, str)
+        or not docs.SHA.fullmatch(tree)
+    ):
+        raise ValueError("core source commit/tree identity is unavailable")
+    inventory = docs.api(f"git/trees/{tree}")
+    entries = inventory.get("tree")
+    if (
+        inventory.get("sha") != tree
+        or inventory.get("truncated") is not False
+        or not isinstance(entries, list)
+        or not 0 < len(entries) <= 4096
+    ):
+        raise ValueError("core root tree inventory is incomplete")
+    indexed = {}
+    for item in entries:
+        path = item.get("path")
+        if (
+            not isinstance(path, str)
+            or not path
+            or "/" in path
+            or "\\" in path
+            or path in indexed
+        ):
+            raise ValueError("core root tree entry is invalid or duplicate")
+        indexed[path] = item
+    selected = {}
+    for name in INPUTS:
+        item = indexed.get(name)
+        if item is None:
+            if name in REQUIRED:
+                raise ValueError("required core build input is missing")
+            selected[name] = None
+            continue
+        kind, mode, digest = item.get("type"), item.get("mode"), item.get("sha")
+        if (
+            not isinstance(digest, str)
+            or not docs.SHA.fullmatch(digest)
+            or (name == "src" and (kind, mode) != ("tree", "040000"))
+            or (name != "src" and (kind != "blob" or mode not in {"100644", "100755"}))
+        ):
+            raise ValueError("core build input is not a regular file/tree")
+        selected[name] = {"type": kind, "mode": mode, "sha": digest}
+    return selected
+
+
+def source_blob(digest: str) -> bytes:
+    value = docs.api(f"git/blobs/{digest}")
+    if (
+        value.get("sha") != digest
+        or value.get("encoding") != "base64"
+        or type(value.get("size")) is not int
+        or not 0 < value["size"] <= 256 * 1024
+    ):
+        raise ValueError("core build recipe blob is unavailable or oversized")
+    raw = base64.b64decode("".join(value["content"].split()), validate=True)
+    identity = hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
+    if len(raw) != value["size"] or identity != digest:
+        raise ValueError("core build recipe bytes differ from the Git object")
+    return raw
+
+
+def recognized_recipe(inputs: dict) -> None:
+    project = tomllib.loads(source_blob(inputs["pyproject.toml"]["sha"]).decode())
+    if project.get("build-system") != {
+        "requires": ["setuptools>=77.0", "jsonschema>=4.18,<5"],
+        "build-backend": "setuptools.build_meta",
+    }:
+        raise ValueError("cross-source core reuse needs the recognized build backend")
+    metadata = project.get("project", {})
+    if (
+        metadata.get("dynamic") not in (None, [])
+        or metadata.get("readme") != "README.md"
+        or not isinstance(metadata.get("license"), str)
+        or metadata.get("license-files") != ["LICENSE"]
+        or project.get("tool", {}).get("setuptools") != SETUPTOOLS
+        or inputs["setup.cfg"] is not None
+    ):
+        raise ValueError("cross-source core metadata/build graph is unrecognized")
+    if inputs["setup.py"] is not None:
+        body = ast.parse(source_blob(inputs["setup.py"]["sha"])).body
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            body = body[1:]
+        expected = ast.parse("from setuptools import setup\nsetup()\n").body
+        if [ast.dump(node) for node in body] != [ast.dump(node) for node in expected]:
+            raise ValueError("cross-source core setup shim contains custom behavior")
+
+
+def regular_source_tree(digest: str) -> None:
+    inventory = docs.api(f"git/trees/{digest}?recursive=1")
+    entries = inventory.get("tree")
+    if (
+        inventory.get("sha") != digest
+        or inventory.get("truncated") is not False
+        or not isinstance(entries, list)
+        or not 0 < len(entries) <= 10000
+    ):
+        raise ValueError("core source tree inventory is incomplete")
+    seen = set()
+    for item in entries:
+        path = item.get("path")
+        if (
+            not isinstance(path, str)
+            or not path
+            or path.startswith("/")
+            or "\\" in path
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            or path in seen
+            or not isinstance(item.get("sha"), str)
+            or not docs.SHA.fullmatch(item["sha"])
+            or (item.get("type"), item.get("mode"))
+            not in {("tree", "040000"), ("blob", "100644"), ("blob", "100755")}
+        ):
+            raise ValueError("core source tree has unsupported or duplicate entries")
+        seen.add(path)
+    if "review_sensei/__init__.py" not in seen:
+        raise ValueError("core source package is missing")
+
+
+def core_equivalence(engine_source: str, workflow_source: str) -> dict:
+    if not all(
+        isinstance(value, str) and re.fullmatch(r"[a-f0-9]{40}", value)
+        for value in (engine_source, workflow_source)
+    ):
+        raise ValueError("core equivalence needs exact immutable sources")
+    result = {"engine_source": engine_source, "workflow_source": workflow_source}
+    if engine_source == workflow_source:
+        return {**result, "mode": "same-source"}
+    engine, workflow = root_inputs(engine_source), root_inputs(workflow_source)
+    if engine != workflow:
+        raise ValueError("workflow source changes published core build inputs")
+    recognized_recipe(engine)
+    regular_source_tree(engine["src"]["sha"])
+    return {**result, "mode": "recognized-build-input-equivalence", "inputs": engine}

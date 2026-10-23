@@ -669,8 +669,10 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/published-cli.yml").read_text()
         gate = workflow.split("  publication:\n", 1)[1].split("\n  qualify:", 1)[0]
         self.assertIn("github.event.workflow_run.conclusion == 'success'", gate)
-        self.assertIn("wait_for_publication.py --workflow release-github.yml", gate)
-        self.assertIn('"github-v$HOSTED_VERSION" --source "$RELEASE_SOURCE"', gate)
+        self.assertIn("workflows: [Release review-sensei-github]", workflow)
+        self.assertIn("wait_for_publication.py --workflow release.yml", gate)
+        self.assertIn('"v$CORE_VERSION" --source "$CORE_SOURCE"', gate)
+        self.assertIn("--recheck-report", gate)
         self.assertIn("needs: publication", workflow.split("  qualify:\n", 1)[1])
         self.assertNotIn("ref: ${{ github.event.workflow_run.head_sha", gate)
 

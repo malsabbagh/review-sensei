@@ -1206,6 +1206,41 @@ class FullGateTests(unittest.TestCase):
                 )
         self.wheel.assert_not_called()
 
+    def test_hosted_only_channel_keeps_core_assets_on_the_actual_core_source(self):
+        core_source = "d" * 40
+        original_binding = {**binding(), "source": core_source}
+        original_release = {
+            **release(),
+            "target_commitish": core_source,
+            "body": "notes\n<!-- reviewsensei-release:"
+            + json.dumps(original_binding)
+            + " -->",
+        }
+        self.run["head_sha"] = core_source
+        self.publication["projects"]["review-sensei"]["source"] = core_source
+
+        def read(path):
+            return (
+                original_release
+                if path == "releases/tags/v" + VERSION
+                else self.api(path)
+            )
+
+        with (
+            patch.object(
+                gate.docs, "tag_identity", return_value=(IMMUTABLE, core_source)
+            ),
+            patch.object(gate.docs, "api", side_effect=read),
+        ):
+            receipt = gate.qualify(self.selected, self.root / "hosted-only")
+        self.assertEqual(receipt["source_sha"], SOURCE)
+        self.assertEqual(receipt["release_source_sha"], core_source)
+        self.assertEqual(receipt["release_binding"]["source"], core_source)
+        self.assertEqual(self.wheel.call_args.args[1]["source"], core_source)
+        self.pypi.assert_called_once_with(
+            SOURCE, VERSION, receipt["github_version"], self.root / "hosted-only/pypi"
+        )
+
     def test_mixed_manifest_or_prerelease_refuses_before_wheel(self):
         for raw in [
             b'[project]\nname="review-sensei"\nversion="0.6.20"\n',

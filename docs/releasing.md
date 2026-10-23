@@ -78,6 +78,17 @@ separately; never move a tag to opt it into the new process.
 
 ## PyPI publication and v5 promotion
 
+For a hosted-only change, select the current engine version and a new hosted
+version. Preparation emits an empty `engine_tag` and only the hosted tag;
+core/npm manifests stay unchanged and no npm tag push occurs. Qualification
+binds core and hosted artifacts to their own signed sources. The hosted source
+equals the workflow source; reusing an older core requires the conservative
+recognized build-input proof in [ADR 0105](adr/0105-hosted-only-python-release-sources.md).
+Changed core inputs or an unrecognized build graph hold this path rather than
+silently substituting unpublished fallback code. Recover a failed later job
+with its existing prepared receipt/original run; do not prepare another version
+solely to avoid a retry or source mismatch.
+
 The next-release policy in [ADR 0095](adr/0095-pypi-qualified-major-channel.md)
 requires verified publication of both `review-sensei` and `review-sensei-github`
 before v5 qualifies. It does not change the active 0.8.4 / 0.3.4 release or its

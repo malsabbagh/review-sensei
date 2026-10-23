@@ -63,7 +63,11 @@ attestation signatures and transparency through pinned pypi-attestations and
 Sigstore tools in a credential-free child process. Bind the signed claims to
 repository, workflow, immutable ref, source digest, GitHub-hosted runner,
 publication run/attempt and protected environment. Require both signed Python
-tags to resolve to the selected source and the hosted wheel to pin the engine.
+tags to bind their own publication sources and the hosted wheel to pin the engine.
+The hosted source equals the selected workflow source. A reused older engine
+source requires the recognized core build-input equivalence proof in
+[ADR 0105](0105-hosted-only-python-release-sources.md); same-source releases
+preserve the original path.
 The GitHub and PyPI engine wheel digests must agree. Pass both verified wheel
 hashes into the unchanged four installed-CLI lanes. Recheck signed channel/tag
 identities, GitHub binding/assets and both PyPI artifact identities at the end.
