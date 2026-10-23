@@ -1253,6 +1253,6 @@ codec and storage limits. See [the recovery protocol](approval-recovery.md)
 for supported commands and version applicability.
 
 Explicit remaining-coverage admission and checkpoint accounting are specified in
-[Proposed ADR 0107](adr/0107-bounded-remaining-coverage.md). Productive partial
-windows retain their partial status and all independent approval obligations;
-their strict progress receipt affects accounting only.
+[Proposed ADR 0107](adr/0107-bounded-remaining-coverage.md). Productive windows
+keep their partial status and independent approval obligations. Strict progress
+receipts affect checkpoint accounting.
