@@ -10,6 +10,8 @@ import os
 import re
 import subprocess
 import sys
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -229,9 +231,9 @@ def release_body_inventory(context: Context, inventory: dict[str, str]) -> str:
 
 @docs.release_stage(docs.ReleaseStage.LOOKUP)
 def find_release(tag: str) -> dict[str, Any] | None:
-    releases = [
-        item for item in docs.api_pages("releases") if item.get("tag_name") == tag
-    ]
+    # Every fence uses a unique inventory read, including reads after creation.
+    path = f"releases?release_readback={uuid.uuid4().hex}"
+    releases = [item for item in docs.api_pages(path) if item.get("tag_name") == tag]
     if len(releases) > 1:
         raise ValueError("duplicate GitHub releases for the tag")
     return releases[0] if releases else None
@@ -303,7 +305,15 @@ def manage(context: Context, assets: dict[str, Path], *, publish: bool) -> None:
             )
         except subprocess.CalledProcessError:
             pass  # A lost response may have created the exact draft. Read back.
-        release = find_release(context.tag)
+        for attempt in range(5):
+            # Retry only an absent readback, never the create request. The run,
+            # immutable tag and prerequisites must remain current on each read.
+            qualify_run(context, publish=False)
+            release = find_release(context.tag)
+            if release is not None:
+                break
+            if attempt < 4:
+                time.sleep(2**attempt)
         if release is None:
             raise ValueError("GitHub draft creation did not produce a verified release")
     verify_release(release, context, body)

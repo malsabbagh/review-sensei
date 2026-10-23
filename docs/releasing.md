@@ -65,6 +65,11 @@ For an interrupted draft job, rerun that job in the original Release run with
 its retained original bundle. An exact matching draft resumes only missing
 assets. A dropped create/upload/publish response is reconciled through readback;
 an already published exact release with successful publisher proofs is a no-op.
+After one draft-create request, absent readback permits five fresh complete
+inventory reads with 1/2/4/8-second delays. Each read requalifies the active run,
+prerequisites and signed tag; subsequent identity fences also use fresh release
+inventories. No second create request is made. Conflicts, read failures or the
+bounded absence hold without uploading or publishing.
 The finalizer never creates a missing draft or repairs missing assets: retry
 draft preparation first. Finalizer-only retries reuse prior successful build
 and publisher attempts, while a newer failed attempt blocks publication.

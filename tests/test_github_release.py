@@ -92,6 +92,7 @@ class GitHubReleaseTests(unittest.TestCase):
         self.releases = []
         self.remote_assets = []
         self.writes = []
+        self.fresh_lookups = []
         self.commands = []
         self.lost_response = set()
         self.run = {
@@ -137,6 +138,7 @@ class GitHubReleaseTests(unittest.TestCase):
                 ),
             )
         )
+        self.sleep = stack.enter_context(patch.object(RELEASE.time, "sleep"))
         stack.enter_context(patch.object(RELEASE, "write_api", side_effect=self.write))
         stack.enter_context(
             patch.object(RELEASE.subprocess, "run", side_effect=self.command)
@@ -147,7 +149,9 @@ class GitHubReleaseTests(unittest.TestCase):
         return copy.deepcopy(self.run)
 
     def pages(self, path, key=None):
-        if path == "releases":
+        if path == "releases" or path.startswith("releases?release_readback="):
+            if "?" in path:
+                self.fresh_lookups.append(path)
             return copy.deepcopy(self.releases)
         if path == "actions/runs/123/jobs?filter=all":
             self.assertEqual(key, "jobs")
@@ -200,6 +204,103 @@ class GitHubReleaseTests(unittest.TestCase):
         self.assertIn(CONTEXT.tag_object, release["body"])
         self.assertIn("/actions/runs/123", release["body"])
         self.assertEqual([method for _, method, _ in self.writes], ["POST"])
+
+    def test_delayed_draft_visibility_reconciles_without_second_create(self):
+        original = RELEASE.find_release
+        misses = 0
+
+        def delayed(tag, **kwargs):
+            nonlocal misses
+            if self.writes and misses < 2:
+                misses += 1
+                return None
+            return original(tag, **kwargs)
+
+        with patch.object(RELEASE, "find_release", side_effect=delayed):
+            self.draft()
+        self.assertEqual(misses, 2)
+        self.assertEqual([method for _, method, _ in self.writes], ["POST"])
+        self.assertEqual(len(self.remote_assets), 4)
+
+    def test_absent_draft_stops_after_bounded_readback_without_recreate(self):
+        original = RELEASE.find_release
+
+        def absent(tag, **kwargs):
+            return None if self.writes else original(tag, **kwargs)
+
+        with patch.object(RELEASE, "find_release", side_effect=absent) as read:
+            with self.assertRaisesRegex(ValueError, "did not produce"):
+                self.draft()
+        self.assertEqual(read.call_count, 6)
+        self.assertEqual([method for _, method, _ in self.writes], ["POST"])
+        self.assertEqual(
+            [call.args[0] for call in self.sleep.call_args_list], [1, 2, 4, 8]
+        )
+        self.assertFalse(self.remote_assets)
+
+    def test_created_draft_readback_is_fresh_and_still_checks_identity(self):
+        def conflicting(path, method, payload):
+            self.write(path, method, payload)
+            self.releases[0]["target_commitish"] = "f" * 40
+
+        with patch.object(RELEASE, "write_api", side_effect=conflicting):
+            with self.assertRaisesRegex(ValueError, "no overwrite"):
+                self.draft()
+        self.assertGreaterEqual(len(self.fresh_lookups), 2)
+        self.assertFalse(self.remote_assets)
+        self.assertEqual([method for _, method, _ in self.writes], ["POST"])
+
+    def test_lost_create_response_with_delayed_visibility_remains_one_write(self):
+        self.lost_response.add("POST")
+        original = RELEASE.find_release
+        misses = 0
+
+        def delayed(tag, **kwargs):
+            nonlocal misses
+            if self.writes and misses < 1:
+                misses += 1
+                return None
+            return original(tag, **kwargs)
+
+        with patch.object(RELEASE, "find_release", side_effect=delayed):
+            self.draft()
+        self.assertEqual([method for _, method, _ in self.writes], ["POST"])
+        self.assertEqual(len(self.remote_assets), 4)
+        self.assertTrue(self.fresh_lookups)
+
+    def test_changed_run_during_readback_stops_without_upload_or_recreate(self):
+        def end_run(_seconds):
+            self.run["status"] = "completed"
+
+        original = RELEASE.find_release
+
+        def absent(tag, **kwargs):
+            return None if self.writes else original(tag, **kwargs)
+
+        with patch.object(RELEASE, "find_release", side_effect=absent):
+            self.sleep.side_effect = end_run
+            with self.assertRaisesRegex(ValueError, "current Release run"):
+                self.draft()
+        self.assertEqual([method for _, method, _ in self.writes], ["POST"])
+        self.assertFalse(self.remote_assets)
+
+    def test_all_release_fences_bypass_stale_precreate_inventory(self):
+        original = self.pages
+
+        def cached(path, key=None):
+            if path == "releases":
+                return []
+            return original(path, key)
+
+        with (
+            patch.object(RELEASE.docs, "api_pages", side_effect=cached),
+            patch.object(RELEASE.time, "time_ns", return_value=42),
+        ):
+            self.draft()
+        self.assertEqual([method for _, method, _ in self.writes], ["POST"])
+        self.assertEqual(len(self.remote_assets), 4)
+        self.assertGreaterEqual(len(self.fresh_lookups), 7)
+        self.assertEqual(len(set(self.fresh_lookups)), len(self.fresh_lookups))
 
     def test_publisher_approval_can_remain_pending_during_draft(self):
         for job in self.jobs:
