@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## review-sensei-github 0.3.12 - 2026-10-23
+
+- Pin `review-sensei==0.8.11`.
+
 ## 0.8.11 - 2026-10-23
 
 - Preserve exact authenticated finding classifications during hosted media
