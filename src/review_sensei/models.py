@@ -1421,12 +1421,18 @@ class ReviewResult:
     # coverage obligations are unsupported binary blobs or generated files
     # excluded by policy. Never model output.
     coverage_only_partial: bool = False
+    # Host execution provenance: only a normal bounded stop, never model output.
+    bounded_work_receipt: Mapping[str, object] | None = None
     work_policy_digest: str | None = None
     # Continuation provenance is separate from the frozen v1 content digest.
     # Its owning service compares the exact current request before reusing work.
     continuation_scope_digest: str | None = None
 
     def __post_init__(self) -> None:
+        if self.bounded_work_receipt is not None:
+            from .remaining_progress import validate_execution_receipt
+
+            validate_execution_receipt(self)
         if not isinstance(self.coverage_only_partial, bool):
             raise ReviewInputError("coverage-only partial flag is invalid")
         if self.work_policy_digest is not None and (
@@ -1629,6 +1635,12 @@ class ReviewResult:
                 **value,
                 "coverage_only_partial": True,
             }
+        if self.bounded_work_receipt is not None:
+            value = {
+                **value,
+                "domain": "reviewsensei:review-content:bounded-work:v1",
+                "bounded_work_receipt": dict(sorted(self.bounded_work_receipt.items())),
+            }
         return hashlib.sha256(_json_compact(value).encode("utf-8")).hexdigest()
 
     def to_dict(self) -> dict[str, object]:
@@ -1673,6 +1685,10 @@ class ReviewResult:
             ]
         if self.coverage is not None:
             value["coverage"] = self.coverage.to_dict()
+        if self.bounded_work_receipt is not None:
+            value["bounded_work_receipt"] = dict(
+                sorted(self.bounded_work_receipt.items())
+            )
         if self.coverage_only_partial:
             value["coverage_only_partial"] = True
         work_policy_digest = self.work_policy_digest or getattr(
@@ -1879,6 +1895,9 @@ class ReviewResult:
             coverage=coverage,
             transaction=transaction,
             coverage_only_partial=cast(bool, value.get("coverage_only_partial", False)),
+            bounded_work_receipt=cast(
+                Mapping[str, object] | None, value.get("bounded_work_receipt")
+            ),
             work_policy_digest=cast(str | None, work_policy_digest),
             continuation_scope_digest=cast(
                 str | None, value.get("continuation_scope_digest")

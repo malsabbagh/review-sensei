@@ -1251,3 +1251,8 @@ exclusive authenticated decision snapshots and explicit analysis metadata phases
 They preserve full audit records and current authority while keeping request,
 codec and storage limits. See [the recovery protocol](approval-recovery.md)
 for supported commands and version applicability.
+
+Explicit remaining-coverage admission and checkpoint accounting are specified in
+[Proposed ADR 0107](adr/0107-bounded-remaining-coverage.md). Productive partial
+windows retain their partial status and all independent approval obligations;
+their strict progress receipt affects accounting only.

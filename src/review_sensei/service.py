@@ -199,6 +199,7 @@ class ReviewRun:
     result: ReviewResult | None = None
     error: BaseException | None = None
     context_admission: Mapping[str, object] | None = None
+    bounded_stop_execution: str | None = None
 
 
 @dataclass
@@ -415,6 +416,17 @@ class ReviewService:
             return run
         try:
             result = replace(run.result, continuation_scope_digest=digest)
+            if run.bounded_stop_execution is not None:
+                from .remaining_progress import execution_receipt
+
+                result = replace(
+                    result,
+                    bounded_work_receipt=execution_receipt(
+                        result,
+                        execution_identity=run.bounded_stop_execution,
+                        provider_calls=run.outcome.provider_calls,
+                    ),
+                )
         except ReviewInputError as exc:
             if "review result exceeds the configured size limit" not in str(exc):
                 raise
@@ -562,6 +574,7 @@ class ReviewService:
                 accumulated_comments.extend(prior_partial.comments)
                 accumulated_proposals.extend(prior_partial.learning_proposals)
         coverage = plan.coverage
+        actual_failure = False
         chunks_completed = 0
         last_model = request.model
 
@@ -615,6 +628,7 @@ class ReviewService:
                     attach_change_coverage=False,
                 )
             except (ReviewInputError, ContextLoadError, ReviewFormatError) as exc:
+                actual_failure = True
                 if isinstance(exc, ChunkPreflightError):
                     coverage = apply_chunk_outcomes(
                         coverage,
@@ -655,6 +669,7 @@ class ReviewService:
                     )
                 continue
             if chunk_run.error is not None or chunk_run.result is None:
+                actual_failure = True
                 chunk_outcome = (
                     "budget-exhausted"
                     if not budgeted.has_remaining_calls()
@@ -691,6 +706,7 @@ class ReviewService:
                 entry.reason == "no-review-stage"
                 for entry in chunk_result.coverage.files
             ):
+                actual_failure = True
                 # A filtered or summary-only pipeline validates no review work.
                 # Never turn its optimistic plan into cross-file evidence.
                 coverage = apply_chunk_outcomes(
@@ -712,6 +728,7 @@ class ReviewService:
             accumulated_proposals.extend(chunk_result.learning_proposals)
             last_model = chunk_result.model
             if chunk_result.review_status != "complete":
+                actual_failure = True
                 if chunk_result.review_status == "incomplete":
                     chunk_outcome = "budget-exhausted"
                     chunk_reason = "incomplete-enumeration"
@@ -849,6 +866,13 @@ class ReviewService:
             result=result,
             repository=request.repository,
             pull_request_number=request.pull_request_number,
+            bounded_stop=(
+                result.review_status == "partial"
+                and not actual_failure
+                and chunks_completed > 0
+                and not no_progress_detected
+                and coverage.enumeration_complete
+            ),
         )
 
     def review(
@@ -1695,6 +1719,7 @@ class ReviewService:
         repository: str | None = None,
         pull_request_number: int | None = None,
         context_admission: Mapping[str, object] | None = None,
+        bounded_stop: bool = False,
     ) -> ReviewRun:
         return ReviewRun(
             RunOutcome(
@@ -1713,6 +1738,7 @@ class ReviewService:
             result=result,
             error=error,
             context_admission=context_admission,
+            bounded_stop_execution=tracker.execution_identity if bounded_stop else None,
         )
 
     def _coverage_decision(

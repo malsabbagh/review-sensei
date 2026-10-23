@@ -223,6 +223,7 @@ class DirectPartialScopeTests(unittest.TestCase):
         provider = self.Provider()
         service = self.service(provider)
         first = service.run(request).result
+        first = replace(first, bounded_work_receipt=None)
         document = first.to_dict()
         document.pop("continuation_scope_digest", None)
         legacy = ReviewResult.from_dict(document)

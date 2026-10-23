@@ -36,6 +36,9 @@
           "reservation"
         ],
         "properties": {
+          "mode": {
+            "const": "remaining"
+          },
           "kind": {
             "enum": [
               "issue_comment",
@@ -62,6 +65,65 @@
           "reservation": {
             "type": "string",
             "pattern": "^[a-f0-9]{8,64}$"
+          },
+          "progress": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "parent_digest",
+              "child_digest",
+              "execution_digest",
+              "scope_digest",
+              "inventory_digest",
+              "reviewed_before_digest",
+              "reviewed_after_digest",
+              "schema_version",
+              "reviewed_before",
+              "reviewed_after"
+            ],
+            "properties": {
+              "parent_digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "child_digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "execution_digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "scope_digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "inventory_digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "reviewed_before_digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "reviewed_after_digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "schema_version": {
+                "const": "1.0"
+              },
+              "reviewed_before": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000
+              },
+              "reviewed_after": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000000
+              }
+            }
           }
         }
       }

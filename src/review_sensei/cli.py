@@ -1418,10 +1418,16 @@ def _parser(*, include_hosted: bool = False) -> argparse.ArgumentParser:
         ),
     )
     if include_hosted:
-        parser.add_argument(
+        reanalysis = parser.add_mutually_exclusive_group()
+        reanalysis.add_argument(
             "--rescan",
             action="store_true",
             help="Authorize one fresh attempt for a published incomplete head from a verified human Actions event.",
+        )
+        reanalysis.add_argument(
+            "--review-remaining",
+            action="store_true",
+            help="Continue exact authenticated partial coverage for one new human event; refuses missing/stale scope instead of starting a full rescan.",
         )
         parser.add_argument(
             "--github-session-ledger",
@@ -2925,16 +2931,24 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 args, resolved_head_sha=resolved_head_sha
             )
         rescan_request = None
-        if getattr(args, "rescan", False):
+        remaining_requested = getattr(args, "review_remaining", False)
+        if getattr(args, "rescan", False) or remaining_requested:
             if not hosted_session_ledger or not transaction_requested or ledger is None:
                 raise ReviewInputError(
-                    "--rescan requires a hosted identity-bound transaction"
+                    "explicit rescan/remaining review requires a hosted identity-bound transaction"
                 )
             if hosted_hooks is None or not hasattr(hosted_hooks, "resolve_rescan"):
                 raise ReviewInputError(
-                    "--rescan requires verified hosted event authority"
+                    "explicit rescan/remaining review requires verified hosted event authority"
                 )
             rescan_request = hosted_hooks.resolve_rescan(args, ledger)
+            if rescan_request is not None and (
+                (getattr(rescan_request, "mode", "full") == "remaining")
+                != bool(remaining_requested)
+            ):
+                raise ReviewInputError(
+                    "authenticated remaining/full review mode differs from requested operation"
+                )
         identity = None
         reservation = None
         held_reservation: str | None = None
@@ -3533,7 +3547,9 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 stages=service.stages,
                 profile=effective_profile,
             )
-            if rescan_request is None and irrecoverable_grant is None:
+            if (
+                rescan_request is None or remaining_requested
+            ) and irrecoverable_grant is None:
                 scope = plan_verification_scope(
                     policy=policy,
                     baseline=persisted_baseline,
@@ -3562,8 +3578,9 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
         if rescan_request is not None:
             # Reinspect the full snapshot; retain the baseline only for
             # publication classification, never for inference reuse.
-            verification_scope = None
-            incremental = None
+            if not remaining_requested:
+                verification_scope = None
+                incremental = None
             admitted_transaction = (
                 prepared_round.record.transaction
                 if prepared_round is not None
@@ -3596,7 +3613,7 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
             prior_partial = None
             # An authorized rescan is fresh analysis, not partial-work continuation.
             if (
-                rescan_request is None
+                (rescan_request is None or remaining_requested)
                 and ledger is not None
                 and identity is not None
                 and resolved_head_sha is not None
@@ -3667,6 +3684,10 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                         prior_partial = replace(
                             candidate_partial, transaction=prior_committed_transaction
                         )
+            if remaining_requested and prior_partial is None:
+                raise ReviewInputError(
+                    "remaining review requires exact retained source/configuration/evidence; no full-analysis fallback"
+                )
             run_provider = (
                 hosted_hooks.run_provider  # type: ignore[attr-defined]
                 if hosted_hooks is not None and hasattr(hosted_hooks, "run_provider")

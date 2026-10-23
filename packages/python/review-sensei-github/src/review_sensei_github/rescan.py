@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -19,6 +20,7 @@ from review_sensei_github.publication import (
     PUBLISHED_REVIEW_STATES,
     approval_eligibility_from_body,
     review_identity_marker,
+    review_result_digest,
 )
 from review_sensei_github.publication_recovery import (
     PublicationBudgetHttp,
@@ -28,6 +30,7 @@ from review_sensei_github.publication_recovery import (
 from review_sensei_github.trigger import (
     choose_head_sha,
     extract_requested_commit,
+    issue_comment_requests_remaining,
     issue_comment_requests_rescan,
 )
 
@@ -49,6 +52,8 @@ def _dispatch_requests_rescan(inputs: dict) -> bool:
 
     if "pull_request_number" not in inputs:
         return False
+    if _dispatch_requests_remaining(inputs):
+        return False
     requested = inputs.get("rescan")
     if requested is not None and str(requested).strip().lower() not in {
         "1",
@@ -59,6 +64,26 @@ def _dispatch_requests_rescan(inputs: dict) -> bool:
     # Dispatch UIs can send "Review" or surrounding whitespace. Fold the same
     # way as the rescan flag so only a real review operation is explicit.
     return str(inputs.get("operation", "review")).strip().lower() == "review"
+
+
+def _dispatch_requests_remaining(inputs: dict) -> bool:
+    return (
+        "pull_request_number" in inputs
+        and str(inputs.get("operation", "review")).strip().lower() == "review"
+        and str(inputs.get("review_remaining", "false")).strip().lower()
+        in {"1", "true", "yes"}
+    )
+
+
+def event_requests_remaining(event: dict, kind: str) -> bool:
+    if kind == "issue_comment":
+        comment = event.get("comment")
+        body = comment.get("body") if isinstance(comment, dict) else None
+        return isinstance(body, str) and issue_comment_requests_remaining(body)
+    if kind == "workflow_dispatch":
+        inputs = event.get("inputs")
+        return isinstance(inputs, dict) and _dispatch_requests_remaining(inputs)
+    return False
 
 
 def event_requests_rescan(event: dict, kind: str) -> bool:
@@ -74,7 +99,7 @@ def event_requests_rescan(event: dict, kind: str) -> bool:
     return False
 
 
-def cli_event_requests_rescan() -> bool:
+def _cli_event_requests(predicate) -> bool:
     """Workflow gate: read the Actions event file and require rescan intent."""
 
     kind = os.environ.get("GITHUB_EVENT_NAME")
@@ -89,7 +114,24 @@ def cli_event_requests_rescan() -> bool:
         return False
     if not isinstance(event, dict):
         return False
-    return event_requests_rescan(event, kind)
+    return predicate(event, kind)
+
+
+def cli_event_requests_rescan() -> bool:
+    return _cli_event_requests(event_requests_rescan)
+
+
+def cli_event_requests_remaining() -> bool:
+    return _cli_event_requests(event_requests_remaining)
+
+
+def cli_event_review_intent() -> str:
+    """Return only a closed CLI switch derived from the original event file."""
+    if cli_event_requests_remaining():
+        return "--review-remaining"
+    if cli_event_requests_rescan():
+        return "--rescan"
+    return ""
 
 
 def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | None:
@@ -111,6 +153,22 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
     event = json.loads(event_path.read_text(encoding="utf-8"))
     if not isinstance(event, dict):
         raise ReviewInputError("explicit rescan event is invalid")
+    remaining = getattr(args, "review_remaining", False)
+    if bool(remaining) != event_requests_remaining(event, kind):
+        raise ReviewInputError(
+            "remaining review intent does not match the authenticated event"
+        )
+    if remaining and getattr(args, "rescan", False):
+        raise ReviewInputError(
+            "remaining review and full rescan are mutually exclusive"
+        )
+    if (
+        remaining
+        and kind == "workflow_dispatch"
+        and str(_object(event.get("inputs")).get("rescan", "false")).strip().lower()
+        in {"1", "true", "yes"}
+    ):
+        raise ReviewInputError("remaining review and full rescan intent are ambiguous")
     repo = _object(event.get("repository"))
     sender = _object(event.get("sender"))
     actor = sender.get("login")
@@ -195,7 +253,12 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
             raise ReviewInputError("explicit rescan comment is unauthorized or edited")
         if len(live["body"].encode("utf-8")) > 4096:
             raise ReviewInputError("explicit rescan comment exceeds 4096 UTF-8 bytes")
-        if not issue_comment_requests_rescan(live["body"]):
+        requested = (
+            issue_comment_requests_remaining
+            if remaining
+            else issue_comment_requests_rescan
+        )
+        if not requested(live["body"]):
             raise ReviewInputError(
                 "explicit rescan requires a standalone @reviewsensei rescan command"
             )
@@ -208,7 +271,10 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
             raise ReviewInputError(
                 "explicit rescan dispatch targets another pull request"
             )
-        if not _dispatch_requests_rescan(inputs):
+        requested_dispatch = (
+            _dispatch_requests_remaining if remaining else _dispatch_requests_rescan
+        )
+        if not requested_dispatch(inputs):
             raise ReviewInputError("explicit rescan dispatch did not request a rescan")
         run_id = os.environ.get("GITHUB_RUN_ID", "")
         if not run_id.isascii() or not run_id.isdecimal():
@@ -233,12 +299,36 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
     if loaded.status not in {"ok", "migrated", "missing"}:
         raise ReviewInputError("explicit rescan session is unavailable")
     if loaded.record is None:
+        if remaining:
+            raise ReviewInputError(
+                "remaining review requires a retained published source"
+            )
         return None  # First review still uses ordinary admission.
     source = rescan_source(loaded.record, args.head_sha)
     if source is None or source.head_sha != args.head_sha:
+        if remaining:
+            raise ReviewInputError(
+                "remaining review source is missing or stale; start a normal review"
+            )
         return None  # A changed head is ordinary new work.
     if source.phase != "publication_succeeded":
+        if remaining and not (
+            source.phase in {"publication_pending", "publication_failed"}
+            and loaded.record.rescan_state is not None
+            and any(
+                item.get("mode") == "remaining"
+                and item["reservation"] == source.reservation_id
+                for item in loaded.record.rescan_state["receipts"]
+            )
+        ):
+            raise ReviewInputError(
+                "remaining review source is not a completed publication"
+            )
         return None  # Active work and publication recovery keep their fences.
+    if remaining and _object(pull.get("base")).get("sha") != source.base_sha:
+        raise ReviewInputError(
+            "remaining review source base changed; start a normal review"
+        )
     reviews = http.paginate(
         path=http.repository_path(
             args.repository, f"/pulls/{args.pull_request}/reviews"
@@ -280,6 +370,10 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
             "explicit rescan request/publication time is unverifiable"
         ) from exc
     if requested_time <= published_time:
+        if remaining:
+            raise ReviewInputError(
+                "remaining review event is not newer than its source; no new window"
+            )
         return (
             None  # Old queued events and original-run retries are ordinary duplicates.
         )
@@ -304,5 +398,48 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
         eligibility.facts.review_status == "complete"
         and eligibility.facts.coverage_blocker is None
     ):
+        if remaining:
+            raise ReviewInputError(
+                "remaining review source is complete; use @reviewsensei verify"
+            )
         return None  # An explicit event does not reopen a completed review.
-    return AuthorizedRescan(kind, request_id, source, latest["id"])
+    if remaining:
+        load = getattr(ledger, "load_retained_checkpoint_result", None)
+        retained = (
+            load(identity, transaction=source, head_sha=args.head_sha)
+            if callable(load)
+            else None
+        )
+        if retained is None or retained.transaction is None:
+            raise ReviewInputError(
+                "remaining review requires the authenticated retained source result"
+            )
+        if (
+            not retained.transaction.logical_identity_matches(source)
+            or retained.content_digest() != source.result_sha256
+            or eligibility.result_digest
+            != review_result_digest(replace(retained, transaction=source))
+        ):
+            raise ReviewInputError(
+                "remaining review published source does not match retained evidence"
+            )
+        if (
+            retained.review_status != "partial"
+            or retained.coverage is None
+            or not retained.coverage.enumeration_complete
+            or retained.continuation_scope_digest is None
+            or not any(
+                entry.outcome in {"budget-exhausted", "partially-reviewed"}
+                for entry in (*retained.coverage.files, *retained.coverage.hunks)
+            )
+        ):
+            raise ReviewInputError(
+                "remaining review has no reusable partial scope or reviewable work; repair evidence/configuration or use the supported media finalization"
+            )
+    return AuthorizedRescan(
+        kind,
+        request_id,
+        source,
+        latest["id"],
+        mode="remaining" if remaining else "full",
+    )

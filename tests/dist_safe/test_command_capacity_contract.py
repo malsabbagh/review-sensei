@@ -23,6 +23,7 @@ sys.path.insert(0, str(_TESTS.parent))
 import test_command_capacity_recovery  # noqa: E402
 import test_disposition_snapshots  # noqa: E402
 import test_publication_future_capacity  # noqa: E402
+import test_remaining_progress  # noqa: E402
 
 
 class InstalledCommandCapacityRecoveryTests(
@@ -39,6 +40,22 @@ class InstalledDecisionSnapshotTests(
 
 class InstalledFutureDispositionFrameTests(
     test_publication_future_capacity.FutureDispositionFrameTests
+):
+    pass
+
+
+class InstalledRemainingProgressTests(test_remaining_progress.RemainingProgressTests):
+    pass
+
+
+class InstalledRemainingCrashAccountingTests(
+    test_remaining_progress.RemainingCrashAccountingTests
+):
+    pass
+
+
+class InstalledActualRemainingWindowTests(
+    test_remaining_progress.ActualProductiveWindowTests
 ):
     pass
 

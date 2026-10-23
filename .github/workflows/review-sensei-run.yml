@@ -1152,19 +1152,15 @@ jobs:
           # ledger rather than a runner-local file, so the publication step of
           # this run and the analysis of the next run read the same durable
           # rounds and baselines.
-          # Issue comments must ask for a rescan. A maintainer dispatch counts
-          # only when its inputs request this review workflow's rescan (ADR 0080).
+          # The original authenticated event selects fresh rescan versus
+          # cumulative remaining work. No caller boolean can authorize inference.
           if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" || "$GITHUB_EVENT_NAME" == "issue_comment" ]]; then
-            # Exit 2 is a deliberate "not a rescan". Any other failure, including
-            # an import error, must fail the job instead of silently omitting it.
-            rescan_gate=0
-            "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'from review_sensei_github.rescan import cli_event_requests_rescan; raise SystemExit(0 if cli_event_requests_rescan() else 2)' || rescan_gate=$?
-            if [[ "$rescan_gate" -eq 0 ]]; then
-              review_args+=(--rescan)
-            elif [[ "$rescan_gate" -ne 2 ]]; then
-              echo '::error::explicit rescan intent could not be evaluated' >&2
-              exit "$rescan_gate"
-            fi
+            review_intent=$("$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'from review_sensei_github.rescan import cli_event_review_intent; print(cli_event_review_intent())')
+            case "$review_intent" in
+              --rescan|--review-remaining) review_args+=("$review_intent") ;;
+              "") ;;
+              *) echo '::error::explicit review intent could not be evaluated' >&2; exit 1 ;;
+            esac
           fi
           review_args+=(--transaction --github-session-ledger \
             --repository-id "$REPOSITORY_ID" \
@@ -1749,19 +1745,15 @@ jobs:
           # ledger rather than a runner-local file, so the publication step of
           # this run and the analysis of the next run read the same durable
           # rounds and baselines.
-          # Issue comments must ask for a rescan. A maintainer dispatch counts
-          # only when its inputs request this review workflow's rescan (ADR 0080).
+          # The original authenticated event selects fresh rescan versus
+          # cumulative remaining work. No caller boolean can authorize inference.
           if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" || "$GITHUB_EVENT_NAME" == "issue_comment" ]]; then
-            # Exit 2 is a deliberate "not a rescan". Any other failure, including
-            # an import error, must fail the job instead of silently omitting it.
-            rescan_gate=0
-            "$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'from review_sensei_github.rescan import cli_event_requests_rescan; raise SystemExit(0 if cli_event_requests_rescan() else 2)' || rescan_gate=$?
-            if [[ "$rescan_gate" -eq 0 ]]; then
-              review_args+=(--rescan)
-            elif [[ "$rescan_gate" -ne 2 ]]; then
-              echo '::error::explicit rescan intent could not be evaluated' >&2
-              exit "$rescan_gate"
-            fi
+            review_intent=$("$RUNNER_TEMP/review-sensei-venv/bin/python" -c 'from review_sensei_github.rescan import cli_event_review_intent; print(cli_event_review_intent())')
+            case "$review_intent" in
+              --rescan|--review-remaining) review_args+=("$review_intent") ;;
+              "") ;;
+              *) echo '::error::explicit review intent could not be evaluated' >&2; exit 1 ;;
+            esac
           fi
           review_args+=(--transaction --github-session-ledger \
             --repository-id "$REPOSITORY_ID" \

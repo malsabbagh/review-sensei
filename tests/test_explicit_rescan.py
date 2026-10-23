@@ -1564,10 +1564,10 @@ class RescanPublicationTests(unittest.TestCase):
             self.assertIs(concurrency["cancel-in-progress"], False)
         self.assertEqual(len(steps), 2)
         for step in steps:
-            self.assertIn("cli_event_requests_rescan", step["run"])
+            self.assertIn("cli_event_review_intent", step["run"])
             self.assertIn('"$GITHUB_EVENT_NAME" == "workflow_dispatch"', step["run"])
             self.assertIn('"$GITHUB_EVENT_NAME" == "issue_comment"', step["run"])
-            self.assertIn("review_args+=(--rescan)", step["run"])
+            self.assertIn("--rescan|--review-remaining", step["run"])
             self.assertNotIn(
                 'if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" || "$GITHUB_EVENT_NAME" == "issue_comment" ]]; then\n            review_args+=(--rescan)\n          fi',
                 step["run"],

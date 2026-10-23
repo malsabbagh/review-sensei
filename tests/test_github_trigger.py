@@ -530,6 +530,10 @@ class InlineCallerResolverTests(unittest.TestCase):
             pull.write_text(json.dumps(_pull()))
             for body, operation in (
                 ("@reviewsensei rescan", "review"),
+                ("@reviewsensei review remaining", "review"),
+                ("@reviewsensei review remaining commit BBBBBBB", "review"),
+                ("> @reviewsensei review remaining", "reply"),
+                ("@reviewsensei review remaining commit not-a-sha", "reply"),
                 ("@ReviewSensei re-scan commit BBBBBBB", "review"),
                 ("@sensei why did the previous rescan fail?", "reply"),
                 ("> @reviewsensei rescan", "reply"),

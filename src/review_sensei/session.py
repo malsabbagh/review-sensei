@@ -2287,6 +2287,7 @@ def _checkpoint_transaction_record(
     *,
     baseline: object | None = None,
     review_complete: bool = True,
+    progress: Mapping[str, object] | None = None,
     now: datetime | None = None,
     partition_writer: Callable[[dict[str, object], int, int], dict[str, object]]
     | None = None,
@@ -2323,9 +2324,34 @@ def _checkpoint_transaction_record(
     # Retained partial findings are publishable, but cannot complete a round
     # or replace its last complete baseline. Charge their bounded incomplete
     # attempt once, at the checkpoint, rather than again on publication retry.
-    increments = _apply_slot(
-        record, record.reserved_slot if review_complete else "failed-attempt"
+    increments = (
+        {}
+        if not review_complete and progress is not None
+        else _apply_slot(
+            record, record.reserved_slot if review_complete else "failed-attempt"
+        )
     )
+    rescan_state = record.rescan_state
+    if progress is not None:
+        if review_complete or rescan_state is None:
+            raise ReviewInputError("productive checkpoint has no remaining authority")
+        rescan_state = json.loads(json.dumps(rescan_state))
+        receipt = next(
+            (
+                item
+                for item in rescan_state["receipts"]
+                if item["reservation"] == transaction.reservation_id
+            ),
+            None,
+        )
+        if (
+            receipt is None
+            or receipt.get("mode") != "remaining"
+            or progress.get("child_digest") != result_digest
+            or progress.get("parent_digest") != receipt["source"]["result_sha256"]
+        ):
+            raise ReviewInputError("productive checkpoint authority differs")
+        receipt["progress"] = dict(progress)
     next_generation = _next_generation(record)
     convergence_history: Mapping[str, object] | None = record.convergence_history
     if not review_complete and baseline is not None:
@@ -2396,6 +2422,7 @@ def _checkpoint_transaction_record(
         failed_attempts=increments.get("failed_attempts"),
         transaction=pending,
         convergence_history=convergence_history,
+        rescan_state=rescan_state,
     )
 
 
@@ -2470,6 +2497,8 @@ def checkpoint_review_analysis(
         )
         retain_result(replace(result, transaction=pending_preview))
 
+    from .remaining_progress import checkpoint_remaining_progress
+
     updated = ledger.replace(
         identity,
         lambda record: _checkpoint_transaction_record(
@@ -2478,6 +2507,7 @@ def checkpoint_review_analysis(
             result_digest,
             baseline=baseline,
             review_complete=result.review_status == "complete",
+            progress=checkpoint_remaining_progress(ledger, identity, record, result),
             now=now,
             partition_writer=(
                 lambda document, count, allowance: getattr(ledger, "stage_evidence")(
@@ -2573,24 +2603,36 @@ def load_review_transaction_for_publication(
         raise ReviewInputError("durable transaction does not match result")
     if not record.transaction.logical_identity_matches(transaction):
         raise ReviewInputError("durable transaction identity does not match result")
-    if transaction.generation > record.transaction.generation:
+    retained_preview = (
+        record.transaction.phase == "analysis"
+        and transaction.phase == "publication_pending"
+        and transaction.generation == record.transaction.generation + 1
+        and transaction.result_sha256 == result_digest
+    )
+    if transaction.generation > record.transaction.generation and not retained_preview:
         raise ReviewInputError("review transaction generation is stale")
     if record.transaction.phase == "analysis":
         if (
             transaction.generation != record.transaction.generation
-            or record.reservation_id != transaction.reservation_id
-        ):
+            and not retained_preview
+        ) or record.reservation_id != transaction.reservation_id:
             raise ReviewInputError("review transaction generation does not match")
         if not commit_analysis:
             return record
+        from .remaining_progress import checkpoint_remaining_progress
+
+        analysis_transaction = record.transaction
         return ledger.replace(
             identity,
             lambda current: _checkpoint_transaction_record(
                 current,
-                transaction,
+                analysis_transaction,
                 result_digest,
                 baseline=baseline,
                 review_complete=result.review_status == "complete",
+                progress=checkpoint_remaining_progress(
+                    ledger, identity, current, result
+                ),
                 now=now,
             ),
             now=now,
@@ -3369,7 +3411,7 @@ class InMemorySessionLedger:
 
     def __init__(self) -> None:
         self._records: dict[tuple[str, int], SessionRecord] = {}
-        self._retained_results: dict[tuple[str, int, str, str], ReviewResult] = {}
+        self._retained_results: dict[tuple[str, int, str, str, str], ReviewResult] = {}
         self._latest_retained_results: dict[tuple[str, int], ReviewResult] = {}
 
     def retain_checkpoint_result(self, result: ReviewResult) -> None:
@@ -3377,7 +3419,7 @@ class InMemorySessionLedger:
         if tx is None:
             return
         digest = tx.result_sha256 or result.content_digest()
-        key = (tx.repository, tx.pull_request, tx.head_sha, digest)
+        key = (tx.repository, tx.pull_request, tx.head_sha, digest, tx.transaction_id)
         self._retained_results[key] = result
         self._latest_retained_results[(tx.repository, tx.pull_request)] = result
 
@@ -3395,6 +3437,7 @@ class InMemorySessionLedger:
                     identity.pull_request,
                     transaction.head_sha,
                     transaction.result_sha256,
+                    transaction.transaction_id,
                 )
             )
             if exact is not None:
@@ -4858,7 +4901,17 @@ class LocalSessionLedger:
                 ) from exc
             raise ReviewInputError("session ledger could not be written") from exc
 
-    def _checkpoint_result_path(self, identity: SessionIdentity) -> Path:
+    def _checkpoint_result_path(
+        self, identity: SessionIdentity, transaction: ReviewTransaction | None = None
+    ) -> Path:
+        if transaction is not None and transaction.result_sha256 is not None:
+            return (
+                self.root
+                / ".checkpoints"
+                / _safe_ledger_name(identity.repository)
+                / f"pr-{identity.pull_request}"
+                / f"{transaction.transaction_id}-{transaction.result_sha256}.json"
+            )
         return (
             self.root
             / ".checkpoints"
@@ -4881,6 +4934,19 @@ class LocalSessionLedger:
             encoded = json.dumps(
                 result.to_dict(), sort_keys=True, separators=(",", ":")
             ).encode("utf-8")
+            # Preserve transaction-addressed parent authority before replacing
+            # the legacy latest file. Crash checkpoint recovery must still read it.
+            exact = self._checkpoint_result_path(identity, tx)
+            exact.parent.mkdir(parents=True, exist_ok=True)
+            if exact.exists() and exact.read_bytes() != encoded:
+                # Publication may legitimately advance only the envelope phase.
+                prior = ReviewResult.from_dict(json.loads(exact.read_bytes()))
+                if prior.content_digest() != result.content_digest():
+                    raise OSError("retained exact checkpoint differs")
+            else:
+                exact_temp = exact.with_suffix(".tmp")
+                exact_temp.write_bytes(encoded)
+                os.replace(exact_temp, exact)
             temp_path.write_bytes(encoded)
             os.replace(temp_path, target)
             if target.read_bytes() != encoded:
@@ -4900,7 +4966,8 @@ class LocalSessionLedger:
         transaction: ReviewTransaction | None = None,
         head_sha: str | None = None,
     ) -> ReviewResult | None:
-        target = self._checkpoint_result_path(identity)
+        exact = self._checkpoint_result_path(identity, transaction)
+        target = exact if exact.is_file() else self._checkpoint_result_path(identity)
         try:
             if not target.is_file():
                 return None

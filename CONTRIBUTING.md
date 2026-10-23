@@ -260,3 +260,9 @@ scope. Maintainers may request changes, defer proposals, or close issues that
 are duplicates, unsupported, unsafe, or outside scope, while explaining the
 rationale when practical. Community feedback is welcome, but approval does not
 transfer release, merge, or publication authority.
+
+When completing reviews as an agent, distinguish fresh `rescan` from the explicit
+remaining-coverage route in the recovery guide. Confirm installed version and
+caller applicability before requesting it. Serialize commands for one PR, retain
+the original source events, and verify actual native APPROVED/check/thread
+receipts; do not equate resolving comments, a green workflow or merge with approval.

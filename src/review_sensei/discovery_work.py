@@ -191,6 +191,7 @@ def discover(
         proposals.extend(prior_partial.learning_proposals)
     stage_summary: dict[str, str] = {}
     failed = False
+    actual_failure = False
     comment_stage = False
     scope_wave_used = not allow_expansion
     context_diagnostics: list[dict[str, object]] = []
@@ -237,6 +238,7 @@ def discover(
         if stage.categories and not categories:
             stage_summary[stage.name] = "skipped"
             failed = True
+            actual_failure = True
             continue
         comment_stage = comment_stage or "comments" in stage.outputs
         stage_provider = service._provider_for_stage(stage, default=provider)
@@ -629,6 +631,7 @@ def discover(
                     if "bridge:" + evidence_digest(scope.to_dict()) in failed_bridge_ids
                 )
             for scope in bridge_pending:
+                actual_failure = True
                 failed = True
                 for path in {scope.reference, *scope.required_paths}:
                     if path in file_outcomes:
@@ -643,6 +646,7 @@ def discover(
         stage_summary[stage.name] = "partial" if execution.pending else "complete"
         if bridge_pending:
             stage_summary[stage.name] = "partial"
+        actual_failure = actual_failure or not execution.clean_bounded_outcome
         failed = failed or bool(execution.pending)
         for _, reason in execution.pending:
             refusal_reasons[reason] = refusal_reasons.get(reason, 0) + 1
@@ -788,4 +792,11 @@ def discover(
         pull_request_number=request.pull_request_number,
         diagnostic=run_diagnostic,
         context_admission=context_admission,
+        bounded_stop=(
+            status == "partial"
+            and not actual_failure
+            and comment_stage
+            and not no_progress_detected
+            and coverage.enumeration_complete
+        ),
     )

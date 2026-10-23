@@ -7,7 +7,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from review_sensei_github.cli import main
-from review_sensei_github.rescan import event_requests_rescan
+from review_sensei_github.rescan import event_requests_remaining, event_requests_rescan
 
 from review_sensei.disposition import parse_maintainer_command
 
@@ -21,7 +21,13 @@ class ApprovalRecoveryInstructionTests(unittest.TestCase):
         self.assertGreaterEqual(len(examples), 7)
         for body in examples:
             with self.subTest(body=body):
-                if body == "@reviewsensei rescan":
+                if body.startswith("@reviewsensei review remaining"):
+                    self.assertTrue(
+                        event_requests_remaining(
+                            {"comment": {"body": body}}, "issue_comment"
+                        )
+                    )
+                elif body == "@reviewsensei rescan":
                     self.assertTrue(
                         event_requests_rescan(
                             {"comment": {"body": body}}, "issue_comment"
