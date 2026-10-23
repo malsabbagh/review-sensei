@@ -165,7 +165,7 @@ class PublicationTests(unittest.TestCase):
         for workflow, run in self.runs.items():
             if (
                 path
-                == f"actions/workflows/{workflow}/runs?head_sha={SOURCE}&event=push"
+                == f"actions/workflows/{workflow}/runs?head_sha={run['head_sha']}&event=push"
             ):
                 return [run]
             if path == f"actions/runs/{run['id']}/jobs?filter=all":
@@ -253,12 +253,82 @@ class PublicationTests(unittest.TestCase):
         ):
             self.qualify("bad-provenance")
         self.verify.side_effect = None
-        for pairs in ([(OBJECT, "c" * 40)], [(OBJECT, SOURCE), (OBJECT, "c" * 40)]):
-            with (
-                patch.object(publication, "signed_release", side_effect=pairs),
-                self.assertRaisesRegex(ValueError, "selected source"),
+        with (
+            patch.object(
+                publication,
+                "signed_release",
+                side_effect=[(OBJECT, SOURCE), (OBJECT, "c" * 40)],
+            ),
+            self.assertRaisesRegex(ValueError, "selected source"),
+        ):
+            self.qualify("wrong-hosted-source")
+
+    def test_hosted_only_publication_uses_each_packages_own_signed_source_and_attempt(
+        self,
+    ):
+        old_core = "c" * 40
+        self.runs["release.yml"]["head_sha"] = old_core
+        for item in self.jobs[1]:
+            item["head_sha"] = old_core
+        proof = {
+            "engine_source": old_core,
+            "workflow_source": SOURCE,
+            "mode": "recognized-build-input-equivalence",
+            "inputs": {"fixture": "exact"},
+        }
+        with (
+            patch.object(
+                publication,
+                "signed_release",
+                side_effect=lambda tag: (
+                    OBJECT,
+                    old_core if tag == "v1.2.3" else SOURCE,
+                ),
+            ),
+            patch.object(
+                publication, "core_equivalence", return_value=proof
+            ) as equivalence,
+        ):
+            receipt = self.qualify("hosted-only")
+            self.assertEqual(receipt["projects"]["review-sensei"]["source"], old_core)
+            self.assertEqual(
+                receipt["projects"]["review-sensei-github"]["source"], SOURCE
+            )
+            self.assertEqual(receipt["core_equivalence"], proof)
+            plan = json.loads(
+                (self.root / "hosted-only/verification-plan.json").read_text()
+            )
+            for item in plan:
+                self.assertEqual(
+                    item["source"],
+                    old_core if item["workflow"] == "release.yml" else SOURCE,
+                )
+                self.assertEqual(item["publication_attempt"], 1)
+                self.assertEqual(item["run_attempt"], 2)
+            equivalence.assert_called_with(old_core, SOURCE)
+            del receipt["core_equivalence"]
+            with self.assertRaisesRegex(
+                ValueError, "require core build-input equivalence"
             ):
-                self.qualify("wrong-source-" + str(len(pairs)))
+                publication.assert_current(receipt)
+
+    def test_changed_core_graph_refuses_split_source_before_registry_or_verifier(self):
+        with (
+            patch.object(
+                publication,
+                "signed_release",
+                side_effect=[(OBJECT, "c" * 40), (OBJECT, SOURCE)],
+            ),
+            patch.object(
+                publication,
+                "core_equivalence",
+                side_effect=ValueError("core build input changed"),
+            ),
+            self.assertRaisesRegex(ValueError, "core build input changed"),
+        ):
+            self.qualify("changed-core")
+        self.assertEqual(self.reads, [])
+        self.verify.assert_not_called()
 
     def test_missing_failed_pending_or_newer_failed_python_job_cannot_be_masked(self):
         for run_id in self.jobs:

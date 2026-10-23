@@ -2,7 +2,7 @@ name: Qualify published CLI
 
 on:
   workflow_run:
-    workflows: [Release]
+    workflows: [Release review-sensei-github]
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -44,16 +44,24 @@ jobs:
           MANUAL_VERSION: ${{ inputs.version }}
           MANUAL_GITHUB_VERSION: ${{ inputs.github_version }}
         run: python scripts/published_cli_release_gate.py --version "$MANUAL_VERSION" --github-version "$MANUAL_GITHUB_VERSION" --report "$RUNNER_TEMP/publication-gate.json"
-      - name: Wait for matching hosted PyPI publication before installed verification
+      - name: Wait for exact core PyPI publication before installed verification
         if: github.event_name == 'workflow_run'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_SOURCE: ${{ github.event.workflow_run.head_sha }}
-          HOSTED_VERSION: ${{ steps.gate.outputs.github_version }}
+          CORE_SOURCE: ${{ steps.gate.outputs.core_source_sha }}
+          CORE_VERSION: ${{ steps.gate.outputs.version }}
         run: >-
-          python scripts/wait_for_publication.py --workflow release-github.yml
-          --tag "github-v$HOSTED_VERSION" --source "$RELEASE_SOURCE"
-          --report "$RUNNER_TEMP/hosted-publication-readiness.json"
+          python scripts/wait_for_publication.py --workflow release.yml
+          --tag "v$CORE_VERSION" --source "$CORE_SOURCE"
+          --report "$RUNNER_TEMP/core-publication-readiness.json"
+      - name: Recheck both immutable tags and publication attempts after waiting
+        if: github.event_name == 'workflow_run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/published_cli_release_gate.py
+          --recheck-report "$RUNNER_TEMP/publication-gate.json"
+          --core-readiness "$RUNNER_TEMP/core-publication-readiness.json"
       - name: Retain publication gate receipt
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -61,7 +69,7 @@ jobs:
           name: published-cli-publication-gate
           path: |
             ${{ runner.temp }}/publication-gate.json
-            ${{ runner.temp }}/hosted-publication-readiness.json
+            ${{ runner.temp }}/core-publication-readiness.json
           if-no-files-found: error
 
   qualify:

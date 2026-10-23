@@ -18,6 +18,7 @@ from published_cli_release_gate import (
 )
 from published_cli_release_gate import (
     published_job,
+    recheck,
     release_identity,
 )
 from qualify_published_cli import (
@@ -243,7 +244,7 @@ class BootstrapContracts(unittest.TestCase):
             "repository": {"full_name": "owner/repo"},
             "head_repository": {"full_name": "owner/repo"},
             "event": "push",
-            "path": ".github/workflows/release.yml",
+            "path": ".github/workflows/release-github.yml",
             "status": "completed",
             "conclusion": "success",
             "head_sha": "a" * 40,
@@ -308,17 +309,18 @@ class BootstrapContracts(unittest.TestCase):
             with self.subTest(changed=changed), self.assertRaises(ValueError):
                 validate_receipt({**valid, **changed}, "0.6.20")
 
-    def run_gate(self, pages, manifest=None, hosted=None):
+    def run_gate(self, pages, manifest=None, hosted=None, core_source=None):
         run = {
             "repository": {"full_name": "owner/repo"},
             "head_repository": {"full_name": "owner/repo"},
             "event": "push",
-            "path": ".github/workflows/release.yml",
+            "path": ".github/workflows/release-github.yml",
             "status": "completed",
             "conclusion": "success",
             "head_sha": "a" * 40,
             "id": 42,
             "run_attempt": 3,
+            "head_branch": "github-v0.1.1",
         }
         manifest = manifest or {
             "encoding": "base64",
@@ -330,12 +332,33 @@ class BootstrapContracts(unittest.TestCase):
             b'dependencies=["cryptography>=44,<51","review-sensei==0.6.20"]\n'
         )
         urls = []
+        core_source = core_source or "a" * 40
 
         def read(request, **kwargs):
             urls.append(request.full_url)
             self.assertEqual(kwargs["timeout"], 15)
             if "/jobs?" in request.full_url:
                 data = pages[len(urls) - 1]
+            elif "/git/ref/tags/" in request.full_url:
+                tag = request.full_url.rsplit("/", 1)[-1]
+                data = {
+                    "ref": "refs/tags/" + tag,
+                    "object": {
+                        "type": "tag",
+                        "sha": ("c" if tag.startswith("v") else "d") * 40,
+                    },
+                }
+            elif "/git/tags/" in request.full_url:
+                core = request.full_url.endswith("c" * 40)
+                data = {
+                    "sha": ("c" if core else "d") * 40,
+                    "tag": "v0.6.20" if core else "github-v0.1.1",
+                    "object": {
+                        "type": "commit",
+                        "sha": core_source if core else "a" * 40,
+                    },
+                    "verification": {"verified": True},
+                }
             elif HOSTED_MANIFEST in request.full_url:
                 data = {
                     "encoding": "base64",
@@ -373,7 +396,7 @@ class BootstrapContracts(unittest.TestCase):
     def test_full_gate_binds_same_attempt_and_exact_sha_with_later_page_job(self):
         filler = [{"name": "other", "id": n} for n in range(100)]
         job = {
-            "name": "Publish to PyPI with Trusted Publishing",
+            "name": "Publish review-sensei-github to PyPI",
             "id": 99,
             "conclusion": "success",
         }
@@ -381,17 +404,23 @@ class BootstrapContracts(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(receipt["release_attempt"], 3)
         self.assertEqual(receipt["publication_job_id"], 99)
-        self.assertEqual(output, "version=0.6.20\ngithub_version=0.1.1\n")
+        self.assertEqual(
+            output,
+            "version=0.6.20\ngithub_version=0.1.1\ncore_source_sha=" + "a" * 40 + "\n",
+        )
         self.assertEqual(receipt["github_version"], "0.1.1")
         self.assertIn("runs/42/attempts/3/jobs?per_page=100&page=2", urls[1])
-        self.assertTrue(urls[-2].endswith("contents/pyproject.toml?ref=" + "a" * 40))
+        manifests = [url for url in urls if "/contents/" in url]
         self.assertTrue(
-            urls[-1].endswith("contents/" + HOSTED_MANIFEST + "?ref=" + "a" * 40)
+            manifests[-2].endswith("contents/pyproject.toml?ref=" + "a" * 40)
+        )
+        self.assertTrue(
+            manifests[-1].endswith("contents/" + HOSTED_MANIFEST + "?ref=" + "a" * 40)
         )
 
     def test_full_gate_requires_hosted_manifest_to_pin_the_exact_engine(self):
         job = {
-            "name": "Publish to PyPI with Trusted Publishing",
+            "name": "Publish review-sensei-github to PyPI",
             "id": 99,
             "conclusion": "success",
         }
@@ -412,6 +441,92 @@ class BootstrapContracts(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertEqual(receipt["status"], "ERROR")
                 self.assertEqual(output, "")
+
+    def test_hosted_only_event_resolves_existing_signed_core_source(self):
+        job = {
+            "name": "Publish review-sensei-github to PyPI",
+            "id": 99,
+            "conclusion": "success",
+        }
+        code, receipt, output, _ = self.run_gate(
+            [{"jobs": [job]}], core_source="b" * 40
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(receipt["source_sha"], "a" * 40)
+        self.assertEqual(receipt["core_source_sha"], "b" * 40)
+        self.assertIn("core_source_sha=" + "b" * 40, output)
+
+    def test_after_core_wait_both_immutable_identities_and_run_attempts_are_rechecked(
+        self,
+    ):
+        core, hosted = "b" * 40, "a" * 40
+        report = {
+            "mode": "confirmed-hosted-pypi-publish",
+            "version": "0.8.11",
+            "github_version": "0.3.12",
+            "core_tag_object": "c" * 40,
+            "github_tag_object": "d" * 40,
+            "core_source_sha": core,
+            "source_sha": hosted,
+            "release_run_id": 42,
+            "release_attempt": 1,
+        }
+        peer = {
+            "status": "PASS",
+            "workflow": "release.yml",
+            "tag": "v0.8.11",
+            "source": core,
+            "run_id": 41,
+            "run_attempt": 2,
+        }
+
+        def original(identifier):
+            is_core = identifier == 41
+            return {
+                "id": identifier,
+                "run_attempt": 2 if is_core else 1,
+                "status": "completed",
+                "conclusion": "success",
+                "event": "push",
+                "head_sha": core if is_core else hosted,
+                "head_branch": "v0.8.11" if is_core else "github-v0.3.12",
+                "path": ".github/workflows/"
+                + ("release.yml" if is_core else "release-github.yml"),
+                "repository": {"full_name": "owner/repo"},
+                "head_repository": {"full_name": "owner/repo"},
+            }
+
+        def get(path):
+            return original(int(path.rsplit("/", 1)[-1]))
+
+        def identity(get, tag):
+            return ("c" * 40, core) if tag == "v0.8.11" else ("d" * 40, hosted)
+
+        with patch("published_cli_release_gate.signed_identity", side_effect=identity):
+            recheck(report, peer, get, "owner/repo")
+            for identifier in (41, 42):
+
+                def changed(path):
+                    value = get(path)
+                    return (
+                        {**value, "run_attempt": value["run_attempt"] + 1}
+                        if value["id"] == identifier
+                        else value
+                    )
+
+                with self.subTest(run=identifier), self.assertRaises(ValueError):
+                    recheck(report, peer, changed, "owner/repo")
+        for changed_tag in ("v0.8.11", "github-v0.3.12"):
+
+            def moved(get, tag):
+                obj, source = identity(get, tag)
+                return ("f" * 40, source) if tag == changed_tag else (obj, source)
+
+            with (
+                patch("published_cli_release_gate.signed_identity", side_effect=moved),
+                self.assertRaises(ValueError),
+            ):
+                recheck(report, peer, get, "owner/repo")
 
     def test_hosted_pin_is_exact_and_unique(self):
         require_hosted_pin(["cryptography<51,>=44", "review-sensei==0.6.23"], "0.6.23")

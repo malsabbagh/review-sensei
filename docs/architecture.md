@@ -11,7 +11,7 @@ writes hold without blind recreation. One original finite evidence budget covers
 publication/reply broker/storage/readers/mutable fences. Missing/conflicting evidence withholds
 decisions. Require reader-first rollout and trusted complete emission. See ADR 0094.
 
-## Bounded default publication and retained recovery
+## Publication and recovery
 
 Writers default to at most 64 findings; readers accept 250. Only trusted
 `github.publication_inventory: complete` enables larger emission after reader-first
@@ -1231,3 +1231,5 @@ instance and lifecycle for admission classifications. Serialized model proposals
 remain audit evidence; missing or conflicting index authority leaves their
 blocking fence active. Human resolution comes from the matching resolution
 inventory. Coverage, receipts and current approval fences remain independent.
+
+Hosted-only reuse requires core-input proof and per-package signed provenance (ADR 0105).

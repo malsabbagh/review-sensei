@@ -312,17 +312,27 @@ def assert_current(receipt):
         )
     if docs.tag_identity(receipt["release_tag"]) != (
         receipt["release_tag_object"],
-        receipt["source_sha"],
+        receipt.get("release_source_sha", receipt["source_sha"]),
     ):
         raise ValueError("immutable release tag changed during validation")
     fresh = docs.api(f"releases/tags/{receipt['release_tag']}")
     binding = release_binding(
-        fresh, receipt["version"], receipt["release_tag_object"], receipt["source_sha"]
+        fresh,
+        receipt["version"],
+        receipt["release_tag_object"],
+        receipt.get("release_source_sha", receipt["source_sha"]),
     )
     if binding != receipt["release_binding"]:
         raise ValueError("published release binding changed during validation")
     published_assets(fresh["id"], binding)
     pypi.assert_current(receipt["pypi_publication"])
+    if receipt["pypi_publication"]["source"] != receipt["source_sha"]:
+        raise ValueError("Python qualification differs from selected workflow source")
+    project = receipt["pypi_publication"].get("projects", {}).get("review-sensei")
+    if project is not None and project.get(
+        "source", receipt["source_sha"]
+    ) != receipt.get("release_source_sha", receipt["source_sha"]):
+        raise ValueError("Python/GitHub core release sources differ")
 
 
 def qualify(selection, output, *, reserved=False):
@@ -365,14 +375,12 @@ def qualify(selection, output, *, reserved=False):
         raise ValueError("site/package release manifests differ")
     versions.validate_npm_manifests(snapshot, version)
     immutable_object, immutable_source = docs.tag_identity("v" + version)
-    if immutable_source != source:
-        raise ValueError(
-            "major channel does not target its exact immutable released source"
-        )
     release = docs.api(f"releases/tags/v{version}")
-    binding = release_binding(release, version, immutable_object, source)
+    binding = release_binding(release, version, immutable_object, immutable_source)
     publication = pypi.qualify(source, version, github_version, output / "pypi")
     engine = publication["projects"]["review-sensei"]
+    if engine.get("source", source) != immutable_source:
+        raise ValueError("GitHub and PyPI core release sources differ")
     if engine["run_id"] != binding["run_id"]:
         raise ValueError("published release run/source differs from PyPI publication")
     if docs.api(f"compare/{source}...main").get("status") not in {"ahead", "identical"}:
@@ -399,6 +407,7 @@ def qualify(selection, output, *, reserved=False):
         "github_version": github_version,
         "release_tag": "v" + version,
         "release_tag_object": immutable_object,
+        "release_source_sha": immutable_source,
         "release_run_id": binding["run_id"],
         "release_binding": binding,
         "wheel_sha256": wheel_digest,

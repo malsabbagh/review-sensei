@@ -109,12 +109,14 @@ Process: `docs/process/adr-process.md`
 | [0078](0078-review-sensei-github-split.md) | Proposed | Ship the GitHub Actions runtime as review-sensei-github | User-authorized split | Engine must not import the host; v5 moves only after the hosted package is published |
 | [0079](0079-reservation-leak-prevention-and-admission-self-heal.md) | Proposed | Prevent reservation leaks and self-heal at admission | Pending triage | Supersedes ADR 0063's explicit-continue rule; pause is never auto-cleared |
 | [0095](0095-pypi-qualified-major-channel.md) | Proposed | Qualify v5 from verified engine and hosted PyPI publication independently of npm | User-requested next-release policy | Preserve signed engine source, provenance, approvals and downstream gates |
+| [0105](0105-hosted-only-python-release-sources.md) | Proposed | Bind hosted-only releases to independent verified Python sources with recognized core build-input equivalence | User-requested release scope | No core/npm bump for unchanged core; immutable provenance and fallback safety remain required |
 
 | [0098](0098-operation-local-admitted-inventory-handoff.md) | Proposed | Reuse same-operation admitted inventory context with complete fresh fences | PR #316 composed-publication budget evidence | No response or authority cache; all mutable storage and prose checks remain fresh |
 
 | [0103](0103-bounded-hosted-media-confirmation.md) | Proposed | Compose retained media confirmation within the original hosted budget | User-authorized media command repair | Grouped v1 parts, fresh authority and exact source audit; no limit increase |
 
 ## Policy
+
 
 New proposal: [0084 - Lossless packed assessment queue carrier](0084-packed-assessment-queue-carrier.md)
 qualifies bounded trusted-library continuation without enabling CLI/Worker writers.

@@ -339,6 +339,11 @@ class PreparationRenderingTests(unittest.TestCase):
     def test_current_engine_version_cannot_publish_the_pre_seam_pin(self):
         before = (self.root / "CHANGELOG.md").read_bytes()
         hosted = (self.root / PREP.HOSTED_PROJECT).read_bytes()
+        unchanged_core = (self.root / "pyproject.toml").read_bytes()
+        unchanged_npm = {
+            str(path.relative_to(self.root)): path.read_bytes()
+            for path in (self.root / "packages/npm").rglob("package.json")
+        }
         pre_seam = PREP.docs.version_tuple("v" + CURRENT) <= PREP.docs.version_tuple(
             "v" + PREP.versions.PRE_SEAM_ENGINE
         )
@@ -356,6 +361,15 @@ class PreparationRenderingTests(unittest.TestCase):
         self.assertEqual(receipt["version"], CURRENT)
         self.assertEqual(receipt["engine_tag"], "")
         self.assertEqual(receipt["github_tag"], "github-v" + HOSTED_NEXT)
+        self.assertEqual((self.root / "pyproject.toml").read_bytes(), unchanged_core)
+        self.assertEqual(
+            {name: (self.root / name).read_bytes() for name in unchanged_npm},
+            unchanged_npm,
+        )
+        # A failed later signing/publication job reuses the prepared receipt;
+        # it does not render another release or create another core/npm tag.
+        self.assertEqual(PREP.validate_payload(self.root), receipt)
+        self.assertEqual(PREP.validate_payload(self.root), receipt)
 
     def test_current_engine_and_hosted_versions_prepare_nothing(self):
         before = (self.root / "CHANGELOG.md").read_bytes()

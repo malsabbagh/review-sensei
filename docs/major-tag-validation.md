@@ -20,6 +20,14 @@ digests and successful source-bound Python release jobs must agree. Overall
 Release success and npm assembly/publication are not admission requirements. Channel numbers
 are independent of package versions: `v5` can select `0.6.21`.
 
+Hosted-only releases bind the selected workflow source to the hosted signed tag.
+The immutable engine tag and core GitHub release can bind an older source only
+when the recognized complete core build inputs are identical. The receipt
+records that core source separately as `release_source_sha`, preserves each
+project's own publication provenance and rechecks both sources. Missing proof,
+changed inputs or an unrecognized build recipe refuses this exemption. See
+[ADR 0105](adr/0105-hosted-only-python-release-sources.md).
+
 The asset inventory is an exact four-item set: one bounded five-item API page
 must contain no fifth asset and advertise no next page. Missing/malformed headers
 or an oversized response fail closed. GitHub API, attestation and

@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import release_docs as docs
+from python_release_sources import core_equivalence
 from qualify_published_cli import clean_environment, require_hosted_pin
 
 MAX_JSON = 512 * 1024
@@ -450,7 +451,12 @@ def qualify(source, version, github_version, output):
             HOSTED_JOB,
         ),
     ]
-    receipt = {"source": source, "projects": {}}
+    engine_identity = signed_release("v" + version)
+    hosted_identity = signed_release("github-v" + github_version)
+    if hosted_identity[1] != source:
+        raise ValueError("hosted immutable tag does not bind the selected source")
+    equivalence = core_equivalence(engine_identity[1], source)
+    receipt = {"source": source, "core_equivalence": equivalence, "projects": {}}
     plan = []
     for (
         project,
@@ -461,15 +467,16 @@ def qualify(source, version, github_version, output):
         required,
         publisher,
     ) in projects:
-        tag_object, tag_source = signed_release(tag)
-        if tag_source != source:
-            raise ValueError("Python immutable tag does not bind the selected source")
-        run = publication_run(source, tag, workflow, required, publisher)
+        tag_object, tag_source = (
+            engine_identity if project == "review-sensei" else hosted_identity
+        )
+        run = publication_run(tag_source, tag, workflow, required, publisher)
         artifacts = distribution_metadata(project, selected_version)
         record = {
             "version": selected_version,
             "tag": tag,
             "tag_object": tag_object,
+            "source": tag_source,
             **run,
             "artifacts": artifacts,
         }
@@ -501,7 +508,7 @@ def qualify(source, version, github_version, output):
                 {
                     "artifact": str(artifact.resolve()),
                     "provenance": str(provenance.resolve()),
-                    "source": source,
+                    "source": tag_source,
                     "tag": tag,
                     "workflow": workflow,
                     "environment": environment,
@@ -534,13 +541,31 @@ def qualify(source, version, github_version, output):
 
 
 def assert_current(receipt):
+    if set(receipt["projects"]) != {"review-sensei", "review-sensei-github"}:
+        raise ValueError("both Python publication identities are required")
     for project, record in receipt["projects"].items():
-        if signed_release(record["tag"]) != (record["tag_object"], receipt["source"]):
+        expected_source = record.get("source", receipt["source"])
+        if project == "review-sensei-github" and expected_source != receipt["source"]:
+            raise ValueError("hosted publication differs from selected workflow source")
+        if signed_release(record["tag"]) != (record["tag_object"], expected_source):
             raise ValueError("immutable Python release tag changed during validation")
         if distribution_metadata(project, record["version"]) != record["artifacts"]:
             raise ValueError(
                 "public PyPI distribution identity changed during validation"
             )
+    engine_source = receipt["projects"]["review-sensei"].get(
+        "source", receipt["source"]
+    )
+    if engine_source != receipt["source"] or "core_equivalence" in receipt:
+        if "core_equivalence" not in receipt:
+            raise ValueError(
+                "split Python sources require core build-input equivalence"
+            )
+        if (
+            core_equivalence(engine_source, receipt["source"])
+            != receipt["core_equivalence"]
+        ):
+            raise ValueError("core build-input equivalence changed during validation")
 
 
 def main():

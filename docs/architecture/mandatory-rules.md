@@ -2,8 +2,6 @@ Same-operation inventory handoff must retain budget/transport/token/scope,
 fresh complete intent/parts reads and fresh ledger/Bot/PR/root/index/full-prose fences.
 Canonical admission is evidence only; see ADR 0098.
 
-## Default human inventory references
-
 Beyond legacy future-assessment capacity, closed schema 5 owned purpose-bound parts
 preserve every admitted human instance/metadata/original index. References grant no authority:
 require independent durable transaction and live repository/PR/base/head/numeric Bot
@@ -14,8 +12,6 @@ Only original live admission starts writes; durable intent precedes data. Unknow
 writes hold without blind recreation. One original finite evidence budget covers
 publication/reply broker/storage/readers/mutable fences. Missing/conflicting evidence withholds
 decisions. Require reader-first rollout and trusted complete emission. See ADR 0094.
-
-## Bounded default publication and retained recovery
 
 Writers default to at most 64 findings; readers accept 250. Only trusted
 `github.publication_inventory: complete` enables larger emission after reader-first
@@ -652,3 +648,5 @@ approval unqualified (ADR 0089).
 
 
 Continuation must verify full input scope; absent/changed scope refuses reuse.
+
+Hosted-only reuse requires core-input proof and per-package signed provenance (ADR 0105).
