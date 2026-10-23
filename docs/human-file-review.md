@@ -219,3 +219,9 @@ An unexpected status or missing response remains unknown and requires explicit
 reconciliation. Failure diagnostics expose only a fixed operation name, bounded
 numeric HTTP status, expected status and presence/absence of a response, without
 paths, response bodies or credentials. See the [GitHub review API contract](https://docs.github.com/en/rest/pulls/reviews#create-a-review-for-a-pull-request).
+
+Media finalization uses the exact authenticated finding index for admitted
+optional and human-only classifications after loading canonical result JSON.
+A resolved human decision stays resolved; pending human decisions and genuine
+required findings still withhold approval. This does not replace file receipts,
+complete text coverage, current thread checks or provider qualification.

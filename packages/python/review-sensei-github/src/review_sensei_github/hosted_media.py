@@ -381,7 +381,20 @@ def prepare_hosted_media_context(
                 and entry.lifecycle
                 == finding_lifecycle_for_comment(comment).fingerprint
             )
-            if comment.blocks_approval and not (
+            # Canonical result JSON preserves the model proposal, not runtime
+            # admission. Only this exact authenticated instance/lifecycle can
+            # replace it; missing or mismatched authority keeps the raw fence.
+            admitted_blocking = (
+                entry.blocking
+                if entry is not None and exact_entry
+                else comment.blocks_approval
+            )
+            admitted_human = (
+                entry.needs_human
+                if entry is not None and exact_entry
+                else comment.needs_human
+            )
+            if admitted_blocking and not (
                 entry is not None
                 and exact_entry
                 and entry.blocking
@@ -389,9 +402,7 @@ def prepare_hosted_media_context(
                 and instance in resolved
             ):
                 blocking = True
-            if comment.needs_human or (
-                entry is not None and exact_entry and entry.needs_human
-            ):
+            if admitted_human:
                 retained_human = human_entries.get(instance)
                 if (
                     entry is None
