@@ -127,7 +127,9 @@ class DispositionSnapshotReaderTests(unittest.TestCase):
             self.assertIsNotNone(record.disposition_snapshot)
             decisions = session_dispositions(record, ledger=fresh)
             self.assertEqual(len(decisions), 25)
-            self.assertTrue(all(d.actor_role == "admin" and d.provenance for d in decisions))
+            self.assertTrue(
+                all(d.actor_role == "admin" and d.provenance for d in decisions)
+            )
             progress = []
             for _ in range(8):
                 outcome, budget, _ = state.verify(decisions)
