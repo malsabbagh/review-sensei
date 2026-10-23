@@ -169,7 +169,7 @@ jobs:
           sha_prefix = re.compile(r"^[a-f0-9]{7,39}$")
           ref = re.compile(r"^[A-Za-z0-9._/-]+$")
           rescan = re.compile(r"\A(?:@sensei|(?ai:@reviewsensei))[ \t]+(?i:re(?:[ \t]|-)?scan)(?:[ \t]+(?ai:commit)[ \t]+(?P<commit>[a-fA-F0-9]{7,40}))?\s*\Z")
-          remaining = re.compile(r"\A(?:@sensei|(?ai:@reviewsensei))[ \t]+(?ai:review)[ \t]+(?ai:remaining)(?:[ \t]+(?ai:commit)[ \t]+(?P<commit>[a-fA-F0-9]{7,40}))?\s*\Z")
+          remaining = re.compile(r"\A(?:@sensei|(?ai:@reviewsensei))[ \t]+(?ai:review)[ \t]+(?ai:remaining)(?:[ \t]+(?ai:commit)[ \t]+(?P<commit>[a-fA-F0-9]{7,40}))?[ \t\r\n]*\Z")
           pull = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
           event_name = sys.argv[2]
           comment_body = sys.argv[3] if len(sys.argv) > 3 else ""

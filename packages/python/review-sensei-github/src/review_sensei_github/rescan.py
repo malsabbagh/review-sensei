@@ -126,10 +126,26 @@ def cli_event_requests_remaining() -> bool:
 
 
 def cli_event_review_intent() -> str:
-    """Return only a closed CLI switch derived from the original event file."""
-    if cli_event_requests_remaining():
+    """Read one valid original event; never downgrade unreadable intent."""
+    kind = os.environ.get("GITHUB_EVENT_NAME")
+    if kind not in {"workflow_dispatch", "issue_comment"}:
+        return ""
+    event_path = Path(os.environ.get("GITHUB_EVENT_PATH", ""))
+    try:
+        if not event_path.is_file() or event_path.stat().st_size > 1024 * 1024:
+            raise ReviewInputError(
+                "original review intent event is unavailable or oversized"
+            )
+        event = json.loads(event_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise ReviewInputError(
+            "original review intent event could not be read"
+        ) from None
+    if not isinstance(event, dict):
+        raise ReviewInputError("original review intent event must be an object")
+    if event_requests_remaining(event, kind):
         return "--review-remaining"
-    if cli_event_requests_rescan():
+    if event_requests_rescan(event, kind):
         return "--rescan"
     return ""
 

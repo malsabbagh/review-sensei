@@ -1,7 +1,9 @@
 """An explicit remaining-work event buys one scoped cumulative window."""
 
 import io
+import json
 import os
+import tempfile
 import unittest
 from contextlib import redirect_stderr
 from dataclasses import replace
@@ -14,7 +16,7 @@ from review_sensei_github.publication import (
     approval_eligibility_marker,
     review_marker,
 )
-from review_sensei_github.rescan import resolve_rescan
+from review_sensei_github.rescan import cli_event_review_intent, resolve_rescan
 
 from review_sensei.cli import main
 from review_sensei.errors import ReviewInputError
@@ -24,6 +26,78 @@ from review_sensei.session import InMemorySessionLedger, complete_review_publica
 from review_sensei.validation import ReviewLimits
 from tests import test_explicit_rescan as rescan
 from tests import test_review_transaction as tx
+
+
+class OriginalEventIntentTests(unittest.TestCase):
+    def test_valid_event_is_read_once_and_returns_only_closed_intent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "event.json"
+            for body, expected in (
+                ("@reviewsensei review remaining\n", "--review-remaining"),
+                ("@reviewsensei rescan", "--rescan"),
+                ("ordinary discussion", ""),
+            ):
+                event = json.dumps({"comment": {"body": body}})
+                path.write_text(event, encoding="utf-8")
+                with (
+                    self.subTest(body=body),
+                    patch.dict(
+                        os.environ,
+                        {
+                            "GITHUB_EVENT_NAME": "issue_comment",
+                            "GITHUB_EVENT_PATH": str(path),
+                        },
+                    ),
+                    patch.object(Path, "read_text", return_value=event) as read,
+                ):
+                    self.assertEqual(cli_event_review_intent(), expected)
+                    self.assertEqual(read.call_count, 1)
+
+    def test_unavailable_or_invalid_event_refuses_instead_of_ordinary_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "event.json"
+            with patch.dict(
+                os.environ,
+                {"GITHUB_EVENT_NAME": "issue_comment", "GITHUB_EVENT_PATH": str(path)},
+            ):
+                for content in (None, b"{", b"[]", b"\xff", b" " * (1024 * 1024 + 1)):
+                    with self.subTest(
+                        content_size=None if content is None else len(content)
+                    ):
+                        if content is not None:
+                            path.write_bytes(content)
+                        with self.assertRaisesRegex(
+                            ReviewInputError, "original review intent event"
+                        ):
+                            cli_event_review_intent()
+                path.write_text("{}", encoding="utf-8")
+                with patch.object(
+                    Path, "read_text", side_effect=OSError("synthetic read failure")
+                ):
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "original review intent event"
+                    ):
+                        cli_event_review_intent()
+
+    def test_unexpected_predicate_failure_propagates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "event.json"
+            path.write_text("{}", encoding="utf-8")
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "GITHUB_EVENT_NAME": "issue_comment",
+                        "GITHUB_EVENT_PATH": str(path),
+                    },
+                ),
+                patch(
+                    "review_sensei_github.rescan.event_requests_remaining",
+                    side_effect=RuntimeError("synthetic internal failure"),
+                ),
+                self.assertRaises(RuntimeError),
+            ):
+                cli_event_review_intent()
 
 
 class RemainingReviewAdmissionTests(unittest.TestCase):
