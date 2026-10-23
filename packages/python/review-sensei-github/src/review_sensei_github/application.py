@@ -88,6 +88,7 @@ from .human_assessment import HumanAssessmentPublisher
 from .learning_pr import LearningPRPublisher, LearningPRResult
 from .publication import (
     PublicationResult,
+    ReviewApprovalFinalizer,
     ReviewPublisher,
     prepare_publication_review,
 )
@@ -318,6 +319,7 @@ class GitHubApplication:
         learner: LearningPRPublisher,
         replier: ConversationPublisher,
         session_ledger: SessionLedger | None = None,
+        enable_disposition_snapshot_writes: bool = False,
     ) -> None:
         self.broker = broker
         self.http = http
@@ -325,6 +327,7 @@ class GitHubApplication:
         self.learner = learner
         self.replier = replier
         self.session_ledger = session_ledger
+        self.enable_disposition_snapshot_writes = enable_disposition_snapshot_writes
         # Every ordinary fresh application can reconstruct supported default
         # inventories from its independently selected durable ledger.
         for publisher in (reviewer, replier):
@@ -895,9 +898,13 @@ class GitHubApplication:
             from review_sensei.disposition import session_dispositions
 
             if prepared is not None:
-                authorized_dispositions = session_dispositions(prepared.record)
+                authorized_dispositions = session_dispositions(
+                    prepared.record, ledger=ledger
+                )
             elif transaction_record is not None:
-                authorized_dispositions = session_dispositions(transaction_record)
+                authorized_dispositions = session_dispositions(
+                    transaction_record, ledger=ledger
+                )
             if baseline_admission_required:
                 record_for_baseline = (
                     prepared.record if prepared is not None else transaction_record
@@ -1718,6 +1725,7 @@ class GitHubApplication:
         review_result: object | None = None,
         request_comment_id: int | None = None,
         media_budget: EvidenceReadBudget | None = None,
+        command_budget: EvidenceReadBudget | None = None,
         media_read_token: str | None = None,
         operation_entry: str = "disabled",
         app_id: int | None = None,
@@ -1776,6 +1784,8 @@ class GitHubApplication:
         hosted_mutation = (
             parsed_command.action != "status" and options.github_session_ledger
         )
+        if command_budget is None and options.github_session_ledger:
+            command_budget = media_budget or EvidenceReadBudget()
         command: MaintainerCommand | None = None
         session_grant: str | None = None
         broker_attestation: Mapping[str, object] | None = None
@@ -2159,6 +2169,7 @@ class GitHubApplication:
                 )
                 if hosted_mutation and command.action == "continue"
                 else None,
+                evidence_budget=command_budget,
             )
         if ledger is None:
             raise GitHubPublicationError("maintainer commands require a session ledger")
@@ -2326,6 +2337,8 @@ class GitHubApplication:
                     app_slug=app_slug,
                     actor=command.actor,
                     record=loaded.record,
+                    ledger=ledger,
+                    evidence_budget=command_budget,
                     incomplete_coverage=derived_incomplete_coverage,
                     policy_digest=command_policy_digest,
                 )
@@ -2367,6 +2380,8 @@ class GitHubApplication:
                 app_slug=app_slug,
                 actor=command.actor,
                 record=_record,
+                ledger=ledger,
+                evidence_budget=command_budget,
                 incomplete_coverage=derived_incomplete_coverage,
                 policy_digest=command_policy_digest,
             )
@@ -2629,6 +2644,7 @@ class GitHubApplication:
             head_sha=head_sha,
             actions_token_provider=actions_token_provider,
             evidence_budget=evidence_budget,
+            enable_disposition_snapshot_writes=self.enable_disposition_snapshot_writes,
         )
         if evidence_budget is not None:
             from .publication_recovery import publication_session_ledger
@@ -2996,6 +3012,8 @@ class GitHubApplication:
         app_slug: str,
         actor: str,
         record: object,
+        ledger: object | None = None,
+        evidence_budget: EvidenceReadBudget | None = None,
         incomplete_coverage: Sequence[str] | None = None,
         policy_digest: str | None = None,
     ) -> object:
@@ -3009,6 +3027,18 @@ class GitHubApplication:
         if not isinstance(result, MaintainerCommandResult):
             return result
         finalizer = getattr(self.reviewer, "finalizer", None)
+        if evidence_budget is not None and isinstance(
+            finalizer, ReviewApprovalFinalizer
+        ):
+            from copy import copy
+
+            existing = finalizer.evidence_budget or finalizer._operation_budget
+            if existing is not None and existing is not evidence_budget:
+                raise ReviewInputError(
+                    "command finalization budget identity mismatches"
+                )
+            finalizer = copy(finalizer)
+            finalizer.evidence_budget = evidence_budget
         refinalize = getattr(finalizer, "refinalize_with_dispositions", None)
         if not callable(refinalize):
             return result
@@ -3027,7 +3057,7 @@ class GitHubApplication:
             from review_sensei.session import SessionRecord
 
             dispositions = (
-                session_dispositions(record)
+                session_dispositions(record, ledger=ledger)
                 if isinstance(record, SessionRecord)
                 else ()
             )
@@ -3724,6 +3754,8 @@ def resolve_hosted_session_ledger(
     pull_request: int,
     head_sha: str,
     app_slug: str | None = None,
+    evidence_budget: EvidenceReadBudget | None = None,
+    analysis_metadata_phases: bool = False,
 ) -> SessionLedger:
     """Open the broker-attested comment ledger for one hosted identity.
 
@@ -3748,12 +3780,29 @@ def resolve_hosted_session_ledger(
     # an attested maintainer command, so the ledger constructor takes only the
     # broker's head-scoped session token. That is the same authority the
     # publication boundary of the same logical review writes with.
-    ledger = GitHubIssueCommentSessionLedger(
-        http,
-        token=session_token,
-        app_slug=app_slug,
-        reservation_owner=owner,
-    )
+    original_owner = dict(owner) if owner is not None else None
+
+    def connection(
+        budget: EvidenceReadBudget | None,
+    ) -> GitHubIssueCommentSessionLedger:
+        return GitHubIssueCommentSessionLedger(
+            http,
+            token=session_token,
+            app_slug=app_slug,
+            reservation_owner=dict(original_owner)
+            if original_owner is not None
+            else None,
+            evidence_budget=budget,
+        )
+
+    if analysis_metadata_phases:
+        from .session_phases import AnalysisSessionPhases
+
+        ledger = AnalysisSessionPhases(
+            connection, evidence_budget or EvidenceReadBudget()
+        ).admission
+    else:
+        ledger = connection(evidence_budget)
     identity = SessionIdentity(
         repository=repository,
         pull_request=pull_request,

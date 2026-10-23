@@ -66,10 +66,13 @@ def release_own_reservation(
     owner = session.reservation_owner
     if owner is None or str(owner.get("run_id")) != run_id:
         raise ReviewInputError("broker reservation owner does not match this run")
+    from review_sensei.bounded_evidence import EvidenceReadBudget
+
     ledger = GitHubIssueCommentSessionLedger(
         http,
         token=session.token,
         reservation_owner=owner,
+        evidence_budget=EvidenceReadBudget(),
     )
     identity = SessionIdentity(
         repository=repository,

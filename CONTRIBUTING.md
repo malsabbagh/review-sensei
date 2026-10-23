@@ -240,6 +240,17 @@ publication, release attestations, and incident/yank decisions. Contributors
 must not push tags, publish packages, or invoke release workflows unless a
 maintainer explicitly delegates that responsibility.
 
+## Agent and maintainer review recovery
+
+Follow [the approval recovery guide](docs/approval-recovery.md) for the installed
+release. Assess each finding before an authorized disposition, use at most ten
+IDs per command, and reconcile retained decisions and native threads before
+retrying. `verify` does not supply missing analysis; full `rescan` and
+`review continue` have distinct authority and reuse semantics. Keep command
+examples and parser tests synchronized. Record actual App-authored exact-head
+APPROVED/check receipts; a successful workflow is not approval. Never discard
+evidence, reset a session or enlarge a budget to turn a withheld gate green.
+
 ## Maintainer decision-making
 
 Maintainers are responsible for project direction, security boundaries, release

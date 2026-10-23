@@ -1697,14 +1697,18 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
 
         constructed = []
 
-        class RecordingHttp:
+        from review_sensei_github.http import GitHubHttp
+
+        class RecordingHttp(GitHubHttp):
             def __init__(self):
+                super().__init__()
                 constructed.append(self)
 
         broker_calls = []
 
         class FakeBroker:
-            def __init__(self):
+            def __init__(self, *, control=None):
+                self.control = control
                 broker_calls.append(self)
 
             def authorize_session_mutation(self, token, **kwargs):

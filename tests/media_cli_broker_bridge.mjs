@@ -31,6 +31,7 @@ const { TokenBroker } = await import("../deploy/cloudflare/src/token-broker.ts")
 const { GitHubApi } = await import("../deploy/cloudflare/src/github-api.ts");
 const { resetOidcJwksCacheForTesting } = await import("../deploy/cloudflare/src/oidc.ts");
 const { brokerDiagnostic } = await import("../deploy/cloudflare/src/broker-diagnostics.ts");
+const { BrokerDispatchControl } = await import("../deploy/cloudflare/src/broker-dispatch-control.ts");
 const fixture = await consumingBroker();
 // The existing fixture owns a generated test-only private key and real signer.
 // Its environment is copied only to change the synthetic repository projection.
@@ -59,15 +60,17 @@ globalThis.fetch = async (input, init) => {
   if (url.pathname === "/repos/owner/repo/installation") return fixture.transport("https://api.github.test/repos/acme/widgets/installation", init);
   if (url.pathname === "/app/installations/2468/access_tokens" && method === "POST") return fixture.transport(url, init);
   if (url.pathname === "/repos/owner/repo") return Response.json({ id: 1, fork: authority.fork });
-  if (url.pathname === "/repos/owner/repo/pulls/2") return Response.json({ number: 2, state: "open", draft: authority.draft, base: { sha: authority.base }, head: { sha: authority.head } });
-  if (url.pathname === "/repos/owner/repo/issues/comments/20") return authority.source === null ? Response.json({ message: "Not Found" }, { status: 404 }) : Response.json(authority.source);
+  const pr = authority.pull_request ?? 2;
+  if (url.pathname === `/repos/owner/repo/pulls/${pr}`) return Response.json({ number: pr, state: "open", draft: authority.draft, base: { sha: authority.base }, head: { sha: authority.head } });
+  if (url.pathname === `/repos/owner/repo/issues/comments/${authority.source?.id ?? 20}`) return authority.source === null ? Response.json({ message: "Not Found" }, { status: 404 }) : Response.json(authority.source);
+  if (url.pathname === "/repos/owner/repo/collaborators/alice/permission") return Response.json({ permission: "admin", role_name: "admin", user: { login: "alice", id: 123 } });
   if (url.pathname === "/app") return fixture.transport(url, init);
-  if (url.pathname === "/repos/owner/repo/pulls/2/reviews") {
+  if (url.pathname === `/repos/owner/repo/pulls/${pr}/reviews`) {
     const size = Number(url.searchParams.get("per_page") ?? "100");
     const page = Number(url.searchParams.get("page") ?? "1");
     return Response.json(authority.reviews.slice((page - 1) * size, page * size));
   }
-  if (url.pathname === "/repos/owner/repo/issues/2/comments") return Response.json([]);
+  if (url.pathname === `/repos/owner/repo/issues/${pr}/comments`) return Response.json(authority.comments ?? []);
   throw new Error("fixture_external_fetch_refused");
 };
 
@@ -92,6 +95,10 @@ for await (const line of lines) {
         ? new TokenBroker({ ...env, GITHUB_API_URL: "https://api.github.com" }, new GitHubApi({ ...env, GITHUB_API_URL: "https://api.github.com" }))
         : broker;
       result = await selectedBroker.exchange(request.body);
+    } else if (request.action === "verify") {
+      authority = request.authority;
+      const control = request.body.control_budget === undefined ? undefined : new BrokerDispatchControl(request.body.control_budget);
+      result = { session_attestation: await broker.verifySessionGrant(request.body.session_grant, request.body.session_attestation, control), ...(control === undefined ? {} : { control_receipt: control.receipt() }) };
     } else if (request.action === "shutdown") {
       fixture.close();
       lines.close();

@@ -21,11 +21,18 @@ if (
 
 sys.path.insert(0, str(_TESTS.parent))
 import test_command_capacity_recovery  # noqa: E402
+import test_disposition_snapshots  # noqa: E402
 import test_publication_future_capacity  # noqa: E402
 
 
 class InstalledCommandCapacityRecoveryTests(
     test_command_capacity_recovery.CommandCapacityRecoveryTests
+):
+    pass
+
+
+class InstalledDecisionSnapshotTests(
+    test_disposition_snapshots.DispositionSnapshotReaderTests
 ):
     pass
 

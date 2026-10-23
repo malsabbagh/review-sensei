@@ -1243,3 +1243,11 @@ blocking fence active. Human resolution comes from the matching resolution
 inventory. Coverage, receipts and current approval fences remain independent.
 
 Hosted-only reuse requires core-input proof and per-package signed provenance (ADR 0105).
+
+### Durable maintainer decision recovery (unreleased)
+
+[ADR0106](adr/0106-durable-decision-snapshots-and-metadata-phases.md) describes
+exclusive authenticated decision snapshots and explicit analysis metadata phases.
+They preserve full audit records and current authority while keeping request,
+codec and storage limits. See [the recovery protocol](approval-recovery.md)
+for supported commands and version applicability.

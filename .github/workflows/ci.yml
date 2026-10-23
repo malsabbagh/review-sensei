@@ -557,7 +557,7 @@ jobs:
       - name: Qualify supported media CLI with production broker accounting
         env:
           REVIEWSENSEI_MEDIA_BROKER_QUALIFICATION: "1"
-        run: python -W error::ResourceWarning -m unittest tests.test_media_cli_activation -v
+        run: python -W error::ResourceWarning -m unittest tests.test_media_cli_activation tests.test_hosted_disposition_snapshots -v
       - name: Qualify coalesced original assessment admission
         run: python -W error::ResourceWarning -m tests.epic238_initial_tail_qualification -v
       - name: Run Worker tests

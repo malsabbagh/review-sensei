@@ -86,6 +86,7 @@
         "tests/test_feedback_fence_budget.py",
         "tests/test_local_partition_read_cache.py",
         "tests/test_authenticated_partitions.py",
+        "tests/test_disposition_snapshots.py",
         "tests/test_command_capacity_recovery.py",
         "tests/test_publication_future_capacity.py",
         "tests/test_hosted_history_readers.py",
