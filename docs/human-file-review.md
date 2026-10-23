@@ -211,3 +211,11 @@ refuses. If a request and genuine receipt fit but approval readback does not,
 the invocation fails before native approval and preserves both audit records.
 An explicit retry of the original command rechecks current authorization and
 reuses those records; it does not ask for another visual assessment.
+
+The native review POST accepts GitHub's documented HTTP 200 success; request and
+receipt comment POSTs require HTTP 201. The approved review still needs exact
+owned readback and the final PR snapshot before the check tail can complete.
+An unexpected status or missing response remains unknown and requires explicit
+reconciliation. Failure diagnostics expose only a fixed operation name, bounded
+numeric HTTP status, expected status and presence/absence of a response, without
+paths, response bodies or credentials. See the [GitHub review API contract](https://docs.github.com/en/rest/pulls/reviews#create-a-review-for-a-pull-request).

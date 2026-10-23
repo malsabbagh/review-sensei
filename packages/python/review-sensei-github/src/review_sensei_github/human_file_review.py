@@ -245,8 +245,29 @@ class HumanFileReviewPublisher:
             body=body,
             timeout_seconds=remaining,
         )
-        if status not in ({200} if method == "GET" else {201}) or value is None:
-            raise ReviewInputError("human file GitHub operation could not be verified")
+        # GitHub creates a PR review with 200 OK; issue comments use 201 Created.
+        # Keep this exception scoped to the exact owned review collection.
+        review_create = (
+            method == "POST" and path == f"/pulls/{self.pull_request}/reviews"
+        )
+        expected = 200 if method == "GET" or review_create else 201
+        if status != expected or value is None:
+            operation = "comment-create"
+            if method == "GET":
+                operation = "read"
+            elif review_create:
+                operation = "review-create"
+            observed = (
+                str(status)
+                if type(status) is int and 100 <= status <= 599
+                else "unknown"
+            )
+            response = "missing" if value is None else "present"
+            raise ReviewInputError(
+                "human file GitHub operation could not be verified; "
+                f"operation={operation}; HTTP={observed}; expected={expected}; "
+                f"response={response}"
+            )
         if _body_size(canonical(value)) > 512 * 1024:
             raise ReviewInputError("human file GitHub response exceeds its bound")
         return value
