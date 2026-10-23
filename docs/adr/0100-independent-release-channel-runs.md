@@ -59,9 +59,12 @@ added. Reuse the strict existing public `major_tag_gate.release_binding` policy;
 remove the earlier optional draft allowance from that helper.
 
 npm does not download Python artifacts, and Python never reads npm state. Both
-channels can build concurrently. npm publication holds if Python finalization
-has not succeeded; retry that original npm publisher with its original bundle
-after Python recovery. This is an explicit publication-order tradeoff rather
+channels can build concurrently. A read-only readiness job waits up to 90 minutes
+for the exact original Python run to succeed, including owner recovery in a
+later attempt, before npm requests protected publication approval. The publisher
+repeats all existing source, bundle, provenance and public-release checks after
+approval. Timeout or conflicting identity holds the original run for recovery
+with its original bundle. This is an explicit publication-order tradeoff rather
 than an assertion that both distributions can publish independently. Their run
 lifecycles, artifacts and retries remain independent. Each channel records its
 own authenticated job/artifact facts and signed contract in a run/attempt-specific
@@ -87,15 +90,20 @@ or merge. Existing tagged workflows cannot be retrofitted.
 An npm approval, failed build or registry wait no longer holds a Python run
 open. Failed Python finalization can be retried after that channel is terminal,
 while npm remains visible and independently recoverable. npm publication now
-waits for verified public Python finalization; an early npm publisher holds
-without publishing and resumes through an original-job retry after that Python
-gate succeeds. Existing npm tarballs and original build invocation stay fixed. A failed
+waits for verified public Python finalization before requesting approval; an
+unready Python run is observed with bounded read-only polling rather than
+failing a protected publisher immediately. Timeout still holds publication.
+Existing npm tarballs and original build invocation stay fixed. A failed
 qualifier produces an Actions failure, never a qualified channel result.
 Missing/expired/conflicting artifacts, duplicate runs or moved identities hold
 recovery for owner review.
 
 ## Alternatives considered
 
+- Failing a protected npm publisher immediately when Python is not ready
+  preserved security but caused avoidable failed jobs during normal ordering.
+  A bounded read-only prerequisite now separates waiting from publication; all
+  existing publisher checks still run fresh after protected approval.
 - Keep separate jobs in one run: retains the observed GitHub HTTP403 retry block.
 - Dispatch downstream workflows with version/source/run inputs: adds write
   authority, caller authentication and cross-run artifact-selection surfaces.

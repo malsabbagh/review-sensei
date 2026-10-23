@@ -257,10 +257,42 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
 
+  python-publication:
+    name: Wait for exact successful Python publication
+    needs: qualify-source
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.qualify-source.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Wait read-only for original Python run including finalization and recording
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SOURCE: ${{ needs.qualify-source.outputs.source_sha }}
+        run: >-
+          python scripts/wait_for_publication.py --workflow release.yml
+          --tag "$GITHUB_REF_NAME" --source "$RELEASE_SOURCE"
+          --report "$RUNNER_TEMP/python-publication-readiness.json"
+      - name: Retain bounded publication readiness evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm-python-publication-readiness-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/python-publication-readiness.json
+          if-no-files-found: error
+
   publish-npm:
     name: Publish npm packages with Trusted Publishing
-    needs: [qualify-source, assemble-npm]
-    if: needs.qualify-source.result == 'success' && needs.assemble-npm.result == 'success'
+    needs: [qualify-source, assemble-npm, python-publication]
+    if: needs.qualify-source.result == 'success' && needs.assemble-npm.result == 'success' && needs.python-publication.result == 'success'
     runs-on: ubuntu-latest
     concurrency:
       group: publish-npm-${{ github.ref_name }}
@@ -351,6 +383,12 @@ jobs:
           --bundle-dir "$GITHUB_WORKSPACE/release/npm"
           --version "${GITHUB_REF_NAME#v}"
 
+      - name: Wait for all six published versions in the npm installation index
+        run: >-
+          python source/scripts/publish_npm_release.py wait-installation
+          --bundle-dir "$GITHUB_WORKSPACE/release/npm"
+          --version "${GITHUB_REF_NAME#v}"
+
       - name: Verify a clean Linux consumer installation
         shell: bash
         run: |
@@ -379,6 +417,7 @@ jobs:
   verify-published:
     name: Verify published npm consumer (${{ matrix.target }})
     needs: [qualify-source, publish-npm]
+    if: needs.qualify-source.result == 'success' && needs.publish-npm.result == 'success'
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -434,7 +473,7 @@ jobs:
 
   channel-result:
     name: Record independent npm channel result
-    needs: [qualify-source, native-build, assemble-npm, publish-npm, verify-published]
+    needs: [qualify-source, native-build, assemble-npm, python-publication, publish-npm, verify-published]
     if: ${{ always() && needs.qualify-source.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:

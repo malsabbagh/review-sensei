@@ -660,6 +660,67 @@ def read_back_with_retry(
     raise PublishError(last_error)
 
 
+def wait_for_installation_metadata(
+    bundle_dir: Path,
+    version: str,
+    *,
+    max_attempts: int = DEFAULT_READBACK_ATTEMPTS,
+    initial_delay_seconds: float = DEFAULT_READBACK_INITIAL_DELAY_SECONDS,
+    max_delay_seconds: float = DEFAULT_READBACK_MAX_DELAY_SECONDS,
+) -> None:
+    """Wait for npm's install index after publication; never publish on a retry."""
+    records = load_integrity_records(bundle_dir, version)
+    pending = set(ALL_PACKAGES)
+    delay = initial_delay_seconds
+    deadline = time.monotonic() + 600
+    for attempt in range(1, max_attempts + 1):
+        for package in sorted(pending):
+            if time.monotonic() >= deadline:
+                raise PublishError("npm installation metadata readiness timed out")
+            try:
+                metadata = fetch_package_metadata(package)
+            except HTTPError as error:
+                if not is_retryable_registry_http_error(error.code):
+                    raise PublishError(
+                        "npm installation metadata access failed"
+                    ) from None
+                continue
+            except RegistryTransportError:
+                continue
+            versions = metadata.get("versions")
+            if not isinstance(versions, dict):
+                raise PublishError("npm installation metadata has no version inventory")
+            remote = versions.get(version)
+            if remote is None:
+                continue
+            if (
+                not isinstance(remote, dict)
+                or remote.get("name") != package
+                or remote.get("version") != version
+                or not isinstance(remote.get("dist"), dict)
+                or remote["dist"].get("integrity") != records[package]["integrity"]
+            ):
+                raise IntegrityMismatchError(
+                    "npm installation index differs from attested bytes"
+                )
+            pending.remove(package)
+        if not pending:
+            print("All six exact npm versions are ready in the installation index")
+            return
+        if attempt < max_attempts:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            print(
+                f"Waiting for npm installation metadata: {len(pending)} packages pending"
+            )
+            time.sleep(min(delay, max_delay_seconds, remaining))
+            delay = min(delay * 1.5, max_delay_seconds)
+    raise PublishError(
+        "npm installation metadata did not become ready; retry original verification"
+    )
+
+
 def publish_tarball(
     tarball: Path,
     *,
@@ -875,6 +936,7 @@ def build_parser() -> argparse.ArgumentParser:
             "preflight",
             "publish-platforms",
             "publish-launcher",
+            "wait-installation",
             "verify-bundle",
             "list-sha256sum-subjects",
             "list-attestation-subjects",
@@ -947,6 +1009,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "publish-platforms":
             publish_platforms(bundle_dir, args.version, **retry_kwargs)
+        elif args.command == "wait-installation":
+            wait_for_installation_metadata(bundle_dir, args.version, **retry_kwargs)
         else:
             publish_launcher(bundle_dir, args.version, **retry_kwargs)
     except PublishError as exc:

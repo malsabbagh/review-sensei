@@ -112,10 +112,12 @@ approving publication. Inspect the prepared GitHub Release draft and its
 reviewed changelog notes/assets before PyPI approval. For npm approval, inspect
 the matching published Python release and exact attested npm bundle. Wait for
 the original Python run's terminal success, including its result recorder,
-before approving npm. npm publication follows Python finalization and recording;
-an early npm publisher
-holds for an original-bundle retry, without draft-read or Contents write
-authority. The release becomes public
+before approving npm. A read-only readiness job waits up to 90 minutes for that
+original Python run, including owner recovery in a later attempt, before npm
+publication can request approval. Native builds continue concurrently. The
+publisher repeats the existing full source, bundle, provenance and Python
+publication checks after approval. Timeout or invalid identity holds the
+original bundle without draft-read or Contents write authority. The release becomes public
 after protected PyPI publication; successful Python and npm runs for the same
 signed source are both required for released docs/Pages. Inspect the independent
 channel result artifacts. Complete the [npm publisher identity migration

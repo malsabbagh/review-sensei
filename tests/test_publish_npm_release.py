@@ -31,11 +31,75 @@ from scripts.publish_npm_release import (  # noqa: E402
     read_back_with_retry,
     retry_delay_seconds,
     tarball_for_package,
+    wait_for_installation_metadata,
     write_publish_state,
 )
 
 
 class PublishNpmReleaseTests(unittest.TestCase):
+    def test_installation_readiness_waits_for_full_packument_without_republishing(self):
+        calls = []
+
+        def metadata(package):
+            calls.append(package)
+            versions = (
+                {}
+                if calls.count(package) == 1
+                else {
+                    "0.5.0": {
+                        "name": package,
+                        "version": "0.5.0",
+                        "dist": {"integrity": f"sha512-{package}"},
+                    }
+                }
+            )
+            return {"versions": versions}
+
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.fetch_package_metadata",
+                side_effect=metadata,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep") as sleep,
+            mock.patch("scripts.publish_npm_release.publish_tarball") as publish,
+        ):
+            wait_for_installation_metadata(self.bundle_dir, "0.5.0", max_attempts=2)
+        self.assertEqual(len(calls), 12)
+        sleep.assert_called_once()
+        publish.assert_not_called()
+
+    def test_installation_readiness_never_retries_conflicting_immutable_bytes(self):
+        metadata = {
+            "versions": {
+                "0.5.0": {
+                    "name": ALL_PACKAGES[0],
+                    "version": "0.5.0",
+                    "dist": {"integrity": "different"},
+                }
+            }
+        }
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.fetch_package_metadata",
+                return_value=metadata,
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep") as sleep,
+            self.assertRaises(IntegrityMismatchError),
+        ):
+            wait_for_installation_metadata(self.bundle_dir, "0.5.0")
+        sleep.assert_not_called()
+
+    def test_installation_readiness_exhaustion_holds_consumer_checks(self):
+        with (
+            mock.patch(
+                "scripts.publish_npm_release.fetch_package_metadata",
+                return_value={"versions": {}},
+            ),
+            mock.patch("scripts.publish_npm_release.time.sleep"),
+            self.assertRaisesRegex(PublishError, "did not become ready"),
+        ):
+            wait_for_installation_metadata(self.bundle_dir, "0.5.0", max_attempts=2)
+
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.bundle_dir = Path(self.tempdir.name)

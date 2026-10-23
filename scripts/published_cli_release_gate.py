@@ -22,6 +22,7 @@ def release_identity(event, repository):
         or run["event"] != "push"
         or run["path"] != ".github/workflows/release.yml"
         or run["status"] != "completed"
+        or run.get("conclusion") != "success"
         or not re.fullmatch(r"[a-f0-9]{40}", run["head_sha"])
     ):
         raise ValueError("event is not a completed same-repository Release push")

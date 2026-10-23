@@ -633,6 +633,47 @@ pull_pinned_image "{image}"
 
 
 class NpmReleaseWorkflowTests(unittest.TestCase):
+    def test_readonly_wait_precedes_approval_and_consumer_verification_follows_publication(
+        self,
+    ):
+        workflow = (ROOT / ".github/workflows/publish-npm.yml").read_text()
+        waiter = workflow.split("  python-publication:\n", 1)[1].split(
+            "\n  publish-npm:", 1
+        )[0]
+        self.assertIn("needs: qualify-source", waiter)
+        self.assertIn("timeout-minutes: 95", waiter)
+        self.assertIn("wait_for_publication.py --workflow release.yml", waiter)
+        for forbidden in (
+            "environment:",
+            "id-token: write",
+            "contents: write",
+            "actions: write",
+        ):
+            self.assertNotIn(forbidden, waiter)
+        consumer = workflow.split("  verify-published:\n", 1)[1].split(
+            "\n  channel-result:", 1
+        )[0]
+        self.assertIn("needs: [qualify-source, publish-npm]", consumer)
+        self.assertIn("needs.publish-npm.result == 'success'", consumer)
+        self.assertLess(
+            workflow.index("publish-launcher"), workflow.index("wait-installation")
+        )
+        self.assertLess(
+            workflow.index("wait-installation"),
+            workflow.index("Verify a clean Linux consumer installation"),
+        )
+
+    def test_pypi_verification_skips_failed_releases_and_waits_for_hosted_publication(
+        self,
+    ):
+        workflow = (ROOT / ".github/workflows/published-cli.yml").read_text()
+        gate = workflow.split("  publication:\n", 1)[1].split("\n  qualify:", 1)[0]
+        self.assertIn("github.event.workflow_run.conclusion == 'success'", gate)
+        self.assertIn("wait_for_publication.py --workflow release-github.yml", gate)
+        self.assertIn('"github-v$HOSTED_VERSION" --source "$RELEASE_SOURCE"', gate)
+        self.assertIn("needs: publication", workflow.split("  qualify:\n", 1)[1])
+        self.assertNotIn("ref: ${{ github.event.workflow_run.head_sha", gate)
+
     def setUp(self):
         self.workflow = (ROOT / ".github/workflows/publish-npm.yml").read_text()
 
@@ -654,9 +695,11 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
         publisher = self.workflow.split("  publish-npm:\n", 1)[1].split(
             "    steps:\n", 1
         )[0]
-        self.assertIn("needs: [qualify-source, assemble-npm]", publisher)
         self.assertIn(
-            "if: needs.qualify-source.result == 'success' && needs.assemble-npm.result == 'success'",
+            "needs: [qualify-source, assemble-npm, python-publication]", publisher
+        )
+        self.assertIn(
+            "if: needs.qualify-source.result == 'success' && needs.assemble-npm.result == 'success' && needs.python-publication.result == 'success'",
             publisher,
         )
         self.assertIn("environment:\n      name: npm", publisher)
@@ -691,7 +734,9 @@ class NpmReleaseWorkflowTests(unittest.TestCase):
         publisher = self.workflow.split("  publish-npm:\n", 1)[1].split(
             "\n  channel-result:", 1
         )[0]
-        self.assertIn("needs: [qualify-source, assemble-npm]", publisher)
+        self.assertIn(
+            "needs: [qualify-source, assemble-npm, python-publication]", publisher
+        )
         assembler = self.workflow.split("  assemble-npm:\n", 1)[1].split(
             "\n  publish-npm:", 1
         )[0]
