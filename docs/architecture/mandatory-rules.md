@@ -34,9 +34,6 @@ parts refuse. Unbound gains no checkpoint authority. See ADR 0093.
 regular base/head blobs and current authorized source. Hosted composition reads canonical retained
 state after broker authorization. V1 parts keep 32 files; groups keep 32 KiB and exact union coverage.
 One publisher keeps 60 ordinary/four finalization calls and 60 seconds, including broker liability.
-Required media checks prepay cold JWKS and annotated-tag fallback inside that same allowance;
-complete first-directory subtree proofs reduce redundant shared-prefix reads. Oversized or
-incomplete trees refuse, and required broker failures retain only allowlisted diagnostics.
 Fresh source, permission, root, request, thread, qualification and full PR facts gate approval.
 Current finding facts require an exact-result index and positive resolution proof; never infer
 resolution from false flags. Never complete AI coverage/result/baseline/cache or carry across heads.
