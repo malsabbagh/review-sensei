@@ -371,6 +371,34 @@ class PreparationRenderingTests(unittest.TestCase):
         self.assertEqual(PREP.validate_payload(self.root), receipt)
         self.assertEqual(PREP.validate_payload(self.root), receipt)
 
+    def test_hosted_only_prepared_ci_handoff_verifies_real_commit_without_core_absence(
+        self,
+    ):
+        receipt = PREP.generate(
+            self.root, CURRENT, DATE, self.base, github_version=HOSTED_NEXT
+        )
+        sha = self.commit_generated()
+        self.run_git("branch", "-M", "main")
+        self.run_git("remote", "add", "origin", str(self.root))
+        with (
+            patch.object(PREP, "remote_main", return_value=sha),
+            patch.object(
+                PREP, "ci_once", return_value={**ci_run(), "head_sha": sha}
+            ) as ci,
+            patch.object(
+                PREP,
+                "unused",
+                side_effect=ValueError("existing core must not be probed"),
+            ) as core,
+            patch.object(PREP, "unused_github") as hosted,
+        ):
+            result = PREP.wait_ci(self.root, sha, 1, CURRENT, DATE)
+        self.assertEqual(result["head_sha"], sha)
+        core.assert_not_called()
+        hosted.assert_called_once_with(HOSTED_NEXT)
+        self.assertEqual(ci.call_count, 2)
+        self.assertEqual(PREP.verify_commit(self.root, sha), receipt)
+
     def test_current_engine_and_hosted_versions_prepare_nothing(self):
         before = (self.root / "CHANGELOG.md").read_bytes()
         receipt = (self.root / PREP.RECEIPT).read_bytes()
@@ -794,6 +822,128 @@ class PreparationQualificationTests(unittest.TestCase):
             self.assertRaisesRegex(ValueError, "CI failed"),
         ):
             PREP.wait_ci(ROOT, SHA, 1, None, None)
+
+    def prepared_wait(
+        self,
+        receipt,
+        *,
+        verify_error=None,
+        core_error=None,
+        hosted_error=None,
+        final_main=SHA,
+        final_ci=True,
+    ):
+        with (
+            patch.object(PREP, "remote_main", side_effect=[SHA, final_main]),
+            patch.object(
+                PREP, "ci_once", side_effect=[ci_run(), ci_run() if final_ci else None]
+            ),
+            patch.object(
+                PREP,
+                "git",
+                side_effect=lambda root, *args: (
+                    SHA if args == ("rev-parse", "FETCH_HEAD") else ""
+                ),
+            ),
+            patch.object(
+                PREP, "verify_commit", return_value=receipt, side_effect=verify_error
+            ) as verifier,
+            patch.object(PREP, "qualify_notes_origin"),
+            patch.object(PREP, "unused", side_effect=core_error) as core,
+            patch.object(PREP, "unused_github", side_effect=hosted_error) as hosted,
+        ):
+            self.wait_core, self.wait_hosted, self.wait_verifier = (
+                core,
+                hosted,
+                verifier,
+            )
+            return PREP.wait_ci(ROOT, SHA, 1, VERSION, DATE)
+
+    def handoff_receipt(self, **changes):
+        return {
+            "version": VERSION,
+            "release_date": DATE,
+            "base_sha": "b" * 40,
+            "engine_tag": "v" + VERSION,
+            "github_tag": "github-v" + HOSTED_NEXT,
+            "github_version": HOSTED_NEXT,
+            **changes,
+        }
+
+    def test_prepared_ci_handoff_checks_only_verified_selected_publications(self):
+        for engine, hosted in ((True, True), (True, False), (False, True)):
+            with self.subTest(engine=engine, hosted=hosted):
+                receipt = self.handoff_receipt(
+                    engine_tag="v" + VERSION if engine else "",
+                    github_tag="github-v" + HOSTED_NEXT if hosted else "",
+                )
+                self.prepared_wait(receipt)
+                self.assertEqual(
+                    self.wait_core.call_args_list, [((VERSION,), {})] if engine else []
+                )
+                self.assertEqual(
+                    self.wait_hosted.call_args_list,
+                    [((HOSTED_NEXT,), {})] if hosted else [],
+                )
+                self.wait_verifier.assert_called_once()
+
+    def test_prepared_ci_handoff_refuses_unverified_or_mismatched_intent_before_absence(
+        self,
+    ):
+        for changes, error in (
+            ({"version": "9.9.9"}, None),
+            ({"release_date": "2020-01-01"}, None),
+            ({"engine_tag": "", "github_tag": ""}, None),
+            ({}, ValueError("invalid generated commit")),
+        ):
+            with (
+                self.subTest(changes=changes, error=error),
+                self.assertRaises(ValueError),
+            ):
+                try:
+                    self.prepared_wait(
+                        self.handoff_receipt(**changes), verify_error=error
+                    )
+                finally:
+                    self.wait_core.assert_not_called()
+                    self.wait_hosted.assert_not_called()
+
+    def test_prepared_ci_handoff_preserves_selected_registry_refusals(self):
+        for channel in ("engine", "hosted"):
+            with (
+                self.subTest(channel=channel),
+                self.assertRaisesRegex(ValueError, "selected publication held"),
+            ):
+                self.prepared_wait(
+                    self.handoff_receipt(),
+                    core_error=ValueError("selected publication held")
+                    if channel == "engine"
+                    else None,
+                    hosted_error=ValueError("selected publication held")
+                    if channel == "hosted"
+                    else None,
+                )
+
+    def test_prepared_ci_handoff_preserves_final_main_and_ci_fences(self):
+        for kwargs in ({"final_main": "e" * 40}, {"final_ci": False}):
+            with (
+                self.subTest(kwargs=kwargs),
+                self.assertRaisesRegex(ValueError, "advanced before signed-tag"),
+            ):
+                self.prepared_wait(self.handoff_receipt(engine_tag=""), **kwargs)
+            self.wait_core.assert_not_called()
+            self.wait_hosted.assert_called_once_with(HOSTED_NEXT)
+
+    def test_initial_ci_wait_does_not_probe_any_package_version(self):
+        with (
+            patch.object(PREP, "remote_main", return_value=SHA),
+            patch.object(PREP, "ci_once", return_value=ci_run()),
+            patch.object(PREP, "unused") as core,
+            patch.object(PREP, "unused_github") as hosted,
+        ):
+            PREP.wait_ci(ROOT, SHA, 1, None, None)
+        core.assert_not_called()
+        hosted.assert_not_called()
 
     def test_github_absence_requires_actual_404_not_auth_error(self):
         for status in (200, 401, 403, 404, 429, 500):
