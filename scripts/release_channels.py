@@ -283,23 +283,86 @@ def verify_npm(root: Path, bundle: Path) -> None:
 
 
 def record(channel: str) -> dict:
-    """Retain all non-recorder outcomes; any incomplete/failed job holds success."""
-    contract = event_contract(channel)
-    run = docs.api(f"actions/runs/{contract['run_id']}")
-    jobs = [
-        {
-            key: job.get(key)
-            for key in ("id", "name", "run_attempt", "status", "conclusion")
+    """Retain outcomes; only an expanded skipped matrix may be superseded."""
+    with docs.release_stage(docs.ReleaseStage.CHANNEL_EVENT):
+        contract = event_contract(channel)
+    with docs.release_stage(docs.ReleaseStage.CHANNEL_RUN):
+        run = docs.api(f"actions/runs/{contract['run_id']}")
+        expected = {
+            "id": contract["run_id"],
+            "run_attempt": contract["run_attempt"],
+            "path": ".github/workflows/" + contract["workflow"],
+            "event": "push",
+            "head_branch": contract["tag"],
+            "head_sha": contract["source_sha"],
+            "status": "in_progress",
         }
-        for job in latest_jobs(run)
-        if job["name"] != f"Record independent {channel} channel result"
-    ]
-    artifacts = docs.api_pages(
-        f"actions/runs/{contract['run_id']}/artifacts", "artifacts"
-    )
+        if (
+            any(run.get(key) != value for key, value in expected.items())
+            or type(run.get("id")) is not int
+            or type(run.get("run_attempt")) is not int
+            or run.get("repository", {}).get("full_name") != docs.REPOSITORY
+            or run.get("head_repository", {}).get("full_name") != docs.REPOSITORY
+            or run.get("pull_requests")
+        ):
+            raise ValueError("recorder run snapshot differs from admitted contract")
+    with docs.release_stage(docs.ReleaseStage.CHANNEL_JOBS):
+        jobs = [
+            {
+                key: job.get(key)
+                for key in ("id", "name", "run_attempt", "status", "conclusion")
+            }
+            for job in latest_jobs(run)
+            if job["name"] != f"Record independent {channel} channel result"
+        ]
+        superseded = []
+        placeholder = "Verify published npm consumer (${{ matrix.target }})"
+        if channel == "npm":
+            expanded = [
+                job
+                for job in jobs
+                if job["name"] in REQUIRED_JOBS["npm"]
+                and job["name"].startswith("Verify published npm consumer (")
+            ]
+            for job in jobs:
+                if (
+                    job["name"] == placeholder
+                    and job["status"] == "completed"
+                    and job["conclusion"] == "skipped"
+                    and len(expanded) == 5
+                    and all(
+                        child["status"] == "completed"
+                        and child["conclusion"] == "success"
+                        and child["run_attempt"] > job["run_attempt"]
+                        and type(child["id"]) is int
+                        and child["id"] > 0
+                        for child in expanded
+                    )
+                    and len({child["id"] for child in expanded}) == 5
+                ):
+                    superseded.append(
+                        {
+                            "job": job,
+                            "reason": "skipped-matrix-expanded-by-later-successful-consumers",
+                            "replacement_job_ids": [child["id"] for child in expanded],
+                        }
+                    )
+            jobs = [
+                job
+                for job in jobs
+                if not any(job == item["job"] for item in superseded)
+            ]
+    with docs.release_stage(docs.ReleaseStage.CHANNEL_ARTIFACTS):
+        artifacts = docs.api_pages(
+            f"actions/runs/{contract['run_id']}/artifacts", "artifacts"
+        )
+    with docs.release_stage(docs.ReleaseStage.CHANNEL_EVENT):
+        if event_contract(channel) != contract:
+            raise ValueError("channel contract changed during recording")
     return {
         **contract,
         "jobs": jobs,
+        "superseded_jobs": superseded,
         "artifacts": [
             {key: item.get(key) for key in ("id", "name", "digest", "expired")}
             for item in artifacts
@@ -335,7 +398,9 @@ def main() -> int:
         else:
             if args.output is None:
                 raise ValueError("channel recording requires an output path")
-            args.output.write_text(json.dumps(record(args.channel), indent=2) + "\n")
+            result = record(args.channel)
+            with docs.release_stage(docs.ReleaseStage.CHANNEL_WRITE):
+                args.output.write_text(json.dumps(result, indent=2) + "\n")
     except (ValueError, OSError, KeyError, TypeError, npm.PublishError):
         print("release channel contract failed; publication held", file=sys.stderr)
         return 1

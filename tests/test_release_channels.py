@@ -490,6 +490,195 @@ class ReleaseChannelTests(unittest.TestCase):
                         if outcome != "missing":
                             self.assertIn(verification, receipt["jobs"])
 
+    def recorder_jobs(self, channel="npm"):
+        return [
+            {
+                "id": index,
+                "name": name,
+                "run_attempt": 2,
+                "status": "completed",
+                "conclusion": "success",
+            }
+            for index, name in enumerate(sorted(channels.REQUIRED_JOBS[channel]), 1)
+        ]
+
+    def placeholder(self, **changes):
+        return {
+            "id": 99,
+            "name": "Verify published npm consumer (${{ matrix.target }})",
+            "run_attempt": 1,
+            "status": "completed",
+            "conclusion": "skipped",
+            **changes,
+        }
+
+    def test_npm_recorder_retains_superseded_placeholder_on_recorder_only_retry(self):
+        self.jobs = self.recorder_jobs() + [self.placeholder()]
+        self.runs["npm"]["run_attempt"] = 3
+        env = {**self.environment("npm"), "GITHUB_RUN_ATTEMPT": "3"}
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch.object(channels.docs, "api", return_value=run("npm", run_attempt=3)),
+        ):
+            receipt = channels.record("npm")
+        self.assertTrue(receipt["successful"])
+        self.assertNotIn(self.placeholder(), receipt["jobs"])
+        self.assertEqual(receipt["superseded_jobs"][0]["job"], self.placeholder())
+        self.assertEqual(len(receipt["superseded_jobs"][0]["replacement_job_ids"]), 5)
+
+    def test_npm_placeholder_cannot_hide_any_current_or_unrelated_failure(self):
+        for defect in (
+            "missing",
+            "failure",
+            "cancelled",
+            "skipped",
+            "pending",
+            "same-attempt",
+            "newer-placeholder",
+            "failed-placeholder",
+            "other",
+        ):
+            with self.subTest(defect=defect):
+                self.jobs = self.recorder_jobs() + [self.placeholder()]
+                target = next(
+                    j
+                    for j in self.jobs
+                    if j["name"] == "Verify published npm consumer (win32-x64)"
+                )
+                if defect == "missing":
+                    self.jobs.remove(target)
+                elif defect in {"failure", "cancelled", "skipped"}:
+                    target["conclusion"] = defect
+                elif defect == "pending":
+                    target.update(status="in_progress", conclusion=None)
+                elif defect == "same-attempt":
+                    self.jobs[-1]["run_attempt"] = 2
+                elif defect == "newer-placeholder":
+                    self.jobs[-1]["run_attempt"] = 2
+                    target["run_attempt"] = 1
+                elif defect == "failed-placeholder":
+                    self.jobs[-1]["conclusion"] = "failure"
+                else:
+                    self.jobs.append({**self.placeholder(), "name": "Unrelated check"})
+                with (
+                    patch.dict(os.environ, self.environment("npm"), clear=True),
+                    patch.object(channels.docs, "api", return_value=run("npm")),
+                ):
+                    receipt = channels.record("npm")
+                self.assertFalse(receipt["successful"])
+
+    def test_python_recorder_never_supersedes_npm_placeholder(self):
+        self.jobs = self.recorder_jobs("python")
+        existing = {job["name"] for job in self.jobs}
+        self.jobs += [
+            job for job in self.recorder_jobs() if job["name"] not in existing
+        ]
+        self.jobs.append(self.placeholder())
+        # Keep all job identities unique; only the npm record may recognize it.
+        with (
+            patch.dict(os.environ, self.environment(), clear=True),
+            patch.object(channels.docs, "api", return_value=run()),
+        ):
+            receipt = channels.record("python")
+        self.assertFalse(receipt["successful"])
+        self.assertEqual(receipt.get("superseded_jobs", []), [])
+
+    def test_recorder_rejects_a_direct_run_snapshot_different_from_admitted_contract(
+        self,
+    ):
+        self.jobs = self.recorder_jobs()
+        for changes in (
+            {"head_sha": "f" * 40},
+            {"run_attempt": 1},
+            {"id": 999},
+            {"path": ".github/workflows/release.yml"},
+            {"status": "completed"},
+        ):
+            with (
+                self.subTest(changes=changes),
+                patch.dict(os.environ, self.environment("npm"), clear=True),
+                patch.object(channels.docs, "api", return_value=run("npm", **changes)),
+                self.assertRaises(ValueError),
+            ):
+                channels.record("npm")
+
+    def test_recorder_final_contract_drift_refuses_receipt(self):
+        self.jobs = self.recorder_jobs()
+        env = self.environment("npm")
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch.object(channels.docs, "api", return_value=run("npm")),
+        ):
+            contract = channels.event_contract("npm")
+            with (
+                patch.object(
+                    channels,
+                    "event_contract",
+                    side_effect=[contract, {**contract, "tag_object": "e" * 40}],
+                ),
+                self.assertRaises(ValueError),
+            ):
+                channels.record("npm")
+
+    def test_recorder_keeps_duplicate_and_invalid_attempt_rejection(self):
+        for defect in ("duplicate", "future", "boolean"):
+            with self.subTest(defect=defect):
+                self.jobs = self.recorder_jobs() + [self.placeholder()]
+                if defect == "duplicate":
+                    self.jobs.append(copy.deepcopy(self.jobs[0]))
+                else:
+                    self.jobs[0]["run_attempt"] = 3 if defect == "future" else True
+                with (
+                    patch.dict(os.environ, self.environment("npm"), clear=True),
+                    patch.object(channels.docs, "api", return_value=run("npm")),
+                    self.assertRaises(ValueError),
+                ):
+                    channels.record("npm")
+
+    def test_recorder_phase_failure_does_not_echo_remote_exception(self):
+        marker = "synthetic-private-remote-content"
+        with (
+            patch.dict(os.environ, self.environment("npm"), clear=True),
+            patch.object(channels.docs, "api", side_effect=ValueError(marker)),
+            patch("sys.stderr", new_callable=io.StringIO) as output,
+            self.assertRaises(ValueError),
+        ):
+            channels.record("npm")
+        self.assertNotIn(marker, output.getvalue())
+        records = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(
+            [r["stage"] for r in records if r["outcome"] == "failed"],
+            ["channel-record-run"],
+        )
+
+    def test_recorder_write_phase_is_reported_without_remote_text(self):
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "release_channels.py",
+                    "record",
+                    "--channel",
+                    "npm",
+                    "--output",
+                    str(self.root / "absent" / "result.json"),
+                ],
+            ),
+            patch.object(channels, "record", return_value={"successful": False}),
+            patch("sys.stderr", new_callable=io.StringIO) as output,
+        ):
+            self.assertEqual(channels.main(), 1)
+        records = [
+            json.loads(line)
+            for line in output.getvalue().splitlines()
+            if line.startswith("{")
+        ]
+        self.assertEqual(
+            [r["stage"] for r in records if r["outcome"] == "failed"],
+            ["channel-record-write"],
+        )
+
     def npm_bundle(self):
         bundle = self.root / "bundle"
         bundle.mkdir()

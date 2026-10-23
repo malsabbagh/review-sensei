@@ -46,6 +46,13 @@ own distribution channels. After the PyPI publisher succeeds, the final job
 publishes the verified draft without waiting for npm assembly or publication.
 A pending or failed npm lane stays visible and must be recovered independently;
 it is never marked successful to qualify the Python release.
+The npm channel recorder retains an old skipped literal matrix placeholder as
+explicit superseded evidence only after all five unique expanded consumer jobs
+succeed at later attempts. Missing or unsuccessful targets, same/newer placeholders
+and unrelated failed/skipped jobs still hold the result. Recorder-only recovery
+can reuse actual earlier consumer successes; it does not republish packages.
+Event, direct-run, job/artifact inventory and receipt-write phases emit sanitized
+fixed diagnostics. A failed phase does not reveal raw remote errors or credentials.
 Pages requires both complete successful channel runs for the same signed
 tag/source.
 A draft or failed Python or npm channel cannot authorize released-docs Pages.
