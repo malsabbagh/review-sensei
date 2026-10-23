@@ -2437,6 +2437,8 @@ class FindingOverrideTests(unittest.TestCase):
         self.assertIn(
             "approval withheld (review_incomplete)", full_enum_changed.summary
         )
+        self.assertIn("verify rechecks finding decisions", full_enum_changed.summary)
+        self.assertIn("original media confirmation", full_enum_changed.summary)
         self.assertEqual(len(reviews), 1)
 
         # 3. If coverage/result changes on the same head after acceptance, acceptance is withheld!

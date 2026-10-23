@@ -197,6 +197,16 @@ metadata, and an old schema withhold or refuse. Policy off leaves the binary
 blocker in place. Replay of the same confirmation event returns the same receipt
 identity.
 
+`@reviewsensei verify` rechecks finding decisions through the standard approval
+gate. It does not evaluate mixed media receipts, so a valid retained file receipt
+can coexist with `approval withheld (review_incomplete)` and partial AI status.
+The diagnostic distinguishes this from unresolved finding decisions. For an
+unsupported-file-only coverage gap, use the original media confirmation event;
+its supported replay checks the current head/base, receipt bindings, permission,
+inventory and remaining approval conditions. Other AI review gaps need review
+continuation. A receipt alone does not authorize an approval or a coverage flag
+change.
+
 `approve_reviewed_media` confirms and evaluates in one bounded composition,
 then posts only after fresh source, request, latest root and full PR fences.
 It admits the native write/readback tail before POST. Unknown responses and

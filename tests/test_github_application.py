@@ -209,6 +209,46 @@ class GitHubApplicationTests(unittest.TestCase):
         )
         self.assertFalse(updated.evaluation_failed)
         self.assertIn("approval withheld (human_adjudication_open)", updated.summary)
+        self.assertNotIn("original media confirmation", updated.summary)
+
+    def test_verify_explains_partial_review_and_separate_media_finalization(self):
+        from review_sensei.disposition import MaintainerCommandResult
+
+        record = SessionRecord.create(
+            SessionIdentity("owner/repo", 1, repository_id=1),
+            now=datetime(2026, 9, 19, tzinfo=timezone.utc),
+        )
+        publication = PublicationResult(
+            status="approval_withheld", diagnostic="review_incomplete"
+        )
+        self.reviewer.finalizer = SimpleNamespace(
+            refinalize_with_dispositions=lambda **kwargs: publication
+        )
+        updated = self.application._refinalize_command(
+            MaintainerCommandResult(
+                action="verify",
+                applied=True,
+                operator_paused=False,
+                summary="overrides for this commit are loaded",
+            ),
+            oidc_token="oidc",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha="a" * 40,
+            app_slug="review-sensei[bot]",
+            actor="alice",
+            record=record,
+        )
+        self.assertFalse(updated.evaluation_failed)
+        self.assertIn("approval withheld (review_incomplete)", updated.summary)
+        self.assertIn("review evidence is still incomplete", updated.summary)
+        self.assertIn("verify rechecks finding decisions", updated.summary)
+        self.assertIn("original media confirmation", updated.summary)
+        self.assertIn("current head/base and retained receipts", updated.summary)
+        self.assertNotIn("approval submitted", updated.summary)
+        self.assertEqual(publication.status, "approval_withheld")
+        self.assertEqual(record.dispositions, ())
 
     def test_persistent_command_capacity_failure_does_not_request_identical_retry(self):
         from review_sensei.disposition import MaintainerCommandResult
