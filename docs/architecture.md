@@ -38,6 +38,9 @@ One publisher keeps 60 ordinary/four finalization calls and 60 seconds, includin
 Media check accounting covers cold JWKS and annotated-tag fallback within that allowance.
 First-directory subtree proofs reduce shared-prefix reads; ADR 0103 describes capacity tradeoffs.
 Broker failures use the closed diagnostic catalog.
+Native media approval follows the review endpoint's HTTP 200 contract; audit
+comments use HTTP 201. Existing owned readback and current snapshot fences
+stay in place. Protocol failures expose fixed operation/status fields without raw bodies.
 Fresh source, permission, root, request, thread, qualification and full PR facts gate approval.
 Current finding facts require an exact-result index and positive resolution proof; never infer
 resolution from false flags. Never complete AI coverage/result/baseline/cache or carry across heads.

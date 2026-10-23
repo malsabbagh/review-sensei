@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Accept GitHub's documented HTTP 200 response for native media-review approval,
+  retaining HTTP 201 for audit comments, exact owned readback, bounded request
+  accounting and explicit reconciliation without duplicate approvals. Include
+  only fixed operation labels and numeric response status in failure diagnostics.
+
 ## 0.8.10 - 2026-10-23
 
 - Fund the required hosted media check capability for a separate cold Worker

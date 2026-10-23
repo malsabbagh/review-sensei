@@ -547,6 +547,20 @@ class MediaCLIActivationTests(unittest.TestCase):
         self.assertEqual(self.activate(), 0, self.last_output)
         self.assert_success()
 
+    def test_documented_review_200_finishes_the_check_without_response_replay(self):
+        self.retain_media_receipt_before_approval()
+        self.assertEqual(self.state.review_response_status, 200)
+        self.assertEqual(self.activate(), 0, self.last_output)
+        self.assert_success()
+        self.assertEqual(
+            sum(
+                method == "POST" and path == REPO + "/pulls/2/reviews"
+                for method, path, _, _ in self.state.physical
+            ),
+            1,
+        )
+        self.assertEqual(self.state.result.review_status, "partial")
+
     def test_lost_native_write_response_is_failure_and_explicit_retry_reconciles(self):
         self.retain_media_receipt_before_approval()
         self.state.lose_review_response = True

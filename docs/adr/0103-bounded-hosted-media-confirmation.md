@@ -8,6 +8,13 @@
 
 ## Context
 
+The media approval's native review POST follows GitHub's HTTP 200 success
+contract, independently of request/receipt comment POSTs which require 201.
+Accepting that response does not replace the exact owned review/body/head
+readback or final snapshot fence. Protocol errors expose fixed operation and
+numeric status fields only. Unexpected/missing responses preserve explicit
+reconciliation and never cause an implicit duplicate write.
+
 The supported maintainer media sentence reaches the hosted application without
 the current retained result, publisher or owned request identity. PR #342 makes
 that refusal an honest command failure. Passing the missing values alone is

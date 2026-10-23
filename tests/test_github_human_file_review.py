@@ -71,6 +71,8 @@ class State:
         self.permission = "write"
         self.calls = []
         self.hook = None
+        self.review_response_status = 200
+        self.comment_response_status = 201
 
     def set_result(self, result, **facts):
         self.result = result
@@ -110,7 +112,7 @@ class State:
                 else "COMMENTED",
             }
             self.reviews.append(value)
-            return 201, copy.deepcopy(value)
+            return self.review_response_status, copy.deepcopy(value)
         if method == "POST":
             self.next_id += 1
             value = {
@@ -120,7 +122,7 @@ class State:
                 "issue_url": f"{API}{REPO}/issues/2",
             }
             self.comments[self.next_id] = value
-            return 201, copy.deepcopy(value)
+            return self.comment_response_status, copy.deepcopy(value)
         if path == "":
             value = {"id": 1, "full_name": "owner/repo"}
         elif path == "/pulls/2":
@@ -217,6 +219,46 @@ class State:
 class GitHubHumanFileReviewTests(unittest.TestCase):
     def setUp(self):
         self.state = State()
+
+    def test_review_201_is_unknown_and_explicit_retry_reuses_the_owned_approval(self):
+        identifier, _, _ = self.confirmed()
+        self.state.review_response_status = 201
+        with self.assertRaisesRegex(
+            ReviewInputError, "operation=review-create; HTTP=201; expected=200"
+        ):
+            self.publisher().publish_mixed_approval(
+                request_comment_id=identifier,
+                result=self.state.result,
+                has_open_review_threads=False,
+            )
+        self.assertEqual(sum(x["state"] == "APPROVED" for x in self.state.reviews), 1)
+        self.state.review_response_status = 200
+        assessment = self.publisher().publish_mixed_approval(
+            request_comment_id=identifier,
+            result=self.state.result,
+            has_open_review_threads=False,
+        )
+        self.assertTrue(assessment.approval.approved)
+        self.assertEqual(
+            sum(
+                method == "POST" and path.endswith("/reviews")
+                for method, path, _ in self.state.calls
+            ),
+            1,
+        )
+        self.assertEqual(self.state.result.review_status, "partial")
+
+    def test_comment_200_remains_unknown_without_leaking_response_body(self):
+        self.state.comment_response_status = 200
+        with self.assertRaisesRegex(
+            ReviewInputError, "operation=comment-create; HTTP=200; expected=201"
+        ) as error:
+            self.request_review()
+        self.assertNotIn(
+            next(iter(self.state.comments.values()))["body"], str(error.exception)
+        )
+        self.assertEqual(len(self.state.comments), 1)
+        self.assertEqual(sum(x["state"] == "APPROVED" for x in self.state.reviews), 0)
 
     def publisher(self, enabled=True):
         self.budget = EvidenceReadBudget(clock=lambda: 100.0)
