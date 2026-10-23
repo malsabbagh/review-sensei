@@ -35,6 +35,9 @@ and one original command read allowance.
 regular base/head blobs and current authorized source. Hosted composition reads canonical retained
 state after broker authorization. V1 parts keep 32 files; groups keep 32 KiB and exact union coverage.
 One publisher keeps 60 ordinary/four finalization calls and 60 seconds, including broker liability.
+Media check accounting covers cold JWKS and annotated-tag fallback within that allowance.
+First-directory subtree proofs reduce shared-prefix reads; ADR 0103 describes capacity tradeoffs.
+Broker failures use the closed diagnostic catalog.
 Fresh source, permission, root, request, thread, qualification and full PR facts gate approval.
 Current finding facts require an exact-result index and positive resolution proof; never infer
 resolution from false flags. Never complete AI coverage/result/baseline/cache or carry across heads.

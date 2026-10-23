@@ -420,6 +420,17 @@ class MediaCLIActivationTests(unittest.TestCase):
             self.assertLessEqual(self.last_physical, budget.calls)
         self.assertIn("media-approved", self.last_output)
 
+    def retain_media_receipt_before_approval(self):
+        self.broker.cold_invocation()
+        self.assertEqual(self.activate(), 1, self.last_output)
+        self.assertEqual(self.approvals(), [])
+        self.assertEqual(self.receipt_count(), 1)
+        self.assertEqual(self.state.check_runs[0]["conclusion"], "action_required")
+        self.assertLessEqual(self.budgets[-1].calls, 60)
+        self.assertEqual(self.budgets[-1].calls, self.last_http + self.last_admitted)
+        if self.production_broker:
+            self.assertLessEqual(self.last_physical, self.budgets[-1].calls)
+
     def test_supported_command_loads_actual_retention_and_finishes_the_check(self):
         for media_count, text_count in ((2, 1), (41, 61)):
             with self.subTest(media_count=media_count):
@@ -439,20 +450,7 @@ class MediaCLIActivationTests(unittest.TestCase):
                         2,
                     )
                 original_source = copy.deepcopy(self.state.comments[20])
-                if media_count == 41:
-                    self.broker.cold_invocation()
-                    self.assertEqual(self.activate(), 1, self.last_output)
-                    self.assertEqual(self.approvals(), [])
-                    self.assertEqual(self.receipt_count(), 1)
-                    self.assertEqual(
-                        self.state.check_runs[0]["conclusion"], "action_required"
-                    )
-                    self.assertLessEqual(self.budgets[-1].calls, 60)
-                    self.assertEqual(
-                        self.budgets[-1].calls, self.last_http + self.last_admitted
-                    )
-                    if self.production_broker:
-                        self.assertEqual(self.last_physical, self.budgets[-1].calls)
+                self.retain_media_receipt_before_approval()
                 self.broker.cold_invocation()
                 self.assertEqual(self.activate(), 0, self.last_output)
                 self.assert_success()
@@ -477,10 +475,10 @@ class MediaCLIActivationTests(unittest.TestCase):
                             "docs/execution/quieter-workspace/zoom",
                         },
                     )
-                    self.assertEqual(len(self.state.tree_requests), 14)
+                    self.assertEqual(len(self.state.tree_requests), 8)
                     self.assertEqual(
                         sorted(recursive for _, recursive in self.state.tree_requests),
-                        [False] * 12 + [True] * 2,
+                        [False] * 4 + [True] * 4,
                     )
                     self.assertTrue(
                         all(
@@ -494,12 +492,12 @@ class MediaCLIActivationTests(unittest.TestCase):
                     self.assert_success()
                     self.assertEqual(self.state.comments[20], original_source)
                     if self.production_broker:
-                        self.assertEqual(self.last_physical, self.budgets[-1].calls)
+                        self.assertLessEqual(self.last_physical, self.budgets[-1].calls)
 
     def test_nested_recursive_tree_proof_refuses_truncated_or_missing_ancestors(self):
         for field, value in (
             ("recursive_tree_truncated", True),
-            ("recursive_tree_missing_ancestor", "after"),
+            ("recursive_tree_missing_ancestor", "execution/quieter-workspace/after"),
         ):
             with self.subTest(field=field):
                 self.state = MediaCLIState(
@@ -522,10 +520,11 @@ class MediaCLIActivationTests(unittest.TestCase):
                         for method, path, _, _ in self.state.physical
                     )
                 )
-                self.assertEqual(len(self.state.tree_requests), 7)
+                expected = 2 if field == "recursive_tree_truncated" else 4
+                self.assertEqual(len(self.state.tree_requests), expected)
                 self.assertEqual(
                     sorted(recursive for _, recursive in self.state.tree_requests),
-                    [False] * 6 + [True],
+                    [False] * (expected // 2) + [True] * (expected // 2),
                 )
                 self.assertTrue(
                     all(
@@ -542,12 +541,14 @@ class MediaCLIActivationTests(unittest.TestCase):
                     self.assertLessEqual(self.last_physical, self.budgets[-1].calls)
 
     def test_explicit_retry_is_idempotent(self):
+        self.retain_media_receipt_before_approval()
         self.assertEqual(self.activate(), 0, self.last_output)
         self.assert_success()
         self.assertEqual(self.activate(), 0, self.last_output)
         self.assert_success()
 
     def test_lost_native_write_response_is_failure_and_explicit_retry_reconciles(self):
+        self.retain_media_receipt_before_approval()
         self.state.lose_review_response = True
         self.assertEqual(self.activate(), 1, self.last_output)
         self.assertEqual(len(self.approvals()), 1)
@@ -563,6 +564,7 @@ class MediaCLIActivationTests(unittest.TestCase):
         )
 
     def test_failed_check_returns_failure_and_retry_preserves_the_native_approval(self):
+        self.retain_media_receipt_before_approval()
         self.state.fail_check = True
         self.assertEqual(self.activate(), 1, self.last_output)
         self.assertEqual(len(self.approvals()), 1)
@@ -637,6 +639,43 @@ class MediaCLIActivationTests(unittest.TestCase):
 )
 class ProductionMediaCLIActivationTests(MediaCLIActivationTests):
     production_broker = True
+
+    def test_separate_cold_annotated_fallback_check_finishes_media_and_check(self):
+        original_call = self.broker.call
+
+        def isolated_check_worker(action, **arguments):
+            if (
+                action == "exchange"
+                and arguments["body"]["capability"] == "check_publish"
+            ):
+                original_call("reset_oidc_cache")
+                arguments["annotated_check_fallback"] = True
+            return original_call(action, **arguments)
+
+        self.broker.call = isolated_check_worker
+        self.broker.cold_invocation()
+        self.assertEqual(self.activate(), 1, self.last_output)
+        self.assertIn("receipt is retained", self.last_output)
+        self.assertEqual(self.receipt_count(), 1)
+        self.assertEqual(self.approvals(), [])
+        self.assertLessEqual(self.budgets[-1].calls, 60)
+        self.broker.cold_invocation()
+        self.assertEqual(self.activate(), 0, self.last_output)
+        self.assert_success()
+        checks = [
+            receipt
+            for receipt in self.broker.receipts
+            if receipt["max_dispatches"] == 8
+        ]
+        self.assertEqual(len(checks), 2)
+        self.assertTrue(all(receipt["dispatched"] == 8 for receipt in checks))
+        self.assertEqual(
+            sum(
+                value["path"].endswith("/.well-known/jwks")
+                for value in self.broker.attempts
+            ),
+            4,
+        )
 
 
 if __name__ == "__main__":

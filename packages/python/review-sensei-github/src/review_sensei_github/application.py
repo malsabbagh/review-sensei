@@ -1915,8 +1915,9 @@ class GitHubApplication:
             from .hosted_media import prepare_hosted_media_context
 
             # The supported command must fund its check capability before any
-            # media publication. Both exchanges keep the original allowance;
-            # a cold/fallback broker refuses before an unfunded subrequest.
+            # media publication. Keep the original allowance while funding
+            # cold JWKS plus the bounded annotated-tag REST fallback.
+            # Unused prepaid slots stay charged to the original allowance.
             check_broker = self.broker
             if type(check_broker) is BrokerClient:
                 from .broker_control import BrokerDispatchAccounting
@@ -1930,11 +1931,14 @@ class GitHubApplication:
                 check_broker.control = BrokerDispatchAccounting(
                     media_budget,
                     control.operation_id,
-                    5,
+                    8,
                     control.verification_liability,
                 )
-            media_check_token = self._check_capability_token(
-                command_exchange_input, broker=check_broker
+            # This capability is required here. Preserve broker diagnostics for
+            # the CLI's existing sanitized failure reporter instead of silently
+            # degrading to a missing optional review check.
+            media_check_token = check_broker.exchange(
+                command_exchange_input, capability="check_publish"
             )
             if not isinstance(media_check_token, str) or not media_check_token.strip():
                 return MaintainerCommandResult(
