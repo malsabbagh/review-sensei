@@ -24,6 +24,15 @@ has 41 media changes among 102 changed files and two retained result parts.
 
 ## Decision
 
+Reconstruct current media finding facts from the authenticated exact-result
+finding index at the exact instance and lifecycle. Canonical result JSON omits
+runtime admission fields, so a raw model blocking proposal is not authoritative
+when that indexed classification is present. Missing or mismatched index
+authority keeps the raw blocker. Human-only findings additionally depend on
+the matching retained human inventory and its explicit resolution. Indexed
+required fixes, live blocking threads, original eligibility, media receipt and
+coverage obligations continue to withhold approval independently.
+
 Compose the command after broker reconstruction of its live source and actor.
 Load the canonical owned session transaction and retained result, preserving the
 separate serialized-payload, content and publication digests. Require the exact

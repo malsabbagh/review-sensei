@@ -16,6 +16,10 @@ from review_sensei_github import (
     GitHubWriteOptions,
     ReviewPublisher,
 )
+from review_sensei_github.approval import (
+    ReviewApprovalEligibility,
+    approval_facts_from_result,
+)
 from review_sensei_github.errors import (
     GitHubHTTPResponseTooLargeError,
     GitHubPublicationError,
@@ -25,9 +29,11 @@ from review_sensei_github.human_file_review import RECEIPT_GROUP_PREFIX
 from review_sensei_github.operation_host import RESULT_COMMENT_MARKER
 from review_sensei_github.publication import (
     IndexedFinding,
+    approval_eligibility_marker,
     finding_index_marker,
     finding_instance_marker,
     finding_marker,
+    parse_finding_index,
     review_result_digest,
 )
 from review_sensei_github.publication_recovery import _event_key, _store
@@ -37,7 +43,10 @@ from review_sensei.bounded_evidence import EvidenceReadBudget, canonical_bytes
 from review_sensei.context import finding_lifecycle_for_comment
 from review_sensei.coverage import CoverageManifest, FileCoverage
 from review_sensei.errors import ReviewInputError
-from review_sensei.human_assessment import finding_instance_fingerprint
+from review_sensei.human_assessment import (
+    PendingHumanReview,
+    finding_instance_fingerprint,
+)
 from review_sensei.models import ReviewComment, ReviewTransaction
 from review_sensei.session import SessionIdentity, SessionRecord
 from tests.fake_github_http import json_response
@@ -65,6 +74,11 @@ class HostedMediaState(State):
         blocking_finding=False,
         resolved_inline=False,
         finding_index=True,
+        admitted_blocking=True,
+        admitted_human=False,
+        human_resolved=False,
+        body_placed=False,
+        coverage_only_partial=True,
         nested_media=False,
         oversized_root=False,
     ):
@@ -133,6 +147,7 @@ class HostedMediaState(State):
             replace(
                 self.result,
                 provider=provider,
+                coverage_only_partial=coverage_only_partial,
                 model="synthetic-model" if provider == "openrouter" else None,
             )
         )
@@ -176,7 +191,33 @@ class HostedMediaState(State):
         if comment is not None:
             # Native publication freezes body blockers; inline obligations
             # are independently authenticated from their exact indexed thread.
-            self.set_result(self.result, has_blocking_findings=False)
+            admitted = replace(
+                comment,
+                effective_blocking=admitted_blocking,
+                needs_human=admitted_human,
+            )
+            inventory = PendingHumanReview.from_result(
+                replace(self.result, comments=(admitted,)), BASE
+            )
+            if inventory is not None and human_resolved:
+                inventory = replace(
+                    inventory, resolved=tuple(x.fingerprint for x in inventory.findings)
+                )
+            facts = replace(
+                approval_facts_from_result(
+                    self.result, enabled=True, app_authored=False
+                ),
+                has_blocking_findings=False,
+                has_human_adjudication_findings=bool(inventory and inventory.pending),
+            )
+            self.root["body"] = approval_eligibility_marker(
+                ReviewApprovalEligibility(
+                    HEAD,
+                    review_result_digest(self.result),
+                    facts,
+                    human_review=inventory,
+                )
+            )
             if finding_index:
                 self.root["body"] += "\n" + finding_index_marker(
                     repository_id=1,
@@ -188,9 +229,9 @@ class HostedMediaState(State):
                         IndexedFinding(
                             finding_instance_fingerprint(comment),
                             finding_lifecycle_for_comment(comment).fingerprint,
-                            blocking=True,
-                            needs_human=False,
-                            body_placed=False,
+                            blocking=admitted_blocking,
+                            needs_human=admitted_human,
+                            body_placed=body_placed,
                         ),
                     ),
                 )
@@ -211,7 +252,7 @@ class HostedMediaState(State):
                                     head_sha=HEAD,
                                     base_sha=BASE,
                                     result=self.result,
-                                    blocking=True,
+                                    blocking=admitted_blocking,
                                     fingerprint=finding_lifecycle_for_comment(
                                         comment
                                     ).fingerprint,
@@ -772,6 +813,125 @@ class HostedMediaContextTests(unittest.TestCase):
                 self.assertTrue(context.result.comments[0].blocks_approval)
                 self.assertEqual(self.state.result.to_dict(), original)
                 self.assertEqual(self.budget.calls, len(self.state.physical))
+
+    def test_authenticated_admission_survives_raw_model_reconstruction(self):
+        cases = (
+            # optional proposal, resolved human-only, pending human-only,
+            # unresolved inline required fix, required body finding.
+            (False, False, False, False, True),
+            (False, True, True, False, True),
+            (False, True, False, False, False),
+            (True, False, False, False, False),
+            (True, False, False, True, False),
+        )
+        for blocking, human, resolved, body, approved in cases:
+            with self.subTest(
+                blocking=blocking, human=human, resolved=resolved, body=body
+            ):
+                self.setup_state(
+                    blocking_finding=True,
+                    admitted_blocking=blocking,
+                    admitted_human=human,
+                    human_resolved=resolved,
+                    body_placed=body,
+                    resolved_inline=body,
+                )
+                original = self.state.result.to_dict()
+                context = self.context()
+                # Canonical JSON omits admission flags, retaining the model proposal.
+                self.assertTrue(context.result.comments[0].blocks_approval)
+                self.assertFalse(context.result.comments[0].needs_human)
+                assessment = context.publisher.approve_reviewed_media(
+                    request_comment_id=context.request_comment_id,
+                    source_comment_id=20,
+                    result=context.result,
+                )
+                self.assertEqual(assessment.approval.approved, approved)
+                self.assertEqual(
+                    sum(item["state"] == "APPROVED" for item in self.state.reviews),
+                    int(approved),
+                )
+                self.assertEqual(
+                    assessment.current_findings.has_blocking_findings, blocking
+                )
+                self.assertEqual(
+                    assessment.current_findings.has_human_adjudication_findings,
+                    human and not resolved,
+                )
+                self.assertEqual(self.state.result.to_dict(), original)
+                self.assertEqual(self.budget.calls, len(self.state.physical))
+
+    def test_optional_admission_does_not_replace_media_receipt_or_text_coverage(self):
+        for complete_text in (True, False):
+            with self.subTest(complete_text=complete_text):
+                self.setup_state(
+                    blocking_finding=True,
+                    admitted_blocking=False,
+                    coverage_only_partial=complete_text,
+                )
+                context = self.context()
+                if complete_text:
+                    assessment = context.publisher.evaluate(
+                        request_comment_id=context.request_comment_id,
+                        result=context.result,
+                    )
+                    self.assertTrue(assessment.pending_ids)
+                else:
+                    assessment = context.publisher.approve_reviewed_media(
+                        request_comment_id=context.request_comment_id,
+                        source_comment_id=20,
+                        result=context.result,
+                    )
+                self.assertFalse(assessment.approval.approved)
+                self.assertFalse(
+                    any(item["state"] == "APPROVED" for item in self.state.reviews)
+                )
+
+    def test_missing_or_mismatched_admission_cannot_downgrade_raw_blocker(self):
+        for mismatch in ("missing", "lifecycle", "instance", "result", "base", "owner"):
+            with self.subTest(mismatch=mismatch):
+                self.setup_state(blocking_finding=True, admitted_blocking=False)
+                body = self.state.root["body"]
+                if mismatch == "missing":
+                    body = body.split("\n<!-- reviewsensei:finding-index:")[0]
+                elif mismatch == "owner":
+                    self.state.root["user"] = BOT | {"id": 999}
+                else:
+                    index = parse_finding_index(
+                        body, repository_id=1, pull_request=2, head_sha=HEAD
+                    )
+                    self.assertIsNotNone(index)
+                    entry = index.entries[0]
+                    if mismatch in {"instance", "lifecycle"}:
+                        entry = replace(entry, **{mismatch: "f" * 64})
+                    body = (
+                        body.split("\n", 1)[0]
+                        + "\n"
+                        + finding_index_marker(
+                            repository_id=1,
+                            pull_request=2,
+                            head_sha=HEAD,
+                            base_sha="f" * 40 if mismatch == "base" else BASE,
+                            result_digest="f" * 64
+                            if mismatch == "result"
+                            else review_result_digest(self.state.result),
+                            entries=(entry,),
+                        )
+                    )
+                self.state.root["body"] = body
+                try:
+                    context = self.context()
+                    assessment = context.publisher.approve_reviewed_media(
+                        request_comment_id=context.request_comment_id,
+                        source_comment_id=20,
+                        result=context.result,
+                    )
+                    self.assertFalse(assessment.approval.approved)
+                except (ReviewInputError, GitHubPublicationError):
+                    pass
+                self.assertFalse(
+                    any(item["state"] == "APPROVED" for item in self.state.reviews)
+                )
 
     def test_missing_or_other_head_thread_cannot_clear_indexed_inline_finding(self):
         for missing in (True, False):

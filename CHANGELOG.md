@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Preserve exact authenticated finding classifications during hosted media
+  finalization, so optional proposals and resolved human decisions are not
+  revived as model-proposed blockers after canonical result reconstruction.
+  Keep unresolved findings, media receipts and coverage obligations intact.
+
 - Accept GitHub's documented HTTP 200 response for native media-review approval,
   retaining HTTP 201 for audit comments, exact owned readback, bounded request
   accounting and explicit reconciliation without duplicate approvals. Include

@@ -1225,3 +1225,9 @@ Opt-in partitioned publication binds independent result/snapshot/policy/config/p
 original budget/conditional generation/owned numeric readback. Fresh scans verify all prose;
 partial roots keep links/capacity/full-ID status. Local replay only; default routes/all-resolved
 approval unqualified (ADR 0089).
+
+Hosted media reconstruction uses the exact-result finding index at each matching
+instance and lifecycle for admission classifications. Serialized model proposals
+remain audit evidence; missing or conflicting index authority leaves their
+blocking fence active. Human resolution comes from the matching resolution
+inventory. Coverage, receipts and current approval fences remain independent.

@@ -547,6 +547,28 @@ class MediaCLIActivationTests(unittest.TestCase):
         self.assertEqual(self.activate(), 0, self.last_output)
         self.assert_success()
 
+    def test_optional_and_resolved_human_admission_replay_finishes_native_check(self):
+        for human in (False, True):
+            with self.subTest(human=human):
+                self.state = MediaCLIState(
+                    blocking_finding=True,
+                    admitted_blocking=False,
+                    admitted_human=human,
+                    human_resolved=human,
+                )
+                self.retain_media_receipt_before_approval()
+                self.broker.cold_invocation()
+                self.assertEqual(self.activate(), 0, self.last_output)
+                self.assert_success()
+                self.assertTrue(self.state.result.comments[0].blocks_approval)
+                self.assertEqual(
+                    sum(
+                        method == "POST" and path == REPO + "/pulls/2/reviews"
+                        for method, path, _, _ in self.state.physical
+                    ),
+                    1,
+                )
+
     def test_documented_review_200_finishes_the_check_without_response_replay(self):
         self.retain_media_receipt_before_approval()
         self.assertEqual(self.state.review_response_status, 200)
