@@ -438,7 +438,12 @@ changes the main metadata through the dedicated App; tagging an unchanged
    notes PR.    Generated notes are recomputed from source during commit validation;
    their digest remains bound to the preparation receipt. The receipt also
    records `engine_tag` and `github_tag`; an empty tag means that package is
-   unchanged and will not be signed. App permissions are unchanged. See [ADR 0071](adr/0071-generated-release-notes.md).
+   unchanged and will not be signed. The prepared-CI handoff verifies the actual
+   generated commit and requested version/date before checking absence only for
+   its nonempty `engine_tag` and `github_tag`. A hosted-only handoff retains the
+   existing core/npm versions; paired handoffs still check both selected releases.
+   Empty selections, unavailable/conflicting registry evidence and final main/CI
+   drift refuse signing. App permissions are unchanged. See [ADR 0071](adr/0071-generated-release-notes.md).
    Historical examples outside markers and the `@v5` channel stay unchanged.
    `PAYLOAD_PATHS` in `scripts/prepare_release.py` lists the complete allowlist.
    Runtime source, configs, tests, workflows, credentials and protection policy

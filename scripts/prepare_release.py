@@ -923,7 +923,6 @@ def wait_ci(
         if date is None:
             raise ValueError("prepared CI requires release date")
         inputs(version, date, sha)
-        unused(version)
         with tempfile.TemporaryDirectory(prefix="qualify-preparation-") as temporary:
             checkout = Path(temporary) / "main"
             git(root, "fetch", "--no-tags", "origin", "refs/heads/main")
@@ -934,6 +933,12 @@ def wait_ci(
                 receipt = verify_commit(checkout, sha)
                 if receipt["version"] != version or receipt["release_date"] != date:
                     raise ValueError("qualified release preparation intent differs")
+                if not receipt["engine_tag"] and not receipt["github_tag"]:
+                    raise ValueError("prepared handoff selects no new publication")
+                if receipt["engine_tag"]:
+                    unused(receipt["version"])
+                if receipt["github_tag"]:
+                    unused_github(receipt["github_version"])
                 qualify_notes_origin(checkout, version, receipt["base_sha"])
             finally:
                 git(root, "worktree", "remove", "--force", str(checkout))
