@@ -16,7 +16,7 @@ class ApprovalRecoveryInstructionTests(unittest.TestCase):
     def test_every_copyable_mention_uses_the_shipped_parser(self):
         document = (
             Path(__file__).resolve().parents[1] / "docs/approval-recovery.md"
-        ).read_text()
+        ).read_text(encoding="utf-8")
         examples = re.findall(r"^@reviewsensei .+$", document, re.MULTILINE)
         self.assertGreaterEqual(len(examples), 7)
         for body in examples:
