@@ -136,3 +136,7 @@ is not that receipt.
 When blocked, retain the source event, exact head, installed versions, reason,
 recorded/unrecorded decision counts, thread state and next supported command.
 Do not include tokens, raw provider output or private source in diagnostics.
+
+Productive partial
+windows retain their partial status and all independent approval obligations;
+their strict progress receipt affects accounting only.

@@ -2933,13 +2933,16 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
         rescan_request = None
         remaining_requested = getattr(args, "review_remaining", False)
         if getattr(args, "rescan", False) or remaining_requested:
+            requested_operation = (
+                "--review-remaining" if remaining_requested else "--rescan"
+            )
             if not hosted_session_ledger or not transaction_requested or ledger is None:
                 raise ReviewInputError(
-                    "explicit rescan/remaining review requires a hosted identity-bound transaction"
+                    f"{requested_operation} requires a hosted identity-bound transaction"
                 )
             if hosted_hooks is None or not hasattr(hosted_hooks, "resolve_rescan"):
                 raise ReviewInputError(
-                    "explicit rescan/remaining review requires verified hosted event authority"
+                    f"{requested_operation} requires verified hosted event authority"
                 )
             rescan_request = hosted_hooks.resolve_rescan(args, ledger)
             if rescan_request is not None and (
