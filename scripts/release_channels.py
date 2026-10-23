@@ -142,11 +142,13 @@ def latest_jobs(run: dict) -> list[dict]:
     return result
 
 
+@docs.release_stage(docs.ReleaseStage.PYTHON)
 def verify_python_release(root: Path, contract: dict) -> None:
     """Read the verified public Python release without draft/write authority."""
-    run = matching_run("python", contract["tag"], contract["source_sha"])
-    if run.get("status") != "completed" or run.get("conclusion") != "success":
-        raise ValueError("matching Python channel run must reach terminal success")
+    with docs.release_stage(docs.ReleaseStage.PYTHON_RUN):
+        run = matching_run("python", contract["tag"], contract["source_sha"])
+        if run.get("status") != "completed" or run.get("conclusion") != "success":
+            raise ValueError("matching Python channel run must reach terminal success")
     jobs = latest_jobs(run)
     for name in (
         releases.BUILD_JOBS | releases.PUBLISH_JOBS | {"Create GitHub release assets"}
@@ -230,6 +232,7 @@ def verify_attestation(path: Path, contract: dict, build_attempt: int) -> None:
             raise ValueError("npm attestation belongs to another run/build attempt")
 
 
+@docs.release_stage(docs.ReleaseStage.NPM)
 def verify_npm(root: Path, bundle: Path) -> None:
     contract = qualify("npm", root)
     artifact_id = int(os.environ["BUNDLE_ARTIFACT_ID"])

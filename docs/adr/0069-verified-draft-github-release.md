@@ -75,3 +75,16 @@ rather than moving tags or overwriting content.
 
 Observe the first newly authorized release's draft and approval transitions.
 Keep npm/PyPI recovery procedures separate and monitor artifact retention.
+
+### Safe operation diagnostics
+
+The 0.8.10 draft attempt failed with only a generic held-publication message;
+the original-run retry succeeded, so the inner historical cause is unknown.
+Future helpers emit structured `release-stage` records with fixed internal
+phase labels, started/passed/failed outcomes and elapsed milliseconds. Failure
+records contain an allowlisted category, bounded subprocess exit status and,
+when available, one numeric HTTP status from gh's fixed suffix. They never emit
+exception messages, commands, paths, tokens, response bodies or remote labels.
+These observations do not alter eligibility, error exits or lost-response
+reconciliation. Missing/conflicting evidence still holds publication. Existing
+immutable releases retain their original helper and logs.

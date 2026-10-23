@@ -93,6 +93,13 @@ tag, triggering independent
 both enforce the same core version. No workflow-dispatch permission is added;
 personal owner credentials are not stored in Actions.
 
+Paired signing verifies the full immutable `vX.Y.Z` and `github-vX.Y.Z` names
+independently at remote readback. Both require annotated, GitHub-verified
+signatures and their exact created object/source; the docs selector remains
+engine-tag-only. The 0.8.10 Marshal exposed an engine-only parser call after both
+pushes had succeeded. Existing tags from such a failure must be reconciled and
+their original publisher runs recovered, never signed or pushed again.
+
 Command failures report fixed operation names and exit codes, never raw command
 arguments or stdout/stderr. Cleanup attempts agent shutdown, local tag removal
 and temporary keyring removal independently. If signing already failed, cleanup

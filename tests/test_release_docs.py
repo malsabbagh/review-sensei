@@ -49,6 +49,116 @@ def successful_jobs():
 
 
 class ReleaseDocsQualificationTests(unittest.TestCase):
+    def test_python_identity_keeps_hosted_name_and_engine_docs_stay_strict(self):
+        for tag in ("v1.2.3", "github-v1.2.3"):
+            queries = []
+
+            def api(path):
+                queries.append(path)
+                if path == "git/ref/tags/" + tag:
+                    return {
+                        "ref": "refs/tags/" + tag,
+                        "object": {"type": "tag", "sha": "b" * 40},
+                    }
+                self.assertEqual(path, "git/tags/" + "b" * 40)
+                return {
+                    "tag": tag,
+                    "object": {"type": "commit", "sha": "a" * 40},
+                    "verification": {"verified": True},
+                }
+
+            with self.subTest(tag=tag), patch.object(DOCS, "api", side_effect=api):
+                self.assertEqual(
+                    DOCS.signed_python_tag_identity(tag), ("b" * 40, "a" * 40)
+                )
+                self.assertEqual(queries[0], "git/ref/tags/" + tag)
+        for tag in ("github-v1.2.3", "v5", "github-github-v1.2.3", "v01.2.3"):
+            with self.subTest(tag=tag), patch.object(DOCS, "api") as api:
+                with self.assertRaises(ValueError):
+                    DOCS.tag_identity(tag)
+                api.assert_not_called()
+        for tag in ("v5", "github-github-v1.2.3", "github-v01.2.3", "../v1.2.3"):
+            with self.subTest(tag=tag), patch.object(DOCS, "api") as api:
+                with self.assertRaises(ValueError):
+                    DOCS.signed_python_tag_identity(tag)
+                api.assert_not_called()
+
+    def test_hosted_readback_rejects_unsigned_nested_foreign_or_moved_identity(self):
+        for field in ("lightweight", "unsigned", "nested", "foreign-name", "bad-sha"):
+            ref = {
+                "ref": "refs/tags/github-v1.2.3",
+                "object": {"type": "tag", "sha": "b" * 40},
+            }
+            tag = {
+                "tag": "github-v1.2.3",
+                "object": {"type": "commit", "sha": "a" * 40},
+                "verification": {"verified": True},
+            }
+            if field == "lightweight":
+                ref["object"]["type"] = "commit"
+            elif field == "unsigned":
+                tag["verification"]["verified"] = False
+            elif field == "nested":
+                tag["object"]["type"] = "tag"
+            elif field == "foreign-name":
+                tag["tag"] = "v1.2.3"
+            else:
+                tag["object"]["sha"] = "not-a-sha"
+            with (
+                self.subTest(field=field),
+                patch.object(DOCS, "api", side_effect=[ref, tag]),
+                self.assertRaises(ValueError),
+            ):
+                DOCS.signed_python_tag_identity("github-v1.2.3")
+
+    def test_stage_diagnostics_preserve_failure_without_private_output(self):
+        for failure, category, extra in (
+            (ValueError("private-value"), "validation", {}),
+            (KeyError("private-key"), "shape", {}),
+            (OSError("private-path"), "io", {}),
+            (subprocess.TimeoutExpired("private-command", 30), "timeout", {}),
+            (
+                subprocess.CalledProcessError(
+                    23,
+                    ["private-command"],
+                    output="private-stdout",
+                    stderr=b"private-token (HTTP 422)\x1b[31m",
+                ),
+                "command",
+                {"exit_code": 23, "http_status": 422},
+            ),
+        ):
+            with (
+                self.subTest(category=category),
+                patch("sys.stderr", new_callable=io.StringIO) as stderr,
+                self.assertRaises(type(failure)) as raised,
+            ):
+                with DOCS.release_stage(DOCS.ReleaseStage.WRITE):
+                    raise failure
+            self.assertIs(raised.exception, failure)
+            text = stderr.getvalue()
+            self.assertNotIn("private", text)
+            self.assertNotIn("\x1b", text)
+            records = [json.loads(line) for line in text.splitlines()]
+            self.assertEqual([r["outcome"] for r in records], ["started", "failed"])
+            self.assertEqual(records[-1]["stage"], "github-release-write")
+            self.assertEqual(records[-1]["category"], category)
+            self.assertGreaterEqual(records[-1]["elapsed_ms"], 0)
+            for key, value in extra.items():
+                self.assertEqual(records[-1][key], value)
+
+    def test_stage_success_and_rejection_of_external_labels(self):
+        with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with DOCS.release_stage(DOCS.ReleaseStage.PYTHON_RUN):
+                pass
+            records = [json.loads(line) for line in stderr.getvalue().splitlines()]
+            self.assertEqual([r["outcome"] for r in records], ["started", "passed"])
+        with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with self.assertRaises(ValueError):
+                with DOCS.release_stage("private-label"):
+                    self.fail("external label accepted")
+            self.assertEqual(stderr.getvalue(), "")
+
     def test_any_valid_version_with_required_release_evidence_qualifies(self):
         for tag in ("v0.0.0", "v0.1.2", "v0.6.16", "v0.6.17", "v1.2.3"):
 

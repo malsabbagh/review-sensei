@@ -135,6 +135,13 @@ attested bundle. No polling loop, rebuild or new run is introduced. Python
 finalization and qualification still do not wait for npm, and its run can become
 terminal and retry while the npm run is pending or failed.
 
+Future helpers emit fixed `release-stage` observations and elapsed milliseconds.
+In particular, `matching-python-run-terminal-success` identifies an npm hold
+caused by an incomplete or failed Python run. Categories and bounded numeric
+exit/HTTP statuses are diagnostic only; raw exception text, commands and remote
+response bodies stay withheld. An observed failure is never converted to
+success. Inspect nested phase records before recovering the original run.
+
 The existing `contents: read` grant is sufficient for public release metadata
 under GitHub's [published release API contract](https://docs.github.com/en/rest/releases/releases#list-releases).
 No draft-read ability is assumed: even a visible draft fails the strict
