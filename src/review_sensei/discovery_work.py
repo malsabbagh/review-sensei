@@ -192,6 +192,7 @@ def discover(
     stage_summary: dict[str, str] = {}
     failed = False
     actual_failure = False
+    clean_limit_stop = False
     comment_stage = False
     scope_wave_used = not allow_expansion
     context_diagnostics: list[dict[str, object]] = []
@@ -646,6 +647,9 @@ def discover(
         stage_summary[stage.name] = "partial" if execution.pending else "complete"
         if bridge_pending:
             stage_summary[stage.name] = "partial"
+        clean_limit_stop = clean_limit_stop or bool(
+            execution.pending and execution.clean_bounded_outcome
+        )
         actual_failure = actual_failure or not execution.clean_bounded_outcome
         failed = failed or bool(execution.pending)
         for _, reason in execution.pending:
@@ -794,6 +798,7 @@ def discover(
         context_admission=context_admission,
         bounded_stop=(
             status == "partial"
+            and clean_limit_stop
             and not actual_failure
             and comment_stage
             and not no_progress_detected

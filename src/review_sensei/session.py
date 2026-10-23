@@ -4919,45 +4919,90 @@ class LocalSessionLedger:
             / f"pr-{identity.pull_request}.json"
         )
 
+    def _retain_exact_checkpoint(
+        self, identity: SessionIdentity, result: ReviewResult, encoded: bytes
+    ) -> None:
+        transaction = result.transaction
+        if transaction is None or transaction.result_sha256 != result.content_digest():
+            raise ReviewInputError("exact checkpoint lacks bound content")
+        exact = self._checkpoint_result_path(identity, transaction)
+        exact.parent.mkdir(parents=True, exist_ok=True)
+        if exact.exists():
+            prior = ReviewResult.from_dict(self._read_checkpoint_document(exact))
+            if (
+                prior.content_digest() != result.content_digest()
+                or prior.transaction is None
+                or not prior.transaction.logical_identity_matches(transaction)
+            ):
+                raise ReviewInputError("retained exact checkpoint differs")
+            return
+        temporary = exact.with_suffix(".tmp")
+        temporary.write_bytes(encoded)
+        os.replace(temporary, exact)
+        if exact.read_bytes() != encoded:
+            raise OSError("exact checkpoint readback differs")
+
+    @staticmethod
+    def _read_checkpoint_document(path: Path) -> Mapping[str, object]:
+        from .validation import DEFAULT_REVIEW_LIMITS
+
+        with path.open("rb") as stream:
+            payload = stream.read(DEFAULT_REVIEW_LIMITS.max_result_bytes + 1)
+        if len(payload) > DEFAULT_REVIEW_LIMITS.max_result_bytes:
+            raise ReviewInputError("retained checkpoint exceeds bounded result size")
+        document = json.loads(payload)
+        if not isinstance(document, dict):
+            raise ReviewInputError("retained checkpoint is not an object")
+        return document
+
     def retain_checkpoint_result(self, result: ReviewResult) -> None:
         tx = result.transaction
         if tx is None:
             return
         identity = SessionIdentity(
-            repository=tx.repository,
-            pull_request=tx.pull_request,
+            repository=tx.repository, pull_request=tx.pull_request
         )
         target = self._checkpoint_result_path(identity)
         temp_path = target.with_suffix(".tmp")
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
+            # Upgrade the legacy latest-only layout BEFORE it can be replaced.
+            # Validate its identity and content; corruption preserves the file
+            # and refuses instead of destroying the only parent authority.
+            if target.exists():
+                previous = ReviewResult.from_dict(
+                    self._read_checkpoint_document(target)
+                )
+                previous_tx = previous.transaction
+                if (
+                    previous_tx is None
+                    or previous_tx.repository != tx.repository
+                    or previous_tx.pull_request != tx.pull_request
+                ):
+                    raise ReviewInputError(
+                        "retained parent checkpoint identity differs"
+                    )
+                previous_bytes = json.dumps(
+                    previous.to_dict(), sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+                self._retain_exact_checkpoint(identity, previous, previous_bytes)
             encoded = json.dumps(
                 result.to_dict(), sort_keys=True, separators=(",", ":")
             ).encode("utf-8")
-            # Preserve transaction-addressed parent authority before replacing
-            # the legacy latest file. Crash checkpoint recovery must still read it.
-            exact = self._checkpoint_result_path(identity, tx)
-            exact.parent.mkdir(parents=True, exist_ok=True)
-            if exact.exists() and exact.read_bytes() != encoded:
-                # Publication may legitimately advance only the envelope phase.
-                prior = ReviewResult.from_dict(json.loads(exact.read_bytes()))
-                if prior.content_digest() != result.content_digest():
-                    raise OSError("retained exact checkpoint differs")
-            else:
-                exact_temp = exact.with_suffix(".tmp")
-                exact_temp.write_bytes(encoded)
-                os.replace(exact_temp, exact)
+            self._retain_exact_checkpoint(identity, result, encoded)
             temp_path.write_bytes(encoded)
             os.replace(temp_path, target)
             if target.read_bytes() != encoded:
                 raise OSError("retained checkpoint result readback mismatch")
-        except OSError as exc:
+        except (OSError, ValueError, ReviewInputError) as exc:
             try:
                 if temp_path.exists():
                     temp_path.unlink()
             except OSError:
                 pass
-            raise ReviewInputError("local checkpoint result retention failed") from exc
+            raise ReviewInputError(
+                "local checkpoint result retention failed; prior evidence preserved"
+            ) from exc
 
     def load_retained_checkpoint_result(
         self,
@@ -4971,10 +5016,9 @@ class LocalSessionLedger:
         try:
             if not target.is_file():
                 return None
-            raw = json.loads(target.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                return None
-            loaded_result = ReviewResult.from_dict(raw)
+            loaded_result = ReviewResult.from_dict(
+                self._read_checkpoint_document(target)
+            )
         except (OSError, ValueError, TypeError, ReviewInputError):
             return None
         if loaded_result.transaction is None:

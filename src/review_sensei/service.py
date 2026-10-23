@@ -575,6 +575,7 @@ class ReviewService:
                 accumulated_proposals.extend(prior_partial.learning_proposals)
         coverage = plan.coverage
         actual_failure = False
+        clean_limit_stop = False
         chunks_completed = 0
         last_model = request.model
 
@@ -586,6 +587,10 @@ class ReviewService:
 
         for chunk in plan.reviewable_chunks:
             if tracker_exhausted() or not budgeted.has_remaining_calls():
+                clean_limit_stop = (
+                    not budgeted.has_remaining_calls()
+                    or tracker.provider_calls >= tracker.budget.max_provider_calls
+                )
                 coverage = apply_chunk_outcomes(
                     coverage,
                     paths=chunk.paths,
@@ -760,6 +765,9 @@ class ReviewService:
                     limits=request.limits,
                 )
             if not budgeted.has_remaining_calls():
+                clean_limit_stop = any(
+                    item.index > chunk.index for item in plan.reviewable_chunks
+                )
                 for item in plan.reviewable_chunks:
                     if item.index > chunk.index:
                         coverage = apply_chunk_outcomes(
@@ -868,6 +876,7 @@ class ReviewService:
             pull_request_number=request.pull_request_number,
             bounded_stop=(
                 result.review_status == "partial"
+                and clean_limit_stop
                 and not actual_failure
                 and chunks_completed > 0
                 and not no_progress_detected

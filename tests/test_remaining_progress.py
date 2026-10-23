@@ -212,6 +212,11 @@ class RemainingProgressTests(unittest.TestCase):
 
 class RemainingCrashAccountingTests(unittest.TestCase):
     def test_local_crash_reconstructs_same_accounting_after_child_replaces_latest(self):
+        for legacy in (False, True):
+            with self.subTest(legacy_layout=legacy):
+                self._local_crash_journey(legacy=legacy)
+
+    def _local_crash_journey(self, *, legacy):
         import tempfile
         from pathlib import Path
 
@@ -224,6 +229,9 @@ class RemainingCrashAccountingTests(unittest.TestCase):
             ledger, _ = fixture.seed(
                 LocalSessionLedger(Path(directory)), result=result(1)
             )
+            if legacy:
+                parent_source = ledger.load(tx.IDENTITY).record.transaction
+                ledger._checkpoint_result_path(tx.IDENTITY, parent_source).unlink()
             prepared = fixture.prepare(
                 ledger, replace(fixture.request(ledger), mode="remaining")
             )
@@ -263,6 +271,51 @@ class RemainingCrashAccountingTests(unittest.TestCase):
                 evidence_digest=tx.EVIDENCE_DIGEST,
             )
             self.assertEqual(stored.to_dict(), replay.to_dict())
+
+    def test_legacy_latest_only_parent_survives_an_ordinary_checkpoint(self):
+        import tempfile
+        from pathlib import Path
+
+        from review_sensei.session import LocalSessionLedger
+
+        with tempfile.TemporaryDirectory() as directory:
+            ledger, _ = fixture.seed(
+                LocalSessionLedger(Path(directory)), result=result(1, bounded=False)
+            )
+            source = ledger.load(tx.IDENTITY).record.transaction
+            ledger._checkpoint_result_path(tx.IDENTITY, source).unlink()
+            prepared = fixture.prepare(
+                ledger, replace(fixture.request(ledger), mode="remaining")
+            )
+            bound = checkpoint_review_analysis(ledger, tx.IDENTITY, prepared, result(2))
+            self.assertEqual(ledger.load(tx.IDENTITY).record.failed_attempts, 1)
+            retained = ledger.load_retained_checkpoint_result(
+                tx.IDENTITY, transaction=source
+            )
+            self.assertEqual(retained.content_digest(), source.result_sha256)
+            self.assertNotEqual(retained.content_digest(), bound.content_digest())
+
+    def test_corrupt_legacy_parent_is_preserved_when_child_retention_refuses(self):
+        import tempfile
+        from pathlib import Path
+
+        from review_sensei.session import LocalSessionLedger
+
+        with tempfile.TemporaryDirectory() as directory:
+            ledger, _ = fixture.seed(
+                LocalSessionLedger(Path(directory)), result=result(1)
+            )
+            prepared = fixture.prepare(
+                ledger, replace(fixture.request(ledger), mode="remaining")
+            )
+            latest = ledger._checkpoint_result_path(tx.IDENTITY)
+            latest.write_bytes(b"synthetic corrupt parent")
+            with self.assertRaisesRegex(ReviewInputError, "prior evidence preserved"):
+                checkpoint_review_analysis(ledger, tx.IDENTITY, prepared, result(2))
+            self.assertEqual(latest.read_bytes(), b"synthetic corrupt parent")
+            self.assertEqual(
+                ledger.load(tx.IDENTITY).record.transaction.phase, "analysis"
+            )
 
     def test_missing_parent_refuses_without_charging_different_accounting(self):
         from unittest.mock import patch
