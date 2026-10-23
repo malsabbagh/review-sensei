@@ -27,7 +27,7 @@ class ApprovalRecoveryInstructionTests(unittest.TestCase):
                             {"comment": {"body": body}}, "issue_comment"
                         )
                     )
-                elif body == "@reviewsensei rescan":
+                elif body.startswith("@reviewsensei rescan"):
                     self.assertTrue(
                         event_requests_rescan(
                             {"comment": {"body": body}}, "issue_comment"

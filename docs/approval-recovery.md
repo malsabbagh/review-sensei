@@ -70,6 +70,24 @@ atomic unit cannot fit or progress stops, repair the identified configuration or
 evidence issue. Fresh rescan remains a separate deliberate operation. Text
 coverage does not replace media/human assessment or independent approval gates.
 
+Complete file and hunk counts can coexist with a partial review. For example,
+incremental reconciliation keeps the result partial when older findings cannot
+be uniquely matched to current evidence. Finding overrides do not establish that
+the older concerns were fixed, and remaining-text analysis has no work to schedule
+if every text unit is already reviewed. Inspect the retained result and baseline
+before choosing a new operation. For confirmed prior-finding uncertainty, the
+existing full rescan starts a fresh bounded review without that incremental
+baseline:
+
+```text
+@reviewsensei rescan commit abc1234
+```
+
+Replace the prefix with the current head. Reconcile that one operation before
+requesting another. A full rescan can discover new findings or remain incomplete;
+it does not waive evidence requirements or guarantee approval. This full-rescan
+route is already available in core 0.8.11 / hosted 0.3.12.
+
 ## Record legitimate maintainer decisions in batches
 
 Assess every finding against its source and evidence before accepting its risk.
@@ -158,8 +176,9 @@ no request, authority or budget and never feeds eligibility.
 
 For `next_action: inspect_partial_source`, inspect the referenced retained
 review. A verify command has not established reusable text scope or media
-confirmation authority. Choose the validated remaining-text operation or the
-original media source replay as appropriate; do not repeat the same operation
+confirmation authority. Choose validated remaining-text work, a fresh full rescan
+for confirmed prior-finding uncertainty, or the original media source replay as
+appropriate; do not repeat the same operation
 without checking its actual outcome. Missing evidence requires repair, not
 clearing a flag or relabeling partial analysis complete.
 
