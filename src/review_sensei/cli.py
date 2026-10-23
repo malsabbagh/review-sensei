@@ -2901,6 +2901,19 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
         ledger: SessionLedger | None = resolve_local_session_ledger(
             getattr(args, "session_ledger", None)
         )
+        if ledger is not None:
+            from .session import LocalSessionLedger
+            from .session_phases import AnalysisSessionPhases
+
+            if isinstance(ledger, LocalSessionLedger):
+                local_root = ledger.root
+                local_phases = AnalysisSessionPhases(
+                    lambda budget: LocalSessionLedger(
+                        local_root, evidence_budget=budget
+                    ),
+                    ledger.evidence_budget,
+                )
+                ledger = local_phases.admission
         if ledger is None and hosted_session_ledger:
             assert resolved_head_sha is not None
             assert isinstance(args.repository_id, int)
@@ -3566,6 +3579,19 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                     "explicit rescan analysis reservation does not match "
                     "the admitted transaction"
                 )
+        provider_phase_started = False
+
+        def completion_ledger(current):
+            phases = getattr(current, "_analysis_phases", None)
+            if phases is not None:
+                return phases.completion(current)
+            transition = getattr(hosted_hooks, "begin_completion_phase", None)
+            return (
+                transition(current)
+                if callable(transition) and current is not None
+                else current
+            )
+
         try:
             prior_partial = None
             # An authorized rescan is fresh analysis, not partial-work continuation.
@@ -3646,6 +3672,14 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 if hosted_hooks is not None and hasattr(hosted_hooks, "run_provider")
                 else _run_review_provider
             )
+            provider_ledger = ledger
+            phases = getattr(ledger, "_analysis_phases", None)
+            transition = getattr(hosted_hooks, "begin_provider_phase", None)
+            if phases is not None:
+                provider_ledger = phases.begin_provider(ledger)
+            elif callable(transition) and ledger is not None:
+                provider_ledger = transition(ledger)
+            provider_phase_started = True
             run = run_provider(
                 service,
                 request,
@@ -3664,7 +3698,7 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 expected_evidence_digest=transaction_evidence_digest,
                 hosted_session_ledger=hosted_session_ledger,
                 operation_entry=work_configuration.github.operation_entry,
-                ledger=ledger,
+                ledger=provider_ledger,
                 repository=args.repository,
                 repository_id=getattr(args, "repository_id", None),
                 pull_request=args.pull_request,
@@ -3675,10 +3709,15 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                     verification_scope=verification_scope,
                 ),
             )
+            ledger = completion_ledger(ledger)
         except (KeyboardInterrupt, SystemExit) as analysis_error:
+            if provider_phase_started:
+                ledger = completion_ledger(ledger)
             cleanup_analysis_error(analysis_error, charge_failed_attempt=False)
             raise
         except Exception as analysis_error:
+            if provider_phase_started:
+                ledger = completion_ledger(ledger)
             cleanup_analysis_error(analysis_error, charge_failed_attempt=True)
             raise
         if (

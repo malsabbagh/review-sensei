@@ -22,6 +22,85 @@
     "record_sha256"
   ],
   "properties": {
+    "disposition_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "result_digest",
+        "state_manifest"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "1.0"
+        },
+        "result_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "state_manifest": {
+          "anyOf": [
+            {
+              "allOf": [
+                {
+                  "$ref": "https://reviewsensei.dev/schemas/v1/evidence-manifest.schema.json"
+                },
+                {
+                  "properties": {
+                    "binding": {
+                      "properties": {
+                        "purpose": {
+                          "const": "dispositions"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "encoding",
+                "binding",
+                "item_count",
+                "sha256",
+                "document"
+              ],
+              "properties": {
+                "encoding": {
+                  "const": "inline-json-v1"
+                },
+                "binding": {
+                  "type": "object",
+                  "required": [
+                    "purpose"
+                  ],
+                  "properties": {
+                    "purpose": {
+                      "const": "dispositions"
+                    }
+                  }
+                },
+                "item_count": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4096
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "document": {
+                  "type": "object"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
     "rescan_state": {"$ref": "https://reviewsensei.dev/schemas/v1/rescan-state.schema.json"},
     "schema_version": {"const": "1.0"},
     "repository": {"type": "string", "minLength": 1, "maxLength": 256},

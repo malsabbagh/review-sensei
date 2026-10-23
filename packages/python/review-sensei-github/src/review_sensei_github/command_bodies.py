@@ -224,6 +224,12 @@ def _github_parser() -> argparse.ArgumentParser:
     command = subparsers.add_parser(
         "command",
         help="Apply an authenticated @reviewsensei maintainer command to the session ledger",
+        description=(
+            "Record at most 10 assessed finding IDs per override comment. "
+            "Use verify to retry approval/thread reconciliation without new inference. "
+            "review continue unpauses; rescan starts fresh bounded analysis. "
+            "Check native APPROVED and the current check, not only workflow success."
+        ),
     )
     command.add_argument("--comment-body", required=True)
     command.add_argument("--actor", required=True)
@@ -1091,13 +1097,29 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 session_attestation = loaded_attestation
             http = GitHubHttp()
             media_budget = None
+            from review_sensei.bounded_evidence import EvidenceReadBudget
+            from review_sensei_github.broker_control import BrokerDispatchAccounting
+            from review_sensei_github.publication_recovery import publication_http
+
+            command_budget = (
+                EvidenceReadBudget() if parsed.action != "approve-media" else None
+            )
             media_read_token = None
             command_broker = None
+            if command_budget is not None:
+                http = publication_http(http, command_budget)
+                command_broker = BrokerClient(
+                    control=BrokerDispatchAccounting(
+                        command_budget,
+                        hashlib.sha256(
+                            f"command:{args.repository_id}:{args.pull_request}:{args.head_sha}:{source_comment_id}".encode()
+                        ).hexdigest(),
+                        10,
+                        1,
+                    )
+                )
             if parsed.action == "approve-media":
-                from review_sensei.bounded_evidence import EvidenceReadBudget
-                from review_sensei_github.broker_control import BrokerDispatchAccounting
                 from review_sensei_github.media_budget import media_http
-                from review_sensei_github.publication_recovery import publication_http
 
                 http = media_http(http)
                 media_budget = EvidenceReadBudget()
@@ -1190,6 +1212,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                 reviewer=ReviewPublisher(http=http),
                 learner=LearningPRPublisher(http=http),
                 replier=ConversationPublisher(http=http),
+                enable_disposition_snapshot_writes=True,
             )
             command_configuration = load_configuration(getattr(args, "config", None))
             explicit_mode = getattr(args, "review_mode", None)
@@ -1227,6 +1250,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                     finding_inventory=finding_inventory,
                     prior_inventories=prior_inventories,
                     media_budget=media_budget,
+                    command_budget=command_budget,
                     media_read_token=media_read_token,
                     reviews_policy=command_configuration.github.reviews,
                     convergence_policy=command_convergence_policy,

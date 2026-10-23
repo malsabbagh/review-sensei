@@ -498,6 +498,8 @@ def disposition_array_bytes(items: object) -> int:
 
 def _stored_dispositions(
     value: object,
+    *,
+    snapshot: bool = False,
 ) -> tuple[dict[str, object], ...]:
     """Validate and copy persisted human finding dispositions."""
 
@@ -505,7 +507,7 @@ def _stored_dispositions(
         raise ReviewInputError("session dispositions must be an array")
     if not isinstance(value, (list, tuple)):
         raise ReviewInputError("session dispositions must be an array")
-    if len(value) > MAX_DISPOSITION_ITEMS:
+    if len(value) > (MAX_DURABLE_BLOCKER_COUNT if snapshot else MAX_DISPOSITION_ITEMS):
         raise ReviewInputError("session dispositions exceed the configured bound")
     normalized: list[dict[str, object]] = []
     allowed = {
@@ -648,7 +650,7 @@ def _stored_dispositions(
                 coverage_items.append(cov.strip())
             entry["incomplete_coverage"] = coverage_items
         normalized.append(entry)
-    if disposition_array_bytes(normalized) > MAX_DISPOSITION_BYTES:
+    if not snapshot and disposition_array_bytes(normalized) > MAX_DISPOSITION_BYTES:
         raise ReviewInputError("session dispositions exceed the configured bound")
     seen: set[tuple[str, str | None]] = set()
     per_head: dict[str, int] = {}
@@ -665,8 +667,9 @@ def _stored_dispositions(
             unheaded += 1
         else:
             per_head[key[1]] = per_head.get(key[1], 0) + 1
-    if unheaded > MAX_UNHEADED_DISPOSITIONS or any(
-        count > MAX_DISPOSITIONS_PER_HEAD for count in per_head.values()
+    if unheaded > MAX_UNHEADED_DISPOSITIONS or (
+        not snapshot
+        and any(count > MAX_DISPOSITIONS_PER_HEAD for count in per_head.values())
     ):
         raise ReviewInputError("session dispositions exceed the configured bound")
     return tuple(normalized)
@@ -850,6 +853,7 @@ class SessionRecord:
     reservation_owner: Mapping[str, object] | None = None
     rescan_state: Mapping[str, object] | None = None
     assessment_queue: Mapping[str, object] | None = None
+    disposition_snapshot: Mapping[str, object] | None = None
     # The shape is selected only while loading an existing untrusted document;
     # it is not part of the public record or its equality contract.
     _digest_shape_input: InitVar[str] = "current"
@@ -940,6 +944,22 @@ class SessionRecord:
         _require_bool(self.operator_paused, label="operator_paused")
         normalized_dispositions = _stored_dispositions(self.dispositions)
         object.__setattr__(self, "dispositions", normalized_dispositions)
+        from .disposition_snapshot import normalize_snapshot, validate_snapshot_identity
+
+        snapshot = normalize_snapshot(self.disposition_snapshot)
+        object.__setattr__(self, "disposition_snapshot", snapshot)
+        if snapshot is not None:
+            if self.dispositions or self._digest_shape != "current":
+                raise ReviewInputError(
+                    "disposition snapshot requires exclusive current authority"
+                )
+            validate_snapshot_identity(
+                snapshot,
+                repository=self.repository,
+                repository_id=self.repository_id,
+                pull_request=self.pull_request,
+                generation=self.generation,
+            )
         object.__setattr__(
             self,
             "continuation_grants",
@@ -1082,6 +1102,8 @@ class SessionRecord:
             payload["rescan_state"] = dict(self.rescan_state)
         if self.assessment_queue is not None:
             payload["assessment_queue"] = dict(self.assessment_queue)
+        if self.disposition_snapshot is not None:
+            payload["disposition_snapshot"] = dict(self.disposition_snapshot)
         return payload
 
     def _payload_without_dispositions(self) -> dict[str, object]:
@@ -1135,6 +1157,7 @@ class SessionRecord:
         reservation_owner: Mapping[str, object] | None = None,
         rescan_state: Mapping[str, object] | None = None,
         assessment_queue: Mapping[str, object] | None = None,
+        disposition_snapshot: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         normalized_dispositions = _stored_dispositions(dispositions)
         normalized_grants = _stored_continuation_grants(continuation_grants)
@@ -1173,6 +1196,11 @@ class SessionRecord:
         normalized_queue = _stored_assessment_queue(assessment_queue)
         if normalized_queue is not None:
             payload["assessment_queue"] = normalized_queue
+        from .disposition_snapshot import normalize_snapshot
+
+        normalized_snapshot = normalize_snapshot(disposition_snapshot)
+        if normalized_snapshot is not None:
+            payload["disposition_snapshot"] = normalized_snapshot
         if (
             len(
                 json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
@@ -1206,6 +1234,7 @@ class SessionRecord:
             reservation_owner=normalized_owner,
             rescan_state=rescan_state,
             assessment_queue=normalized_queue,
+            disposition_snapshot=normalized_snapshot,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -1278,6 +1307,11 @@ class SessionRecord:
         has_history = "convergence_history" in value
         has_owner = "reservation_owner" in value
         has_queue = "assessment_queue" in value
+        has_snapshot = "disposition_snapshot" in value
+        if has_snapshot and value["disposition_snapshot"] is None:
+            raise ReviewInputError(
+                "disposition snapshot cannot be a null absence marker"
+            )
         if has_queue and value["assessment_queue"] is None:
             raise ReviewInputError("assessment queue cannot be a null absence marker")
         has_attempt_head = value.get("failed_attempts_head_sha") is not None
@@ -1294,6 +1328,7 @@ class SessionRecord:
             or has_attempt_head
             or has_owner
             or has_queue
+            or has_snapshot
             or "rescan_state" in value
             else "operator-paused"
             if has_operator_paused
@@ -1373,6 +1408,9 @@ class SessionRecord:
             reservation_owner=_stored_reservation_owner(value.get("reservation_owner")),
             rescan_state=value.get("rescan_state"),  # type: ignore[arg-type]
             assessment_queue=_stored_assessment_queue(value.get("assessment_queue")),
+            disposition_snapshot=cast(
+                Mapping[str, object] | None, value.get("disposition_snapshot")
+            ),
             _digest_shape_input=digest_shape,
         )
         validate_public_document(record.to_dict(), "session-record")
@@ -1401,6 +1439,7 @@ class SessionRecord:
         reservation_owner: Mapping[str, object] | None = None,
         rescan_state: Mapping[str, object] | None = None,
         assessment_queue: Mapping[str, object] | None = None,
+        disposition_snapshot: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         created = _aware_now(now)
         if isinstance(expires_at, str):
@@ -1439,6 +1478,7 @@ class SessionRecord:
             reservation_owner=reservation_owner,
             rescan_state=rescan_state,
             assessment_queue=assessment_queue,
+            disposition_snapshot=disposition_snapshot,
         )
 
     def evolve(
@@ -1461,6 +1501,7 @@ class SessionRecord:
         reservation_owner: Mapping[str, object] | None | object = ...,
         rescan_state: Mapping[str, object] | None | object = ...,
         assessment_queue: Mapping[str, object] | None | object = ...,
+        disposition_snapshot: Mapping[str, object] | None | object = ...,
     ) -> "SessionRecord":
         updated = _format_datetime(_aware_now(now))
         return type(self)._construct(
@@ -1534,6 +1575,11 @@ class SessionRecord:
                 self.assessment_queue
                 if assessment_queue is ...
                 else cast(Mapping[str, object] | None, assessment_queue)
+            ),
+            disposition_snapshot=(
+                self.disposition_snapshot
+                if disposition_snapshot is ...
+                else cast(Mapping[str, object] | None, disposition_snapshot)
             ),
             convergence_history=(
                 self.convergence_history
@@ -3521,6 +3567,153 @@ def _trusted_evidence_resolver(
     return producer, reader
 
 
+def read_session_dispositions(
+    ledger: object, record: SessionRecord
+) -> tuple[Mapping[str, object], ...]:
+    """Read exactly one authenticated decision authority; never fall back."""
+    if record.disposition_snapshot is None:
+        return record.dispositions
+    from .disposition_snapshot import normalize_snapshot, snapshot_document
+
+    root = normalize_snapshot(record.disposition_snapshot)
+    assert root is not None
+    manifest = root["state_manifest"]
+    binding = manifest["binding"]
+    producer, reader = _trusted_evidence_resolver(ledger)
+    if binding["producer"] != producer():
+        raise ReviewInputError("disposition snapshot producer does not match session")
+    identity = SessionIdentity(
+        record.repository, record.pull_request, record.repository_id
+    )
+    document = reader(identity, manifest, expected_binding=binding)
+    return snapshot_document(
+        document, result_digest=root["result_digest"], item_count=manifest["item_count"]
+    )
+
+
+def disposition_snapshot_capacity(record: SessionRecord) -> int:
+    """Reserve a decision root beside retained evidence and lifecycle growth."""
+    from .baseline import MAX_HISTORY_ENVELOPE_RESERVE_BYTES
+    from .disposition_snapshot import MAX_DISPOSITION_SNAPSHOT_ROOT_BYTES
+
+    shell = record.to_dict()
+    shell.pop("disposition_snapshot", None)
+    shell["dispositions"] = []
+    shell.update(
+        generation=MAX_GENERATION,
+        completed_initial_reviews=DIAGNOSTIC_ROUND_CEILING,
+        completed_verification_rounds=DIAGNOSTIC_ROUND_CEILING,
+        failed_attempts=MAX_FAILED_ATTEMPTS,
+        failed_attempts_head_sha="a" * 64,
+        reservation_id="a" * 64,
+        reserved_slot="failed-attempt",
+        last_committed_reservation_id="b" * 64,
+        reservation_owner={"run_id": "9" * 19, "head_sha": "a" * 40},
+    )
+    future = ReviewTransaction.create(
+        repository=record.repository,
+        pull_request=record.pull_request,
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        policy_digest="c" * 64,
+        configuration_digest="d" * 64,
+        evidence_digest="e" * 64,
+        reservation_id="f" * 64,
+        generation=MAX_GENERATION,
+    ).to_dict()
+    future.update(phase="publication_suppressed", result_sha256="a" * 64)
+    shell["transaction"] = future
+    shell["updated_at"] = max(
+        str(shell["updated_at"]), "9999-12-31T23:59:59.999999Z", key=len
+    )
+    if record.assessment_queue is not None:
+        shell["assessment_queue"] = "q" * MAX_ASSESSMENT_QUEUE_ROOT_BYTES
+    return max(
+        0,
+        min(
+            MAX_DISPOSITION_SNAPSHOT_ROOT_BYTES,
+            MAX_SESSION_RECORD_BYTES
+            - len(canonical_bytes(shell))
+            - len(',"disposition_snapshot":')
+            - MAX_HISTORY_ENVELOPE_RESERVE_BYTES,
+        ),
+    )
+
+
+def stage_session_dispositions(
+    ledger: object,
+    record: SessionRecord,
+    decisions: Sequence[Mapping[str, object]],
+    *,
+    head_sha: str | None,
+    now: datetime | None,
+) -> SessionRecord:
+    """Stage one full snapshot inside the caller's serialized CAS mutation."""
+    if getattr(ledger, "enable_disposition_snapshot_writes", False) is not True:
+        raise ReviewInputError(
+            "disposition snapshot writer is disabled; decisions retained"
+        )
+    transaction = record.transaction
+    if (
+        transaction is None
+        or transaction.head_sha != head_sha
+        or transaction.result_sha256 is None
+    ):
+        raise ReviewInputError(
+            "disposition snapshot requires the current reviewed transaction"
+        )
+    values = _stored_dispositions(decisions, snapshot=True)
+    producer, _reader = _trusted_evidence_resolver(ledger)
+    stage = getattr(ledger, "stage_evidence", None)
+    if not callable(stage):
+        raise ReviewInputError("disposition snapshot staging is unavailable")
+    document = {
+        "schema_version": "1.0",
+        "result_digest": transaction.result_sha256,
+        "dispositions": list(values),
+    }
+    binding = {
+        "repository": record.repository,
+        "repository_id": record.repository_id,
+        "pull_request": record.pull_request,
+        "base_sha": transaction.base_sha,
+        "head_sha": transaction.head_sha,
+        "policy_digest": transaction.policy_digest,
+        "configuration_digest": transaction.configuration_digest,
+        "generation": record.generation + 1,
+        "producer": producer(),
+        "purpose": "dispositions",
+        "schema_version": "1.0",
+    }
+    identity = SessionIdentity(
+        record.repository, record.pull_request, record.repository_id
+    )
+    root = {"schema_version": "1.0", "result_digest": transaction.result_sha256}
+    capacity = (
+        disposition_snapshot_capacity(record)
+        - len(canonical_bytes({**root, "state_manifest": {}}))
+        + 2
+    )
+    if capacity <= 0:
+        raise ReviewInputError("disposition snapshot has no future root capacity")
+    manifest = stage(
+        identity,
+        binding=binding,
+        document=document,
+        item_count=len(values),
+        max_manifest_bytes=capacity,
+    )
+    updated = record.evolve(
+        now=now,
+        generation=record.generation + 1,
+        dispositions=(),
+        disposition_snapshot={**root, "state_manifest": manifest},
+    )
+    if read_session_dispositions(ledger, updated) != values:
+        raise ReviewInputError("disposition snapshot readback differs")
+    return updated
+
+
 def read_session_assessment_queue(
     ledger: object, record: SessionRecord
 ) -> object | None:
@@ -3690,6 +3883,14 @@ def _history_preserve_sources(
 
 
 def _validate_queue_retention(before: SessionRecord, after: SessionRecord) -> None:
+    if before.disposition_snapshot is not None and after.disposition_snapshot is None:
+        raise ReviewInputError("disposition snapshot cannot be silently discarded")
+    if after.disposition_snapshot is not None and len(
+        canonical_bytes(after.disposition_snapshot)
+    ) > disposition_snapshot_capacity(after):
+        raise ReviewInputError(
+            "disposition snapshot exceeds future session growth allocation"
+        )
     if before.assessment_queue is not None and after.assessment_queue is None:
         raise ReviewInputError(
             "assessment queue must retain an explicit tombstone, never absence"
@@ -3963,14 +4164,18 @@ class LocalSessionLedger:
         evidence_budget: EvidenceReadBudget | None = None,
         enable_partition_writes: bool = False,
         enable_history_graph: bool = False,
+        enable_disposition_snapshot_writes: bool = False,
     ) -> None:
         if not isinstance(root, Path):
             raise ReviewInputError("session ledger root is invalid")
         self.root = root
+        self._analysis_phases: Any | None = None
+        self._metadata_phase_closed = False
         self.evidence_budget = evidence_budget or EvidenceReadBudget()
         self._explicit_evidence_budget = evidence_budget is not None
         self.enable_partition_writes = enable_partition_writes
         self.enable_history_graph = enable_history_graph
+        self.enable_disposition_snapshot_writes = enable_disposition_snapshot_writes
         self._history_documents: dict[str, bytes] = {}
         self._history_associations: dict[object, Any] = {}
         self._shared_control_budget = evidence_budget is not None
@@ -3982,7 +4187,13 @@ class LocalSessionLedger:
         ] = {}
 
     def _control_accounting_enabled(self) -> bool:
-        return self._shared_control_budget or self.enable_partition_writes
+        if self._metadata_phase_closed:
+            raise ReviewInputError("analysis metadata phase is closed")
+        return (
+            self._shared_control_budget
+            or self.enable_partition_writes
+            or self.enable_disposition_snapshot_writes
+        )
 
     def _dispatch_evidence(self, label: str, *, fence: bool = False) -> None:
         if self._activation_ticket is not None:
@@ -3999,9 +4210,13 @@ class LocalSessionLedger:
     def _observe_control_document(self, document: Mapping[str, object]) -> None:
         history = document.get("convergence_history")
         baseline = history.get("baseline") if isinstance(history, Mapping) else None
-        if "assessment_queue" in document or (
-            isinstance(baseline, Mapping)
-            and baseline.get("encoding") == PARTITION_ENCODING
+        if (
+            "assessment_queue" in document
+            or "disposition_snapshot" in document
+            or (
+                isinstance(baseline, Mapping)
+                and baseline.get("encoding") == PARTITION_ENCODING
+            )
         ):
             self._shared_control_budget = True
 
@@ -4047,6 +4262,7 @@ class LocalSessionLedger:
         ):
             raise ReviewInputError("history root identity differs")
         read_session_baseline(self, record)
+        read_session_dispositions(self, record)
         return record, read_session_assessment_queue(self, record)
 
     @staticmethod
@@ -4246,7 +4462,10 @@ class LocalSessionLedger:
         item_count: int,
         max_manifest_bytes: int,
     ) -> dict[str, object]:
-        if not self.enable_partition_writes:
+        if not self.enable_partition_writes and not (
+            self.enable_disposition_snapshot_writes
+            and binding.get("purpose") == "dispositions"
+        ):
             raise ReviewInputError(
                 "partition writers require explicit reader-first enablement"
             )
@@ -4799,6 +5018,7 @@ class LocalSessionLedger:
                 return SessionLoadResult(status="migrated", record=migrated_record)
             record = SessionRecord.from_dict(document)
             read_session_baseline(self, record)
+            read_session_dispositions(self, record)
             read_session_assessment_queue(self, record)
         except ReviewInputError:
             return SessionLoadResult(status="integrity-failed")
@@ -4857,6 +5077,7 @@ class LocalSessionLedger:
         _history_legacy_write_guard(self, loaded.record)
         _validate_queue_retention(loaded.record, updated)
         read_session_baseline(self, updated)
+        read_session_dispositions(self, updated)
         read_session_assessment_queue(self, updated)
         _history_legacy_write_guard(self, updated)
         current_document = self._read_document(self._path(identity), fence=True)
@@ -5025,6 +5246,7 @@ class LocalSessionLedger:
                 budget=budget,
             )
             if self.enable_history_graph:
+                read_session_dispositions(self, draft)
                 read_session_assessment_queue(self, draft)
                 _history_preserve_sources(self, before, draft)
             old_ids = _history_extra_ids(self, before)
@@ -5073,6 +5295,7 @@ class LocalSessionLedger:
             )
             self._activation_ticket, self._activation_identity = ticket, identity
             read_session_baseline(self, sealed)
+            read_session_dispositions(self, sealed)
             read_session_assessment_queue(self, sealed)
             current_document = self._read_document(
                 self._path(identity), fence=True, tail_label="root:reload"

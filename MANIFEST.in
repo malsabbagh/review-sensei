@@ -58,6 +58,7 @@ include tests/test_schema5_public_contract.py
 include tests/test_feedback_fence_budget.py
 include tests/test_local_partition_read_cache.py
 include tests/test_authenticated_partitions.py
+include tests/test_disposition_snapshots.py
 include tests/test_command_capacity_recovery.py
 include tests/test_publication_future_capacity.py
 include tests/test_hosted_history_readers.py

@@ -67,10 +67,15 @@ class CommandCapacityState:
         compact=False,
         inline_range=(8, 21),
         padded=True,
+        human_count=None,
     ):
         comments = []
         for number in range(56):
-            human = number < (20 if schema in {"1", "2.0"} else 21)
+            human = number < (
+                human_count
+                if human_count is not None
+                else (20 if schema in {"1", "2.0"} else 21)
+            )
             comments.append(
                 ReviewComment(
                     path=f"src/file{number}.py",

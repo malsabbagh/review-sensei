@@ -84,7 +84,8 @@
             "human-inventory",
             "feedback",
             "evidence",
-            "queue"
+            "queue",
+            "dispositions"
           ]
         },
         "schema_version": {

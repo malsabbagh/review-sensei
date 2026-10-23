@@ -1162,7 +1162,11 @@ def apply_session_command(
                         if not planned:
                             raise ReviewInputError("finding disposition is invalid")
                         return _evolve_dispositions(
-                            initial, planned, head_sha=command.head_sha, now=now
+                            initial,
+                            planned,
+                            head_sha=command.head_sha,
+                            now=now,
+                            ledger=ledger,
                         )
                     return initial
 
@@ -1187,7 +1191,7 @@ def apply_session_command(
             summary=PAUSED_BY_MAINTAINER_SUMMARY,
         )
     if command.action == "verify":
-        dispositions = session_dispositions(record)
+        dispositions = session_dispositions(record, ledger=ledger)
         from .presentation import finding_identifier
 
         stale: list[str] = []
@@ -1334,8 +1338,11 @@ def apply_session_command(
         )
     if not planned:
         raise ReviewInputError("finding disposition is invalid")
+    from .session import read_session_dispositions
+
     before = {
-        (item.get("fingerprint"), item.get("head_sha")) for item in record.dispositions
+        (item.get("fingerprint"), item.get("head_sha"))
+        for item in read_session_dispositions(ledger, record)
     }
     if not initialized_with_mutation:
         record = _append_dispositions(
@@ -1352,7 +1359,7 @@ def apply_session_command(
             )
         else:
             receipts.append(receipt)
-    stored = session_dispositions(record)
+    stored = session_dispositions(record, ledger=ledger)
     summary_text = (
         "coverage uncertainty accepted for current head; analysis remains incomplete and is not marked complete"
         if command.action == "accept-coverage-uncertainty"
@@ -1409,11 +1416,15 @@ def _evolve_dispositions(
     *,
     head_sha: str | None,
     now: datetime | None,
+    ledger: object | None = None,
 ) -> SessionRecord:
     """Prune other heads, keep the first decision, and enforce the current-head budget."""
 
+    from .session import read_session_dispositions
+
+    current_values = read_session_dispositions(ledger, record)
     kept: list[dict[str, object]] = []
-    for item in record.dispositions:
+    for item in current_values:
         if not isinstance(item, Mapping):
             continue
         if _disposition_expired(item, now):
@@ -1433,17 +1444,32 @@ def _evolve_dispositions(
             continue
         kept.append(disposition.to_dict())
         existing.add(key)
+    if kept == [dict(item) for item in current_values]:
+        return record
     unheaded = sum(1 for item in kept if item.get("head_sha") is None)
     if unheaded > MAX_UNHEADED_DISPOSITIONS:
         raise ReviewInputError("session disposition limit reached")
-    if head_sha is not None:
-        headed = sum(1 for item in kept if item.get("head_sha") == head_sha)
-        if headed > MAX_DISPOSITIONS_PER_HEAD:
-            raise ReviewInputError("session disposition limit reached")
-    if disposition_array_bytes(kept) > MAX_DISPOSITION_BYTES:
+    headed = sum(1 for item in kept if item.get("head_sha") == head_sha)
+    needs_snapshot = (
+        record.disposition_snapshot is not None
+        or (head_sha is not None and headed > MAX_DISPOSITIONS_PER_HEAD)
+        or disposition_array_bytes(kept) > MAX_DISPOSITION_BYTES
+    )
+    if (
+        needs_snapshot
+        and getattr(ledger, "enable_disposition_snapshot_writes", False) is True
+    ):
+        from .session import stage_session_dispositions
+
+        return stage_session_dispositions(
+            ledger, record, kept, head_sha=head_sha, now=now
+        )
+    if record.disposition_snapshot is not None:
+        raise ReviewInputError(
+            "disposition snapshot writer is disabled; decisions retained"
+        )
+    if needs_snapshot:
         raise ReviewInputError("session disposition limit reached")
-    if kept == [dict(item) for item in record.dispositions]:
-        return record
     return record.evolve(
         now=now,
         generation=record.generation + 1,
@@ -1503,7 +1529,9 @@ def _append_dispositions(
     def mutate(current: SessionRecord) -> SessionRecord:
         if current.generation != record.generation:
             raise ReviewInputError("session generation conflict")
-        return _evolve_dispositions(current, dispositions, head_sha=head_sha, now=now)
+        return _evolve_dispositions(
+            current, dispositions, head_sha=head_sha, now=now, ledger=ledger
+        )
 
     return replace(identity, mutate, now=now)
 
@@ -1603,9 +1631,10 @@ def session_honors_coverage_uncertainty(
     incomplete_coverage: Sequence[str] | None = None,
     policy_digest: str | None = None,
     now: datetime | None = None,
+    ledger: object | None = None,
 ) -> bool:
     return disposition_honors_coverage_uncertainty(
-        session_dispositions(record),
+        session_dispositions(record, ledger=ledger),
         head_sha=head_sha,
         incomplete_coverage=incomplete_coverage,
         policy_digest=policy_digest,
@@ -1613,11 +1642,15 @@ def session_honors_coverage_uncertainty(
     )
 
 
-def session_dispositions(record: SessionRecord) -> tuple[FindingDisposition, ...]:
+def session_dispositions(
+    record: SessionRecord, *, ledger: object | None = None
+) -> tuple[FindingDisposition, ...]:
     """Decode the bounded dispositions persisted on one session record."""
 
     if not isinstance(record, SessionRecord):
         raise ReviewInputError("session record is invalid")
+    from .session import read_session_dispositions
+
     return tuple(
         FindingDisposition(
             fingerprint=cast(str, item["fingerprint"]),
@@ -1636,7 +1669,7 @@ def session_dispositions(record: SessionRecord) -> tuple[FindingDisposition, ...
                 cast(Sequence[str], item.get("incomplete_coverage") or ())
             ),
         )
-        for item in record.dispositions
+        for item in read_session_dispositions(ledger, record)
     )
 
 

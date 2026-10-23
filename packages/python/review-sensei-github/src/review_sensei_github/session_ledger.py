@@ -76,6 +76,7 @@ from review_sensei.session import (
     mutate_reserved,
     read_session_assessment_queue,
     read_session_baseline,
+    read_session_dispositions,
 )
 
 from .broker_client import SESSION_GRANT_PATTERN, BrokerClient, BrokerSessionGrant
@@ -282,6 +283,7 @@ class GitHubIssueCommentSessionLedger:
         evidence_budget: EvidenceReadBudget | None = None,
         enable_partition_writes: bool = False,
         enable_history_graph: bool = False,
+        enable_disposition_snapshot_writes: bool = False,
     ) -> None:
         if not isinstance(http, GitHubHttp):
             raise ReviewInputError("GitHub session ledger requires GitHubHttp")
@@ -328,9 +330,12 @@ class GitHubIssueCommentSessionLedger:
         self._actions_read_token = actions_read_token
         self._actions_token_provider = actions_token_provider
         self._request_started = False
+        self._analysis_phases: Any | None = None
+        self._metadata_phase_closed = False
         self.evidence_budget = evidence_budget
         self.enable_partition_writes = enable_partition_writes
         self.enable_history_graph = enable_history_graph
+        self.enable_disposition_snapshot_writes = enable_disposition_snapshot_writes
         self._history_documents: dict[str, bytes] = {}
         self._history_associations: dict[object, Any] = {}
         self._history_reading = False
@@ -574,7 +579,13 @@ class GitHubIssueCommentSessionLedger:
         max_manifest_bytes: int,
     ) -> dict[str, object]:
         if (
-            not self.enable_partition_writes
+            not (
+                self.enable_partition_writes
+                or (
+                    self.enable_disposition_snapshot_writes
+                    and binding.get("purpose") == "dispositions"
+                )
+            )
             or not self._mutation_active
             or self.evidence_budget is None
         ):
@@ -1048,6 +1059,8 @@ class GitHubIssueCommentSessionLedger:
         *,
         body: dict[str, object] | None = None,
     ) -> tuple[int, dict[str, Any] | list[Any] | None]:
+        if self._metadata_phase_closed:
+            raise ReviewInputError("analysis metadata phase is closed")
         self._request_started = True
         try:
             if self.evidence_budget is not None:
@@ -1254,6 +1267,7 @@ class GitHubIssueCommentSessionLedger:
         )
         if (
             record.assessment_queue is not None
+            or record.disposition_snapshot is not None
             or isinstance(stored_baseline, dict)
             and stored_baseline.get("encoding") == PARTITION_ENCODING
         ):
@@ -1272,6 +1286,7 @@ class GitHubIssueCommentSessionLedger:
                     identity,
                 )
                 read_session_baseline(self, record)
+                read_session_dispositions(self, record)
                 read_session_assessment_queue(self, record)
             except ReviewInputError as exc:
                 raise SessionLoadError(
@@ -1418,6 +1433,7 @@ class GitHubIssueCommentSessionLedger:
             updated = mutate(record)
             _validate_queue_retention(record, updated)
             read_session_baseline(self, updated)
+            read_session_dispositions(self, updated)
             read_session_assessment_queue(self, updated)
             _history_legacy_write_guard(self, updated)
         finally:
@@ -1949,6 +1965,7 @@ class GitHubIssueCommentSessionLedger:
                 initial_slot=initial_slot,
             )
             if self.enable_history_graph:
+                read_session_dispositions(self, draft)
                 read_session_assessment_queue(self, draft)
                 _history_preserve_sources(self, before, draft)
             old_ids = _history_extra_ids(self, before)
@@ -2057,6 +2074,7 @@ class GitHubIssueCommentSessionLedger:
             self._activation_ticket, self._activation_identity = ticket, identity
             self._tail_phase = "validate"
             read_session_baseline(self, sealed)
+            read_session_dispositions(self, sealed)
             read_session_assessment_queue(self, sealed)
             self._tail_phase = "reload"
             current_id, current = self._discover(identity, now=now)
@@ -2518,8 +2536,12 @@ class GitHubIssueCommentSessionLedger:
             if identity.repository_id is not None
             else replace(identity, repository_id=self._expected_repository_id)
         )
+        from .publication_recovery import publication_http
+
         store = _store(
-            self.http,
+            publication_http(self.http, self.evidence_budget)
+            if self.evidence_budget is not None
+            else self.http,
             token=self.token,
             identity=effective_identity,
             app_slug=self.app_slug or "reviewsensei[bot]",

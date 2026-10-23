@@ -247,6 +247,7 @@ def validate_binding(value: object) -> dict[str, object]:
         "feedback",
         "evidence",
         "queue",
+        "dispositions",
     }:
         raise ReviewInputError("partition purpose is invalid")
     if value["schema_version"] != "1.0":
