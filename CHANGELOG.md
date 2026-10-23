@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.11 - 2026-10-23
+
 - Preserve exact authenticated finding classifications during hosted media
   finalization, so optional proposals and resolved human decisions are not
   revived as model-proposed blockers after canonical result reconstruction.
@@ -11,6 +13,10 @@
   retaining HTTP 201 for audit comments, exact owned readback, bounded request
   accounting and explicit reconciliation without duplicate approvals. Include
   only fixed operation labels and numeric response status in failure diagnostics.
+
+## review-sensei-github 0.3.11 - 2026-10-23
+
+- Pin `review-sensei==0.8.11`.
 
 ## 0.8.10 - 2026-10-23
 
