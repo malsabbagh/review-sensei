@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass, replace
 
 from review_sensei.disposition import MaintainerCommandResult
 
+from .operation_diagnostics import OperationDiagnostics
+
 
 @dataclass(frozen=True)
 class ApprovalProgress:
@@ -114,13 +116,19 @@ def render_command_progress(
 ) -> MaintainerCommandResult:
     """Append an allowlisted observation after human text; preserve all flags."""
     progress = getattr(publication, "approval_progress", None)
-    if type(progress) is not ApprovalProgress:
-        return result
-    return replace(
-        result,
-        summary=result.summary
-        + "\napproval-progress: "
-        + json.dumps(
+    summary = result.summary
+    operations = getattr(publication, "operation_diagnostics", None)
+    if type(operations) is OperationDiagnostics:
+        summary += "\napproval-operation-failure: " + json.dumps(
+            operations.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+    # Retain the original terminal observation for consumers already parsing
+    # everything after this prefix. The separate schema never changes 1.0.
+    if type(progress) is ApprovalProgress:
+        summary += "\napproval-progress: " + json.dumps(
             progress.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=True
-        ),
-    )
+        )
+    return result if summary == result.summary else replace(result, summary=summary)

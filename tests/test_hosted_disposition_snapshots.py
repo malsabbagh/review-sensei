@@ -326,6 +326,41 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
             identifier,
         )
 
+    def test_public_verify_reports_graphql_failure_without_claiming_approval(self):
+        from review_sensei_github.http import GitHubHttp
+
+        for start, event in ((0, 20), (10, 21), (20, 22)):
+            self.override(start, event)
+        self.assertEqual(len(self.load()[1]), 25)
+
+        def opener(request, timeout):
+            path = urlsplit(request.full_url).path
+            if path == "/graphql":
+                data = json.loads(request.data)
+                self.state.calls.append((request.method, path, data))
+                return json_response(
+                    {"errors": [{"type": "FORBIDDEN", "message": "SECRET-server"}]}
+                )
+            return self.state.open(request, timeout)
+
+        self.state.http = GitHubHttp(api_url="https://api.github.test", opener=opener)
+        self.command("@reviewsensei verify", 23)
+        self.assertEqual(len(self.load()[1]), 25)
+        self.assertEqual(self.state.checks[-1]["conclusion"], "success")
+        self.assertFalse(any(r["state"] == "APPROVED" for r in self.state.reviews))
+        lines = self.last_output.splitlines()
+        report = json.loads(
+            next(
+                line.split(": ", 1)[1]
+                for line in lines
+                if line.startswith("approval-operation-failure: ")
+            )
+        )
+        self.assertEqual(report["cleanup"]["first"]["reason"], "graphql-rejected")
+        self.assertEqual(report["approval"]["first"]["reason"], "graphql-rejected")
+        self.assertFalse(report["approval_request_attempted"])
+        self.assertNotIn("SECRET", self.last_output)
+
     def test_lost_part_response_does_not_activate_or_invent_decisions(self):
         self.override(0, 20)
         self.override(10, 21)

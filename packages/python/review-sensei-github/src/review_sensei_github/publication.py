@@ -95,6 +95,7 @@ from .http import (
     BoundedGraphQLPages,
     GitHubHttp,
 )
+from .operation_diagnostics import OperationDiagnostics, OperationObserver
 from .qualification import TrustedOpenRouterQualification
 from .thread_resolution import graphql_app_author
 
@@ -1324,6 +1325,7 @@ class PublicationResult:
     # publication failure.
     transaction_id: str | None = None
     generation: int | None = None
+    operation_diagnostics: OperationDiagnostics | None = None
 
 
 _PUBLICATION_TO_RUN_STATUS = {
@@ -1609,6 +1611,7 @@ class ReviewApprovalFinalizer:
         self._operation_budget: EvidenceReadBudget | None = None
         self._last_review_scan: tuple[int, int, int] | None = None
         self._human_inventory_scope: tuple[str, int, str, str, str] | None = None
+        self._operation_observer: OperationObserver | None = None
         self._scoped_human_inventory_reader: _ScopedHumanInventoryReader | None = None
 
     @contextmanager
@@ -1621,6 +1624,10 @@ class ReviewApprovalFinalizer:
         finally:
             if owns_budget:
                 self._operation_budget = None
+
+    def _observe_stage(self, stage: str) -> None:
+        if self._operation_observer is not None:
+            self._operation_observer.at(stage)
 
     def _human_reader_for_scope(
         self,
@@ -1838,6 +1845,7 @@ class ReviewApprovalFinalizer:
                     return PublicationResult(
                         status="approval_withheld", diagnostic="approval_withheld"
                     )
+            self._observe_stage("approval.preflight")
             preflight = self._preflight(
                 token=token,
                 repository=repository,
@@ -1866,6 +1874,7 @@ class ReviewApprovalFinalizer:
                 return PublicationResult(
                     status="approval_withheld", diagnostic="qualification_unverified"
                 )
+            self._observe_stage("approval.thread-scan")
             open_blocking, resolved_instances = self._scan_blocking_threads(
                 token=token,
                 repository=repository,
@@ -1878,6 +1887,7 @@ class ReviewApprovalFinalizer:
             )
             # The thread scan can paginate, so bind the write to the same exact PR
             # identity immediately before emitting APPROVE.
+            self._observe_stage("approval.preflight")
             write_preflight = self._preflight(
                 token=token,
                 repository=repository,
@@ -1904,6 +1914,7 @@ class ReviewApprovalFinalizer:
                     status="approval_withheld",
                     diagnostic=approval_withheld_diagnostic(decision),
                 )
+            self._observe_stage("approval.persisted-readback")
             reviews = self._load_head_reviews(
                 token=token, repository=repository, pull_request=pull_request
             )
@@ -2126,21 +2137,36 @@ class ReviewApprovalFinalizer:
             budget = self.evidence_budget or self._operation_budget
             assert budget is not None
             operation = copy(self)
-            operation.http = publication_http(self.http, budget)
-            return operation._refinalize_with_dispositions_impl(
-                token=token,
-                check_token=check_token,
-                repository=repository,
-                repository_id=repository_id,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                app_slug=app_slug,
-                actor=actor,
-                finding_ids=finding_ids,
-                dispositions=dispositions,
-                reviews_policy=reviews_policy,
-                incomplete_coverage=incomplete_coverage,
-                policy_digest=policy_digest,
+            observer = OperationObserver(budget)
+            operation._operation_observer = observer
+            operation.http = publication_http(self.http, budget, observer=observer)
+            try:
+                result = operation._refinalize_with_dispositions_impl(
+                    token=token,
+                    check_token=check_token,
+                    repository=repository,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                    actor=actor,
+                    finding_ids=finding_ids,
+                    dispositions=dispositions,
+                    reviews_policy=reviews_policy,
+                    incomplete_coverage=incomplete_coverage,
+                    policy_digest=policy_digest,
+                )
+            except (GitHubHTTPError, GitHubPublicationError, ReviewInputError) as exc:
+                observer.exception(exc)
+                # Preserve the original exception contract; the public command
+                # may render this closed observation without its raw message.
+                setattr(exc, "operation_diagnostics", observer.report())
+                raise
+            return replace(
+                result,
+                operation_diagnostics=observer.report(
+                    completed=result.status in {"approved", "already_approved"}
+                ),
             )
         finally:
             if owns_operation_budget:
@@ -2627,6 +2653,7 @@ class ReviewApprovalFinalizer:
         )
         if check_token:
             assert check_outcome is not None
+            self._observe_stage("check.publication")
             try:
                 check_result = ReviewCheckPublisher(http=self.http).complete(
                     token=check_token,
@@ -2640,7 +2667,9 @@ class ReviewApprovalFinalizer:
                 GitHubHTTPTransientError,
                 GitHubPublicationError,
                 ReviewInputError,
-            ):
+            ) as exc:
+                if self._operation_observer is not None:
+                    self._operation_observer.exception(exc)
                 check_failed = True
         resolution = self.reconcile_decided_threads(
             token=token,
@@ -2668,9 +2697,11 @@ class ReviewApprovalFinalizer:
                 coverage_uncertainty_accepted=coverage_accepted,
                 _before_approval=final_capacity_guard if compacted else None,
             )
-        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError) as exc:
             # The write may have committed before its response became unreadable.
             # Preserve the legacy result, while keeping the observation unknown.
+            if self._operation_observer is not None:
+                self._operation_observer.exception(exc)
             finalization_observed = False
             finalized = PublicationResult(
                 status="approval_withheld", diagnostic="approval_withheld"
@@ -2741,6 +2772,8 @@ class ReviewApprovalFinalizer:
         transient: str,
     ) -> PublicationResult:
         path = self.http.repository_path(repository, f"/pulls/{pull_request}/reviews")
+        if event == "APPROVE":
+            self._observe_stage("approval.request")
         try:
             status, payload = self.http.request(
                 "POST",
@@ -2749,6 +2782,8 @@ class ReviewApprovalFinalizer:
                 body={"body": body, "event": event, "commit_id": head_sha},
             )
         except GitHubHTTPTransientError as exc:
+            if event == "APPROVE":
+                self._observe_stage("approval.readback")
             if already():
                 return PublicationResult(status=already_status)
             raise GitHubPublicationTransientError(transient) from exc
@@ -2757,6 +2792,8 @@ class ReviewApprovalFinalizer:
             if isinstance(review_id, int):
                 return PublicationResult(status=success_status, review_id=review_id)
         if status in {409, 422, 429} or status >= 500:
+            if event == "APPROVE":
+                self._observe_stage("approval.readback")
             if already():
                 return PublicationResult(status=already_status)
             if status == 422:
@@ -2947,7 +2984,10 @@ class ReviewApprovalFinalizer:
             return ThreadResolutionResult()
         try:
             durable_records = resolution_records(reviews, app_slug)
-        except GitHubPublicationError:
+        except GitHubPublicationError as exc:
+            self._observe_stage("cleanup.authority-fence")
+            if self._operation_observer is not None:
+                self._operation_observer.exception(exc)
             return ThreadResolutionResult(
                 unconfirmed=tuple(
                     entry.instance for entry in index.entries if not entry.body_placed
@@ -2991,6 +3031,7 @@ class ReviewApprovalFinalizer:
             return ThreadResolutionResult()
 
         def fence() -> bool:
+            self._observe_stage("cleanup.authority-fence")
             live_reviews = self._load_head_reviews(
                 token=token, repository=repository, pull_request=pull_request
             )
@@ -3044,8 +3085,11 @@ class ReviewApprovalFinalizer:
                 records=records,
                 fence=fence,
                 skip_resolved=_skip_resolved,
+                observer=self._operation_observer,
             )
-        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError):
+        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError) as exc:
+            if self._operation_observer is not None:
+                self._operation_observer.exception(exc)
             return ThreadResolutionResult(unconfirmed=tuple(sorted(instances)))
 
     def finalize_recorded_decisions(

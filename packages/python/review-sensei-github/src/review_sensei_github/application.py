@@ -3047,6 +3047,8 @@ class GitHubApplication:
             command_result.summary
             + "; recorded; gate re-evaluation failed, comment `@reviewsensei verify` to retry"
         )
+        from .approval_progress import render_command_progress
+
         try:
             review_token = self.broker.exchange(oidc_token, capability="review_publish")
             try:
@@ -3082,9 +3084,10 @@ class GitHubApplication:
                 incomplete_coverage=incomplete_coverage,
                 policy_digest=policy_digest,
             )
-        except Exception:
-            return replace(command_result, summary=failed, evaluation_failed=True)
-        from .approval_progress import render_command_progress
+        except Exception as exc:
+            return render_command_progress(
+                replace(command_result, summary=failed, evaluation_failed=True), exc
+            )
 
         if getattr(
             publication, "status", None
