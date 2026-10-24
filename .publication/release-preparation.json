@@ -1,9 +1,9 @@
 {
-  "base_sha": "f672f39b08f5915ddfd2101e1d54a9dbb3c5aa8a",
+  "base_sha": "7afda9b1a372d0563b325bb6e6f3a233f353574c",
   "engine_tag": "",
   "files": {
-    "CHANGELOG.md": "700ff465c59419377df1d8f7d8e435c744250d3e84bb61e7eda52712b46a5f5c",
-    "README.md": "39b09af06a1347ebcc93e170d200ede4d4e0d207dc20de57a739a2c0134a2156",
+    "CHANGELOG.md": "98d3f13eab0f5bc4240941e2026e274bb4a9d41c4a21d83884cd6df0b5fd5ab2",
+    "README.md": "fe119e1089efcc548faac5df4bb155064b00263e0db962b8b9b4252dc7795e02",
     "docs/installation.md": "6ff42cc12c08ae8654a72e85251f293fda07b3063efa7fc6c4cea09276a9f616",
     "docs/site/data/site-manifest.json": "b54a459730449525175d98d0e5340da572e0f975b95536c6b2a03e42460bde32",
     "docs/site/getting-started/index.html": "3de8edfe786c6bf41a08f8105d5ad2c325b651e373345e5082247b4ce79efd42",
@@ -22,11 +22,11 @@
     "packages/npm/platforms/linux-x64-gnu/package.json": "d4855626895763cb1c40bd1ef7659d2d7fdfade913f5463fa0a26686f674c6d7",
     "packages/npm/platforms/win32-x64/README.md": "58e58cb2f7989c55b3facf20eaa7c630f9fdf0fafaf986cc63ead77904268e5e",
     "packages/npm/platforms/win32-x64/package.json": "5f43f11c6e7f725aee2ce593f5a4b9bb358375932bacbb98a057bb886356dcb5",
-    "packages/python/review-sensei-github/pyproject.toml": "e424073d5fc200a0e03eb33f6a6f0deaf4cd2b640adcda5a4f5b1c4401aa16de",
+    "packages/python/review-sensei-github/pyproject.toml": "1b559c2eb454feadd7f109c3d61cc3418d925d680fafe44d4cf029d3a4626b8c",
     "pyproject.toml": "7ab59cc210125673ad0636ff803e925a92b0370f66c2437da7b92054f2a38efe"
   },
-  "github_tag": "github-v0.3.15",
-  "github_version": "0.3.15",
+  "github_tag": "github-v0.3.16",
+  "github_version": "0.3.16",
   "notes_sha256": "b6f312aae3a0acbad287656e88946702847e3f61f3b79eb09e694bc79c242189",
   "release_date": "2026-10-24",
   "repository": "malsabbagh/review-sensei",

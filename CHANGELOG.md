@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## review-sensei-github 0.3.16 - 2026-10-24
+
+- Pin `review-sensei==0.8.12`.
+
 ## review-sensei-github 0.3.15 - 2026-10-24
 
 - Pin `review-sensei==0.8.12`.
