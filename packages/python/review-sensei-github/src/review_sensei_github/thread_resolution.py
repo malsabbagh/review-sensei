@@ -12,7 +12,7 @@ from typing import Any, Callable, Mapping, Sequence
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
 
-from .errors import GitHubHTTPError, GitHubPublicationError
+from .errors import GitHubBrokerClientError, GitHubHTTPError, GitHubPublicationError
 from .http import BoundedGraphQLPages, GitHubHttp
 from .operation_diagnostics import OperationObserver
 
@@ -148,6 +148,10 @@ class _ResolutionPermissionDenied(GitHubPublicationError):
     """Known rejection must stop this batch, rather than retry another thread."""
 
 
+class _CleanupCapabilityUnavailable(GitHubPublicationError):
+    """An unavailable dedicated capability must never fall back or retry."""
+
+
 def _check_resolution_permission(status: int, payload: Any) -> None:
     errors = payload.get("errors") if isinstance(payload, dict) else None
     if status in (401, 403) or (
@@ -269,6 +273,7 @@ class FindingThreadResolver:
         skip_resolved: bool = False,
         cleanup_budget: EvidenceReadBudget | None = None,
         observer: OperationObserver | None = None,
+        cleanup_token_provider: Callable[[], str] | None = None,
     ) -> ThreadResolutionResult:
         from .publication import (
             finding_fingerprint_from_body,
@@ -379,6 +384,7 @@ class FindingThreadResolver:
                 - {node["id"] for node, _, _, old in candidates if old}
             )
         )
+        cleanup_token: str | None = None
         for position, (node, root, instance, old) in enumerate(candidates):
             identity = node["id"] if old else instance
             assert isinstance(identity, str)
@@ -397,53 +403,96 @@ class FindingThreadResolver:
                     # and its one possible readback. Paginated fences may need
                     # more read-only work; no mutation is admitted until they end.
                     cleanup_budget.preflight(6)
-                # Re-read the root, decision, and PR immediately before each mutation.
-                status, live_root = self.http.request(
-                    "GET",
-                    self.http.repository_path(
-                        repository, f"/pulls/comments/{root['databaseId']}"
-                    ),
-                    token=token,
-                )
-                if (
-                    status != 200
-                    or not isinstance(live_root, dict)
-                    or live_root.get("body") != root.get("body")
-                    or live_root.get("pull_request_url")
-                    != self.http.api_url
-                    + self.http.repository_path(repository, f"/pulls/{pull_request}")
-                    or str(live_root.get("user", {}).get("login", "")).casefold()
-                    != app_slug.casefold()
-                    or live_root.get("user", {}).get("type") != "Bot"
-                ):
-                    raise GitHubPublicationError("thread root changed")
-                for record in records:
-                    if record["instance"] == instance and (
-                        record["root"] != root["databaseId"]
-                        or not self.source_valid(
-                            token=token,
-                            repository=repository,
-                            record=record,
-                            app_slug=app_slug,
+
+                # Re-read the root, decision, and PR immediately before each
+                # mutation, and again after capability acquisition. Discovery
+                # and authority reads always retain the ordinary credential.
+                def authenticate_candidate() -> None:
+                    if observer is not None:
+                        observer.at("cleanup.root-readback")
+                    status, live_root = self.http.request(
+                        "GET",
+                        self.http.repository_path(
+                            repository, f"/pulls/comments/{root['databaseId']}"
+                        ),
+                        token=token,
+                    )
+                    if (
+                        status != 200
+                        or not isinstance(live_root, dict)
+                        or live_root.get("body") != root.get("body")
+                        or live_root.get("pull_request_url")
+                        != self.http.api_url
+                        + self.http.repository_path(
+                            repository, f"/pulls/{pull_request}"
                         )
+                        or str(live_root.get("user", {}).get("login", "")).casefold()
+                        != app_slug.casefold()
+                        or live_root.get("user", {}).get("type") != "Bot"
                     ):
-                        raise GitHubPublicationError("resolution source changed")
-                if observer is not None:
-                    observer.at("cleanup.authority-fence")
-                if not fence():
-                    raise GitHubPublicationError("thread resolution authority changed")
+                        raise GitHubPublicationError("thread root changed")
+                    for record in records:
+                        if record["instance"] == instance and (
+                            record["root"] != root["databaseId"]
+                            or not self.source_valid(
+                                token=token,
+                                repository=repository,
+                                record=record,
+                                app_slug=app_slug,
+                            )
+                        ):
+                            raise GitHubPublicationError("resolution source changed")
+                    if observer is not None:
+                        observer.at("cleanup.authority-fence")
+                    if not fence():
+                        raise GitHubPublicationError(
+                            "thread resolution authority changed"
+                        )
+
+                authenticate_candidate()
+                if (
+                    not node["isResolved"]
+                    and cleanup_token_provider is not None
+                    and cleanup_token is None
+                ):
+                    if observer is not None:
+                        observer.at("cleanup.capability")
+                    try:
+                        cleanup_token = cleanup_token_provider()
+                    except (
+                        GitHubBrokerClientError,
+                        GitHubHTTPError,
+                        ReviewInputError,
+                        OSError,
+                    ) as exc:
+                        raise _CleanupCapabilityUnavailable(
+                            "thread cleanup capability unavailable"
+                        ) from exc
+                    if not isinstance(cleanup_token, str) or not cleanup_token.strip():
+                        raise _CleanupCapabilityUnavailable(
+                            "thread cleanup capability unavailable"
+                        )
+                    # Issuance consumed time and the original request budget;
+                    # pre-issuance observations cannot authorize the mutation.
+                    authenticate_candidate()
                 if cleanup_budget is not None:
                     cleanup_budget.preflight(2)
                 if observer is not None:
                     observer.at("cleanup.resolve-request")
+                mutation_token = token
+                if cleanup_token_provider is not None and not node["isResolved"]:
+                    assert isinstance(cleanup_token, str)
+                    mutation_token = cleanup_token
                 if not node["isResolved"] and not self._resolve_confirmed(
-                    token=token, thread_id=node["id"], observer=observer
+                    token=mutation_token,
+                    thread_id=node["id"],
+                    observer=observer,
                 ):
                     raise GitHubPublicationError(
                         "thread resolution mutation is unconfirmed"
                     )
                 resolved.append(identity)
-            except _ResolutionPermissionDenied as exc:
+            except (_ResolutionPermissionDenied, _CleanupCapabilityUnavailable) as exc:
                 if observer is not None:
                     observer.exception(exc)
                 for n, _, item, previous in candidates[position:]:

@@ -3049,14 +3049,23 @@ class GitHubApplication:
         )
         from .approval_progress import render_command_progress
 
+        def command_token(budget: EvidenceReadBudget, capability: str) -> str:
+            # Use only the original controlled command client. A finalizer
+            # with a different or unavailable accounting envelope cannot mint
+            # cleanup authority, and never falls back to the review token.
+            budget.check()
+            if isinstance(self.broker, BrokerClient) and (
+                self.broker.control is None or self.broker.control.budget is not budget
+            ):
+                raise GitHubBrokerClientError(
+                    "thread cleanup broker accounting is unavailable"
+                )
+            token = self.broker.exchange(oidc_token, capability=capability)
+            budget.check()
+            return token
+
         try:
             review_token = self.broker.exchange(oidc_token, capability="review_publish")
-            try:
-                check_token = self.broker.exchange(
-                    oidc_token, capability="check_publish"
-                )
-            except (GitHubBrokerClientError, GitHubHTTPTransientError, OSError):
-                check_token = None
             from review_sensei.session import SessionRecord
 
             dispositions = (
@@ -3072,7 +3081,7 @@ class GitHubApplication:
             )
             publication = refinalize(
                 token=review_token,
-                check_token=check_token,
+                check_token=None,
                 repository=repository,
                 repository_id=repository_id,
                 pull_request=pull_request,
@@ -3083,6 +3092,12 @@ class GitHubApplication:
                 dispositions=dispositions,
                 incomplete_coverage=incomplete_coverage,
                 policy_digest=policy_digest,
+                thread_cleanup_token_provider=lambda budget: command_token(
+                    budget, "thread_resolve"
+                ),
+                check_token_provider=lambda budget: command_token(
+                    budget, "check_publish"
+                ),
             )
         except Exception as exc:
             return render_command_progress(

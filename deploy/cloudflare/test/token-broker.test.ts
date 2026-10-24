@@ -307,6 +307,7 @@ describe("token broker authorization", () => {
   it.each([
     [undefined, "review_publish", { pull_requests: "write" }, true],
     ["review_publish", "review_publish", { pull_requests: "write" }, true],
+    ["thread_resolve", "thread_resolve", { contents: "write", pull_requests: "write" }, false],
     ["check_publish", "check_publish", { checks: "write" }, false],
     ["review_status", "review_status", { pull_requests: "read" }, false],
     ["inline_reply", "inline_reply", { pull_requests: "write" }, false],
@@ -368,6 +369,32 @@ describe("token broker authorization", () => {
       SHA,
       "ghs_scoped_token",
     );
+  });
+
+  it.each([
+    ["acme/widgets", "acme", 987654321, 2468],
+    ["other-org/another-repository", "other-org", 1234567, 9753],
+  ])("binds cleanup to OIDC repository %s and its looked-up installation", async (repository, owner, id, installation) => {
+    oidc.verify.mockResolvedValue(claims({repository, repository_owner: owner, repository_id: id}));
+    const {broker, github} = harness();
+    github.installationFor.mockResolvedValue(installation);
+    github.repositoryInfo.mockResolvedValue({id, fork:false});
+    await expect(broker.exchange({oidc_token:"signed-jwt",capability:"thread_resolve"})).resolves.toMatchObject({capability:"thread_resolve"});
+    expect(github.installationFor).toHaveBeenCalledWith(repository);
+    expect(github.capabilityToken).toHaveBeenCalledWith(installation, repository, {contents:"write",pull_requests:"write"}, false);
+  });
+
+  it.each(["fork", "wrong-id", "no-installation", "stale-runtime", "wrong-workflow", "wrong-owner", "wrong-event"])("rejects cleanup admission: %s", async fault => {
+    const {broker, github} = harness();
+    if (fault === "fork") github.repositoryInfo.mockResolvedValue({id:987654321,fork:true});
+    if (fault === "wrong-id") github.repositoryInfo.mockResolvedValue({id:987654322,fork:false});
+    if (fault === "no-installation") github.installationFor.mockResolvedValue(null as never);
+    if (fault === "stale-runtime") oidc.verify.mockResolvedValue(claims({job_workflow_sha:"c".repeat(40)}));
+    if (fault === "wrong-workflow") oidc.verify.mockResolvedValue(claims({job_workflow_ref:`attacker/repo/.github/workflows/review-sensei-run.yml@refs/tags/${TAG}`}));
+    if (fault === "wrong-owner") oidc.verify.mockResolvedValue(claims({repository_owner:"attacker"}));
+    if (fault === "wrong-event") oidc.verify.mockResolvedValue(claims({event_name:"push"}));
+    await expect(broker.exchange({oidc_token:"signed-jwt",capability:"thread_resolve"})).rejects.toThrow();
+    expect(github.capabilityToken).not.toHaveBeenCalled();
   });
 
   it("refuses a stale session head before recording a new enrollment witness", async () => {

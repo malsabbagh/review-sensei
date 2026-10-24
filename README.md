@@ -237,6 +237,12 @@ make the corresponding GitHub API write; Cloudflare does not perform that
 write. Review and reply capabilities grant `pull_requests: write`;
 `learning_write` additionally grants `contents: write`. A review-publication
 token cannot write repository contents.
+The proposed [repository-bound cleanup capability](docs/adr/0110-repository-bound-thread-cleanup.md)
+is separate from those ordinary grants. It is an unreleased implementation
+candidate requiring qualified broker/hosted rollout and explicit live issuance
+approval; hosted 0.3.15 does not enable it. See the
+[cleanup recovery instructions](docs/approval-recovery.md#separate-cleanup-capability-unreleased-candidate)
+before using a new capability to recover a permission denial.
 Cloudflare does not run the review engine or send prompts to the model provider;
 the GitHub Actions job performs those operations in the configured provider
 environment.

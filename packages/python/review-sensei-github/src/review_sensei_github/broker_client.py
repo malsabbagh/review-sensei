@@ -349,6 +349,7 @@ class BrokerClient:
         if capability is not None:
             if capability not in {
                 "review_publish",
+                "thread_resolve",
                 "review_status",
                 "review_actions",
                 "check_publish",
@@ -360,6 +361,10 @@ class BrokerClient:
                 raise GitHubBrokerClientError("Broker capability is invalid")
             payload["capability"] = capability
         parsed = self._post(payload)
+        if capability == "thread_resolve" and parsed.get("capability") != capability:
+            raise GitHubBrokerClientError(
+                "Broker cleanup capability response is invalid"
+            )
         token = parsed.get("token")
         if not isinstance(token, str) or not token.strip():
             raise GitHubBrokerClientError("Broker token response was invalid")

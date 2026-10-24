@@ -19,6 +19,28 @@ function api() {
 
 describe("GitHubApi recovery evidence scope", () => {
   it.each([
+    ["exact", {metadata:"read",contents:"write",pull_requests:"write"}, true],
+    ["missing metadata", {contents:"write",pull_requests:"write"}, false],
+    ["missing contents", {metadata:"read",pull_requests:"write"}, false],
+    ["contents read", {metadata:"read",contents:"read",pull_requests:"write"}, false],
+    ["pull requests read", {metadata:"read",contents:"write",pull_requests:"read"}, false],
+    ["extra checks write", {metadata:"read",contents:"write",pull_requests:"write",checks:"write"}, false],
+    ["extra actions read", {metadata:"read",contents:"write",pull_requests:"write",actions:"read"}, false],
+  ])("requires exact cleanup grants: %s", async (_name, permissions, accepted) => {
+    const client = api();
+    const request = vi.spyOn(client, "request").mockResolvedValue({status:201,data:{token:"synthetic-cleanup",expires_at:new Date(Date.now()+60_000).toISOString(),permissions}});
+    const result = client.capabilityToken(2468,"acme/widgets",{contents:"write",pull_requests:"write"});
+    if (accepted) await expect(result).resolves.toBe("synthetic-cleanup");
+    else await expect(result).rejects.toThrow("github_capability_permissions_invalid");
+    expect(request).toHaveBeenCalledWith("POST","/app/installations/2468/access_tokens","app-jwt",{repositories:["widgets"],permissions:{contents:"write",pull_requests:"write"}});
+  });
+
+  it("still refuses unsolicited contents write on ordinary review tokens", async () => {
+    const client=api();
+    vi.spyOn(client,"request").mockResolvedValue({status:201,data:{token:"synthetic",expires_at:new Date(Date.now()+60_000).toISOString(),permissions:{metadata:"read",contents:"write",pull_requests:"write"}}});
+    await expect(client.capabilityToken(2468,"acme/widgets",{pull_requests:"write"},true)).rejects.toThrow("github_capability_permissions_invalid");
+  });
+  it.each([
     ["exact Actions read", { actions: "read", metadata: "read" }, true],
     ["Actions write escalation", { actions: "write", metadata: "read" }, false],
     ["extra Checks write", { actions: "read", metadata: "read", checks: "write" }, false],

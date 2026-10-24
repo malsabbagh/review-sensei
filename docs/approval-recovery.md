@@ -142,6 +142,38 @@ reconciled again. Every actual mutation and final approval retains current
 identity, finding, permission and eligibility checks. No new inference is needed
 for this cleanup.
 
+### Separate cleanup capability (unreleased candidate)
+
+Hosted 0.3.15 stops a cleanup batch after a permission denial. It does not include
+the new `thread_resolve` capability described in [ADR 0110](adr/0110-repository-bound-thread-cleanup.md).
+The candidate adds a separate App token for `verify` and disposition
+re-finalization, requesting Contents: write and Pull requests: write for the
+authenticated requesting repository and installation. Ordinary review and check
+tokens retain their existing scopes. There is no repository-specific exception,
+PAT fallback or automatic settings change. Contents: write can write repository
+content; it is not a GitHub thread-only permission.
+
+Use this recovery only after the qualified broker and hosted versions are
+deployed, installation grants are verified and applicable rollout/issuance
+approval is recorded. A previous `FORBIDDEN` is not permission to retry unchanged.
+After an authorization repair and reconciliation of any uncertain operation,
+an authorized operator can issue one supported current-head command:
+
+```text
+@reviewsensei verify
+```
+
+Discovery and authority checks precede lazy issuance. The original request
+allowance remains bounded; command finalization acquires its separate check
+token after cleanup. A command may durably resolve threads before running
+out of room for check reconciliation or approval. An unfunded check defers a
+new approval while preserving any already-observed native approval. Inspect
+actual progress and its next action before a
+new request. No progress, another denial, changed head or missing authority needs
+diagnosis rather than an unchanged command loop. Review supersession and reply
+publication do not implicitly request the new token. Verify final thread state,
+the actual native `APPROVED` review and exact-head check independently.
+
 If a bounded retry makes no progress, retain its diagnostic and inspect the
 specific unresolved conversations and authority checks before another retry.
 An authorized maintainer may use GitHub's normal **Resolve conversation** control
