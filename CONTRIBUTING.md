@@ -246,8 +246,11 @@ Follow [the approval recovery guide](docs/approval-recovery.md) for the installe
 release. Assess each finding before an authorized disposition, use at most ten
 IDs per command, and reconcile retained decisions and native threads before
 retrying. `verify` does not supply missing analysis; full `rescan` and
-`review continue` have distinct authority and reuse semantics. Keep command
-examples and parser tests synchronized. Record actual App-authored exact-head
+`review continue` have distinct authority and reuse semantics. Tie command
+selection to the installed versions, activated signed runner and caller
+routing. Stop unchanged retry loops when there is no observed progress; retain
+the exact reason and inspect the prerequisite before choosing the next operation.
+Keep command examples and parser tests synchronized. Record actual App-authored exact-head
 APPROVED/check receipts; a successful workflow is not approval. Never discard
 evidence, reset a session or enlarge a budget to turn a withheld gate green.
 

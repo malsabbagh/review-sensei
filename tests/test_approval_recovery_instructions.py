@@ -37,7 +37,10 @@ class ApprovalRecoveryInstructionTests(unittest.TestCase):
                     self.assertIsNotNone(
                         parse_maintainer_command(body, actor="alice", head_sha="a" * 40)
                     )
-        self.assertIn("**unreleased**", document)
+        self.assertIn("core 0.8.12", document)
+        self.assertIn("hosted 0.3.13", document)
+        self.assertIn("Publication does not update an installed workflow", document)
+        self.assertNotIn("**unreleased**", document)
         self.assertIn("APPROVED", document)
 
     def test_documented_ten_id_boundary_and_help_do_not_claim_approval(self):

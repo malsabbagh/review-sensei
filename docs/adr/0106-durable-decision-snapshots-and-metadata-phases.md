@@ -1,10 +1,11 @@
 # ADR 0106: Durable decision snapshots and analysis metadata phases
 
-Status: Proposed
+Status: Accepted; published in core 0.8.12 / hosted 0.3.13. Qualified workflow
+activation and installed/live acceptance remain separate rollout evidence.
 Date: 2026-10-23
 Owners/Reviewers: Maintainers; independent Astra review
 Linked issue: User-requested approval liveness repair
-Linked PR: Pending
+Linked PR: [361](https://github.com/malsabbagh/review-sensei/pull/361)
 
 ## Context
 
@@ -73,5 +74,8 @@ parts, rewrite immutable versions or run an old writer over activated records.
 
 ## Follow-up work
 
-Explicit cumulative coverage continuation and unified finalization diagnostics
-remain separate scoped slices. This ADR does not claim they already ship.
+Explicit cumulative coverage continuation and finalization diagnostics were
+delivered separately in PRs 362 and 363 and the same published package pair.
+See [ADR 0107](0107-bounded-remaining-coverage.md) and the
+[recovery guide](../approval-recovery.md). Component qualification and publication
+do not establish a completed live approval canary.
