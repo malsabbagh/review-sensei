@@ -270,6 +270,29 @@ class ActualFinalizerProgressTests(unittest.TestCase):
 
 
 class FinalizationOperationDiagnosticsTests(unittest.TestCase):
+    def test_malformed_check_response_preserves_approval_and_reports_check_stage(self):
+        state = CommandCapacityState(complete=True)
+
+        def opener(request, timeout):
+            if request.method == "GET" and urlsplit(request.full_url).path.endswith(
+                "/check-runs"
+            ):
+                return json_response({"unexpected": "SECRET-upstream-body"})
+            return state.open(request, timeout)
+
+        state.http = GitHubHttp(api_url="https://api.github.test", opener=opener)
+        with tempfile.TemporaryDirectory() as directory:
+            result, budget, _ = state.verify(state.record(directory))
+        self.assertEqual(result.status, "gate_reevaluation_failed")
+        self.assertEqual(result.approval_progress.approval_state, "submitted")
+        self.assertEqual(result.approval_progress.check_state, "unconfirmed")
+        self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 1)
+        report = result.operation_diagnostics.to_dict()
+        self.assertEqual(report["check"]["first"]["stage"], "check.publication")
+        self.assertEqual(report["check"]["first"]["reason"], "unknown")
+        self.assertEqual(report["budget_calls"], budget.calls)
+        self.assertNotIn("SECRET", json.dumps(report))
+
     def test_initial_transport_failure_reaches_public_command_without_raw_error(self):
         from urllib.error import URLError
 

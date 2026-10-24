@@ -2667,7 +2667,9 @@ class ReviewApprovalFinalizer:
                 GitHubHTTPTransientError,
                 GitHubPublicationError,
                 ReviewInputError,
-            ):
+            ) as exc:
+                if self._operation_observer is not None:
+                    self._operation_observer.exception(exc)
                 check_failed = True
         resolution = self.reconcile_decided_threads(
             token=token,
