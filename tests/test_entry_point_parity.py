@@ -18,6 +18,7 @@ import io
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -127,6 +128,78 @@ def load_smoke_module():
 
 
 class EntryPointParityTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
+    def test_smoke_fixture_keeps_git_framing_in_windows_style_checkout(self):
+        relative = "tests/fixtures/standalone-smoke/blocking-review.patch"
+        expected = PATCH.read_bytes()
+        self.assertNotIn(b"\r", expected)
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            fixture = checkout / relative
+            fixture.parent.mkdir(parents=True)
+            fixture.write_bytes(expected)
+            (checkout / ".gitattributes").write_bytes(
+                (ROOT / ".gitattributes").read_bytes()
+            )
+            environment = {
+                name: os.environ[name]
+                for name in (
+                    "PATH",
+                    "SYSTEMROOT",
+                    "WINDIR",
+                    "COMSPEC",
+                    "PATHEXT",
+                    "TMP",
+                    "TEMP",
+                )
+                if name in os.environ
+            }
+            environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+
+            def git(*arguments):
+                return subprocess.run(
+                    ["git", "-C", directory, *arguments],
+                    env=environment,
+                    check=True,
+                    capture_output=True,
+                    timeout=10,
+                )
+
+            git("init", "--quiet")
+            git("-c", "core.autocrlf=false", "add", "--", ".gitattributes", relative)
+            git("config", "core.autocrlf", "true")
+            git("config", "core.eol", "crlf")
+            fixture.unlink()
+            git("checkout-index", "--force", "--", relative)
+            self.assertEqual(fixture.read_bytes(), expected)
+            attributes = git("check-attr", "--cached", "text", "eol", "--", relative)
+            self.assertEqual(
+                attributes.stdout.decode().splitlines(),
+                [f"{relative}: text: set", f"{relative}: eol: lf"],
+            )
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with (
+                mock.patch.dict(os.environ, environment, clear=True),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                status = main(
+                    [
+                        "--diff",
+                        str(fixture),
+                        "--provider",
+                        "fixture",
+                        "--fixture-response",
+                        str(BLOCKING_RESPONSE),
+                        "--no-learning-proposals",
+                        "--format",
+                        "json",
+                    ]
+                )
+            self.assertEqual(status, 1, stderr.getvalue())
+            reviewed = ReviewResult.from_dict(json.loads(stdout.getvalue()))
+            self.assertEqual(reviewed.review_status, "complete")
+            self.assertTrue(has_blocking_findings(reviewed))
+
     def _response_path(self, name: str, payload: dict[str, object]) -> Path:
         path = Path.cwd() / name
         path.write_text(json.dumps(payload), encoding="utf-8")
