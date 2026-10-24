@@ -897,6 +897,32 @@ class ReleaseDocsBuildTests(unittest.TestCase):
 
 
 class ReleaseDocsWorkflowTests(unittest.TestCase):
+    def test_core_completion_waits_for_npm_before_strict_pages_selection(self):
+        workflow = (ROOT / ".github/workflows/pages.yml").read_text(encoding="utf-8")
+        qualifier = workflow.split("\n  deploy:\n", 1)[0]
+        waiter = qualifier.split(
+            "- name: Wait for matching npm publication before documentation verification",
+            1,
+        )[1].split("- name: Select exact successful release run", 1)[0]
+        self.assertIn("timeout-minutes: 95", qualifier)
+        self.assertIn("github.event_name == 'workflow_run'", waiter)
+        self.assertIn("github.event.workflow_run.name == 'Release'", waiter)
+        self.assertIn("github.event.workflow_run.head_branch", waiter)
+        self.assertIn("github.event.workflow_run.head_sha", waiter)
+        self.assertIn("wait_for_publication.py --workflow publish-npm.yml", waiter)
+        self.assertIn(' --tag "$RELEASE_TAG" --source "$RELEASE_SOURCE"', waiter)
+        self.assertIn('--pages-core-run-id "$RELEASE_RUN_ID"', waiter)
+        self.assertIn("pages-npm-readiness.json", waiter)
+        self.assertIn("actions/upload-artifact@", waiter)
+        self.assertLess(
+            qualifier.index("wait_for_publication.py"),
+            qualifier.index("release_docs.py select"),
+        )
+        self.assertIn("workflows: [Release, Release npm]", workflow)
+        self.assertIn("inputs.release_run_id", qualifier)
+        self.assertNotIn("secrets.", qualifier)
+        self.assertNotIn("id-token: write", qualifier)
+
     def test_release_docs_build_is_read_only_and_uses_event_sha(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         docs_job = workflow.split("  docs-build:\n", 1)[1].split("\n  build:\n", 1)[0]

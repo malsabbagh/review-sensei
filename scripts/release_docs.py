@@ -372,10 +372,15 @@ def npm_consumer_policy(source: str) -> bool:
     return True
 
 
-def validate_channels(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
-    split = not any(
+def uses_independent_npm_channel(jobs: list[dict[str, Any]]) -> bool:
+    """Classify complete original-run history using the existing channel policy."""
+    return not any(
         j.get("name") == "Publish npm packages with Trusted Publishing" for j in jobs
     )
+
+
+def validate_channels(run: dict[str, Any], jobs: list[dict[str, Any]]) -> None:
+    split = uses_independent_npm_channel(jobs)
     validate_run(run, jobs, split_npm=split)
     if not split:
         return  # Immutable historical combined runs retain their original policy.

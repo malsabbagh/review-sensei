@@ -919,8 +919,16 @@ covers the site's exact bytes. The static bundle is retained as
 It is a source-bound build record, not a package attestation or a registry
 verification receipt.
 
-Pages wakes only after `Release` completes successfully, not after main CI or
-on a PR. Its helper executes from the trusted default-branch SHA and has only
+Pages wakes after successful `Release` or `Release npm` completion, not after
+main CI or on a PR. On core completion, a read-only readiness step classifies
+the complete original core job inventory. Historical combined releases retain
+their embedded npm policy. Split releases wait up to 90 minutes for the one
+matching tag/source npm run to reach terminal success, including consumers and
+its recorder; the receipt is retained even on timeout. Retry the original
+publisher rather than creating another run. npm-completion and explicit run-ID
+recovery retain their normal selection paths. Readiness never grants deployment
+eligibility: the unchanged selector and rechecks still verify every prerequisite.
+Its helper executes from the trusted default-branch SHA and has only
 Contents/Actions read. It requires successful documentation, PyPI, npm and
 GitHub-release jobs, a published non-draft/non-prerelease GitHub release, a
 verified signed annotated tag still pointing to the run SHA, source ancestry
