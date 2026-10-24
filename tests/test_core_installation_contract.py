@@ -14,6 +14,38 @@ from major_tag_surface import workflow_data  # noqa: E402
 
 
 class RegistryOnlyInstallerTests(unittest.TestCase):
+    def test_windows_checkout_keeps_the_byte_pinned_workflow_exact(self):
+        relative = ".github/workflows/review-sensei-run.yml"
+        raw = (ROOT / relative).read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            workflow = temporary / relative
+            workflow.parent.mkdir(parents=True)
+            workflow.write_bytes(raw)
+            (temporary / ".gitattributes").write_bytes(
+                (ROOT / ".gitattributes").read_bytes()
+            )
+            git = ["git", "-C", directory, "-c", "core.autocrlf=true"]
+            for args in (
+                ["init", "--quiet"],
+                ["add", "."],
+                [
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.test",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "fixture",
+                ],
+            ):
+                subprocess.run(git + args, check=True, capture_output=True, timeout=10)
+            filtered = subprocess.check_output(
+                git + ["cat-file", "--filters", "HEAD:" + relative], timeout=10
+            )
+            self.assertEqual(filtered, raw)
+
     def run_installers(self, failure):
         workflow = workflow_data(
             (ROOT / ".github/workflows/review-sensei-run.yml").read_text()
