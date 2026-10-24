@@ -270,6 +270,57 @@ class ActualFinalizerProgressTests(unittest.TestCase):
 
 
 class FinalizationOperationDiagnosticsTests(unittest.TestCase):
+    def test_cleanup_forbidden_stops_remaining_mutations_and_retains_decisions(self):
+        from review_sensei_github.publication import approval_eligibility_from_body
+
+        state = CommandCapacityState(
+            complete=False, schema="1", inline_range=(0, 3), human_count=3, padded=False
+        )
+        state.resolved_threads.clear()
+        mutations = []
+        readbacks = []
+
+        def opener(request, timeout):
+            if urlsplit(request.full_url).path == "/graphql":
+                body = json.loads(request.data)
+                if body["operationName"] == "ResolveReviewThread":
+                    thread = body["variables"]["input"]["threadId"]
+                    mutations.append(thread)
+                    if thread == "PRRT_101":
+                        return json_response(
+                            {"errors": [{"type": "FORBIDDEN", "message": "SECRET"}]}
+                        )
+                elif body["operationName"] == "ResolutionReadback":
+                    readbacks.append(body["variables"]["id"])
+            return state.open(request, timeout)
+
+        state.http = GitHubHttp(api_url="https://api.github.test", opener=opener)
+        with tempfile.TemporaryDirectory() as directory:
+            dispositions = state.record(directory)
+            outcome, budget, _ = state.verify(dispositions)
+
+        self.assertEqual(mutations, ["PRRT_100", "PRRT_101"])
+        self.assertEqual(readbacks, [])  # Explicit rejection is not a lost response.
+        self.assertEqual(state.resolved_threads, {100})
+        self.assertEqual(outcome.thread_resolution, "unconfirmed")
+        self.assertEqual(outcome.status, "approval_withheld")
+        self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+        retained = approval_eligibility_from_body(state.reviews[0]["body"])
+        self.assertEqual(len(retained.human_review.resolved), 3)
+        self.assertEqual(outcome.approval_progress.pending_human_assessments, 0)
+        self.assertEqual(outcome.approval_progress.review_status, "partial")
+        self.assertEqual(state.checks[-1]["conclusion"], "action_required")
+        diagnostic = outcome.operation_diagnostics.to_dict()
+        self.assertEqual(
+            diagnostic["cleanup"]["first"]["stage"], "cleanup.resolve-request"
+        )
+        self.assertEqual(
+            diagnostic["cleanup"]["first"]["graphql_categories"], ["FORBIDDEN"]
+        )
+        self.assertFalse(diagnostic["approval_request_attempted"])
+        self.assertLess(budget.calls, 60)
+        self.assertNotIn("SECRET", json.dumps(diagnostic))
+
     def test_malformed_check_response_preserves_approval_and_reports_check_stage(self):
         state = CommandCapacityState(complete=True)
 

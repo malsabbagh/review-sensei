@@ -198,6 +198,15 @@ not expand permissions, reset resource budgets, repeat inference, or claim
 native approval from that check. The original `approval-progress` 1.0 document
 is unchanged and remains the final machine-readable line.
 
+A cleanup `FORBIDDEN`, `UNAUTHORIZED`, HTTP 401 or HTTP 403 is an authorization
+hold. Retain recorded decisions and confirmed thread state. Do not follow a
+generic `retry_verify` suggestion until the denial has been investigated and
+materially relevant authority evidence or a reviewed supported recovery path
+allows it. Do not switch actors, substitute a broader token or change App,
+installation or workflow permissions as a retry. Any needed access expansion
+requires an explicit scoped approval. An uncertain lost response is different:
+read back the original target before deciding whether any write remains needed.
+
 When blocked, retain the source event, exact head, installed versions, reason,
 recorded/unrecorded decision counts, thread state and next supported command.
 Do not include tokens, raw provider output or private source in diagnostics.

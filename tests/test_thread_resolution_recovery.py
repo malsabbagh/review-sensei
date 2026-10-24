@@ -17,7 +17,10 @@ from review_sensei_github.publication import (
     finding_instance_marker,
     finding_marker,
 )
-from review_sensei_github.thread_resolution import RESOLUTION_PREFIX
+from review_sensei_github.thread_resolution import (
+    RESOLUTION_PREFIX,
+    FindingThreadResolver,
+)
 
 from review_sensei.context import finding_lifecycle_for_comment
 from review_sensei.disposition import FindingDisposition
@@ -263,6 +266,151 @@ class ResolutionHost(GitHubHttp):
             finding_ids=(),
             dispositions=dispositions,
         )
+
+
+class ThreadResolutionDenialTests(unittest.TestCase):
+    def resolve(self, response, *, already_resolved=()):
+        from tests.fake_github_http import json_response
+        from tests.test_command_capacity_recovery import CommandCapacityState
+
+        state = CommandCapacityState(
+            schema="1", inline_range=(0, 3), human_count=3, padded=False
+        )
+        state.resolved_threads = set(already_resolved)
+        operations = []
+
+        def opener(request, timeout):
+            if request.full_url.endswith("/graphql"):
+                import json
+
+                body = json.loads(request.data)
+                operations.append((body["operationName"], body["variables"]))
+                scripted = response(state, body)
+                if scripted is not None:
+                    return json_response(*scripted)
+            return state.open(request, timeout)
+
+        result = FindingThreadResolver(
+            GitHubHttp(api_url="https://api.github.test", opener=opener)
+        ).resolve(
+            token="synthetic",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD,
+            base_sha=BASE,
+            app_slug=APP,
+            instances=frozenset(e.instance for e in state.entries[:3]),
+            fence=lambda: True,
+            skip_resolved=True,
+        )
+        return state, result, operations
+
+    def test_known_permission_denials_stop_without_observer_or_cleanup_budget(self):
+        denials = (
+            ({}, 401),
+            ({}, 403),
+            ({"errors": [{"type": "UNAUTHORIZED"}]}, 200),
+            (
+                {
+                    "errors": [{"type": []}, {"type": "FORBIDDEN"}],
+                    "data": {
+                        "resolveReviewThread": {
+                            "thread": {"id": "PRRT_100", "isResolved": True}
+                        }
+                    },
+                },
+                200,
+            ),
+        )
+        for denial in denials:
+            with self.subTest(response=denial):
+                state, result, operations = self.resolve(
+                    lambda state, body: (
+                        denial
+                        if body["operationName"] == "ResolveReviewThread"
+                        else None
+                    )
+                )
+                self.assertEqual(
+                    [op for op, _ in operations],
+                    ["FindingResolutionThreads", "ResolveReviewThread"],
+                )
+                self.assertEqual(result.resolved, ())
+                self.assertEqual(
+                    set(result.unconfirmed), {e.instance for e in state.entries[:3]}
+                )
+                self.assertEqual(state.resolved_threads, set())
+
+    def test_denial_preserves_already_resolved_suffix_without_more_mutations(self):
+        state, result, operations = self.resolve(
+            lambda state, body: (
+                ({"errors": [{"type": "FORBIDDEN"}]}, 200)
+                if body["operationName"] == "ResolveReviewThread"
+                else None
+            ),
+            already_resolved=(102,),
+        )
+        self.assertEqual(result.resolved, (state.entries[2].instance,))
+        self.assertEqual(
+            set(result.unconfirmed), {e.instance for e in state.entries[:2]}
+        )
+        self.assertEqual([op for op, _ in operations].count("ResolveReviewThread"), 1)
+        self.assertEqual(state.resolved_threads, {102})
+
+    def test_denied_readback_after_lost_response_stops_remaining_mutations(self):
+        def response(state, body):
+            if body["operationName"] == "ResolveReviewThread":
+                raise GitHubHTTPTransientError("response unavailable")
+            if body["operationName"] == "ResolutionReadback":
+                return {"errors": [{"type": "FORBIDDEN"}]}, 200
+
+        state, result, operations = self.resolve(response)
+        self.assertEqual(
+            [op for op, _ in operations],
+            ["FindingResolutionThreads", "ResolveReviewThread", "ResolutionReadback"],
+        )
+        self.assertEqual(result.resolved, ())
+        self.assertEqual(
+            set(result.unconfirmed), {e.instance for e in state.entries[:3]}
+        )
+        self.assertEqual(state.resolved_threads, set())
+
+    def test_non_permission_failure_preserves_bounded_readback_and_other_progress(self):
+        def response(state, body):
+            if (
+                body["operationName"] == "ResolveReviewThread"
+                and body["variables"]["input"]["threadId"] == "PRRT_100"
+            ):
+                return {"errors": [{"type": "INTERNAL"}]}, 200
+
+        state, result, operations = self.resolve(response)
+        self.assertEqual(result.unconfirmed, (state.entries[0].instance,))
+        self.assertEqual(set(result.resolved), {e.instance for e in state.entries[1:3]})
+        self.assertEqual(state.resolved_threads, {101, 102})
+        self.assertEqual([op for op, _ in operations].count("ResolutionReadback"), 1)
+        self.assertEqual([op for op, _ in operations].count("ResolveReviewThread"), 3)
+
+    def test_lost_response_confirmed_by_readback_does_not_repeat_mutation(self):
+        def response(state, body):
+            if (
+                body["operationName"] == "ResolveReviewThread"
+                and body["variables"]["input"]["threadId"] == "PRRT_100"
+            ):
+                state.resolved_threads.add(100)
+                raise GitHubHTTPTransientError("response lost after committed mutation")
+
+        state, result, operations = self.resolve(response)
+        self.assertEqual(result.unconfirmed, ())
+        self.assertEqual(set(result.resolved), {e.instance for e in state.entries[:3]})
+        self.assertEqual(state.resolved_threads, {100, 101, 102})
+        mutations = [
+            v["input"]["threadId"]
+            for op, v in operations
+            if op == "ResolveReviewThread"
+        ]
+        self.assertEqual(mutations, ["PRRT_100", "PRRT_101", "PRRT_102"])
+        self.assertEqual([op for op, _ in operations].count("ResolutionReadback"), 1)
 
 
 class ThreadResolutionRecoveryTests(unittest.TestCase):
