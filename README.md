@@ -10,9 +10,9 @@ providers later.
 > workflow. Setup-v4 callers follow the operator-managed public `v5` tag; the
 > Worker validates that tag before creating the setup PR and the broker resolves
 > it again when issuing a capability. The broker still accepts `v4` during
-> migration. The example workflow installs the
-> requested exact package from PyPI first and falls back to its executing commit
-> only when the distribution is unavailable. Both paths prove the intended
+> migration. The example workflow installs exact versioned packages; its
+> [version-specific installation contract](docs/installation.md#github-workflow-example)
+> defines registry requirements and source fallback. Supported paths prove the intended
 > release identity against a compatibility manifest; live canary and `v5`
 > movement remain operator-only. It
 > defaults to a local Ollama endpoint and does not require a hosted backend.

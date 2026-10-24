@@ -208,5 +208,116 @@ class PythonReleaseSourceTests(unittest.TestCase):
             sources.core_equivalence(ENGINE, HOSTED)
 
 
+class RegistryCoreContractTests(unittest.TestCase):
+    def setUp(self):
+        self.raw = (ROOT / ".github/workflows/review-sensei-run.yml").read_bytes()
+
+    def test_actual_reviewed_workflow_binds_registry_only_core_contract(self):
+        proof = sources.registry_core_contract(self.raw)
+        self.assertEqual(proof["mode"], "pypi-exact-v1")
+        self.assertEqual(proof["installation_lanes"], 4)
+        self.assertEqual(proof["workflow_sha256"], hashlib.sha256(self.raw).hexdigest())
+        with patch.object(
+            sources, "workflow_source_bytes", return_value=(self.raw, "d" * 40)
+        ):
+            bound = sources.core_installation(ENGINE, HOSTED)
+        self.assertEqual(bound["engine_source"], ENGINE)
+        self.assertEqual(bound["workflow_source"], HOSTED)
+        self.assertEqual(bound["workflow_blob_sha"], "d" * 40)
+
+    def test_one_source_fallback_or_arbitrary_workflow_change_is_not_admitted(self):
+        for raw in (
+            self.raw + b"\n# unreviewed byte change\n",
+            self.raw.replace(b"\n", b"\r\n"),
+            self.raw.replace(
+                b'install_source="PyPI"',
+                b'install_source="PyPI"\n          pip install git+https://github.com/malsabbagh/review-sensei.git@main',
+                1,
+            ),
+            self.raw.replace(b"pypi-exact-v1", b"caller-asserted-mode"),
+            self.raw + b"\n# reviewsensei-core-installation: pypi-exact-v1\n",
+        ):
+            with (
+                self.subTest(digest=hashlib.sha256(raw).hexdigest()),
+                self.assertRaises(ValueError),
+            ):
+                sources.registry_core_contract(raw)
+
+    def test_legacy_without_selector_does_not_claim_new_contract(self):
+        self.assertIsNone(sources.registry_core_contract(b"name: old workflow\n"))
+
+    def test_contract_reads_verified_git_blob_from_exact_regular_path(self):
+        raw = self.raw
+        digest = hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
+        trees = ["c" * 40, "d" * 40, "e" * 40]
+        data = {f"git/commits/{HOSTED}": {"sha": HOSTED, "tree": {"sha": trees[0]}}}
+        for index, name in enumerate((".github", "workflows", "review-sensei-run.yml")):
+            leaf = index == 2
+            data[f"git/trees/{trees[index]}"] = {
+                "sha": trees[index],
+                "truncated": False,
+                "tree": [
+                    {
+                        "path": name,
+                        "type": "blob" if leaf else "tree",
+                        "mode": "100644" if leaf else "040000",
+                        "sha": digest if leaf else trees[index + 1],
+                    }
+                ],
+            }
+        data[f"git/blobs/{digest}"] = {
+            "sha": digest,
+            "encoding": "base64",
+            "size": len(raw),
+            "content": base64.b64encode(raw).decode(),
+        }
+        original = copy.deepcopy(data)
+        with patch.object(sources.docs, "api", side_effect=lambda path: data[path]):
+            proof = sources.core_installation(ENGINE, HOSTED)
+            self.assertEqual(proof["workflow_blob_sha"], digest)
+            leaf = data[f"git/trees/{trees[2]}"]["tree"][0]
+            leaf["mode"] = "120000"
+            with self.assertRaises(ValueError):
+                sources.core_installation(ENGINE, HOSTED)
+            leaf["mode"] = "100644"
+            data[f"git/blobs/{digest}"]["content"] = base64.b64encode(
+                raw + b"forged"
+            ).decode()
+            with self.assertRaises(ValueError):
+                sources.core_installation(ENGINE, HOSTED)
+        for mutation in (
+            "commit",
+            "tree",
+            "truncated",
+            "duplicate",
+            "gitlink",
+            "blob-size",
+            "blob-type",
+        ):
+            data = copy.deepcopy(original)
+            if mutation == "commit":
+                data[f"git/commits/{HOSTED}"]["tree"] = None
+            elif mutation == "tree":
+                data[f"git/trees/{trees[0]}"]["sha"] = "f" * 40
+            elif mutation == "truncated":
+                data[f"git/trees/{trees[0]}"]["truncated"] = True
+            elif mutation == "duplicate":
+                data[f"git/trees/{trees[0]}"]["tree"] *= 2
+            elif mutation == "gitlink":
+                data[f"git/trees/{trees[2]}"]["tree"][0].update(
+                    type="commit", mode="160000"
+                )
+            elif mutation == "blob-size":
+                data[f"git/blobs/{digest}"]["size"] += 1
+            else:
+                data[f"git/blobs/{digest}"]["content"] = None
+            with (
+                self.subTest(mutation=mutation),
+                patch.object(sources.docs, "api", side_effect=lambda path: data[path]),
+                self.assertRaises(ValueError),
+            ):
+                sources.core_installation(ENGINE, HOSTED)
+
+
 if __name__ == "__main__":
     unittest.main()

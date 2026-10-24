@@ -278,10 +278,26 @@ authorizing a run (using the public Git ref advertisement before a bounded REST
 fallback on GitHub.com). That workflow
 installs the exact release its workflow commit belongs to (the version its
 `pyproject.toml` declares) from PyPI in a separate `RUNNER_TEMP` environment;
-no repository variable selects it. When that exact distribution is unavailable,
-it installs from the public ReviewSensei repository at the executing workflow
-commit SHA;
-other PyPI failures remain fatal, including network and authentication errors.
+no repository variable selects it. The published hosted 0.3.13 workflow uses
+its executing commit as source fallback when an exact distribution is unavailable;
+network and authentication failures remain fatal.
+
+The **registry-only core contract is unreleased after hosted 0.3.13**. Once a
+qualified release and channel activation adopt it, every runtime lane requires
+the exact published `review-sensei` core from PyPI. Missing distribution,
+network/authentication failure or installed-version mismatch stops installation;
+there is no core Git source fallback or alternate version. The separately pinned
+`review-sensei-github` package retains fallback to its own signed workflow source,
+without replacing the exact installed core. See
+[ADR 0109](adr/0109-registry-bound-core-installation.md).
+
+If exact core installation fails, inspect the publication and registry
+availability for the selected version. Do not trigger new PR analysis, change
+credentials or substitute `latest`. Publication and installed-consumer checks
+must pass before activating a release. A hosted-only release can reuse the
+original signed core publication without rebuilding its README metadata from
+the later workflow checkout.
+
 Both paths must prove the intended release identity against a validated
 compatibility manifest through `prove_release_identity`, which checks the
 executing workflow commit, every manifest artifact digest, and Worker
