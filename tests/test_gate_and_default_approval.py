@@ -574,7 +574,7 @@ class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
         self.assertEqual(outcome.diagnostic, "app_authored")
         self.assertEqual(checks.writes, [])
 
-    def test_missing_gate_capability_reports_permission_but_still_approves(self):
+    def test_missing_gate_capability_is_unavailable_but_still_approves(self):
         outcome, calls = self.publish(
             [
                 json_response(pr_payload(head_sha=HEAD)),
@@ -591,7 +591,7 @@ class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
         )
         self.assertEqual(outcome.status, "published")
         self.assertEqual(posted_events(calls), ["COMMENT", "APPROVE"])
-        self.assertEqual(outcome.diagnostic, "check_permission")
+        self.assertEqual(outcome.diagnostic, "check_capability_unavailable")
         self.assertIn(outcome.diagnostic, PUBLIC_DIAGNOSTICS)
         self.assertFalse(any("/check-runs" in url for _, url, _ in calls))
 
@@ -623,7 +623,7 @@ class DefaultApprovalAcceptanceTests(GateAcceptanceCase):
         )
 
         self.assertEqual(outcome.status, "published")
-        self.assertEqual(outcome.diagnostic, "check_permission")
+        self.assertEqual(outcome.diagnostic, "check_capability_unavailable")
         self.assertEqual(posted_events(calls), ["REQUEST_CHANGES"])
         self.assertIn(
             "This file needs a tighter contract.", review_payloads(calls)[0]["body"]
@@ -857,9 +857,9 @@ class OneGateAcceptanceTests(GateAcceptanceCase):
         )
         self.assertEqual(outcome.status, "published")
         self.assertEqual(posted_events(calls), ["COMMENT", "APPROVE"])
-        self.assertEqual(outcome.diagnostic, "check_permission")
+        self.assertEqual(outcome.diagnostic, "check_access_denied")
         self.assertIn(
-            "ReviewSensei merge gate unavailable",
+            "ReviewSensei merge gate unconfirmed",
             review_payloads(calls)[0]["body"],
         )
         self.assertEqual(checks.writes, [])
@@ -1127,7 +1127,7 @@ class CheckPublisherContractTests(unittest.TestCase):
             )
 
         publisher, _calls = self.check_publisher([json_response({"check_runs": {}})])
-        with self.assertRaisesRegex(GitHubPublicationError, "response was invalid"):
+        with self.assertRaisesRegex(GitHubPublicationError, "check_publication_failed"):
             publisher.start(
                 token="token", repository="owner/repo", head_sha=HEAD, app_slug=APP
             )
@@ -1135,7 +1135,7 @@ class CheckPublisherContractTests(unittest.TestCase):
         publisher, _calls = self.check_publisher(
             [json_response({"check_runs": []}), json_response({"message": "nope"}, 422)]
         )
-        with self.assertRaisesRegex(GitHubPublicationError, "rejected"):
+        with self.assertRaisesRegex(GitHubPublicationError, "check_publication_failed"):
             publisher.start(
                 token="token", repository="owner/repo", head_sha=HEAD, app_slug=APP
             )
@@ -1143,14 +1143,16 @@ class CheckPublisherContractTests(unittest.TestCase):
         publisher, _calls = self.check_publisher(
             [json_response({"check_runs": []}), json_response({"message": "nope"}, 404)]
         )
-        with self.assertRaisesRegex(GitHubPublicationError, "not found"):
+        with self.assertRaisesRegex(GitHubPublicationError, "check_publication_failed"):
             publisher.start(
                 token="token", repository="owner/repo", head_sha=HEAD, app_slug=APP
             )
 
     def test_transport_failure_is_transient(self):
         publisher, _calls = self.check_publisher([URLError("unreachable")])
-        with self.assertRaisesRegex(GitHubPublicationTransientError, "temporarily"):
+        with self.assertRaisesRegex(
+            GitHubPublicationTransientError, "check_temporarily_unavailable"
+        ):
             publisher.start(
                 token="token", repository="owner/repo", head_sha=HEAD, app_slug=APP
             )

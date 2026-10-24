@@ -302,7 +302,7 @@ class TrustedQualificationTests(unittest.TestCase):
                 )
                 self.assertEqual(outcome.status, "published")
                 self.assertEqual(posted_events(calls), ["COMMENT"])
-                self.assertEqual(outcome.diagnostic, "check_permission")
+                self.assertEqual(outcome.diagnostic, "check_capability_unavailable")
                 eligibility = approval_eligibility_from_body(
                     review_payloads(calls)[0]["body"]
                 )

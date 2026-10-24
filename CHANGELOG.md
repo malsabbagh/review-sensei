@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Distinguish unavailable check capabilities, observed access denials, temporary
+  failures and other check publication failures. Retain neutral legacy diagnostic
+  wording and visible warnings when summary space is exhausted, without changing
+  approval eligibility or adding retries.
+
 ## review-sensei-github 0.3.17 - 2026-10-24
 
 - Pin `review-sensei==0.8.12`.
