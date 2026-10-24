@@ -310,6 +310,7 @@ class DocumentedCommandExecutionTests(unittest.TestCase):
                 "+print(1)\n"
                 "+print(2)\n",
                 encoding="utf-8",
+                newline="\n",
             )
             result = self._run(
                 directory,

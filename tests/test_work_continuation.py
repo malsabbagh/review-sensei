@@ -1405,7 +1405,7 @@ class WorkContinuationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             diff_path = root / "nine.diff"
-            diff_path.write_text(nine_file_diff, encoding="utf-8")
+            diff_path.write_text(nine_file_diff, encoding="utf-8", newline="\n")
             cfg_path = root / ".reviewsensei.yml"
             cfg_path.write_text(
                 "schema: 1\n"
@@ -1852,7 +1852,7 @@ class WorkContinuationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             diff_path = root / "nine.diff"
-            diff_path.write_text(nine_file_diff, encoding="utf-8")
+            diff_path.write_text(nine_file_diff, encoding="utf-8", newline="\n")
             ledger_dir = root / "ledger"
             ledger = LocalSessionLedger(ledger_dir)
             identity = SessionIdentity(repository="owner/repo", pull_request=91)

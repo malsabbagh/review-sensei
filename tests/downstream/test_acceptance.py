@@ -467,7 +467,7 @@ class EngineAndPublicationAcceptanceTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             with (
                 patch("sys.stderr", stderr),
                 patch(

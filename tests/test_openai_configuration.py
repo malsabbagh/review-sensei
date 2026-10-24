@@ -50,7 +50,7 @@ class Response(io.BytesIO):
 class OpenAIConfigurationTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def setUp(self):
         super().setUp()
-        Path("change.patch").write_text(PATCH, encoding="utf-8")
+        Path("change.patch").write_text(PATCH, encoding="utf-8", newline="\n")
         self.requests = []
         self.adapters = []
         self.environment = {"OPENAI_API_KEY": KEY}
@@ -208,6 +208,7 @@ class OpenAIConfigurationTests(IsolatedWorkingDirectoryMixin, unittest.TestCase)
             "--- a/.reviewsensei.yml\n+++ b/.reviewsensei.yml\n@@ -1 +1,4 @@\n"
             " schema: 1\n+advanced:\n+  endpoint:\n+    allow_custom_endpoint: true\n",
             encoding="utf-8",
+            newline="\n",
         )
         status, _, error = self.review(
             ["--provider", "openai-compatible", "--base-url", OTHER]

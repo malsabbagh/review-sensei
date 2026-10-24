@@ -469,7 +469,7 @@ class PreProviderFailureCleanupTests(IsolatedWorkingDirectoryMixin, unittest.Tes
                 tempfile.TemporaryDirectory() as temp,
             ):
                 root = Path(temp)
-                (root / "review.patch").write_text(diff)
+                (root / "review.patch").write_text(diff, encoding="utf-8", newline="\n")
                 (root / "response.json").write_text('{"summary":"ok","comments":[]}')
                 args = [
                     "--diff",

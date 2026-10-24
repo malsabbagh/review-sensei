@@ -184,6 +184,7 @@ class DefaultPublicationCliJourneyTests(unittest.TestCase):
             "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n"
             + DIFF,
             encoding="utf-8",
+            newline="\n",
         )
         self.configuration(root, "legacy")
         return result, ledger.load(IDENTITY).record

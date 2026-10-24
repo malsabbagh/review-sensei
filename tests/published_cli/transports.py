@@ -231,7 +231,7 @@ def main():
                 )  # Drain previous synthetic socket handlers before observing dispatch.
                 wd = runner.root / ("cancel-" + kind)
                 wd.mkdir(exist_ok=True)
-                (wd / "input.patch").write_text(PATCH)
+                (wd / "input.patch").write_text(PATCH, encoding="utf-8", newline="\n")
                 state.update(responses=[{}], requests=[], delay=0.5)
                 argv = [
                     str(exe),

@@ -92,8 +92,11 @@ class BaselineRecoveryTests(unittest.TestCase):
             "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
             "@@ -1 +1,2 @@\n keep\n+change\n",
             encoding="utf-8",
+            newline="\n",
         )
-        with (self.root / "diff.patch").open("a") as handle:
+        with (self.root / "diff.patch").open(
+            "a", encoding="utf-8", newline="\n"
+        ) as handle:
             handle.write(
                 "diff --git a/other.py b/other.py\n--- a/other.py\n+++ b/other.py\n"
                 "@@ -1 +1,2 @@\n keep\n+related\n"
@@ -204,7 +207,9 @@ class BaselineRecoveryTests(unittest.TestCase):
             "".join(
                 f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1,2 @@\n keep\n+change\n"
                 for path in current
-            )
+            ),
+            encoding="utf-8",
+            newline="\n",
         )
         return self.record()
 
@@ -529,7 +534,9 @@ class BaselineRecoveryTests(unittest.TestCase):
         self.assertEqual(self.record().convergence_history, before.convergence_history)
         self.assertEqual(self.record().failed_attempts, 1)
         self.provider.error = None
-        with (self.root / "diff.patch").open("a") as handle:
+        with (self.root / "diff.patch").open(
+            "a", encoding="utf-8", newline="\n"
+        ) as handle:
             handle.write(
                 "diff --git a/logo.bin b/logo.bin\nBinary files a/logo.bin and b/logo.bin differ\n"
             )
@@ -687,7 +694,9 @@ class BaselineRecoveryTests(unittest.TestCase):
     ):
         self.assertEqual(self.run_cli()[0], 0)
         before = self.record()
-        with (self.root / "diff.patch").open("a") as handle:
+        with (self.root / "diff.patch").open(
+            "a", encoding="utf-8", newline="\n"
+        ) as handle:
             handle.write(
                 "diff --git a/logo.bin b/logo.bin\nBinary files a/logo.bin and b/logo.bin differ\n"
             )

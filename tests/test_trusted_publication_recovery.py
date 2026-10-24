@@ -72,6 +72,7 @@ class TrustedPublicationRecoveryTests(unittest.TestCase):
             "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n"
             "+++ b/src/app.py\n@@ -1 +1 @@\n-old\n+new\n",
             encoding="utf-8",
+            newline="\n",
         )
         argv = [
             "--config",
