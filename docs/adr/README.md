@@ -11,8 +11,8 @@ Process: `docs/process/adr-process.md`
 
 | ADR | Status | Decision | Related issue | Notes |
 | --- | --- | --- | --- | --- |
-| [0109](0109-registry-bound-core-installation.md) | Proposed | Bind core installation to its verified registry publication | Hosted-only release scope | Closed reviewed workflow bytes; exact core required; historical equivalence retained |
-| [0108](0108-finalization-operational-failures.md) | Proposed | Observe operational finalization failures without changing authority | TaskAlong PR #25 diagnosis | Closed per-phase first failures, original budget facts, explicit request-attempt uncertainty; not yet published |
+| [0109](0109-registry-bound-core-installation.md) | Proposed | Bind core installation to its verified registry publication | Hosted-only release scope | Introduced with hosted 0.3.14; closed reviewed workflow bytes; exact core required; historical equivalence retained |
+| [0108](0108-finalization-operational-failures.md) | Proposed | Observe operational finalization failures without changing authority | TaskAlong PR #25 diagnosis | Published in hosted 0.3.14; closed per-phase first failures, original budget facts and explicit request-attempt uncertainty |
 | [0106](0106-durable-decision-snapshots-and-metadata-phases.md) | Proposed | Complete bounded decision snapshots and explicit metadata phases | User-requested approval liveness repair | Retained authority, original command limits, coordinated reader/writer release |
 | [0104](0104-published-npm-consumer-verification.md) | Proposed | Verify published npm consumers before channel completion | User-requested npm integration follow-up | Five isolated native registry installs; read-only verification retries and unchanged publication proofs |
 | [0102](0102-bind-partial-continuation-to-review-input.md) | Proposed | Bind reusable partial coverage to complete review input | PR [#342](https://github.com/malsabbagh/review-sensei/pull/342) | Persisted bounded provenance, unchanged v1 content digests and authority/budgets |

@@ -8,6 +8,15 @@ Publication does not update an installed workflow. Confirm both installed Python
 versions and the qualified signed `v5` source in the release/activation receipt;
 do not infer activation from a checkout or a green workflow. The remaining-work
 route also needs a compatible caller, as described below.
+
+Hosted **0.3.14**, paired with the unchanged core **0.8.12**, adds operational
+failure observations and a registry-only core installation contract. Its signed
+workflow source is
+[`41792ec8`](https://github.com/malsabbagh/review-sensei/commit/41792ec89afb092c4b8ad0ad6816fba945ab551f).
+These additions do not supply missing review evidence or guarantee automatic
+thread cleanup or native approval. Check the activation receipt and installed
+versions before expecting these diagnostics from `v5`.
+
 Hosted 0.3.12 / core 0.8.11 still use the embedded decision ledger and can reach
 its byte limit. Never reset a session or discard decisions to get past that limit.
 
@@ -162,13 +171,13 @@ threads are confirmed resolved. Record those IDs and the installed versions.
 A green workflow, a comment saying decisions were stored, or a merged PR alone
 is not that receipt.
 
-### Unreleased operational failure observation
+### Operational failure observation (hosted 0.3.14+)
 
-The separate `approval-operation-failure` schema 1.0 observation is under
-development after hosted 0.3.13. Do not expect it from that published version.
-When a compatible release ships, the line identifies the first failure in each
-of eligibility readback, check publication, thread cleanup and approval, plus
-bounded failure counts. It reports closed stage/reason names and allowlisted
+The separate `approval-operation-failure` schema 1.0 observation was introduced
+in hosted 0.3.14 for `verify` and finding-disposition re-finalization. It is not
+available in hosted 0.3.13. When one of those operations observes a failure, the
+line identifies the first failure in each phase of eligibility readback, check
+publication, thread cleanup and approval, plus bounded failure counts. It reports closed stage/reason names and allowlisted
 HTTP/GraphQL categories; raw messages, responses, tokens and source are excluded.
 Later call exhaustion does not replace an earlier failure in another phase.
 

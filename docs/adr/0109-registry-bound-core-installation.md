@@ -1,6 +1,7 @@
 # ADR 0109: Registry-bound core installation
 
-Status: Proposed. Unreleased after hosted 0.3.13.
+Status: Proposed. Implemented in the qualified hosted 0.3.14 workflow.
+Channel activation and installed-version verification remain separate gates.
 
 ## Problem
 
