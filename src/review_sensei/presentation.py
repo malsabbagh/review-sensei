@@ -70,19 +70,13 @@ _SAFE_LINK_SCHEMES = frozenset(("http", "https"))
 _DISCUSSION_REFERENCE_INLINE = "See the inline discussion."
 _DISCUSSION_REFERENCE_BODY = "See the full explanation below."
 _OPTIONAL_NOT_REQUIRED = "This is not required for this PR."
-_CHECK_PERMISSION_WARNING = (
-    "**Warning: ReviewSensei merge gate unavailable.** This run could not publish "
-    "the required `ReviewSensei` check (`check_permission`). Missing this check "
-    "does not itself withhold approval: an otherwise eligible review can still "
-    "be approved under the configured auto-approval policy. Grant the App "
-    "`Checks: write` and broker `check_publish`, and mark the check required in "
-    "branch protection before relying on it to gate merges."
-)
-_CHECK_PERMISSION_WARNING_CONCISE = (
-    "**Warning: ReviewSensei merge gate unavailable (`check_permission`).** "
-    "Auto-approval may proceed when otherwise eligible. Grant `Checks: write` "
-    "and broker `check_publish`, then require the check in branch protection."
-)
+_CHECK_WARNING_REASONS = {
+    "check_permission": "The legacy diagnostic does not establish the cause.",
+    "check_capability_unavailable": "The check capability was unavailable.",
+    "check_access_denied": "An access denial (HTTP 401 or 403) was observed.",
+    "check_temporarily_unavailable": "A temporary check capability or publication failure was observed.",
+    "check_publication_failed": "A check publication failure was observed; its cause is unconfirmed.",
+}
 
 _HEADING_STATES = {
     CHANGES_REQUIRED_STATE: "## ReviewSensei — Changes required",
@@ -146,10 +140,27 @@ def render_command_receipt(
     return "\n".join(lines) + "\n\n" + marker + "\n"
 
 
-def render_check_permission_warning(*, concise: bool = False) -> str:
-    """Explain an unavailable GitHub merge gate in published review Markdown."""
+def render_check_warning(diagnostic: str, *, concise: bool = False) -> str:
+    """Render closed evidence without inferring missing grants or a live cause."""
+    if diagnostic not in _CHECK_WARNING_REASONS:
+        diagnostic = "check_publication_failed"
+    prefix = (
+        "**Warning: ReviewSensei merge gate unconfirmed.** "
+        f"Check publication could not be confirmed (`{diagnostic}`). "
+    )
+    if concise:
+        return prefix + "Auto-approval may proceed when otherwise eligible."
+    return (
+        prefix
+        + _CHECK_WARNING_REASONS[diagnostic]
+        + " Missing this check does not itself withhold approval: an otherwise "
+        "eligible review can still be approved under the configured auto-approval policy."
+    )
 
-    return _CHECK_PERMISSION_WARNING_CONCISE if concise else _CHECK_PERMISSION_WARNING
+
+def render_check_permission_warning(*, concise: bool = False) -> str:
+    """Keep the legacy diagnostic readable without claiming a permission cause."""
+    return render_check_warning("check_permission", concise=concise)
 
 
 # Inline Markdown constructs reshape or hide content regardless of position:

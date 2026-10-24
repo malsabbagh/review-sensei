@@ -1324,7 +1324,7 @@ repository administrator must mark the check required for it to gate merges
 in `blocking` mode;
 `review-sensei doctor` reports the expected check identity and producing App,
 and `Checks: write` is a scoped broker capability. A missing permission leaves
-the check unpublished and reports `check_permission`, but does not prevent
+the check unpublished and reports `check_capability_unavailable`, but does not prevent
 approval for an otherwise eligible review. Repositories that require the check
 must grant the permission and broker capability for that merge gate to apply.
 

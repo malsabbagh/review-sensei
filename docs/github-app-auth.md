@@ -205,7 +205,7 @@ published through the separate `check_publish` capability, which is why
 `checks: write` is requested explicitly: it is not part of review-comment
 permission. If the broker withholds that capability or the App lacks the
 permission, the check remains unpublished and the run reports
-`check_permission`; an otherwise eligible review can still be approved. A
+`check_capability_unavailable`; an otherwise eligible review can still be approved. A
 repository that requires the check must grant both the permission and broker
 capability. Because a required check is matched to its producing App, an administrator who makes
 `ReviewSensei` required selects it by this App's slug; YAML alone cannot make a

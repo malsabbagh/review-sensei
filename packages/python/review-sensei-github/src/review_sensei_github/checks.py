@@ -23,11 +23,16 @@ from review_sensei.models import ReviewResult
 from review_sensei.validation import validate_bounded_text
 
 from .approval import has_blocking_findings, has_human_adjudication_findings
+from .check_diagnostics import (
+    CheckFailure,
+    CheckOperationError,
+    CheckOperationTransientError,
+    check_failure,
+)
 from .errors import (
     GitHubHTTPError,
     GitHubHTTPTransientError,
     GitHubPublicationError,
-    GitHubPublicationTransientError,
 )
 from .http import GitHubHttp
 
@@ -58,6 +63,7 @@ class CheckPublicationResult:
     status: str
     check_run_id: int | None = None
     diagnostic: str | None = None
+    failure: CheckFailure | None = None
 
 
 def required_check_identity(*, app_slug: str) -> dict[str, str]:
@@ -466,19 +472,19 @@ class ReviewCheckPublisher:
         )
         try:
             status, payload = self.http.request("GET", path, token=token)
-        except GitHubHTTPTransientError as exc:
-            raise GitHubPublicationTransientError(
-                "check lookup failed temporarily"
-            ) from exc
-        except GitHubHTTPError as exc:
-            raise GitHubPublicationError("check lookup failed") from exc
-        if status < 200 or status >= 300:
-            raise GitHubPublicationError("check lookup failed")
+        except GitHubHTTPTransientError:
+            raise CheckOperationTransientError(
+                check_failure("lookup", transient=True)
+            ) from None
+        except GitHubHTTPError:
+            raise CheckOperationError(check_failure("lookup")) from None
+        if type(status) is not int or status < 200 or status >= 300:
+            raise CheckOperationError(check_failure("lookup", status=status))
         if not isinstance(payload, Mapping):
-            raise GitHubPublicationError("check lookup response was invalid")
+            raise CheckOperationError(check_failure("lookup", status=status))
         runs = payload.get("check_runs")
         if not isinstance(runs, list):
-            raise GitHubPublicationError("check lookup response was invalid")
+            raise CheckOperationError(check_failure("lookup", status=status))
         expected = app_slug.casefold()
         # Review/comment users expose the App's REST Bot login, whereas a
         # native check's App object exposes its unsuffixed slug. Both identify
@@ -528,19 +534,17 @@ class ReviewCheckPublisher:
         )
         if status_code == 403:
             return CheckPublicationResult(
-                status="check_permission_denied", diagnostic="check_permission"
+                status="check_permission_denied",
+                diagnostic="check_access_denied",
+                failure=check_failure("create", status=status_code),
             )
-        if status_code == 404:
-            raise GitHubPublicationError("check target was not found")
-        if status_code == 422:
-            raise GitHubPublicationError("check publication was rejected")
         if status_code == 201 and isinstance(payload, Mapping):
             check_run_id = payload.get("id")
             if isinstance(check_run_id, int) and not isinstance(check_run_id, bool):
                 return CheckPublicationResult(
                     status="created", check_run_id=check_run_id
                 )
-        raise GitHubPublicationError("check publication was rejected")
+        raise CheckOperationError(check_failure("create", status=status_code))
 
     def _update(
         self,
@@ -567,17 +571,15 @@ class ReviewCheckPublisher:
         )
         if status_code == 403:
             return CheckPublicationResult(
-                status="check_permission_denied", diagnostic="check_permission"
+                status="check_permission_denied",
+                diagnostic="check_access_denied",
+                failure=check_failure("update", status=status_code),
             )
-        if status_code == 404:
-            raise GitHubPublicationError("check target was not found")
-        if status_code == 422:
-            raise GitHubPublicationError("check update was rejected")
         if status_code == 200 and isinstance(payload, Mapping):
             updated_id = payload.get("id")
             if isinstance(updated_id, int) and not isinstance(updated_id, bool):
                 return CheckPublicationResult(status="updated", check_run_id=updated_id)
-        raise GitHubPublicationError("check update was rejected")
+        raise CheckOperationError(check_failure("update", status=status_code))
 
     def _request(
         self,
@@ -588,12 +590,16 @@ class ReviewCheckPublisher:
     ) -> tuple[int, Mapping[str, object] | None]:
         try:
             status, payload = self.http.request(method, path, token=token, body=body)
-        except GitHubHTTPTransientError as exc:
-            raise GitHubPublicationTransientError(
-                "check publication failed temporarily"
-            ) from exc
-        except GitHubHTTPError as exc:
-            raise GitHubPublicationError("check publication failed") from exc
+        except GitHubHTTPTransientError:
+            raise CheckOperationTransientError(
+                check_failure(
+                    "create" if method == "POST" else "update", transient=True
+                )
+            ) from None
+        except GitHubHTTPError:
+            raise CheckOperationError(
+                check_failure("create" if method == "POST" else "update")
+            ) from None
         if isinstance(payload, Mapping):
             return status, payload
         return status, None

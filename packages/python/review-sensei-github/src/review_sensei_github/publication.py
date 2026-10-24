@@ -53,7 +53,7 @@ from review_sensei.presentation import (
     build_finding_view,
     build_review_summary_view,
     render_body_findings,
-    render_check_permission_warning,
+    render_check_warning,
     render_finding,
     render_review_summary,
 )
@@ -74,6 +74,7 @@ from .approval import (
     restrict_result_qualification,
 )
 from .approval_progress import ApprovalProgress, build_approval_progress
+from .check_diagnostics import CHECK_FAILURE_CODES, CheckFailure, CheckOperationError
 from .checks import (
     REVIEW_POLICY_MODES,
     CheckOutcome,
@@ -4069,15 +4070,12 @@ class ReviewPublisher:
     ) -> str | None:
         """Write one gate state for a reviewed head and report an unusable capability.
 
-        ``outcome=None`` publishes the pending state. A missing or unauthorized
-        check capability is reported as a ``check_permission`` diagnostic rather
-        than raised: the review itself is still published, and an otherwise
-        eligible review may still be approved even though the merge gate is
-        unavailable.
+        ``outcome=None`` publishes the pending state. Failure diagnostics do
+        not change review publication or approval eligibility.
         """
 
         if check_token is None:
-            return "check_permission"
+            return "check_capability_unavailable"
         if outcome is None:
             result = self.checks.start(
                 token=check_token,
@@ -4094,7 +4092,13 @@ class ReviewPublisher:
                 outcome=outcome,
             )
         if result.status == "check_permission_denied":
-            return "check_permission"
+            return (
+                result.failure.code
+                if result.failure is not None
+                else "check_publication_failed"
+            )
+        if result.status not in {"created", "updated"}:
+            return "check_publication_failed"
         return None
 
     def _check_state_or_diagnostic(
@@ -4109,8 +4113,8 @@ class ReviewPublisher:
         """Write one gate state, reporting an unusable capability as a diagnostic.
 
         A gate that cannot be written must not suppress the review itself. The
-        ``check_permission`` diagnostic tells the operator enforcement is not
-        in place; an otherwise eligible review may still be approved. A pending
+        closed diagnostic tells the operator publication is unconfirmed;
+        an otherwise eligible review may still be approved. A pending
         conclusion left behind by a transient failure is overwritten by the
         next run for the same head.
         """
@@ -4123,8 +4127,12 @@ class ReviewPublisher:
                 app_slug=app_slug,
                 outcome=outcome,
             )
+        except CheckOperationError as exc:
+            return exc.failure.code
+        except (GitHubHTTPTransientError, GitHubPublicationTransientError):
+            return "check_temporarily_unavailable"
         except (GitHubHTTPError, GitHubPublicationError):
-            return "check_permission"
+            return "check_publication_failed"
 
     def _complete_failed_check(
         self,
@@ -4170,6 +4178,7 @@ class ReviewPublisher:
         qualification_binding: str | None = None,
         retained_eligibility: ReviewApprovalEligibility | None = None,
         persisted_eligibility: ReviewApprovalEligibility | None = None,
+        check_capability_failure: CheckFailure | None = None,
     ) -> PublicationResult:
         """Re-assert one already-published result's gate and approval decision.
 
@@ -4226,6 +4235,8 @@ class ReviewPublisher:
                 required_decisions=replay_eligibility.facts.has_human_adjudication_findings,
             ),
         )
+        if check_token is None and check_capability_failure is not None:
+            check_diagnostic = check_capability_failure.code
         finalized = self.finalizer.finalize(
             token=token,
             repository=repository,
@@ -4256,6 +4267,7 @@ class ReviewPublisher:
         auto_approve: bool = True,
         reviews_policy: str = "auto-approve",
         check_token: str | None = None,
+        check_capability_failure: CheckFailure | None = None,
         qualification: str = "not-required",
         configuration_context: Mapping[str, object] | None = None,
         candidates: Sequence[CandidateFinding] | None = None,
@@ -4304,6 +4316,7 @@ class ReviewPublisher:
                 auto_approve=auto_approve,
                 reviews_policy=reviews_policy,
                 check_token=check_token,
+                check_capability_failure=check_capability_failure,
                 qualification=qualification,
                 configuration_context=configuration_context,
                 candidates=candidates,
@@ -4354,6 +4367,7 @@ class ReviewPublisher:
         auto_approve: bool = True,
         reviews_policy: str = "auto-approve",
         check_token: str | None = None,
+        check_capability_failure: CheckFailure | None = None,
         qualification: str = "not-required",
         configuration_context: Mapping[str, object] | None = None,
         candidates: Sequence[CandidateFinding] | None = None,
@@ -4834,6 +4848,7 @@ class ReviewPublisher:
                         base_sha=base_sha,
                         app_slug=app_slug,
                         check_token=check_token,
+                        check_capability_failure=check_capability_failure,
                         result=result,
                         policy=effective_policy,
                         approval_enabled=approval_enabled,
@@ -4853,6 +4868,7 @@ class ReviewPublisher:
                             base_sha=base_sha,
                             app_slug=app_slug,
                             check_token=check_token,
+                            check_capability_failure=check_capability_failure,
                             result=result,
                             policy=effective_policy,
                             approval_enabled=approval_enabled,
@@ -4874,6 +4890,7 @@ class ReviewPublisher:
                             base_sha=base_sha,
                             app_slug=app_slug,
                             check_token=check_token,
+                            check_capability_failure=check_capability_failure,
                             result=result,
                             policy=effective_policy,
                             approval_enabled=approval_enabled,
@@ -5095,6 +5112,12 @@ class ReviewPublisher:
                         required_decisions=prospective_eligibility.facts.has_human_adjudication_findings,
                     ),
                 )
+        if (
+            not write_preflight.app_authored
+            and check_token is None
+            and check_capability_failure is not None
+        ):
+            check_diagnostic = check_capability_failure.code
         eligibility = approval_eligibility_from_result(
             result,
             head_sha=head_sha,
@@ -5144,6 +5167,12 @@ class ReviewPublisher:
                 facts=replace(eligibility.facts, has_blocking_findings=body_blocking),
             )
             eligibility_marker = approval_eligibility_marker(eligibility)
+            check_warning = (
+                render_check_warning(check_diagnostic, concise=True)
+                if check_diagnostic in CHECK_FAILURE_CODES
+                or check_diagnostic == "check_permission"
+                else ""
+            )
             summary, index_marker = fit_assembled_review(
                 assembled,
                 review_marker=marker,
@@ -5158,7 +5187,8 @@ class ReviewPublisher:
                 complete_inventory=complete_inventory,
                 reserved_bytes=_disposition_frame_reserve(
                     eligibility, assembled.index_entries
-                ),
+                )
+                + (len(check_warning.encode("utf-8")) + 2 if check_warning else 0),
                 preserve_explanations=human_inventory is not None,
             )
             prepared_comments = assembled.inline_comments
@@ -5172,10 +5202,13 @@ class ReviewPublisher:
                 )
 
             body = body_for_summary(summary)
-            if check_diagnostic == "check_permission":
+            if (
+                check_diagnostic in CHECK_FAILURE_CODES
+                or check_diagnostic == "check_permission"
+            ):
                 for concise in (False, True):
                     warned_summary = (
-                        f"{render_check_permission_warning(concise=concise)}\n\n"
+                        f"{render_check_warning(check_diagnostic, concise=concise)}\n\n"
                         f"{summary}"
                     )
                     if len(
@@ -5190,6 +5223,10 @@ class ReviewPublisher:
                     ):
                         body = warned_body
                         break
+                else:
+                    # The warning is framing, like eligibility metadata: retain
+                    # the complete finding prose even when its summary budget is full.
+                    body = f"{render_check_warning(check_diagnostic, concise=True)}\n\n{body}"
             validate_bounded_text(
                 body,
                 MAX_PUBLISHED_REVIEW_BODY_BYTES,

@@ -72,6 +72,7 @@ from .approval import (
     qualification_state_for_publication,
 )
 from .broker_client import BrokerClient
+from .check_diagnostics import CheckCapability, check_failure, observed_http_status
 from .checks import REVIEW_POLICY_MODES
 from .conversation import (
     ConversationPublisher,
@@ -482,11 +483,11 @@ class GitHubApplication:
                 broker = copy(broker)
                 broker.before_request = budget.consume
 
-        def check_token() -> str | None:
-            token = self._check_capability_token(exchange_input, broker=broker)
+        def check_capability() -> CheckCapability:
+            capability = self._check_capability(exchange_input, broker=broker)
             if budget is not None:
                 budget.check()
-            return token
+            return capability
 
         if base_branch is None or base_sha is None:
             raise GitHubPublicationError(
@@ -1346,6 +1347,7 @@ class GitHubApplication:
                 else result
             )
             review_policy = options.review_policy()
+            capability = check_capability()
             publisher_arguments: dict[str, Any] = {
                 "token": token,
                 "repository": repository,
@@ -1362,7 +1364,8 @@ class GitHubApplication:
                 # approval while the mode withholds it or the reverse.
                 "auto_approve": review_policy == "auto-approve",
                 "reviews_policy": review_policy,
-                "check_token": check_token(),
+                "check_token": capability.token,
+                "check_capability_failure": capability.failure,
                 "qualification": qualification_state_for_publication(
                     provider=result.provider,
                     model=result.model,
@@ -1494,7 +1497,7 @@ class GitHubApplication:
             ):
                 try:
                     reviewer._complete_failed_check(
-                        check_token=check_token(),
+                        check_token=check_capability().token,
                         repository=repository,
                         head_sha=head_sha,
                         app_slug=app_slug,
@@ -2389,23 +2392,32 @@ class GitHubApplication:
                 result = refinalized
         return result
 
+    def _check_capability(
+        self, exchange_input: str, *, broker: BrokerClient | None = None
+    ) -> CheckCapability:
+        """Acquire the separate gate capability without changing review eligibility."""
+        try:
+            token = (broker or self.broker).exchange(
+                exchange_input, capability="check_publish"
+            )
+        except GitHubHTTPTransientError as exc:
+            return CheckCapability(
+                failure=check_failure(
+                    "capability", status=observed_http_status(exc), transient=True
+                )
+            )
+        except GitHubBrokerClientError as exc:
+            return CheckCapability(
+                failure=check_failure("capability", status=observed_http_status(exc))
+            )
+        if not isinstance(token, str) or not token.strip():
+            return CheckCapability(failure=check_failure("capability"))
+        return CheckCapability(token=token)
+
     def _check_capability_token(
         self, exchange_input: str, *, broker: BrokerClient | None = None
     ) -> str | None:
-        """Request Checks: write for the merge gate, degrading to no gate.
-
-        The gate is a separate authority from review publication, so a broker
-        that does not grant it must not suppress the review itself. A missing
-        token leaves the gate unpublished and reports that diagnostic. It does
-        not prevent approval when the review otherwise qualifies.
-        """
-
-        try:
-            return (broker or self.broker).exchange(
-                exchange_input, capability="check_publish"
-            )
-        except (GitHubBrokerClientError, GitHubHTTPTransientError):
-            return None
+        return self._check_capability(exchange_input, broker=broker).token
 
     def _finalize_media_command_result(
         self,
@@ -2759,6 +2771,7 @@ class GitHubApplication:
         # A recovery publishes through the same gate as the run it replaces, so
         # the check conclusion always describes the review that is standing for
         # this head rather than whichever attempt happened to finish last.
+        capability = self._check_capability(exchange_input)
         return self.reviewer.publish(
             token=token,
             repository=repository,
@@ -2772,7 +2785,8 @@ class GitHubApplication:
             app_slug=app_slug,
             auto_approve=review_policy == "auto-approve",
             reviews_policy=review_policy,
-            check_token=self._check_capability_token(exchange_input),
+            check_token=capability.token,
+            check_capability_failure=capability.failure,
             qualification=qualification_state_for_publication(
                 provider=result.provider,
                 model=result.model,

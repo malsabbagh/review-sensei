@@ -915,7 +915,7 @@ stand for a review that has not finished. A repository administrator must mark t
 required for it to gate merges in `blocking` mode; `doctor` reports the check identity and
 producing App. Checks: write is a scoped broker capability
 (`check_publish`), so a missing permission leaves the check unpublished and
-reports `check_permission`; it does not prevent approval for an otherwise
+reports `check_capability_unavailable`; it does not prevent approval for an otherwise
 eligible review. Repositories that require this check must grant the
 permission and broker capability for the merge gate to be enforced.
 
