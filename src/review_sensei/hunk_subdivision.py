@@ -66,7 +66,14 @@ def subdivide_hunk(
     source = EvidenceRecord.from_diff_record(record, snapshot)
     original_header, _, body = hunk.text.partition("\n")
     units: list[str] = []
-    for line in body.splitlines(keepends=True):
+    # Split at the same physical LF boundaries as the diff parser, retaining
+    # terminators and source separators for exact fragment bytes and offsets.
+    lines = body.split("\n")
+    for index, line in enumerate(lines):
+        if index < len(lines) - 1:
+            line += "\n"
+        elif not line:
+            continue
         if line.startswith("\\"):
             if not units:
                 raise ReviewInputError("hunk subdivision marker has no source line")

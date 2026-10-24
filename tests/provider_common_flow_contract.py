@@ -487,7 +487,7 @@ class _CommonFlows:
                     k: v for k, v in environment.items() if not k.startswith("GITHUB_")
                 }
                 diff = root / "change.patch"
-                diff.write_text(DIFF, encoding="utf-8")
+                diff.write_text(DIFF, encoding="utf-8", newline="\n")
                 directory = root / ".github/review-sensei/learnings"
                 directory.mkdir(parents=True)
                 (directory / "local.json").write_text(
@@ -632,7 +632,7 @@ class _CommonFlows:
                 self.case.configuration(),
                 encoding="utf-8",
             )
-            diff.write_text(DIFF, encoding="utf-8")
+            diff.write_text(DIFF, encoding="utf-8", newline="\n")
             stdout, stderr = io.StringIO(), io.StringIO()
             with (
                 self.case.transport_scope(transport),

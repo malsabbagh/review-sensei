@@ -543,7 +543,7 @@ class PartialPublicationTests(SessionFixtureClockMixin, unittest.TestCase):
                 root = Path(tmp)
                 diff_path = root / "review.patch"
                 response_path = root / "response.json"
-                diff_path.write_text(gates.DIFF, encoding="utf-8")
+                diff_path.write_text(gates.DIFF, encoding="utf-8", newline="\n")
                 response_path.write_text(
                     '{"summary":"ok","comments":[]}', encoding="utf-8"
                 )

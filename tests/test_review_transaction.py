@@ -973,7 +973,7 @@ diff --git a/src/helper.py b/src/helper.py
             outcome_path = root / "outcome.json"
             configuration_path = root / "configuration.json"
             ledger_path = root / "ledger"
-            diff_path.write_text(diff, encoding="utf-8")
+            diff_path.write_text(diff, encoding="utf-8", newline="\n")
             response_path.write_text(
                 json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
             )
@@ -1288,7 +1288,7 @@ diff --git a/src/helper.py b/src/helper.py
             outcome_path = root / "outcome.json"
             configuration_path = root / "configuration.json"
             ledger_path = root / "ledger"
-            diff_path.write_text(diff, encoding="utf-8")
+            diff_path.write_text(diff, encoding="utf-8", newline="\n")
             response_path.write_text(
                 json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
             )
@@ -1416,7 +1416,7 @@ diff --git a/src/helper.py b/src/helper.py
             output_path = root / "review.json"
             configuration_path = root / "configuration.json"
             ledger_path = root / "ledger"
-            diff_path.write_text(diff, encoding="utf-8")
+            diff_path.write_text(diff, encoding="utf-8", newline="\n")
             response_path.write_text(
                 json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
             )
@@ -1506,7 +1506,7 @@ diff --git a/src/helper.py b/src/helper.py
             output_path = root / "review.json"
             configuration_path = root / "configuration.json"
             ledger_path = root / "ledger"
-            diff_path.write_text(diff, encoding="utf-8")
+            diff_path.write_text(diff, encoding="utf-8", newline="\n")
             response_path.write_text(
                 json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
             )
@@ -1608,7 +1608,7 @@ diff --git a/src/helper.py b/src/helper.py
             response_path = root / "response.json"
             output_path = root / "review.json"
             ledger_path = root / "ledger"
-            diff_path.write_text(diff, encoding="utf-8")
+            diff_path.write_text(diff, encoding="utf-8", newline="\n")
             response_path.write_text(
                 json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
             )
@@ -1683,7 +1683,7 @@ diff --git a/src/helper.py b/src/helper.py
             response_path = root / "response.json"
             output_path = root / "review.json"
             ledger_path = root / "ledger"
-            diff_path.write_text(diff, encoding="utf-8")
+            diff_path.write_text(diff, encoding="utf-8", newline="\n")
             response_path.write_text(
                 json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
             )
@@ -1755,7 +1755,7 @@ diff --git a/src/helper.py b/src/helper.py
             response_path = root / "response.json"
             output_path = root / "review.json"
             ledger_path = root / "ledger"
-            diff_path.write_text(diff, encoding="utf-8")
+            diff_path.write_text(diff, encoding="utf-8", newline="\n")
             response_path.write_text(
                 json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
             )
@@ -1858,7 +1858,7 @@ diff --git a/src/helper.py b/src/helper.py
             configuration_path = root / "configuration.json"
             admission_path = root / "admission.json"
             ledger_path = root / "ledger"
-            diff_path.write_text(diff, encoding="utf-8")
+            diff_path.write_text(diff, encoding="utf-8", newline="\n")
             response_path.write_text(
                 json.dumps(
                     {
@@ -1949,7 +1949,7 @@ diff --git a/src/helper.py b/src/helper.py
             output_path = root / "review.json"
             configuration_path = root / "missing" / "configuration.json"
             ledger_path = root / "ledger"
-            diff_path.write_text(diff, encoding="utf-8")
+            diff_path.write_text(diff, encoding="utf-8", newline="\n")
             response_path.write_text(
                 json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
             )
@@ -2038,7 +2038,7 @@ diff --git a/src/helper.py b/src/helper.py
             response_path = root / "response.json"
             output_path = root / "review.json"
             ledger_path = root / "ledger"
-            diff_path.write_text(diff, encoding="utf-8")
+            diff_path.write_text(diff, encoding="utf-8", newline="\n")
             response_path.write_text(
                 json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
             )
@@ -2135,7 +2135,7 @@ diff --git a/src/helper.py b/src/helper.py
             configuration_path = root / "configuration.json"
             admission_path = root / "admission.json"
             ledger_path = root / "ledger"
-            diff_path.write_text(diff, encoding="utf-8")
+            diff_path.write_text(diff, encoding="utf-8", newline="\n")
             response_path.write_text(
                 json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
             )
@@ -2221,7 +2221,7 @@ diff --git a/src/helper.py b/src/helper.py
             response_path = root / "response.json"
             configuration_path = root / "configuration.json"
             ledger_path = root / "ledger"
-            diff_path.write_text(diff, encoding="utf-8")
+            diff_path.write_text(diff, encoding="utf-8", newline="\n")
             response_path.write_text(
                 json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
             )
@@ -2298,7 +2298,7 @@ diff --git a/src/helper.py b/src/helper.py
             response_path = root / "response.json"
             configuration_path = root / "configuration.json"
             ledger_path = root / "ledger"
-            diff_path.write_text(diff, encoding="utf-8")
+            diff_path.write_text(diff, encoding="utf-8", newline="\n")
             response_path.write_text(
                 json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
             )
@@ -2384,7 +2384,7 @@ diff --git a/src/helper.py b/src/helper.py
             response_path = root / "response.json"
             configuration_path = root / "configuration.json"
             ledger_path = root / "ledger"
-            diff_path.write_text(diff, encoding="utf-8")
+            diff_path.write_text(diff, encoding="utf-8", newline="\n")
             response_path.write_text(
                 json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
             )
@@ -3202,7 +3202,7 @@ class HostedAnalysisCliTests(unittest.TestCase):
     def _argv(self, root: Path, *, admission_context_output: Path) -> list[str]:
         diff_path = root / "review.patch"
         response_path = root / "response.json"
-        diff_path.write_text(self.ANALYSIS_DIFF, encoding="utf-8")
+        diff_path.write_text(self.ANALYSIS_DIFF, encoding="utf-8", newline="\n")
         response_path.write_text(
             json.dumps({"summary": "ok", "comments": []}), encoding="utf-8"
         )

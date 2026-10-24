@@ -53,7 +53,9 @@ class PublicationCliRecoveryTests(unittest.TestCase):
             root = Path(directory)
             (root / "result.json").write_text(json.dumps(result.to_dict()))
             (root / "diff.patch").write_text(
-                "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x\n+y\n"
+                "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x\n+y\n",
+                encoding="utf-8",
+                newline="\n",
             )
             (root / "context.json").write_text('{"fixture":"trusted"}')
             (root / "config.yml").write_text(

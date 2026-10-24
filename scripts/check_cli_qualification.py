@@ -37,7 +37,7 @@ def qualify(executable: Path) -> list[dict[str, object]]:
     ) as temporary:
         root = Path(temporary)
         config = root / ".reviewsensei.yml"
-        (root / "input.patch").write_text(DIFF)
+        (root / "input.patch").write_text(DIFF, encoding="utf-8", newline="\n")
         (root / "response.json").write_text(CLEAN)
 
         def run(name, arguments, expected, extra_env=None):

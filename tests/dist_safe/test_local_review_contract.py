@@ -89,7 +89,7 @@ class LocalReviewContractTests(unittest.TestCase):
         self.root = Path(self._temporary.name)
         self.addCleanup(self._temporary.cleanup)
         self.diff_path = self.root / "review.patch"
-        self.diff_path.write_text(DIFF, encoding="utf-8")
+        self.diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
 
     def response_path(self, payload: dict[str, object]) -> Path:
         path = self.root / "response.json"
@@ -300,7 +300,7 @@ class InstalledProcessExitTests(unittest.TestCase):
             root = Path(scratch)
             diff = root / "input.patch"
             response = root / "response.json"
-            diff.write_text(DIFF, encoding="utf-8")
+            diff.write_text(DIFF, encoding="utf-8", newline="\n")
             env = {
                 key: os.environ[key]
                 for key in ("PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT")

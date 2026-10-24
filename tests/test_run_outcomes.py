@@ -600,7 +600,7 @@ class RunOutcomeWiringTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             outcome_path = root / "outcome.json"
             result_path = root / "result.json"
             fixture = root / "fixture.json"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             fixture.write_text(
                 '{"summary":"Looks good.","comments":[]}', encoding="utf-8"
             )
@@ -636,7 +636,7 @@ class RunOutcomeWiringTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             root = Path(temp_dir)
             diff_path = root / "diff.patch"
             outcome_path = root / "outcome.json"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             learning_status = main(
                 [
                     "github",

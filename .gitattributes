@@ -5,5 +5,7 @@ packages/python/review-sensei-github/src/review_sensei_github/fixtures/released-
 deploy/cloudflare/fixtures/released-v5-keyword-rescan-caller.yml text eol=lf
 # Preserve the byte-pinned evaluation inventory across Windows checkouts.
 evaluation/v1/** text eol=lf
+# Keep Git diff record framing intact in the native smoke fixture on Windows.
+tests/fixtures/standalone-smoke/blocking-review.patch text eol=lf
 # Keep the reviewed registry-only workflow bytes stable on every checkout.
 .github/workflows/review-sensei-run.yml text eol=lf

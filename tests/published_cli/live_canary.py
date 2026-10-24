@@ -38,7 +38,7 @@ def main():
     for model in ["deepseek-v4.1-flash:cloud", "glm-5.3:cloud"]:
         wd = (a.report / model.split(":")[0]).resolve()
         wd.mkdir(exist_ok=True)
-        (wd / "input.patch").write_text(PATCH)
+        (wd / "input.patch").write_text(PATCH, encoding="utf-8", newline="\n")
         (wd / "config.yml").write_text(
             "schema: 1\ninference:\n  backend: cloud-ollama\nadvanced:\n  review_work:\n    mode: unified\n  resources:\n    max_provider_calls: 2\n    review_deadline_seconds: 90\n    timeout_seconds: 45\n"
         )

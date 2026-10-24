@@ -148,7 +148,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 "schema: 1\ngithub:\n  artifacts: diagnostics\nadvanced:\n  review_work:\n    mode: unified\n"
             )
             diff = root / "change.patch"
-            diff.write_text(DIFF)
+            diff.write_text(DIFF, encoding="utf-8", newline="\n")
             key = root / "authentication-key"
             key.write_bytes(b"k" * 32)
             key.chmod(0o600)
@@ -228,7 +228,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             with patch.multiple(
                 github_module,
                 BrokerClient=lambda: object(),
@@ -360,7 +360,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             root = Path(temp_dir)
             diff_path = root / "diff.patch"
             artifact_path = root / "recovery.json"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             artifact = RecoveryArtifact.create(
                 repository="owner/repo",
                 pull_request_number=2,
@@ -455,7 +455,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             stderr = io.StringIO()
             with patch.multiple(
                 github_module,
@@ -959,7 +959,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_profile_missing_api_key_env_is_rejected_at_cli_boundary(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             stderr = io.StringIO()
             with patch.dict("os.environ", {}, clear=True):
                 with redirect_stderr(stderr):
@@ -1043,7 +1043,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_profile_accepts_matching_explicit_api_key_env(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             created = []
 
             class Registry:
@@ -1120,7 +1120,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_profile_supplies_its_provider_without_an_explicit_selection(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             created = []
 
             class Registry:
@@ -1154,7 +1154,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_profile_fast_triage_omits_conflicting_defaults(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             created = []
 
             class Registry:
@@ -1207,7 +1207,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_profile_deep_verification_uses_profile_api_key_env(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             created = []
 
             class Registry:
@@ -1322,7 +1322,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_openai_provider_ignores_the_retired_environment_endpoint(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             created = []
 
             class Registry:
@@ -1376,7 +1376,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_openai_provider_accepts_explicit_custom_endpoint_opt_in(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             created = []
 
             class Registry:
@@ -1410,7 +1410,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_openai_provider_uses_openai_credential_environment(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             created = []
 
             class Registry:
@@ -2022,7 +2022,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             diff_path = root / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             response_path = root / "response.json"
             response_path.write_text('{"summary":"ok","comments":[]}', encoding="utf-8")
             output_path = root / "review.json"
@@ -2240,7 +2240,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             diff_path = root / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             output_path = root / "review.json"
             categories_dir = root / "categories"
             stages_dir = root / "stages"
@@ -2326,7 +2326,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             (src / "app.py").write_text("import helper\nkeep\n")
             (src / "helper.py").write_text("VALUE = 1\n")
             diff_path = root / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             output_path = root / "review.json"
             provider = SymbolContextProvider()
             with patch(
@@ -2359,7 +2359,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             (src / "app.py").write_text("import helper\nkeep\nchange\n")
             (src / "helper.py").write_text("VALUE = 1\n")
             diff_path = root / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             output_path = root / "review.json"
             provider = SymbolContextProvider()
             with patch(
@@ -2403,7 +2403,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
         stderr = io.StringIO()
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             with redirect_stderr(stderr):
                 status = main(
                     [
@@ -2423,7 +2423,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                 with tempfile.TemporaryDirectory() as temp_dir:
                     root = Path(temp_dir)
                     diff_path = root / "review.patch"
-                    diff_path.write_text(DIFF, encoding="utf-8")
+                    diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
                     with redirect_stderr(stderr):
                         status = main(
                             [
@@ -2455,7 +2455,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
                     (src / "app.py").write_text("import helper\nkeep\nchange\n")
                     (src / "helper.py").write_text("VALUE = 1\n")
                     diff_path = root / "review.patch"
-                    diff_path.write_text(DIFF, encoding="utf-8")
+                    diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
                     provider = SymbolContextProvider()
                     with patch(
                         "review_sensei.cli.default_registry",
@@ -2490,7 +2490,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             (src / "app.py").write_text("import helper\nkeep\nchange\n")
             (src / "helper.py").write_text("VALUE = 1\n")
             diff_path = root / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             output_path = root / "review.json"
             provider = SymbolContextProvider()
             with patch(
@@ -2529,7 +2529,7 @@ class CliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             diff_path = root / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             with redirect_stderr(stderr):
                 status = main(
                     [
@@ -2700,7 +2700,7 @@ class DoctorPlanCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_plan_cli_renders_ready_plan_from_diff(self):
         with tempfile.TemporaryDirectory() as temporary:
             diff_path = Path(temporary) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             stdout = io.StringIO()
             with redirect_stderr(io.StringIO()):
                 with patch("sys.stdout", stdout):
@@ -2736,7 +2736,7 @@ class DoctorPlanCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_plan_cli_unexpected_analyze_diff_failure_exits_without_traceback(self):
         with tempfile.TemporaryDirectory() as temporary:
             diff_path = Path(temporary) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             stderr = io.StringIO()
             with redirect_stderr(stderr):
                 with patch(
@@ -3095,7 +3095,7 @@ class PromotionCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_openrouter_provider_requires_api_key_at_cli_boundary(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             stderr = io.StringIO()
             with patch.dict("os.environ", {}, clear=True):
                 with redirect_stderr(stderr):
@@ -3117,7 +3117,7 @@ class PromotionCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_openrouter_rejects_non_allowlisted_base_url(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             stderr = io.StringIO()
             with patch.dict(
                 "os.environ", {"OPENROUTER_API_KEY": "router-secret"}, clear=True
@@ -3140,7 +3140,7 @@ class PromotionCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_openrouter_ignores_the_retired_environment_base_url(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             created = []
 
             class Registry:
@@ -3174,7 +3174,7 @@ class PromotionCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_openrouter_review_ignores_retired_upstream_environment(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             created = []
 
             class Registry:
@@ -3208,7 +3208,7 @@ class PromotionCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_review_timeout_ignores_the_retired_openrouter_environment(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             created = []
 
             class Registry:
@@ -3256,7 +3256,7 @@ class PromotionCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_openrouter_api_key_env_override(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             created = []
 
             class Registry:
@@ -3289,7 +3289,7 @@ class PromotionCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_openrouter_profile_wires_policy_and_credential(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             created = []
 
             class Registry:
@@ -3343,7 +3343,7 @@ class PromotionCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def test_openrouter_profile_requires_unqualified_opt_in(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             diff_path = Path(temp_dir) / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             stderr = io.StringIO()
             with patch.dict(
                 "os.environ", {"OPENROUTER_API_KEY": "router-secret"}, clear=True
@@ -3415,7 +3415,7 @@ class HostedPublicationCliTests(IsolatedWorkingDirectoryMixin, unittest.TestCase
             ),
             encoding="utf-8",
         )
-        diff_path.write_text(DIFF, encoding="utf-8")
+        diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
         import review_sensei_github as github_module
 
         self.FakeApplication.instances = []
@@ -3657,7 +3657,7 @@ class HostedSessionLedgerFlagTests(IsolatedWorkingDirectoryMixin, unittest.TestC
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             diff_path = root / "diff.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             with redirect_stderr(stderr):
                 from review_sensei_github.cli import main as github_main
 

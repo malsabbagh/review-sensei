@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Parse diff records and count line budgets using physical LF boundaries,
+  preserving embedded source separators and CRLF source bytes in reconstructed
+  hunks instead of rejecting valid patches or stripping their carriage returns.
+  Preserve the same physical lines and exact byte ranges during subdivision.
+
 ## review-sensei-github 0.3.17 - 2026-10-24
 
 - Pin `review-sensei==0.8.12`.

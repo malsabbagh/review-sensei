@@ -18,6 +18,7 @@ import io
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -127,6 +128,143 @@ def load_smoke_module():
 
 
 class EntryPointParityTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
+    def test_generated_diff_fixtures_keep_bytes_with_windows_newline_defaults(self):
+        from tests import test_openai_configuration as openai_fixture
+        from tests.test_baseline_recovery import BaselineRecoveryTests
+        from tests.test_default_publication_cli_journey import (
+            DefaultPublicationCliJourneyTests,
+        )
+        from tests.test_review_transaction import ReviewTransactionTests
+
+        original_write_text = Path.write_text
+        original_open = Path.open
+        written = []
+
+        def windows_open(
+            path, mode="r", buffering=-1, encoding=None, errors=None, newline=None
+        ):
+            if (
+                path.suffix in {".patch", ".diff"}
+                and "b" not in mode
+                and any(flag in mode for flag in ("w", "a"))
+                and newline is None
+            ):
+                newline = "\r\n"
+            return original_open(path, mode, buffering, encoding, errors, newline)
+
+        def windows_write_text(path, data, *args, **kwargs):
+            if path.suffix in {".patch", ".diff"}:
+                count = original_write_text(path, data, *args, **kwargs)
+                written.append((path.read_bytes(), data.encode("utf-8")))
+                return count
+            return original_write_text(path, data, *args, **kwargs)
+
+        # Git headers keep LF framing while source records retain their CRs
+        # and every non-LF separator, even under Windows text-write defaults.
+        source = "\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+        diff = openai_fixture.PATCH.replace("+x = 1\n", f"+x = {source}\r\n")
+        cases = unittest.TestSuite(
+            [
+                openai_fixture.OpenAIConfigurationTests(
+                    "test_yaml_only_permission_reaches_real_adapter"
+                ),
+                DefaultPublicationCliJourneyTests(
+                    "test_trusted_complete_config_publishes_all_77_through_actual_cli_and_reader"
+                ),
+                ReviewTransactionTests(
+                    "test_cli_checkpoint_uses_one_provider_call_and_one_reservation"
+                ),
+                BaselineRecoveryTests(
+                    "test_base_change_runs_full_and_refreshes_only_after_checkpoint"
+                ),
+            ]
+        )
+        result = unittest.TestResult()
+        with (
+            mock.patch.object(Path, "write_text", windows_write_text),
+            mock.patch.object(Path, "open", windows_open),
+            mock.patch.object(openai_fixture, "PATCH", diff),
+        ):
+            cases.run(result)
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+        self.assertEqual(result.testsRun, 4)
+        self.assertGreaterEqual(len(written), 4)
+        for actual, expected in written:
+            self.assertEqual(actual, expected)
+        self.assertIn(diff.encode("utf-8"), [actual for actual, _ in written])
+
+    def test_smoke_fixture_keeps_git_framing_in_windows_style_checkout(self):
+        relative = "tests/fixtures/standalone-smoke/blocking-review.patch"
+        expected = PATCH.read_bytes()
+        self.assertNotIn(b"\r", expected)
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            fixture = checkout / relative
+            fixture.parent.mkdir(parents=True)
+            fixture.write_bytes(expected)
+            (checkout / ".gitattributes").write_bytes(
+                (ROOT / ".gitattributes").read_bytes()
+            )
+            environment = {
+                name: os.environ[name]
+                for name in (
+                    "PATH",
+                    "SYSTEMROOT",
+                    "WINDIR",
+                    "COMSPEC",
+                    "PATHEXT",
+                    "TMP",
+                    "TEMP",
+                )
+                if name in os.environ
+            }
+            environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+
+            def git(*arguments):
+                return subprocess.run(
+                    ["git", "-C", directory, *arguments],
+                    env=environment,
+                    check=True,
+                    capture_output=True,
+                    timeout=10,
+                )
+
+            git("init", "--quiet")
+            git("-c", "core.autocrlf=false", "add", "--", ".gitattributes", relative)
+            git("config", "core.autocrlf", "true")
+            git("config", "core.eol", "crlf")
+            fixture.unlink()
+            git("checkout-index", "--force", "--", relative)
+            self.assertEqual(fixture.read_bytes(), expected)
+            attributes = git("check-attr", "--cached", "text", "eol", "--", relative)
+            self.assertEqual(
+                attributes.stdout.decode().splitlines(),
+                [f"{relative}: text: set", f"{relative}: eol: lf"],
+            )
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with (
+                mock.patch.dict(os.environ, environment, clear=True),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                status = main(
+                    [
+                        "--diff",
+                        str(fixture),
+                        "--provider",
+                        "fixture",
+                        "--fixture-response",
+                        str(BLOCKING_RESPONSE),
+                        "--no-learning-proposals",
+                        "--format",
+                        "json",
+                    ]
+                )
+            self.assertEqual(status, 1, stderr.getvalue())
+            reviewed = ReviewResult.from_dict(json.loads(stdout.getvalue()))
+            self.assertEqual(reviewed.review_status, "complete")
+            self.assertTrue(has_blocking_findings(reviewed))
+
     def _response_path(self, name: str, payload: dict[str, object]) -> Path:
         path = Path.cwd() / name
         path.write_text(json.dumps(payload), encoding="utf-8")
