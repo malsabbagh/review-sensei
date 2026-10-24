@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -46,6 +47,7 @@ class RegistryOnlyInstallerTests(unittest.TestCase):
             )
             self.assertEqual(filtered, raw)
 
+    @unittest.skipIf(os.name == "nt", "Runtime installer execution requires POSIX Bash")
     def run_installers(self, failure):
         workflow = workflow_data(
             (ROOT / ".github/workflows/review-sensei-run.yml").read_text()
@@ -61,13 +63,17 @@ class RegistryOnlyInstallerTests(unittest.TestCase):
         for name, script in installers:
             with (
                 self.subTest(lane=name, failure=failure),
-                tempfile.TemporaryDirectory() as directory,
+                tempfile.TemporaryDirectory(
+                    prefix="review sensei installer "
+                ) as directory,
             ):
                 temporary = Path(directory)
                 calls = temporary / "calls.jsonl"
                 fake = temporary / "python"
-                fake.write_text(
-                    f"#!{sys.executable}\n"
+                interpreter = temporary / "python executable"
+                interpreter.symlink_to(sys.executable)
+                implementation = temporary / "fake python implementation.py"
+                implementation.write_text(
                     "import json,os,sys\n"
                     "args=sys.argv[1:]\n"
                     "with open(os.environ['INSTALL_CALLS'],'a') as f: f.write(json.dumps(args)+'\\n')\n"
@@ -78,6 +84,13 @@ class RegistryOnlyInstallerTests(unittest.TestCase):
                     " print('No matching distribution found for review-sensei-github==0.3.13',file=sys.stderr);sys.exit(1)\n"
                     "if '-c' in args and 'metadata.version' in args[-1]:\n"
                     " print('0.3.13' if 'review-sensei-github' in args[-1] else ('0.8.99' if mode=='wrong-version' else '0.8.12'))\n"
+                )
+                fake.write_text(
+                    "#!/bin/sh\nexec "
+                    + shlex.quote(str(interpreter))
+                    + " "
+                    + shlex.quote(str(implementation))
+                    + ' "$@"\n'
                 )
                 fake.chmod(0o755)
                 env = {
