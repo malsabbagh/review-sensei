@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -35,6 +36,8 @@ def execute(plan, **kwargs):
     plans.append({"plan_id":plan.plan_id,"snapshot":plan.bundle.snapshot.to_dict(),
         "records":[record.to_dict() for record in plan.bundle.records],
         "record_ids":[record.evidence_id for record in plan.bundle.records],
+        "fragment_bodies":[record.analysis.hunk_records[0].text.partition("\n")[2]
+            for record in plan.bundle.records if record.fragment is not None],
         "unprocessed":plan.unprocessed})
     render = kwargs["render"]
     def traced_render(batch):
@@ -76,16 +79,34 @@ class InstalledHunkSubdivisionTests(unittest.TestCase):
         self.assertTrue(all("fragment" in record for record in plans[0]["records"]))
         return plans[0]
 
-    def run_cli(self, *, lines=200, giant=False, calls=8, recovery=False):
-        bodies = ["+" + f"line{index}:" + "x" * 290 + "\n" for index in range(lines)]
+    def run_cli(
+        self,
+        *,
+        lines=200,
+        giant=False,
+        calls=8,
+        recovery=False,
+        separator="",
+        source_crlf=False,
+    ):
+        following = ("+addition", "-deletion", "\\ No newline at end of file")
+        bodies = [
+            "+"
+            + f"line{index}:"
+            + (separator + following[index % 3] if separator else "")
+            + "x" * 290
+            + ("\r\n" if source_crlf else "\n")
+            for index in range(lines)
+        ]
         if giant:
             bodies[0] = "+" + "x" * 200_000 + "\n"
         diff = self.root / "change.patch"
-        diff.write_text(
-            "diff --git a/src/large.py b/src/large.py\n--- a/src/large.py\n+++ b/src/large.py\n"
-            + f"@@ -0,0 +1,{lines} @@\n"
-            + "".join(bodies),
-            encoding="utf-8",
+        diff.write_bytes(
+            (
+                "diff --git a/src/large.py b/src/large.py\n--- a/src/large.py\n+++ b/src/large.py\n"
+                + f"@@ -0,0 +1,{lines} @@\n"
+                + "".join(bodies)
+            ).encode("utf-8")
         )
         response = self.root / "response.json"
         response.write_text(
@@ -193,6 +214,70 @@ class InstalledHunkSubdivisionTests(unittest.TestCase):
             [identity for plan in witness["plans"] for identity in plan["record_ids"]],
             ["5452374469fe4d69579380b583f60ecbee69de399233af5e0b2b2f50985e8393"],
         )
+
+    def test_forced_subdivision_preserves_source_separators_and_crlf_bytes(self):
+        separators = (
+            "\r",
+            "\v",
+            "\f",
+            "\x1c",
+            "\x1d",
+            "\x1e",
+            "\x85",
+            "\u2028",
+            "\u2029",
+        )
+        cases = [(separator, False) for separator in separators] + [("", True)]
+        for separator, source_crlf in cases:
+            with self.subTest(separator=repr(separator), source_crlf=source_crlf):
+                result, witness, _ = self.run_cli(
+                    separator=separator, source_crlf=source_crlf
+                )
+                self.assertEqual(result["review_status"], "complete")
+                self.assertGreater(len(witness["calls"]), 1)
+                self.assertLessEqual(len(witness["calls"]), 8)
+                self.assertTrue(
+                    all(call["prompt_bytes"] <= 49_152 for call in witness["calls"])
+                )
+                observed = [
+                    line for call in witness["calls"] for line in call["added_lines"]
+                ]
+                self.assertEqual(sorted(observed), list(range(1, 201)))
+                self.assertEqual(len(observed), len(set(observed)))
+                diff = (self.root / "change.patch").read_bytes()
+                hunk = diff.split(b"\n", 3)[3]
+                body = hunk.partition(b"\n")[2]
+                boundaries = {0}
+                cursor = 0
+                for line in body.split(b"\n")[:-1]:
+                    cursor += len(line) + 1
+                    boundaries.add(cursor)
+                plan = self.subdivision_plan(witness)
+                bodies = [text.encode() for text in plan["fragment_bodies"]]
+                # Plans may order records by evidence identity, so reassemble
+                # by the authenticated source offsets rather than plan order.
+                pieces = sorted(
+                    zip(plan["records"], bodies, strict=True),
+                    key=lambda item: item[0]["fragment"]["body_start"],
+                )
+                bodies = [piece for _, piece in pieces]
+                self.assertEqual(b"".join(bodies), body)
+                cursor = 0
+                for record, piece in pieces:
+                    proof = record["fragment"]
+                    self.assertEqual(proof["body_start"], cursor)
+                    self.assertIn(cursor, boundaries)
+                    cursor += len(piece)
+                    self.assertEqual(proof["body_end"], cursor)
+                    self.assertIn(cursor, boundaries)
+                    self.assertEqual(proof["body_bytes"], len(body))
+                    self.assertEqual(
+                        proof["body_sha256"], hashlib.sha256(piece).hexdigest()
+                    )
+                    self.assertEqual(
+                        proof["source_hunk_sha256"], hashlib.sha256(hunk).hexdigest()
+                    )
+                self.assertEqual(cursor, len(body))
 
     def test_giant_line_is_retained_and_never_certified_as_complete(self):
         result, witness, _ = self.run_cli(lines=2, giant=True)
