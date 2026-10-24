@@ -440,7 +440,9 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
         self.assertEqual(approved[0]["commit_id"], HEAD)
         self.assertEqual(len(self.state.resolved_threads), 25)
         self.assertEqual(self.state.checks[-1]["conclusion"], "success")
+        before = len(self.broker.requests)
         self.command("@reviewsensei verify", 80)
+        self.assertNotIn("thread_resolve", self.broker.requests[before:])
         self.assertEqual(
             len(
                 [
@@ -451,3 +453,78 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
             ),
             1,
         )
+
+    def test_unfunded_check_after_cleanup_retains_progress_and_defers_new_approval(
+        self,
+    ):
+        for start, event in ((0, 20), (10, 21), (20, 22)):
+            self.override(start, event)
+        # Synthetic external starting state: retained decisions, reopened
+        # eligible threads and no prior native approval. Never a live mutation.
+        self.state.resolved_threads.clear()
+        self.state.reviews[:] = [
+            review for review in self.state.reviews if review["state"] != "APPROVED"
+        ]
+        self.command("@reviewsensei verify", 30)
+        self.assertGreater(len(self.state.resolved_threads), 0, self.last_output)
+        self.assertLess(len(self.state.resolved_threads), 25, self.last_output)
+        self.assertEqual(len(self.load()[1]), 25)
+        self.assertFalse(
+            any(review["state"] == "APPROVED" for review in self.state.reviews)
+        )
+        progress = json.loads(
+            next(
+                line.split(": ", 1)[1]
+                for line in self.last_output.splitlines()
+                if line.startswith("approval-progress: ")
+            )
+        )
+        self.assertNotEqual(progress["check_state"], "confirmed")
+        self.assertEqual(progress["approval_state"], "not-observed")
+        self.assertEqual(progress["next_action"], "retry_verify")
+
+    def test_refused_deferred_check_preserves_existing_approval_without_new_write(self):
+        for start, event in ((0, 20), (10, 21), (20, 22)):
+            self.override(start, event)
+        for attempt in range(27):
+            self.command("@reviewsensei verify", 30 + attempt)
+            if any(r["state"] == "APPROVED" for r in self.state.reviews):
+                break
+        self.assertEqual(len(self.state.resolved_threads), 25)
+        approved = [
+            review for review in self.state.reviews if review["state"] == "APPROVED"
+        ]
+        self.assertEqual(len(approved), 1)
+        original = self.broker.open
+
+        def refused(request, timeout):
+            if json.loads(request.data).get("capability") == "check_publish":
+                raise HTTPError(
+                    request.full_url, 403, "synthetic refusal", {}, io.BytesIO(b"{}")
+                )
+            return original(request, timeout)
+
+        self.broker.open = refused
+        self.command("@reviewsensei verify", 80)
+        self.assertEqual(
+            [review for review in self.state.reviews if review["state"] == "APPROVED"],
+            approved,
+        )
+        progress = json.loads(
+            next(
+                line.split(": ", 1)[1]
+                for line in self.last_output.splitlines()
+                if line.startswith("approval-progress: ")
+            )
+        )
+        self.assertEqual(progress["approval_state"], "observed-existing")
+        self.assertNotEqual(progress["check_state"], "confirmed")
+        self.assertEqual(progress["next_action"], "reconcile_current_check")
+        report = json.loads(
+            next(
+                line.split(": ", 1)[1]
+                for line in self.last_output.splitlines()
+                if line.startswith("approval-operation-failure: ")
+            )
+        )
+        self.assertEqual(report["check"]["first"]["stage"], "check.capability")

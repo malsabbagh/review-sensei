@@ -13,6 +13,7 @@ _STAGES = frozenset(
     {
         "eligibility.readback",
         "check.publication",
+        "check.capability",
         "cleanup.discovery",
         "cleanup.capability",
         "cleanup.root-readback",
@@ -169,7 +170,10 @@ class OperationObserver:
                 break
             message = str(current)
             calls = self._calls()
-            if message == "partition shared request budget exhausted" or (
+            if message in {
+                "partition shared request budget exhausted",
+                "broker internal liability exceeds original budget",
+            } or (
                 message == "review scan shared budget exhausted"
                 and calls is not None
                 and calls >= MAX_PART_READS - 4

@@ -164,8 +164,11 @@ an authorized operator can issue one supported current-head command:
 ```
 
 Discovery and authority checks precede lazy issuance. The original request
-allowance remains bounded; a command may durably resolve threads before running
-out of room for approval. Inspect actual progress and its next action before a
+allowance remains bounded; command finalization acquires its separate check
+token after cleanup. A command may durably resolve threads before running
+out of room for check reconciliation or approval. An unfunded check defers a
+new approval while preserving any already-observed native approval. Inspect
+actual progress and its next action before a
 new request. No progress, another denial, changed head or missing authority needs
 diagnosis rather than an unchanged command loop. Review supersession and reply
 publication do not implicitly request the new token. Verify final thread state,

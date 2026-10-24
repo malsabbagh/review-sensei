@@ -8,10 +8,10 @@ from pathlib import Path
 from review_sensei_github.application import GitHubApplication, GitHubWriteOptions
 from review_sensei_github.broker_client import BrokerClient
 from review_sensei_github.broker_control import BrokerDispatchAccounting
-from review_sensei_github.errors import GitHubBrokerClientError
+from review_sensei_github.errors import GitHubBrokerClientError, GitHubPublicationError
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.operation_diagnostics import OperationObserver
-from review_sensei_github.publication import ReviewPublisher
+from review_sensei_github.publication import ReviewApprovalFinalizer, ReviewPublisher
 from review_sensei_github.publication_recovery import publication_http
 from review_sensei_github.thread_resolution import FindingThreadResolver
 
@@ -294,6 +294,117 @@ class CleanupBrokerResponseTests(unittest.TestCase):
 
 
 class CleanupCommandCompositionTests(unittest.TestCase):
+    def test_deferred_check_refusal_or_invalid_id_never_submits_fresh_approval(self):
+        for fault in ("create403", "update403", "zero-id"):
+            state = CommandCapacityState(
+                complete=True,
+                schema="1",
+                inline_range=(0, 1),
+                human_count=1,
+                padded=False,
+            )
+            with tempfile.TemporaryDirectory() as directory:
+                dispositions = state.record(directory)
+                if fault == "update403":
+                    state.verify(dispositions)
+                    state.reviews[:] = [
+                        r for r in state.reviews if r["state"] != "APPROVED"
+                    ]
+
+                def opener(request, timeout):
+                    path = request.full_url.split("?")[0]
+                    if (request.method == "POST" and path.endswith("/check-runs")) or (
+                        request.method == "PATCH" and "/check-runs/" in path
+                    ):
+                        if fault == "zero-id":
+                            return json_response({"id": 0}, 201)
+                        return json_response({"message": "synthetic denied"}, 403)
+                    return state.open(request, timeout)
+
+                outcome = ReviewApprovalFinalizer(
+                    http=GitHubHttp(api_url="https://api.github.test", opener=opener)
+                ).refinalize_with_dispositions(
+                    token="synthetic-review",
+                    check_token=None,
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha=HEAD,
+                    app_slug=APP,
+                    actor="alice",
+                    finding_ids=(),
+                    dispositions=dispositions,
+                    check_token_provider=lambda budget: "synthetic-check",
+                )
+            with self.subTest(fault=fault):
+                self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+                self.assertEqual(outcome.status, "gate_reevaluation_failed")
+                self.assertEqual(outcome.approval_progress.check_state, "unconfirmed")
+                self.assertEqual(
+                    outcome.approval_progress.approval_state, "not-observed"
+                )
+
+    def test_deferred_check_drift_cannot_approve_a_stale_head(self):
+        from tests.test_github_publication import pr_payload
+
+        state = CommandCapacityState(
+            complete=True, schema="1", inline_range=(0, 1), human_count=1, padded=False
+        )
+        state.resolved_threads.clear()
+        changed = [False]
+
+        def opener(request, timeout):
+            if (
+                changed[0]
+                and request.method == "GET"
+                and request.full_url.split("?")[0].endswith("/pulls/1")
+            ):
+                return json_response(pr_payload(head_sha="c" * 40))
+            return state.open(request, timeout)
+
+        def check(budget):
+            changed[0] = True
+            return "synthetic-check"
+
+        with tempfile.TemporaryDirectory() as directory:
+            dispositions = state.record(directory)
+            outcome = ReviewApprovalFinalizer(
+                http=GitHubHttp(api_url="https://api.github.test", opener=opener)
+            ).refinalize_with_dispositions(
+                token="synthetic-review",
+                check_token=None,
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD,
+                app_slug=APP,
+                actor="alice",
+                finding_ids=(),
+                dispositions=dispositions,
+                thread_cleanup_token_provider=lambda budget: "synthetic-cleanup",
+                check_token_provider=check,
+            )
+        self.assertEqual(state.resolved_threads, {100})
+        self.assertEqual(outcome.status, "skipped_stale_head")
+        self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+
+    def test_explicit_and_deferred_check_credentials_are_not_ambiguous(self):
+        finalizer = ReviewApprovalFinalizer(http=GitHubHttp())
+        with self.assertRaises(GitHubPublicationError):
+            finalizer.refinalize_with_dispositions(
+                token="synthetic-review",
+                check_token="synthetic-check",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD,
+                app_slug=APP,
+                actor="alice",
+                finding_ids=(),
+                dispositions=(),
+                check_token_provider=lambda budget: "other-check",
+            )
+
     def test_missing_or_mismatched_original_broker_accounting_never_issues_cleanup(
         self,
     ):
@@ -360,7 +471,7 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 actor="alice",
                 record=None,
             )
-            self.assertEqual(requested, ["review_publish", "check_publish"])
+            self.assertEqual(requested, ["review_publish"])
             self.assertTrue(result.evaluation_failed)
             self.assertIn("decisions retained", result.summary)
 
@@ -500,7 +611,7 @@ class CleanupCommandCompositionTests(unittest.TestCase):
             )
         self.assertEqual(
             [name for name, _ in exchanges],
-            ["review_publish", "review_publish", "check_publish", "thread_resolve"],
+            ["review_publish", "review_publish", "thread_resolve", "check_publish"],
             (result.summary, budget.calls, len(requests)),
         )
         self.assertEqual(budget.wall_deadline_ms, original_deadline)

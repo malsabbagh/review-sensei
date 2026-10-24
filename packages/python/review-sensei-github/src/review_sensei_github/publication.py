@@ -83,6 +83,7 @@ from .checks import (
 )
 from .eligibility_parts import BoundPartitionedEligibilityReader
 from .errors import (
+    GitHubBrokerClientError,
     GitHubHTTPError,
     GitHubHTTPPaginationLimitError,
     GitHubHTTPTransientError,
@@ -2123,12 +2124,15 @@ class ReviewApprovalFinalizer:
         policy_digest: str | None = None,
         thread_cleanup_token_provider: Callable[[EvidenceReadBudget], str]
         | None = None,
+        check_token_provider: Callable[[EvidenceReadBudget], str] | None = None,
     ) -> PublicationResult:
         """Re-evaluate one published head after an override, without a provider call.
 
         Adjusted eligibility is updated in the original review before approval.
         A failed patch does not submit an approval.
         """
+        if check_token is not None and check_token_provider is not None:
+            raise GitHubPublicationError("check credential configuration is ambiguous")
         owns_operation_budget = (
             self.evidence_budget is None and self._operation_budget is None
         )
@@ -2165,6 +2169,9 @@ class ReviewApprovalFinalizer:
                     reviews_policy=reviews_policy,
                     incomplete_coverage=incomplete_coverage,
                     policy_digest=policy_digest,
+                    check_token_provider=(lambda: check_token_provider(budget))
+                    if check_token_provider is not None
+                    else None,
                 )
             except (GitHubHTTPError, GitHubPublicationError, ReviewInputError) as exc:
                 observer.exception(exc)
@@ -2226,6 +2233,7 @@ class ReviewApprovalFinalizer:
         reviews_policy: str = "auto-approve",
         incomplete_coverage: Sequence[str] | None = None,
         policy_digest: str | None = None,
+        check_token_provider: Callable[[], str] | None = None,
     ) -> PublicationResult:
         from .checks import ReviewCheckPublisher, review_check_outcome
 
@@ -2648,7 +2656,41 @@ class ReviewApprovalFinalizer:
                 return PublicationResult(status="skipped_stale_base")
             return None
 
+        def reconcile_cleanup():
+            return self.reconcile_decided_threads(
+                token=token,
+                repository=repository,
+                repository_id=repository_id,
+                pull_request=pull_request,
+                head_sha=head_sha,
+                app_slug=app_slug,
+                eligibility=adjusted,
+                index=index,
+                reviews=reviews,
+                honored_instances=honored_instances,
+            )
+
+        # The command path must not spend another whole check-token liability
+        # before cleanup can make durable progress. Explicit-token callers keep
+        # their existing check-first order. No request allowance is renewed.
+        resolution = reconcile_cleanup() if check_token_provider is not None else None
         check_failed = False
+        if check_token_provider is not None:
+            self._observe_stage("check.capability")
+            try:
+                check_token = check_token_provider()
+                if not isinstance(check_token, str) or not check_token.strip():
+                    raise GitHubBrokerClientError("check capability unavailable")
+            except (
+                GitHubBrokerClientError,
+                GitHubHTTPError,
+                ReviewInputError,
+                OSError,
+            ) as exc:
+                if self._operation_observer is not None:
+                    self._operation_observer.exception(exc)
+                check_token = None
+                check_failed = True
         check_result = None
         check_outcome = (
             review_check_outcome(
@@ -2658,7 +2700,7 @@ class ReviewApprovalFinalizer:
                 required_decisions=has_human,
                 coverage_uncertainty_accepted=coverage_accepted,
             )
-            if check_token
+            if check_token or check_token_provider is not None
             else None
         )
         if check_token:
@@ -2681,32 +2723,56 @@ class ReviewApprovalFinalizer:
                 if self._operation_observer is not None:
                     self._operation_observer.exception(exc)
                 check_failed = True
-        resolution = self.reconcile_decided_threads(
-            token=token,
-            repository=repository,
-            repository_id=repository_id,
-            pull_request=pull_request,
-            head_sha=head_sha,
-            app_slug=app_slug,
-            eligibility=adjusted,
-            index=index,
-            reviews=reviews,
-            honored_instances=honored_instances,
+        if resolution is None:
+            resolution = reconcile_cleanup()
+        check_confirmed = (
+            check_result is not None
+            and check_result.status in {"created", "updated"}
+            and type(check_result.check_run_id) is int
+            and check_result.check_run_id > 0
         )
+        if check_token_provider is not None and not check_confirmed:
+            # Permission refusals can be returned values, not exceptions.
+            # Deferred commands require an actually confirmed check before
+            # attempting a new approval; explicit-token compatibility stays.
+            check_failed = True
         finalization_observed = True
         try:
-            finalized = self.finalize(
-                token=token,
-                repository=repository,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                app_slug=app_slug,
-                eligibility=adjusted,
-                require_persisted=True,
-                honored_instances=honored_instances,
-                coverage_uncertainty_accepted=coverage_accepted,
-                _before_approval=final_capacity_guard if compacted else None,
-            )
+            if check_token_provider is not None and check_failed:
+                # Deferred commands retain progress without using an unfunded
+                # check phase to justify a fresh approval. An actual exact-head
+                # approval already seen in the authenticated read remains an
+                # observation; no new write or additional read is inferred.
+                observed = self._reviews_have_app_head_state(
+                    reviews,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                    state="APPROVED",
+                    body=approval_marker(
+                        repository_id=repository_id,
+                        pull_request=pull_request,
+                        head_sha=head_sha,
+                        base_sha=index.base_sha,
+                    ),
+                )
+                finalized = PublicationResult(
+                    status="already_approved" if observed else "approval_withheld",
+                    diagnostic="check_reconciliation_failed",
+                )
+                finalization_observed = observed
+            else:
+                finalized = self.finalize(
+                    token=token,
+                    repository=repository,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    app_slug=app_slug,
+                    eligibility=adjusted,
+                    require_persisted=True,
+                    honored_instances=honored_instances,
+                    coverage_uncertainty_accepted=coverage_accepted,
+                    _before_approval=final_capacity_guard if compacted else None,
+                )
         except (GitHubHTTPError, GitHubPublicationError, ReviewInputError) as exc:
             # The write may have committed before its response became unreadable.
             # Preserve the legacy result, while keeping the observation unknown.
@@ -2739,11 +2805,7 @@ class ReviewApprovalFinalizer:
             approval_status=finalized.status if finalization_observed else "unknown",
             approval_review_id=finalized.review_id,
             check_attempted=bool(check_token),
-            check_confirmed=not check_failed
-            and check_result is not None
-            and check_result.status in {"created", "updated"}
-            and type(check_result.check_run_id) is int
-            and check_result.check_run_id > 0,
+            check_confirmed=not check_failed and check_confirmed,
             check_run_id=check_result.check_run_id
             if check_result is not None
             else None,
