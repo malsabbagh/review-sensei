@@ -30,13 +30,18 @@ from review_sensei.session import (
     load_review_transaction_for_publication,
 )
 
-from .errors import GitHubHTTPResponseTooLargeError, GitHubPublicationError
+from .errors import (
+    GitHubHTTPError,
+    GitHubHTTPResponseTooLargeError,
+    GitHubPublicationError,
+)
 from .http import GitHubHttp
 from .operation_comments import (
     GitHubIssueCommentOperationPort,
     ResultPartStore,
     ensure_result_part_capacity,
 )
+from .operation_diagnostics import OperationObserver
 
 # Metadata dies with the original budget. No response bytes, credentials or
 # authority decisions are retained; distinct physical transports stay isolated.
@@ -128,12 +133,19 @@ class _PaginationObservationHttp(GitHubHttp):
 class PublicationBudgetHttp(GitHubHttp):
     """Charge each physical publication request once against one original budget."""
 
-    def __init__(self, http: GitHubHttp, budget: EvidenceReadBudget) -> None:
+    def __init__(
+        self,
+        http: GitHubHttp,
+        budget: EvidenceReadBudget,
+        *,
+        observer: OperationObserver | None = None,
+    ) -> None:
         from .human_assessment import FeedbackBudgetHttp
 
         super().__init__(api_url=http.api_url, timeout=getattr(http, "timeout", 30))
         self.primed_issue_comments = http.primed_issue_comments
         self.publication_budget = budget
+        self.operation_observer = observer
         accounting_http = http
         while type(accounting_http) is _PaginationObservationHttp:
             if accounting_http.observation_budget is not budget:
@@ -168,31 +180,50 @@ class PublicationBudgetHttp(GitHubHttp):
         timeout_seconds: float | None = None,
     ) -> tuple[int, dict[str, Any] | list[Any] | None]:
         budget = self.publication_budget
-        budget.check()
-        remaining = (
-            budget._remaining_seconds() if self._already_charged else budget.consume()
-        )
-        response = self.transport.request(
-            method,
-            path,
-            token=token,
-            body=body,
-            timeout_seconds=min(remaining, timeout_seconds)
-            if timeout_seconds is not None
-            else remaining,
-        )
-        budget.check()
-        return response
+        observer = self.operation_observer
+        if observer is not None:
+            observer.request(method, path)
+        try:
+            budget.check()
+            remaining = (
+                budget._remaining_seconds()
+                if self._already_charged
+                else budget.consume()
+            )
+            response = self.transport.request(
+                method,
+                path,
+                token=token,
+                body=body,
+                timeout_seconds=min(remaining, timeout_seconds)
+                if timeout_seconds is not None
+                else remaining,
+            )
+            if observer is not None:
+                observer.response(*response)
+            budget.check()
+            return response
+        except (ReviewInputError, GitHubHTTPError, GitHubPublicationError) as exc:
+            if observer is not None:
+                observer.exception(exc)
+            raise
 
 
 def publication_http(
-    http: GitHubHttp, budget: EvidenceReadBudget
+    http: GitHubHttp,
+    budget: EvidenceReadBudget,
+    *,
+    observer: OperationObserver | None = None,
 ) -> PublicationBudgetHttp:
     if type(http) is PublicationBudgetHttp:
         if http.publication_budget is not budget:
             raise GitHubPublicationError("publication budget identity mismatches")
-        return http
-    return PublicationBudgetHttp(http, budget)
+        if observer is None:
+            return http
+        observed = copy(http)
+        observed.operation_observer = observer
+        return observed
+    return PublicationBudgetHttp(http, budget, observer=observer)
 
 
 def publication_session_ledger(

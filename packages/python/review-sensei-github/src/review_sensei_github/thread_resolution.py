@@ -14,6 +14,7 @@ from review_sensei.errors import ReviewInputError
 
 from .errors import GitHubHTTPError, GitHubPublicationError
 from .http import BoundedGraphQLPages, GitHubHttp
+from .operation_diagnostics import OperationObserver
 
 RESOLUTION_PREFIX = "<!-- reviewsensei:resolution:v2 "
 _RESOLUTION_RE = re.compile(re.escape(RESOLUTION_PREFIX) + r"([A-Za-z0-9_-]+) -->")
@@ -179,7 +180,9 @@ class FindingThreadResolver:
             and has_standalone_sensei_mention(source["body"])
         )
 
-    def _resolve_confirmed(self, *, token: str, thread_id: str) -> bool:
+    def _resolve_confirmed(
+        self, *, token: str, thread_id: str, observer: OperationObserver | None = None
+    ) -> bool:
         """Reconcile an ambiguous response once, without repeating a mutation."""
         try:
             status, payload = self.http.request(
@@ -203,6 +206,8 @@ class FindingThreadResolver:
         except (GitHubHTTPError, AttributeError, TypeError):
             pass
         try:
+            if observer is not None:
+                observer.at("cleanup.resolve-readback")
             status, payload = self.http.request(
                 "POST",
                 "/graphql",
@@ -239,6 +244,7 @@ class FindingThreadResolver:
         supersede: Mapping[str, str] | None = None,
         skip_resolved: bool = False,
         cleanup_budget: EvidenceReadBudget | None = None,
+        observer: OperationObserver | None = None,
     ) -> ThreadResolutionResult:
         from .publication import (
             finding_fingerprint_from_body,
@@ -248,6 +254,8 @@ class FindingThreadResolver:
 
         if not instances and not supersede:
             return ThreadResolutionResult()
+        if observer is not None:
+            observer.at("cleanup.discovery")
         owner, name = repository.split("/", 1)
         after = None
         candidates = []
@@ -338,6 +346,8 @@ class FindingThreadResolver:
             )
         resolved, unconfirmed = [], []
         found = {instance for _, _, instance, old in candidates if not old}
+        if observer is not None and instances - found:
+            observer.missing_evidence()
         unconfirmed.extend(sorted(instances - found))
         unconfirmed.extend(
             sorted(
@@ -356,6 +366,8 @@ class FindingThreadResolver:
                 resolved.append(identity)
                 continue
             try:
+                if observer is not None:
+                    observer.at("cleanup.root-readback")
                 if cleanup_budget is not None:
                     # Root + replacement scan + eligibility + PR, then mutation
                     # and its one possible readback. Paginated fences may need
@@ -392,18 +404,24 @@ class FindingThreadResolver:
                         )
                     ):
                         raise GitHubPublicationError("resolution source changed")
+                if observer is not None:
+                    observer.at("cleanup.authority-fence")
                 if not fence():
                     raise GitHubPublicationError("thread resolution authority changed")
                 if cleanup_budget is not None:
                     cleanup_budget.preflight(2)
+                if observer is not None:
+                    observer.at("cleanup.resolve-request")
                 if not node["isResolved"] and not self._resolve_confirmed(
-                    token=token, thread_id=node["id"]
+                    token=token, thread_id=node["id"], observer=observer
                 ):
                     raise GitHubPublicationError(
                         "thread resolution mutation is unconfirmed"
                     )
                 resolved.append(identity)
-            except ReviewInputError:
+            except ReviewInputError as exc:
+                if observer is not None:
+                    observer.exception(exc)
                 if cleanup_budget is None:
                     unconfirmed.append(identity)
                     continue
@@ -417,6 +435,8 @@ class FindingThreadResolver:
                 GitHubPublicationError,
                 AttributeError,
                 TypeError,
-            ):
+            ) as exc:
+                if observer is not None:
+                    observer.exception(exc)
                 unconfirmed.append(identity)
         return ThreadResolutionResult(tuple(resolved), tuple(unconfirmed))

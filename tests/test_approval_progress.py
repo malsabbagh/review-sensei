@@ -1,15 +1,20 @@
 """Finalization observations explain progress without minting approval authority."""
 
 import json
+import tempfile
 import unittest
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 from review_sensei_github.approval_progress import (
     build_approval_progress,
     render_command_progress,
 )
+from review_sensei_github.http import GitHubHttp
 
 from review_sensei.disposition import MaintainerCommandResult
+from tests.fake_github_http import json_response
+from tests.test_command_capacity_recovery import CommandCapacityState
 
 
 class ApprovalProgressTests(unittest.TestCase):
@@ -155,6 +160,10 @@ class ActualFinalizerProgressTests(unittest.TestCase):
         self.assertEqual(outcome.status, "approval_withheld")
         self.assertEqual(outcome.approval_progress.approval_state, "not-observed")
         self.assertIsNone(outcome.approval_progress.approval_review_id)
+        operation = outcome.operation_diagnostics.to_dict()
+        self.assertTrue(operation["approval_request_attempted"])
+        self.assertEqual(operation["approval"]["first"]["reason"], "unknown")
+        self.assertNotIn("Synthetic unreadable", json.dumps(operation))
         from review_sensei_github import GitHubApplication
 
         app = GitHubApplication(
@@ -258,3 +267,201 @@ class ActualFinalizerProgressTests(unittest.TestCase):
         self.assertIsNone(outcome.approval_progress.pending_units)
         self.assertEqual(state.checks[-1]["conclusion"], "action_required")
         self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+
+
+class FinalizationOperationDiagnosticsTests(unittest.TestCase):
+    def test_initial_transport_failure_reaches_public_command_without_raw_error(self):
+        from urllib.error import URLError
+
+        from review_sensei_github import GitHubApplication
+        from review_sensei_github.publication import ReviewApprovalFinalizer
+
+        def opener(request, timeout):
+            raise URLError("SECRET-network-detail")
+
+        app = GitHubApplication(
+            broker=SimpleNamespace(exchange=lambda *args, **kwargs: "synthetic"),
+            http=None,
+            reviewer=SimpleNamespace(
+                finalizer=ReviewApprovalFinalizer(
+                    http=GitHubHttp(api_url="https://api.github.test", opener=opener)
+                )
+            ),
+            learner=SimpleNamespace(),
+            replier=SimpleNamespace(),
+        )
+        command = MaintainerCommandResult(
+            action="verify", applied=True, operator_paused=False, summary="Retained"
+        )
+        result = app._refinalize_command(
+            command,
+            oidc_token="synthetic",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha="b" * 40,
+            app_slug="reviewsensei[bot]",
+            actor="alice",
+            record=SimpleNamespace(),
+        )
+        self.assertTrue(result.applied)
+        self.assertTrue(result.evaluation_failed)
+        report = json.loads(result.summary.split("\napproval-operation-failure: ")[1])
+        self.assertEqual(
+            report["eligibility"]["first"]["stage"], "eligibility.readback"
+        )
+        self.assertEqual(report["eligibility"]["first"]["reason"], "transport")
+        self.assertFalse(report["approval_request_attempted"])
+        self.assertNotIn("SECRET", result.summary)
+
+    def test_green_check_and_failed_queries_report_pre_approval_failure(self):
+        state = CommandCapacityState(complete=True)
+        state.resolved_threads.clear()
+
+        def opener(request, timeout):
+            if urlsplit(request.full_url).path == "/graphql":
+                return json_response(
+                    {
+                        "errors": [
+                            {"type": "FORBIDDEN", "message": "SECRET-upstream"},
+                            {"type": "SECRET-category"},
+                        ]
+                    }
+                )
+            return state.open(request, timeout)
+
+        state.http = GitHubHttp(api_url="https://api.github.test", opener=opener)
+        with tempfile.TemporaryDirectory() as directory:
+            outcome, budget, _ = state.verify(state.record(directory))
+        self.assertEqual(state.checks[-1]["conclusion"], "success")
+        self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+        self.assertEqual(outcome.approval_progress.approval_state, "not-observed")
+        diagnostic = outcome.operation_diagnostics.to_dict()
+        self.assertEqual(diagnostic["schema_version"], "1.0")
+        self.assertEqual(diagnostic["cleanup"]["first"]["stage"], "cleanup.discovery")
+        self.assertEqual(
+            diagnostic["approval"]["first"]["stage"], "approval.thread-scan"
+        )
+        self.assertEqual(diagnostic["cleanup"]["first"]["reason"], "graphql-rejected")
+        self.assertEqual(
+            diagnostic["approval"]["first"]["graphql_categories"],
+            ["FORBIDDEN", "OTHER"],
+        )
+        self.assertFalse(diagnostic["approval_request_attempted"])
+        self.assertEqual(diagnostic["budget_calls"], budget.calls)
+        self.assertEqual(diagnostic["call_limit"], 64)
+        self.assertEqual(diagnostic["ordinary_call_limit"], 60)
+        result = MaintainerCommandResult(
+            action="verify",
+            applied=True,
+            operator_paused=False,
+            summary="Decisions retained",
+        )
+        rendered = render_command_progress(result, outcome)
+        self.assertIn("\napproval-operation-failure: ", rendered.summary)
+        self.assertNotIn("SECRET", rendered.summary)
+        self.assertEqual(
+            json.loads(rendered.summary.split("\napproval-progress: ")[1]),
+            outcome.approval_progress.to_dict(),
+        )
+        self.assertTrue(rendered.applied)
+        self.assertEqual(rendered.evaluation_failed, result.evaluation_failed)
+
+    def test_original_call_limit_is_reported_without_refill_or_approval_attempt(self):
+        from review_sensei_github.publication import ReviewApprovalFinalizer
+        from review_sensei_github.publication_recovery import publication_http
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+
+        state = CommandCapacityState(complete=True)
+        state.resolved_threads.clear()
+        budget = EvidenceReadBudget()
+
+        def opener(request, timeout):
+            if urlsplit(request.full_url).path == "/graphql":
+                # Model already charged admission work in this same original
+                # envelope, without changing its ceiling or deadline.
+                while budget.calls < 60:
+                    budget.consume()
+            return state.open(request, timeout)
+
+        state.http = GitHubHttp(api_url="https://api.github.test", opener=opener)
+        finalizer = ReviewApprovalFinalizer(
+            http=publication_http(state.http, budget), evidence_budget=budget
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            outcome = finalizer.refinalize_with_dispositions(
+                token="synthetic",
+                check_token="synthetic-check",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha="b" * 40,
+                app_slug="reviewsensei[bot]",
+                actor="alice",
+                finding_ids=(),
+                dispositions=state.record(directory),
+            )
+        self.assertEqual(budget.calls, 60)
+        self.assertEqual(state.checks[-1]["conclusion"], "success")
+        self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
+        diagnostic = outcome.operation_diagnostics.to_dict()
+        self.assertEqual(diagnostic["cleanup"]["first"]["reason"], "call-limit")
+        self.assertEqual(diagnostic["approval"]["first"]["reason"], "call-limit")
+        self.assertFalse(diagnostic["approval_request_attempted"])
+        self.assertEqual(diagnostic["budget_calls"], 60)
+
+    def test_first_graphql_failure_survives_later_approval_call_exhaustion(self):
+        from review_sensei_github.publication import ReviewApprovalFinalizer
+        from review_sensei_github.publication_recovery import publication_http
+
+        from review_sensei.bounded_evidence import EvidenceReadBudget
+
+        state = CommandCapacityState(complete=True)
+        state.resolved_threads.clear()
+        budget = EvidenceReadBudget()
+
+        def opener(request, timeout):
+            if urlsplit(request.full_url).path == "/graphql":
+                while budget.calls < 59:
+                    budget.consume()
+                return json_response(
+                    {"errors": [{"type": "RATE_LIMITED", "message": "SECRET-limits"}]}
+                )
+            return state.open(request, timeout)
+
+        state.http = GitHubHttp(api_url="https://api.github.test", opener=opener)
+        finalizer = ReviewApprovalFinalizer(
+            http=publication_http(state.http, budget), evidence_budget=budget
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            outcome = finalizer.refinalize_with_dispositions(
+                token="synthetic",
+                check_token="synthetic-check",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha="b" * 40,
+                app_slug="reviewsensei[bot]",
+                actor="alice",
+                finding_ids=(),
+                dispositions=state.record(directory),
+            )
+        diagnostic = outcome.operation_diagnostics.to_dict()
+        self.assertEqual(
+            diagnostic["cleanup"]["first"]["graphql_categories"], ["RATE_LIMITED"]
+        )
+        self.assertEqual(diagnostic["approval"]["first"]["reason"], "call-limit")
+        self.assertEqual(budget.calls, 60)
+        self.assertFalse(diagnostic["approval_request_attempted"])
+        self.assertNotIn("SECRET", json.dumps(diagnostic))
+
+    def test_absent_observation_preserves_existing_constructor_and_rendering(self):
+        from review_sensei_github.publication import PublicationResult
+
+        publication = PublicationResult(status="approval_withheld")
+        self.assertIsNone(publication.operation_diagnostics)
+        command = MaintainerCommandResult(
+            action="verify", applied=True, operator_paused=False, summary="Kept"
+        )
+        self.assertEqual(render_command_progress(command, SimpleNamespace()), command)

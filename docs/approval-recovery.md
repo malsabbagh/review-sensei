@@ -162,6 +162,33 @@ threads are confirmed resolved. Record those IDs and the installed versions.
 A green workflow, a comment saying decisions were stored, or a merged PR alone
 is not that receipt.
 
+### Unreleased operational failure observation
+
+The separate `approval-operation-failure` schema 1.0 observation is under
+development after hosted 0.3.13. Do not expect it from that published version.
+When a compatible release ships, the line identifies the first failure in each
+of eligibility readback, check publication, thread cleanup and approval, plus
+bounded failure counts. It reports closed stage/reason names and allowlisted
+HTTP/GraphQL categories; raw messages, responses, tokens and source are excluded.
+Later call exhaustion does not replace an earlier failure in another phase.
+
+The original budget's observed calls and 64-call ceiling are separate from its
+60-call ordinary-dispatch limit: four calls remain reserved for explicit final
+work. No counter or deadline is refreshed. Transport request attempts include
+invocations rejected locally by an inner allowance; they are not network-call
+counts. `approval_request_attempted` means the finalizer invoked the approval
+HTTP adapter, not that the POST reached GitHub. `network_dispatch_observed` is
+null because this observation cannot establish that boundary. A failure before
+that adapter invocation records false; a lost dispatched response remains
+uncertain until the native review is read back.
+
+The observation adds no requests and never controls eligibility. Inspect its
+first failing stage before another unchanged retry. A REST check can succeed
+before a later GraphQL read or approval request fails. Preserve both facts; do
+not expand permissions, reset resource budgets, repeat inference, or claim
+native approval from that check. The original `approval-progress` 1.0 document
+is unchanged and remains the final machine-readable line.
+
 When blocked, retain the source event, exact head, installed versions, reason,
 recorded/unrecorded decision counts, thread state and next supported command.
 Do not include tokens, raw provider output or private source in diagnostics.
