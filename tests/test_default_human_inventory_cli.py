@@ -112,7 +112,7 @@ def checkpoint_raw_proposals(root):
         "admission.json": admission_context_document(None, key),
     }.items():
         (root / name).write_text(json.dumps(document), encoding="utf-8")
-    (root / "review.patch").write_text(state.diff, encoding="utf-8")
+    (root / "review.patch").write_text(state.diff, encoding="utf-8", newline="\n")
     publication_cli.DefaultPublicationCliJourneyTests().configuration(root, "complete")
     return result, state
 

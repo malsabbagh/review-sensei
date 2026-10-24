@@ -80,6 +80,7 @@ class BaselineCLIContract:
             "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
             "@@ -1 +1,2 @@\n keep\n+change\n",
             encoding="utf-8",
+            newline="\n",
         )
         self.response = self.root / "response.json"
         self.respond()
@@ -300,7 +301,7 @@ class BaselineCLIContract:
         self.assertEqual(self.record().failed_attempts, 1)
         self.assertIsNone(self.record().reservation_id)
         self.respond()
-        with self.diff.open("a") as handle:
+        with self.diff.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(
                 "diff --git a/logo.bin b/logo.bin\nBinary files a/logo.bin and b/logo.bin differ\n"
             )
@@ -312,7 +313,7 @@ class BaselineCLIContract:
 
     def test_oversized_item_refuses_without_inference_or_state_loss(self):
         before = self.seed()
-        with self.diff.open("a") as handle:
+        with self.diff.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write("+" + "x" * 1_100_000 + "\n")
         code, stderr, _, observed = self.run_cli(base="c", head="d")
         self.assertNotEqual(code, 0, stderr)

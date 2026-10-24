@@ -297,6 +297,7 @@ class InstalledOpenRouterMetadataContractTests(unittest.TestCase):
             diff.write_text(
                 "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-x = 0\n+x = 1\n",
                 encoding="utf-8",
+                newline="\n",
             )
             with (
                 patch.dict(

@@ -128,6 +128,71 @@ def load_smoke_module():
 
 
 class EntryPointParityTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
+    def test_generated_diff_fixtures_keep_bytes_with_windows_newline_defaults(self):
+        from tests import test_openai_configuration as openai_fixture
+        from tests.test_baseline_recovery import BaselineRecoveryTests
+        from tests.test_default_publication_cli_journey import (
+            DefaultPublicationCliJourneyTests,
+        )
+        from tests.test_review_transaction import ReviewTransactionTests
+
+        original_write_text = Path.write_text
+        original_open = Path.open
+        written = []
+
+        def windows_open(
+            path, mode="r", buffering=-1, encoding=None, errors=None, newline=None
+        ):
+            if (
+                path.suffix in {".patch", ".diff"}
+                and "b" not in mode
+                and any(flag in mode for flag in ("w", "a"))
+                and newline is None
+            ):
+                newline = "\r\n"
+            return original_open(path, mode, buffering, encoding, errors, newline)
+
+        def windows_write_text(path, data, *args, **kwargs):
+            if path.suffix in {".patch", ".diff"}:
+                count = original_write_text(path, data, *args, **kwargs)
+                written.append((path.read_bytes(), data.encode("utf-8")))
+                return count
+            return original_write_text(path, data, *args, **kwargs)
+
+        # Git headers keep LF framing while source records retain their CRs
+        # and every non-LF separator, even under Windows text-write defaults.
+        source = "\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+        diff = openai_fixture.PATCH.replace("+x = 1\n", f"+x = {source}\r\n")
+        cases = unittest.TestSuite(
+            [
+                openai_fixture.OpenAIConfigurationTests(
+                    "test_yaml_only_permission_reaches_real_adapter"
+                ),
+                DefaultPublicationCliJourneyTests(
+                    "test_trusted_complete_config_publishes_all_77_through_actual_cli_and_reader"
+                ),
+                ReviewTransactionTests(
+                    "test_cli_checkpoint_uses_one_provider_call_and_one_reservation"
+                ),
+                BaselineRecoveryTests(
+                    "test_base_change_runs_full_and_refreshes_only_after_checkpoint"
+                ),
+            ]
+        )
+        result = unittest.TestResult()
+        with (
+            mock.patch.object(Path, "write_text", windows_write_text),
+            mock.patch.object(Path, "open", windows_open),
+            mock.patch.object(openai_fixture, "PATCH", diff),
+        ):
+            cases.run(result)
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+        self.assertEqual(result.testsRun, 4)
+        self.assertGreaterEqual(len(written), 4)
+        for actual, expected in written:
+            self.assertEqual(actual, expected)
+        self.assertIn(diff.encode("utf-8"), [actual for actual, _ in written])
+
     def test_smoke_fixture_keeps_git_framing_in_windows_style_checkout(self):
         relative = "tests/fixtures/standalone-smoke/blocking-review.patch"
         expected = PATCH.read_bytes()

@@ -34,7 +34,7 @@ SENTINELS = {
 class OpenRouterCLIContract(IsolatedWorkingDirectoryMixin):
     def setUp(self):
         super().setUp()
-        Path("change.patch").write_text(PATCH, encoding="utf-8")
+        Path("change.patch").write_text(PATCH, encoding="utf-8", newline="\n")
         self.requests = []
         self.environment = dict(SENTINELS)
         self.envelope = {

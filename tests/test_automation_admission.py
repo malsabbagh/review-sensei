@@ -534,7 +534,7 @@ class CliInferenceSkipTests(
             )
             ledger._write(IDENTITY, record)
             diff_path = root / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
             response_path = root / "response.json"
             response_path.write_text('{"summary":"ok","comments":[]}', encoding="utf-8")
             outcome_path = root / "outcome.json"
