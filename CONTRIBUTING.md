@@ -285,3 +285,10 @@ observation when available. Null means unknown, and decided-thread reconciliatio
 is not a declaration that every native thread is resolved. Follow the indicated
 next action after reconciling uncertain writes; do not repeat unchanged commands
 or treat a requested check conclusion as a confirmed publication.
+
+The separate operational-failure observation described in the recovery guide is
+unreleased after hosted 0.3.13. When present in a compatible runtime, inspect the
+first phase/stage and original budget facts before retrying an unchanged
+operation. An attempted HTTP adapter request is not proof of network dispatch;
+retain uncertain native outcomes and do not broaden permissions from a generic
+transport error. These observations never supply approval authority.
