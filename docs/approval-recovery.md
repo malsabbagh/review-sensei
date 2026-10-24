@@ -1,10 +1,13 @@
 # Reaching approval with bounded recovery
 
-Version applicability: the durable decision snapshots, remaining-coverage windows
-and metadata phases below
-are **unreleased**. They are implemented by the approval-liveness repair; do not
-assume a checkout or a green workflow has updated the installed runtime. The
-release receipt must identify both Python versions and the signed `v5` source.
+Version applicability: the durable decision snapshots, remaining-coverage windows,
+metadata phases and progress diagnostics below were published in **core 0.8.12 /
+hosted 0.3.13** from signed source
+[`c80d1983`](https://github.com/malsabbagh/review-sensei/commit/c80d19837f7bc3ac90a54fb8184638443628b7b6).
+Publication does not update an installed workflow. Confirm both installed Python
+versions and the qualified signed `v5` source in the release/activation receipt;
+do not infer activation from a checkout or a green workflow. The remaining-work
+route also needs a compatible caller, as described below.
 Hosted 0.3.12 / core 0.8.11 still use the embedded decision ledger and can reach
 its byte limit. Never reset a session or discard decisions to get past that limit.
 
@@ -35,8 +38,8 @@ workflow can truthfully report that approval is withheld.
 
 ## Continue a published partial text review
 
-The following operation is **unreleased**. It requires compatible core/hosted
-packages, the activated reusable runner and an updated caller. Updating `v5`
+The following operation requires core 0.8.12 / hosted 0.3.13 or a compatible later
+pair, the qualified activated reusable runner and an updated caller. Updating `v5`
 alone cannot update an installed caller's embedded trigger parser. Inspect the
 caller with `review-sensei-github setup --help` and its supported migration flow;
 preserve custom runner labels, pins and secrets. The migration diagnostic names
@@ -104,7 +107,7 @@ findings in the review.
 @reviewsensei verify
 ```
 
-The unreleased snapshot writer preserves all audit fields in authenticated,
+The compatible snapshot writer preserves all audit fields in authenticated,
 immutable parts and commits one complete inventory reference in the session.
 It does not remove the ten-ID command limit, increase the request budget, or
 drop earlier decisions. A fresh process validates the complete referenced
@@ -129,6 +132,14 @@ Already resolved matching threads are observations; reopened threads must be
 reconciled again. Every actual mutation and final approval retains current
 identity, finding, permission and eligibility checks. No new inference is needed
 for this cleanup.
+
+If a bounded retry makes no progress, retain its diagnostic and inspect the
+specific unresolved conversations and authority checks before another retry.
+An authorized maintainer may use GitHub's normal **Resolve conversation** control
+after independently assessing that conversation. This records a native thread
+resolution; it does not record a finding-risk decision or supply missing analysis
+or human evidence. Run supported finalization afterward and verify its actual
+outcome. Manual resolution does not establish that automatic cleanup is fixed.
 
 A lost response is an uncertain outcome, not proof the write failed. Reconcile
 retained decisions, the original native review and the current check before
@@ -157,7 +168,7 @@ Do not include tokens, raw provider output or private source in diagnostics.
 
 ## Read finalization progress
 
-The **unreleased** command diagnostics can emit an `approval-progress` JSON line
+The compatible command diagnostics can emit an `approval-progress` JSON line
 with schema version 1.0. Its head, result digest and source review ID identify
 the observation. `honored_findings` counts authenticated current index entries,
 not IDs merely requested in a comment. Unknown coverage counts, human counts

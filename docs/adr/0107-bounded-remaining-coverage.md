@@ -1,6 +1,8 @@
 # ADR 0107: Explicit remaining coverage windows
 
-Status: Proposed. Unreleased; activation requires qualified package and workflow releases.
+Status: Accepted in [PR 362](https://github.com/malsabbagh/review-sensei/pull/362).
+Published in core 0.8.12 / hosted 0.3.13; activation requires the qualified signed
+runner and compatible caller. Live acceptance is separate from publication.
 
 A published partial review could be rescanned from the start, but that did not
 provide a public route to accumulate its remaining text coverage. Charging every

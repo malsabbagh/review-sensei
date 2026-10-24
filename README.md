@@ -772,8 +772,10 @@ finding by its `RS-` id. Up to 10 IDs can be named in the same comment,
 separated by spaces or commas. An override
 re-checks approval on this commit without a new AI review. Comment
 `@reviewsensei verify` to retry that check. An override applies to the current commit only. A new push needs a
-new override. Cumulative `review remaining` windows are currently unreleased and
-require compatible packages, runner and caller migration. See the [bounded approval recovery guide](docs/approval-recovery.md)
+new override. Cumulative `review remaining` windows require core 0.8.12 / hosted
+0.3.13 or a compatible later pair, a qualified activated runner, and caller
+migration. Package publication alone does not activate an installed workflow.
+See the [bounded approval recovery guide](docs/approval-recovery.md)
 for batching, retained evidence, thread retries and actual native approval receipts;
 its version applicability distinguishes released behavior from pending repairs.
 `review.json` is uploaded only when
