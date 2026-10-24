@@ -144,6 +144,23 @@ class ThreadResolutionResult:
         return "thread_resolution_unconfirmed" if self.unconfirmed else None
 
 
+class _ResolutionPermissionDenied(GitHubPublicationError):
+    """Known rejection must stop this batch, rather than retry another thread."""
+
+
+def _check_resolution_permission(status: int, payload: Any) -> None:
+    errors = payload.get("errors") if isinstance(payload, dict) else None
+    if status in (401, 403) or (
+        isinstance(errors, list)
+        and any(
+            isinstance(error, dict)
+            and error.get("type") in ("FORBIDDEN", "UNAUTHORIZED")
+            for error in errors
+        )
+    ):
+        raise _ResolutionPermissionDenied("thread resolution permission denied")
+
+
 class FindingThreadResolver:
     def __init__(self, http: GitHubHttp) -> None:
         self.http = http
@@ -195,6 +212,10 @@ class FindingThreadResolver:
                     "variables": {"input": {"threadId": thread_id}},
                 },
             )
+            # This request is known rejected, unlike a lost response. Do not
+            # spend readback allowance or try subsequent candidates. Never
+            # include GitHub's raw message in a propagated error.
+            _check_resolution_permission(status, payload)
             if (
                 status == 200
                 and isinstance(payload, dict)
@@ -218,6 +239,9 @@ class FindingThreadResolver:
                     "variables": {"id": thread_id},
                 },
             )
+            # A denied readback cannot confirm the uncertain prior mutation.
+            # Preserve that uncertainty and stop further writes in the batch.
+            _check_resolution_permission(status, payload)
             return bool(
                 status == 200
                 and isinstance(payload, dict)
@@ -419,6 +443,17 @@ class FindingThreadResolver:
                         "thread resolution mutation is unconfirmed"
                     )
                 resolved.append(identity)
+            except _ResolutionPermissionDenied as exc:
+                if observer is not None:
+                    observer.exception(exc)
+                for n, _, item, previous in candidates[position:]:
+                    pending = n["id"] if previous else item
+                    assert isinstance(pending, str)
+                    if skip_resolved and n["isResolved"]:
+                        resolved.append(pending)
+                    else:
+                        unconfirmed.append(pending)
+                break
             except ReviewInputError as exc:
                 if observer is not None:
                     observer.exception(exc)
