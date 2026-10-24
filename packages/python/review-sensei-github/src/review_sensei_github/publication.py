@@ -1613,6 +1613,9 @@ class ReviewApprovalFinalizer:
         self._human_inventory_scope: tuple[str, int, str, str, str] | None = None
         self._operation_observer: OperationObserver | None = None
         self._scoped_human_inventory_reader: _ScopedHumanInventoryReader | None = None
+        # Installed only on a single command finalization copy. Other
+        # publication/conversation entry points acquire no new authority.
+        self._thread_cleanup_token_provider: Callable[[], str] | None = None
 
     @contextmanager
     def _read_operation(self) -> Iterator[None]:
@@ -2118,6 +2121,8 @@ class ReviewApprovalFinalizer:
         reviews_policy: str = "auto-approve",
         incomplete_coverage: Sequence[str] | None = None,
         policy_digest: str | None = None,
+        thread_cleanup_token_provider: Callable[[EvidenceReadBudget], str]
+        | None = None,
     ) -> PublicationResult:
         """Re-evaluate one published head after an override, without a provider call.
 
@@ -2137,6 +2142,11 @@ class ReviewApprovalFinalizer:
             budget = self.evidence_budget or self._operation_budget
             assert budget is not None
             operation = copy(self)
+            operation._thread_cleanup_token_provider = (
+                (lambda: thread_cleanup_token_provider(budget))
+                if thread_cleanup_token_provider is not None
+                else None
+            )
             observer = OperationObserver(budget)
             operation._operation_observer = observer
             operation.http = publication_http(self.http, budget, observer=observer)
@@ -3086,6 +3096,7 @@ class ReviewApprovalFinalizer:
                 fence=fence,
                 skip_resolved=_skip_resolved,
                 observer=self._operation_observer,
+                cleanup_token_provider=self._thread_cleanup_token_provider,
             )
         except (GitHubHTTPError, GitHubPublicationError, ReviewInputError) as exc:
             if self._operation_observer is not None:

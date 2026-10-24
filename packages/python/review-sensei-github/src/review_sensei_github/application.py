@@ -3049,6 +3049,21 @@ class GitHubApplication:
         )
         from .approval_progress import render_command_progress
 
+        def cleanup_token(budget: EvidenceReadBudget) -> str:
+            # Use only the original controlled command client. A finalizer
+            # with a different or unavailable accounting envelope cannot mint
+            # cleanup authority, and never falls back to the review token.
+            budget.check()
+            if isinstance(self.broker, BrokerClient) and (
+                self.broker.control is None or self.broker.control.budget is not budget
+            ):
+                raise GitHubBrokerClientError(
+                    "thread cleanup broker accounting is unavailable"
+                )
+            token = self.broker.exchange(oidc_token, capability="thread_resolve")
+            budget.check()
+            return token
+
         try:
             review_token = self.broker.exchange(oidc_token, capability="review_publish")
             try:
@@ -3083,6 +3098,7 @@ class GitHubApplication:
                 dispositions=dispositions,
                 incomplete_coverage=incomplete_coverage,
                 policy_digest=policy_digest,
+                thread_cleanup_token_provider=cleanup_token,
             )
         except Exception as exc:
             return render_command_progress(

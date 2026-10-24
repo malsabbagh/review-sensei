@@ -66,6 +66,7 @@ export async function consumingBroker(_filename = ":memory:", traceFile?: string
   } as unknown as WorkerEnv;
   void traceFile;
   const githubInputs = {
+    repository: "acme/widgets", repositoryId: 987654321,
     number: 7, state: "open", draft: false,
     base: "b".repeat(40),
     head: SHA,
@@ -104,11 +105,11 @@ export async function consumingBroker(_filename = ":memory:", traceFile?: string
     if (url.href === "https://token.actions.githubusercontent.com/.well-known/jwks") body = { keys: [jwk] };
     else if (url.hostname !== "api.github.test") throw new Error("unexpected fixture transport host");
     else if (url.pathname === "/repos/malsabbagh/review-sensei/git/ref/tags/v5") body = { object: { type: "commit", sha: SHA } };
-    else if (url.pathname === "/repos/acme/widgets/installation") body = { id: 2468 };
+    else if (url.pathname === `/repos/${githubInputs.repository}/installation`) body = { id: 2468 };
     else if (url.pathname === "/app/installations/2468/access_tokens" && method === "POST") {
       const request = JSON.parse(String(init?.body));
       body = { token: "synthetic-scoped", expires_at: new Date(Date.now() + 60_000).toISOString(), permissions: { metadata: "read", ...request.permissions } };
-    } else if (url.pathname === "/repos/acme/widgets") body = { id: 987654321, fork: false };
+    } else if (url.pathname === `/repos/${githubInputs.repository}`) body = { id: githubInputs.repositoryId, fork: false };
     else if (url.pathname === "/repos/acme/widgets/pulls/7") body = { number: githubInputs.number, state: githubInputs.state, draft: githubInputs.draft, base: { sha: githubInputs.base }, head: { sha: githubInputs.head } };
     else if (url.pathname === "/repos/acme/widgets/issues/comments/13579") {
       const source = githubInputs.source;

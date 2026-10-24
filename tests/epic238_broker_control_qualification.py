@@ -21,6 +21,7 @@ from review_sensei_github.errors import GitHubBrokerClientError
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.broker_diagnostics import exception_broker_diagnostic
+from review_sensei.errors import ReviewInputError
 from tests.epic238_public_dispatch_support import (
     PhysicalDispatchTrace,
     ProductionBrokerBridge,
@@ -83,6 +84,123 @@ class BrokerControlQualification(unittest.TestCase):
         self.assertEqual(
             grant.attestation["mutation"]["read_accounting"]["deadline_unix_ms"],
             self.budget.wall_deadline_ms,
+        )
+
+    def test_cleanup_exchange_uses_production_admission_and_original_dispatch_budget(
+        self,
+    ):
+        client = self.client(10)
+        token = self.oidc(client)
+        deadline = self.budget.wall_deadline_ms
+        before = self.budget.calls
+        self.assertEqual(
+            client.exchange(token, capability="thread_resolve"), "synthetic-scoped"
+        )
+        self.assertEqual(self.budget.calls, before + 11)
+        self.assertLessEqual(len(self.trace.attempts()), self.budget.calls)
+        self.assertEqual(self.budget.wall_deadline_ms, deadline)
+        attempts = self.trace.attempts()
+        self.assertTrue(
+            any(item["path"] == "/repos/acme/widgets/installation" for item in attempts)
+        )
+        self.assertTrue(
+            any(
+                item["path"] == "/app/installations/2468/access_tokens"
+                for item in attempts
+            )
+        )
+        # Exhaust the original allowance, then prove the new capability cannot
+        # dispatch or renew its liability/deadline through another exchange.
+        while self.budget.calls < 51:
+            self.budget.consume()
+        physical = len(self.trace.attempts())
+        with self.assertRaises(ReviewInputError):
+            client.exchange(token, capability="thread_resolve")
+        self.assertEqual(len(self.trace.attempts()), physical)
+        self.assertEqual(self.budget.wall_deadline_ms, deadline)
+
+    def test_public_verify_with_durable_decisions_and_real_broker_cleanup_issuance(
+        self,
+    ):
+        """Real admission/physical accounting; explicit local ledger authority.
+
+        External GitHub state/OIDC signing are synthetic. This is not proof of
+        live App grants or the separate hosted source-attestation boundary.
+        """
+        from review_sensei_github.application import (
+            GitHubApplication,
+            GitHubWriteOptions,
+        )
+        from review_sensei_github.http import GitHubHttp
+        from review_sensei_github.publication import ReviewPublisher
+
+        from review_sensei.session import LocalSessionLedger
+        from tests.test_command_capacity_recovery import APP, HEAD, CommandCapacityState
+
+        state = CommandCapacityState(
+            complete=True,
+            schema="3",
+            inline_range=(0, 21),
+            human_count=21,
+            padded=False,
+        )
+        state.resolved_threads.clear()
+        state.record(self.temporary.name)
+        self.bridge.call(
+            "set_snapshot", snapshot={"repository": "owner/repo", "repositoryId": 1}
+        )
+        self.bridge.oidc_overrides = {
+            "repository": "owner/repo",
+            "repository_owner": "owner",
+            "repository_id": "1",
+        }
+        progress = []
+        for attempt in range(25):
+            self.budget = EvidenceReadBudget()
+            deadline = self.budget.wall_deadline_ms
+            physical_before = len(self.trace.attempts())
+            client = self.client(10)
+            oidc = self.oidc(client)
+            http = GitHubHttp(
+                api_url="https://api.github.test",
+                opener=self.trace.opener(state.open, origin="host-github"),
+            )
+            app = GitHubApplication(
+                broker=client,
+                http=http,
+                reviewer=ReviewPublisher(http=http),
+                learner=None,
+                replier=None,
+                session_ledger=LocalSessionLedger(Path(self.temporary.name) / "ledger"),
+            )
+            app.reviewer.finalizer.human_inventory_reader_factory = None
+            outcome = app.apply_maintainer_command(
+                options=GitHubWriteOptions(github_writes=True),
+                oidc_token=oidc,
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD,
+                app_slug=APP,
+                actor_login="alice",
+                association="OWNER",
+                body="@reviewsensei verify",
+                command_budget=self.budget,
+            )
+            physical = len(self.trace.attempts()) - physical_before
+            self.assertLessEqual(physical, self.budget.calls)
+            self.assertLessEqual(self.budget.calls, 64)
+            self.assertEqual(self.budget.wall_deadline_ms, deadline)
+            progress.append(len(state.resolved_threads))
+            if any(review["state"] == "APPROVED" for review in state.reviews):
+                break
+            if attempt:
+                self.assertGreater(
+                    progress[-1], progress[-2], (progress, outcome.summary)
+                )
+        self.assertEqual(len(state.resolved_threads), 21, (progress, outcome.summary))
+        self.assertEqual(
+            sum(review["state"] == "APPROVED" for review in state.reviews), 1
         )
 
     def test_real_http_redirects_cannot_hide_an_unfunded_second_dispatch(self):

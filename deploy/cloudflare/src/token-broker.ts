@@ -18,6 +18,11 @@ const WORKFLOW_PATH = ".github/workflows/review-sensei-run.yml";
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const CAPABILITIES = {
   review_publish: { "pull_requests": "write" },
+  // GitHub thread resolution also needs repository write authority. Keep it
+  // separate from ordinary review publication. Admission below derives the
+  // installation and single repository from verified OIDC identity, never a
+  // repository allowlist or caller-supplied installation identifier.
+  thread_resolve: { contents: "write", "pull_requests": "write" },
   // The merge gate is a check run, so enforcing github.reviews: blocking (or
   // the default auto-approve mode) needs Checks: write. It is a separate
   // capability from review publication so a broker that has not been granted

@@ -1,0 +1,72 @@
+# ADR 0110: Separate repository-bound thread cleanup authority
+
+Status: Proposed; implementation candidate, not published or enabled.
+
+GitHub can reject `ResolveReviewThread` for a Pull requests: write installation
+token even though ordinary review publication succeeds. GitHub's issue
+[35726](https://github.com/github/gh-aw/issues/35726) reports the additional
+Contents: write requirement. This corroborates the observed rejection; it does
+not reconstruct the historical token's effective permissions.
+
+Add the fixed App capability `thread_resolve`, requesting exactly Contents:
+write and Pull requests: write, plus GitHub's implicit Metadata: read. Keep
+ordinary review, reply, session and check grants unchanged. Retain exact
+returned-permission validation, including rejection of unsolicited Contents:
+write on an ordinary review token. No PAT or `learning_write` fallback exists.
+
+The broker derives repository identity from verified Actions OIDC claims,
+independently checks its numeric identity and fork status, and looks up that
+repository's installation. GitHub issuance selects only that repository. The
+operation is generic across existing authorized installations and selected
+repositories; it contains no repository-specific exception. Public immutable
+workflow admission, issuer/audience/signature checks and original dispatch
+controls remain mandatory. The broker authenticates this execution context;
+it does not establish that a particular finding has been independently assessed.
+
+Initially wire the capability only into `verify` and disposition command
+re-finalization. Complete discovery, independently owned root readback and
+current decision/head/base/result fences use the ordinary review token. Only
+an eligible unresolved candidate can lazily request cleanup authority. The
+operation caches it locally; acquisition uses the same controlled broker client,
+original budget and deadline. Refresh root, decision and current-source fences
+after acquisition. Only resolution and bounded lost-response readback receive
+the cleanup token. Empty, foreign, unassessed, resolved or stale candidates
+acquire nothing. Failure leaves cleanup unconfirmed and decisions retained;
+there is no fallback or automatic permission escalation. Denial stops the batch.
+
+A subsequent supported request can observe prior progress under its own bounded
+allowance. Neither issuance nor a retry resets an existing request's budget.
+Normal review supersession and conversational reply entry points do not
+implicitly acquire this capability; supported command finalization remains the
+explicit recovery path. Source, inventory and approval gates are unchanged.
+
+GitHub does **not** restrict this credential to thread resolution: Contents:
+write permits repository-content writes in its selected repository. Lazy
+acquisition and application fences limit intended use, not GitHub's inherent
+grant. Broadening `review_publish` would expose that authority during every
+review; a PAT would introduce a separate user principal and credential lifecycle.
+A broker-executed fixed mutation would reduce token exposure but would be a
+different execution boundary. The dedicated App capability is selected.
+
+Implementation qualification includes exact grants, generic repository and
+installation binding, admission rejection, token separation, post-acquisition
+authority races, original accounting and deadline refusal, denial/lost-response
+recovery, and durable progress across more than twenty legitimate synthetic
+decisions with the production broker and public command seam. Synthetic proof
+does not establish live installation grants or actual native approval.
+
+Deployment needs a qualified Worker revision, hosted package and coordinated
+signed channel activation. Core/npm need no release unless their actual inputs
+change. Before live activation, present the concrete generic issuance population
+and repository-content-write authority for approval. Read existing App and
+installation grants first. Missing registration permission or installation
+acceptance requires an explicitly identified, separately approved change; never
+expand repository selection silently. Read-only setup inspection must not invoke
+helpers that internally mint installation tokens.
+
+Rollback withdraws the broker capability or hosted acquisition path. Unsupported
+issuance fails closed without fallback. Withdrawing issuance does not revoke
+already-issued GitHub credentials; account for their remaining lifetime or an
+explicitly authorized revocation before treating that authority as withdrawn.
+Keep immutable releases, durable
+decisions, truthful uncertain outcomes and all approval evidence.

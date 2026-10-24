@@ -14,6 +14,7 @@ _STAGES = frozenset(
         "eligibility.readback",
         "check.publication",
         "cleanup.discovery",
+        "cleanup.capability",
         "cleanup.root-readback",
         "cleanup.authority-fence",
         "cleanup.resolve-request",

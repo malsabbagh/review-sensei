@@ -170,12 +170,16 @@ keys, JWTs, authorization headers, or assertion content.
 
 ### Issue-64 Worker capability broker
 
-The deployed Worker endpoint is `POST /github/token` and accepts a bounded
-JSON body containing an OIDC assertion plus one of the fixed capability names:
+The Worker endpoint is `POST /github/token` and accepts a bounded JSON body
+containing an OIDC assertion plus one of the fixed capability names below.
+This table tracks the source protocol: `thread_resolve` is an **unreleased
+candidate**, requiring a qualified deployment and explicit live issuance
+approval; hosted 0.3.15 does not enable it.
 
 | Capability | GitHub installation permission |
 | --- | --- |
 | `review_publish` | `pull_requests: write` |
+| `thread_resolve` | `contents: write`, `pull_requests: write` |
 | `review_status` | `pull_requests: read` |
 | `review_actions` | `actions: read` |
 | `check_publish` | `checks: write` |
@@ -183,6 +187,15 @@ JSON body containing an OIDC assertion plus one of the fixed capability names:
 | `inline_reply` | `pull_requests: write` |
 | `issue_reply` | `pull_requests: write` |
 | `learning_write` | `contents: write`, `pull_requests: write` |
+
+The proposed `thread_resolve` token is selected only for the authenticated
+requesting repository and installation. Command finalization acquires it lazily
+after authenticating an eligible unresolved App thread; only resolution and its
+bounded readback use it. Ordinary review scopes and exact returned-grant
+validation stay unchanged. Contents write also permits repository-content
+writes; it is not a thread-only GitHub grant. See
+[ADR 0110](adr/0110-repository-bound-thread-cleanup.md) for the generic scope,
+qualification and separate rollout/installation-acceptance gates.
 
 The `review_publish` capability covers `COMMENT`, `REQUEST_CHANGES`, and
 `APPROVE` events. `auto-approve` publishes `REQUEST_CHANGES` when required
