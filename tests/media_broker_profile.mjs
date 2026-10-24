@@ -122,4 +122,55 @@ for (const order of [["review_session", "check_publish"], ["check_publish", "rev
   assert.equal(attempts.length, 15);
   output.push({ mode: "git", history: "owned-review", sequence, internal_dispatches: attempts.length, caller_posts: 2, combined_liability: 17, attempts });
 }
+// Unattended analysis does not carry a command attestation. Exercise the actual
+// Git and annotated-tag fallback with the caller's admitted liability, including
+// the old underfunded value and a history that needs an unfunded thirteenth IO.
+const analysisMaximum = Number(process.argv[2] ?? 12);
+assert.equal(analysisMaximum, 12);
+for (const mode of ["git", "fallback-annotated"]) {
+  for (const history of ["empty", "full-page"]) {
+    for (const maximum of [10, analysisMaximum]) {
+      const fixture = await consumingBroker();
+      const env = { ...fixture.broker.env, GITHUB_API_URL: "https://api.github.com" };
+      const broker = new TokenBroker(env, new GitHubApi(env));
+      const attempts = [];
+      resetOidcJwksCacheForTesting();
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+        attempts.push({ method: init?.method ?? "GET", path: url.pathname });
+        if (url.hostname === "github.com") return mode === "git" ? new Response(advertisement) : new Response("", { status: 503 });
+        if (url.pathname === "/repos/malsabbagh/review-sensei/git/ref/tags/v5" && mode === "fallback-annotated") return Response.json({ object: { type: "tag", sha: "b".repeat(40) } });
+        if (url.pathname.startsWith("/repos/malsabbagh/review-sensei/git/tags/")) return Response.json({ object: { type: "commit", sha: SHA } });
+        if (url.pathname === "/repos/acme/widgets/pulls/7/reviews" && history === "full-page") return Response.json(Array.from({ length: 100 }, (_, index) => ({ id: index + 1, user: { type: "Bot", login: "reviewsensei[bot]" }, state: "COMMENTED", commit_id: SHA })));
+        const mapped = new URL(url);
+        if (mapped.hostname === "api.github.com") mapped.hostname = "api.github.test";
+        return fixture.transport(mapped, init);
+      };
+      try {
+        for (const temperature of ["cold", "warm"]) {
+          const start = attempts.length;
+          const control = { schema_version: "1.0", operation_id: "a".repeat(64), request_id: (temperature === "cold" ? "b" : "c").repeat(64), deadline_unix_ms: Date.now() + 60_000, max_dispatches: maximum };
+          let result;
+          let error;
+          try {
+            result = await broker.exchange({ oidc_token: await fixture.oidcToken(), capability: "review_session", session: { repository_id: 987654321, pull_request: 7, head_sha: SHA }, control_budget: control });
+          } catch (caught) { error = caught.message; }
+          const dispatched = attempts.length - start;
+          if (history === "full-page" || (mode === "fallback-annotated" && maximum === 10)) {
+            assert.equal(error, "broker_control_budget_exhausted");
+            assert.equal(dispatched, maximum);
+            assert.equal(result, undefined);
+          } else {
+            assert.equal(error, undefined);
+            assert.equal(dispatched, 10 + (mode === "fallback-annotated" ? 2 : 0) - (temperature === "warm" ? 1 : 0));
+            assert.equal(result.session_state, "enrolled");
+            assert.deepEqual(result.control_receipt, { ...control, dispatched });
+          }
+          output.push({ capability: "analysis-admission", mode, history, temperature, admitted: maximum, dispatched, ...(error ? { error } : { session_state: result.session_state }), attempts: attempts.slice(start) });
+          if (error) break;
+        }
+      } finally { fixture.close(); }
+    }
+  }
+}
 process.stdout.write(JSON.stringify({ schema_version: "media-broker-profile-v1", profiles: output }, null, 2) + "\n");

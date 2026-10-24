@@ -59,6 +59,21 @@ before any transport or partial debit.
 
 ## Consequences and alternatives
 
+Unattended analysis admission prepays 12 internal dispatches plus its caller
+HTTP request from the original metadata budget. This covers the cold JWKS path,
+failed Git advertisement followed by an annotated-tag REST lookup, installation
+and repository checks, session capability, current head, App identity, and one
+complete page each of review and operation-comment witnesses. The same factory
+conservatively reserves 12 for the rescan authorization exchange. These are
+bounded reservations, not a promise that arbitrary paginated histories fit.
+Additional witness pages remain charged and refuse before an unfunded dispatch;
+they cannot produce a successful enrollment from an incomplete inventory.
+The 64 total / 60 ordinary call ceilings, original deadline, exact receipt
+binding, and no-refund rule are unchanged. This accounting correction applies
+when the containing hosted package is released; it does not authorize renewing
+a previously refused live attempt or attribute any historical failure to this
+fallback without its original dispatch evidence.
+
 This deliberately charges a conservative admitted liability when a cached or
 failed request uses fewer internal calls. Its returned count is evidence, not a
 refund. Post-hoc telemetry alone is rejected because it permits unfunded server

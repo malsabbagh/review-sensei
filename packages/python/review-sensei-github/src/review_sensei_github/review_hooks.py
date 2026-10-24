@@ -14,6 +14,12 @@ from review_sensei_github.broker_control import BrokerDispatchAccounting
 from review_sensei_github.commands import report_broker_failure, run_hosted_provider
 from review_sensei_github.http import GitHubHttp
 
+# Cold unattended admission: JWKS (1), failed Git plus annotated-tag REST
+# fallback (3), installation/repository/capability (4), head/App identity and
+# single-page review/comment witnesses (4). Longer histories remain bounded by
+# the same reservation and must refuse if they cannot complete within it.
+_ANALYSIS_ADMISSION_INTERNAL_DISPATCHES = 12
+
 
 class GitHubReviewHooks:
     """Broker ledger, operation-entry provider, and broker diagnostics."""
@@ -62,7 +68,11 @@ class GitHubReviewHooks:
         operation = hashlib.sha256(
             f"analysis-admission:{args.repository_id}:{args.pull_request}:{args.head_sha}".encode()
         ).hexdigest()
-        return BrokerClient(control=BrokerDispatchAccounting(budget, operation, 10, 1))
+        return BrokerClient(
+            control=BrokerDispatchAccounting(
+                budget, operation, _ANALYSIS_ADMISSION_INTERNAL_DISPATCHES, 1
+            )
+        )
 
     def run_provider(
         self, service: object, request: object, **kwargs: object

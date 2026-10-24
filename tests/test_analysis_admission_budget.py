@@ -1,0 +1,185 @@
+"""Analysis admission prepays the cold fallback from its original budget."""
+
+import hashlib
+import json
+import os
+import unittest
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from review_sensei_github.errors import GitHubBrokerClientError
+from review_sensei_github.review_hooks import GitHubReviewHooks
+
+from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.errors import ReviewInputError
+from tests.test_github_broker_client import FakeResponse
+
+
+class AnalysisAdmissionBudgetTests(unittest.TestCase):
+    def setUp(self):
+        self.args = SimpleNamespace(
+            repository="acme/widgets",
+            repository_id=987654321,
+            pull_request=7,
+            head_sha="a" * 40,
+            oidc_token="synthetic",
+            app_slug="reviewsensei[bot]",
+        )
+
+    def client(self, budget, transport):
+        client = GitHubReviewHooks._admission_broker(self.args, budget)
+        client.opener = transport
+        return client
+
+    def response(self, request, *, dispatched=12, fault=None):
+        payload = json.loads(request.data)
+        control = payload["control_budget"]
+        receipt = {**control, "dispatched": dispatched}
+        if fault:
+            receipt[fault] = "b" * 64
+        return FakeResponse(
+            json.dumps(
+                {
+                    "token": "synthetic",
+                    "capability": "review_session",
+                    "session_state": "enrolled",
+                    "control_receipt": receipt,
+                }
+            ).encode()
+        )
+
+    def open_session(self, client):
+        return client.open_session(
+            "synthetic",
+            repository_id=self.args.repository_id,
+            pull_request=7,
+            head_sha=self.args.head_sha,
+        )
+
+    def test_fallback_prepays_twelve_internal_and_one_outer_dispatch(self):
+        budget = EvidenceReadBudget()
+        deadline = budget.wall_deadline_ms
+        requests = []
+
+        def transport(request, timeout):
+            requests.append(json.loads(request.data))
+            self.assertEqual(budget.calls, 13)
+            self.assertEqual(requests[-1]["control_budget"]["max_dispatches"], 12)
+            return self.response(request)
+
+        self.assertEqual(
+            self.open_session(self.client(budget, transport)).state, "enrolled"
+        )
+        control = requests[0]["control_budget"]
+        self.assertEqual(control["deadline_unix_ms"], deadline)
+        self.assertEqual(
+            control["operation_id"],
+            hashlib.sha256(
+                f"analysis-admission:987654321:7:{self.args.head_sha}".encode()
+            ).hexdigest(),
+        )
+        self.assertEqual(budget.calls, 13)
+
+    def test_full_reservation_is_kept_for_a_warm_shorter_exchange(self):
+        budget = EvidenceReadBudget()
+        client = self.client(
+            budget, lambda request, timeout: self.response(request, dispatched=9)
+        )
+        for _ in range(2):
+            self.open_session(client)
+        self.assertEqual(budget.calls, 26)
+
+    def test_last_funded_request_and_atomic_unfunded_refusal(self):
+        for prior in (47, 48):
+            with self.subTest(prior=prior):
+                budget = EvidenceReadBudget()
+                for _ in range(prior):
+                    budget.consume()
+                dispatched = []
+
+                def transport(request, timeout):
+                    dispatched.append(request)
+                    return self.response(request)
+
+                client = self.client(budget, transport)
+                if prior == 47:
+                    self.open_session(client)
+                    self.assertEqual(budget.calls, 60)
+                    self.assertEqual(len(dispatched), 1)
+                else:
+                    with self.assertRaisesRegex(ReviewInputError, "original budget"):
+                        self.open_session(client)
+                    self.assertEqual(budget.calls, prior)
+                    self.assertEqual(dispatched, [])
+
+    def test_changed_receipt_refuses_and_keeps_original_charges(self):
+        for fault in ("request_id", "operation_id", "deadline_unix_ms"):
+            with self.subTest(fault=fault):
+                budget = EvidenceReadBudget()
+                client = self.client(
+                    budget, lambda req, timeout: self.response(req, fault=fault)
+                )
+                with self.assertRaises(GitHubBrokerClientError):
+                    self.open_session(client)
+                self.assertEqual(budget.calls, 13)
+
+    def test_expired_original_deadline_refuses_before_transport(self):
+        clock = [0.0]
+        budget = EvidenceReadBudget(clock=lambda: clock[0])
+        client = self.client(
+            budget, lambda *_args, **_kwargs: self.fail("expired transport")
+        )
+        clock[0] = 60.0
+        with self.assertRaises(ReviewInputError):
+            self.open_session(client)
+        self.assertEqual(budget.calls, 0)
+
+    def test_admission_then_real_rescan_keeps_one_cumulative_budget(self):
+        from tests.test_default_human_rescan import DefaultHumanRescanTests
+
+        with TemporaryDirectory() as directory:
+            state, ledger, env, args = DefaultHumanRescanTests().prepare(
+                directory, count=3, detail=1
+            )
+            args.oidc_token = "synthetic"
+            budget = EvidenceReadBudget()
+            deadline = budget.wall_deadline_ms
+            ledger.evidence_budget = budget
+            client = GitHubReviewHooks._admission_broker(args, budget)
+            controls = []
+
+            def transport(request, timeout):
+                payload = json.loads(request.data)
+                controls.append(payload["control_budget"])
+                return self.response(request, dispatched=6)
+
+            client.opener = transport
+            client.open_session(
+                args.oidc_token,
+                repository_id=args.repository_id,
+                pull_request=args.pull_request,
+                head_sha=args.head_sha,
+            )
+            self.assertEqual(budget.calls, 13)
+            with (
+                patch.dict(os.environ, env),
+                patch.object(
+                    GitHubReviewHooks, "_admission_broker", return_value=client
+                ),
+            ):
+                authorized = GitHubReviewHooks().resolve_rescan(args, ledger)
+            self.assertEqual(authorized.request_id, 10)
+            self.assertEqual(authorized.review_id, state.reviews[-1]["id"])
+            self.assertIs(ledger.evidence_budget, budget)
+            self.assertEqual(budget.calls, 26 + len(state.rescan_calls))
+            self.assertLessEqual(budget.calls, 60)
+            self.assertEqual(budget.wall_deadline_ms, deadline)
+            self.assertEqual(len(controls), 2)
+            self.assertEqual(len({item["operation_id"] for item in controls}), 1)
+            self.assertEqual(len({item["request_id"] for item in controls}), 2)
+            self.assertTrue(all(item["max_dispatches"] == 12 for item in controls))
+
+
+if __name__ == "__main__":
+    unittest.main()
