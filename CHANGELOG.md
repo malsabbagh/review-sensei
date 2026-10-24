@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## review-sensei-github 0.3.14 - 2026-10-24
+
+- Pin `review-sensei==0.8.12`.
+
 ## 0.8.12 - 2026-10-24
 
 - Preserve complete audited maintainer decisions in authenticated immutable
