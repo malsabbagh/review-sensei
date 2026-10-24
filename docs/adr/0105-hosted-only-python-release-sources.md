@@ -94,3 +94,17 @@ versions and immutable tags remain unchanged. This contract grants no channel
 promotion authority. Rollback before a new preparation can restore source
 equality; a rollback after split-source activation must first account for that
 qualified channel and preserve all existing immutable artifacts.
+
+## Proposed registry-only installation amendment
+
+ADR 0109 adds a separately recognized registry-only core installer, unreleased
+after hosted 0.3.13. Its proof binds the complete reviewed workflow bytes and
+the original signed core source. It makes no build-input-equivalence claim:
+the new workflow never builds or executes core from its own checkout, and
+fails closed when the exact published core cannot be installed. Hosted fallback
+remains bound to its own signed workflow source. All publication/provenance and
+installed qualification checks remain required.
+
+Historical workflow-source fallback retains every equivalence check above.
+A selector or receipt assertion is not installation authority; unknown bytes,
+ambiguous proof fields or a surviving core source fallback reject the new mode.

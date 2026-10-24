@@ -8,6 +8,7 @@ from pathlib import Path
 
 import yaml
 from check_action_pins import check_workflow_text
+from python_release_sources import registry_core_contract
 
 
 class WorkflowLoader(yaml.SafeLoader):
@@ -54,7 +55,8 @@ def validate_surface(root: Path):
         ".github/workflows/review-sensei-run.yml",
         ".github/workflows/review-sensei-review.yml",
     ]
-    texts = [root.joinpath(path).read_text() for path in paths]
+    raw_workflows = [root.joinpath(path).read_bytes() for path in paths]
+    texts = [raw.decode("utf-8", errors="strict") for raw in raw_workflows]
     runner, caller = map(workflow_data, texts)
     for text, path in zip(texts, paths):
         violations = check_workflow_text(text, source=path)
@@ -120,9 +122,12 @@ def validate_surface(root: Path):
         required_fragments = [
             '"review-sensei==$expected_version"',
             '"$installed_version" != "$expected_version"',
-            '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_COMMIT"',
-            "Could not find a version that satisfies the requirement review-sensei==",
         ]
+        if "reviewsensei-core-installation:" not in texts[0]:
+            required_fragments += [
+                '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_COMMIT"',
+                "Could not find a version that satisfies the requirement review-sensei==",
+            ]
         if any(
             fragment not in script for fragment in required_fragments
         ) or not step.get("env", {}).get("REVIEW_SENSEI_VERSION"):
@@ -160,12 +165,14 @@ def validate_surface(root: Path):
         raise ValueError(
             "runtime version is not bound to the executing workflow commit"
         )
+    installation = registry_core_contract(raw_workflows[0])
     return {
         "status": "PASS",
         "data_only": True,
         "caller_references": calls,
         "installation_lanes": len(installs),
         "publication_metadata_lanes": len(publication),
+        "core_installation": installation,
         "diagnostics": [
             "actionlint/current context documentation omit job.workflow_*; observed downstream bootstrap resolved the correct callee tag object/source. This static mismatch is not a proven runtime defect; full live job/command execution remains separate."
         ],

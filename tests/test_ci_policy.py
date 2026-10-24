@@ -1797,7 +1797,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             )
             self.assertEqual(accepted.returncode, 0, accepted.stderr)
 
-    def test_reusable_workflow_prefers_pypi_with_sha_verified_github_fallback(self):
+    def test_reusable_workflow_requires_registry_core_and_pins_hosted_fallback(self):
         workflow = (
             Path(__file__).resolve().parents[1]
             / ".github"
@@ -1835,11 +1835,8 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertIn("does not declare an exact released version", release)
         self.assertIn('echo "package_version=$package_version"', release)
         self.assertIn("refusing the GitHub fallback", text)
-        self.assertIn("No matching distribution found for review-sensei==", text)
-        self.assertIn(
-            "Could not find a version that satisfies the requirement review-sensei==",
-            text,
-        )
+        self.assertEqual(text.count("core source fallback is disabled."), 4)
+        self.assertNotIn("No matching distribution found for review-sensei==", text)
         self.assertIn(
             '"review-sensei==$expected_version"',
             text,
@@ -1867,12 +1864,14 @@ class ActionPinPolicyTests(unittest.TestCase):
                 self.assertLess(
                     block.index('"review-sensei==$expected_version"'),
                     block.index(
-                        '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_COMMIT"'
+                        '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_COMMIT#subdirectory=packages/python/review-sensei-github"'
                     ),
                 )
-        # The tagged-commit fallback is one behavior shared by four install
-        # steps, so assert its shape once and assert the four copies stay
-        # identical instead of counting marker strings anywhere in the file.
+                self.assertNotIn(
+                    '"git+https://github.com/malsabbagh/review-sensei.git@$REVIEW_SENSEI_WORKFLOW_COMMIT"',
+                    block,
+                )
+        # Exact version validation is shared by all four install steps.
         regions = [_install_fallback_region(block) for block in install_blocks]
         self.assertEqual(len(set(regions)), 1)
         region = regions[0]

@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import release_docs as docs
-from python_release_sources import core_equivalence
+from python_release_sources import core_equivalence, core_installation
 from qualify_published_cli import clean_environment, require_hosted_pin
 
 MAX_JSON = 512 * 1024
@@ -455,8 +455,13 @@ def qualify(source, version, github_version, output):
     hosted_identity = signed_release("github-v" + github_version)
     if hosted_identity[1] != source:
         raise ValueError("hosted immutable tag does not bind the selected source")
-    equivalence = core_equivalence(engine_identity[1], source)
-    receipt = {"source": source, "core_equivalence": equivalence, "projects": {}}
+    installation = core_installation(engine_identity[1], source)
+    binding = (
+        {"core_installation": installation}
+        if installation is not None
+        else {"core_equivalence": core_equivalence(engine_identity[1], source)}
+    )
+    receipt = {"source": source, **binding, "projects": {}}
     plan = []
     for (
         project,
@@ -556,6 +561,16 @@ def assert_current(receipt):
     engine_source = receipt["projects"]["review-sensei"].get(
         "source", receipt["source"]
     )
+    installation = core_installation(engine_source, receipt["source"])
+    if installation is not None:
+        if (
+            "core_equivalence" in receipt
+            or receipt.get("core_installation") != installation
+        ):
+            raise ValueError("core installation contract is missing or changed")
+        return
+    if "core_installation" in receipt:
+        raise ValueError("core installation contract is not present in the source")
     if engine_source != receipt["source"] or "core_equivalence" in receipt:
         if "core_equivalence" not in receipt:
             raise ValueError(

@@ -33,6 +33,105 @@ SETUPTOOLS = {
     },
 }
 
+INSTALLATION_SELECTOR = b"# reviewsensei-core-installation: pypi-exact-v1"
+WORKFLOW_PATH = ".github/workflows/review-sensei-run.yml"
+# Trusted, append-only validator policy. Each digest admits the entire reviewed
+# workflow under the registry-only core contract. Never derive this allowlist
+# from a candidate, its selector, a receipt or downloaded release data.
+REGISTRY_ONLY_WORKFLOWS = frozenset(
+    {"2f7ea8f388968b8cadab9dae156e90a8fb636c945b28585cde6ae04412bccf0c"}
+)
+
+
+def registry_core_contract(raw: bytes) -> dict | None:
+    """Recognize reviewed exact bytes, without executing selected source code."""
+    if not isinstance(raw, bytes) or not 0 < len(raw) <= 256 * 1024:
+        raise ValueError("core installation workflow bytes are invalid or oversized")
+    digest = hashlib.sha256(raw).hexdigest()
+    if b"reviewsensei-core-installation:" not in raw:
+        return None  # Historical workflow-source fallback still needs equivalence.
+    declarations = [
+        line for line in raw.splitlines() if b"reviewsensei-core-installation:" in line
+    ]
+    if declarations != [INSTALLATION_SELECTOR] or digest not in REGISTRY_ONLY_WORKFLOWS:
+        raise ValueError("registry-only core installation workflow is not recognized")
+    return {
+        "mode": "pypi-exact-v1",
+        "workflow_sha256": digest,
+        "installation_lanes": 4,
+    }
+
+
+def workflow_source_bytes(source: str) -> tuple[bytes, str]:
+    """Read one regular immutable Git path with bounded complete inventories."""
+    if not isinstance(source, str) or not docs.SHA.fullmatch(source):
+        raise ValueError("core installation needs an exact workflow source")
+    commit = docs.api(f"git/commits/{source}")
+    if not isinstance(commit, dict) or commit.get("sha") != source:
+        raise ValueError("core installation workflow commit is unavailable")
+    selected_tree = commit.get("tree")
+    tree = selected_tree.get("sha") if isinstance(selected_tree, dict) else None
+    if not isinstance(tree, str) or not docs.SHA.fullmatch(tree):
+        raise ValueError("core installation workflow tree is unavailable")
+    for index, name in enumerate(WORKFLOW_PATH.split("/")):
+        inventory = docs.api(f"git/trees/{tree}")
+        entries = inventory.get("tree") if isinstance(inventory, dict) else None
+        if (
+            not isinstance(inventory, dict)
+            or inventory.get("sha") != tree
+            or inventory.get("truncated") is not False
+            or not isinstance(entries, list)
+            or not 0 < len(entries) <= 4096
+        ):
+            raise ValueError("core installation workflow inventory is incomplete")
+        selected = {}
+        for item in entries:
+            path = item.get("path") if isinstance(item, dict) else None
+            if (
+                not isinstance(path, str)
+                or not path
+                or "/" in path
+                or "\\" in path
+                or path in {".", ".."}
+                or path in selected
+            ):
+                raise ValueError("core installation workflow inventory is invalid")
+            selected[path] = item
+        item = selected.get(name, {})
+        digest = item.get("sha")
+        leaf = index == 2
+        if (
+            not isinstance(digest, str)
+            or not docs.SHA.fullmatch(digest)
+            or (not leaf and (item.get("type"), item.get("mode")) != ("tree", "040000"))
+            or (
+                leaf
+                and (
+                    item.get("type") != "blob"
+                    or item.get("mode") not in {"100644", "100755"}
+                )
+            )
+        ):
+            raise ValueError("core installation workflow path is not regular")
+        tree = digest
+    return source_blob(tree), tree
+
+
+def core_installation(engine_source: str, workflow_source: str) -> dict | None:
+    if not isinstance(engine_source, str) or not docs.SHA.fullmatch(engine_source):
+        raise ValueError("core installation needs an exact published engine source")
+    raw, blob = workflow_source_bytes(workflow_source)
+    contract = registry_core_contract(raw)
+    if contract is None:
+        return None
+    return {
+        **contract,
+        "engine_source": engine_source,
+        "workflow_source": workflow_source,
+        "workflow_path": WORKFLOW_PATH,
+        "workflow_blob_sha": blob,
+    }
+
 
 def root_inputs(source: str) -> dict:
     if not docs.SHA.fullmatch(source):
@@ -89,10 +188,13 @@ def root_inputs(source: str) -> dict:
 def source_blob(digest: str) -> bytes:
     value = docs.api(f"git/blobs/{digest}")
     if (
-        value.get("sha") != digest
+        not isinstance(value, dict)
+        or value.get("sha") != digest
         or value.get("encoding") != "base64"
         or type(value.get("size")) is not int
         or not 0 < value["size"] <= 256 * 1024
+        or not isinstance(value.get("content"), str)
+        or len(value["content"]) > 512 * 1024
     ):
         raise ValueError("core build recipe blob is unavailable or oversized")
     raw = base64.b64decode("".join(value["content"].split()), validate=True)

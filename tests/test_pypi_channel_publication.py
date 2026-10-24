@@ -46,6 +46,9 @@ class PublicationTests(unittest.TestCase):
         self.registry = {}
         self.bodies = {}
         self.reads = []
+        self.enterContext(
+            patch.object(publication, "core_installation", return_value=None)
+        )
         for index, (project, version, tag, workflow, required) in enumerate(
             (
                 (
@@ -311,6 +314,77 @@ class PublicationTests(unittest.TestCase):
                 ValueError, "require core build-input equivalence"
             ):
                 publication.assert_current(receipt)
+
+    def test_registry_only_core_uses_original_signed_publication_without_equivalence(
+        self,
+    ):
+        old_core = "c" * 40
+        self.runs["release.yml"]["head_sha"] = old_core
+        for item in self.jobs[1]:
+            item["head_sha"] = old_core
+        proof = {
+            "mode": "pypi-exact-v1",
+            "engine_source": old_core,
+            "workflow_source": SOURCE,
+            "workflow_path": ".github/workflows/review-sensei-run.yml",
+            "workflow_blob_sha": "d" * 40,
+            "workflow_sha256": "e" * 64,
+            "installation_lanes": 4,
+        }
+        with (
+            patch.object(
+                publication,
+                "signed_release",
+                side_effect=lambda tag: (
+                    OBJECT,
+                    old_core if tag == "v1.2.3" else SOURCE,
+                ),
+            ),
+            patch.object(publication, "core_installation", return_value=proof),
+            patch.object(
+                publication,
+                "core_equivalence",
+                side_effect=ValueError("README differs"),
+            ) as equivalence,
+        ):
+            receipt = self.qualify("registry-only")
+            self.assertEqual(receipt["core_installation"], proof)
+            self.assertNotIn("core_equivalence", receipt)
+            self.assertEqual(receipt["projects"]["review-sensei"]["source"], old_core)
+            equivalence.assert_not_called()
+            for mutation in ("missing", "mixed", "source", "blob", "mode"):
+                bad = copy.deepcopy(receipt)
+                if mutation == "missing":
+                    del bad["core_installation"]
+                elif mutation == "mixed":
+                    bad["core_equivalence"] = {"mode": "same-source"}
+                else:
+                    key = {
+                        "source": "workflow_source",
+                        "blob": "workflow_blob_sha",
+                        "mode": "mode",
+                    }[mutation]
+                    bad["core_installation"][key] = "forged"
+                with (
+                    self.subTest(mutation=mutation),
+                    self.assertRaisesRegex(ValueError, "installation"),
+                ):
+                    publication.assert_current(bad)
+
+    def test_requested_but_unrecognized_registry_contract_never_falls_back(self):
+        with (
+            patch.object(
+                publication,
+                "core_installation",
+                side_effect=ValueError("registry-only workflow is not recognized"),
+            ),
+            patch.object(publication, "core_equivalence") as equivalence,
+            self.assertRaisesRegex(ValueError, "not recognized"),
+        ):
+            self.qualify("unrecognized-registry")
+        equivalence.assert_not_called()
+        self.assertEqual(self.reads, [])
+        self.verify.assert_not_called()
 
     def test_changed_core_graph_refuses_split_source_before_registry_or_verifier(self):
         with (

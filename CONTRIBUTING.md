@@ -46,6 +46,16 @@ clean, and mypy must pass for `src`. Keep provider-specific transport and
 authentication under `src/review_sensei/providers/`; review business logic stays
 independent of GitHub and model-provider SDKs.
 
+The proposed registry-only core installer contract (ADR 0109, unreleased after
+hosted 0.3.13) binds complete reusable-workflow bytes to a trusted append-only
+digest list in `scripts/python_release_sources.py`. Every workflow-byte change,
+including comments, needs review of all execution paths and an explicit policy
+addition. Never derive allowed digests from a selected release, selector or
+receipt; retain historical entries. Exercise all four actual installer scripts
+with `python -m unittest tests.test_core_installation_contract` and the source,
+publication-receipt and major-channel regressions. These tests supplement the
+full gate sequence; they do not replace cryptographic or installed qualification.
+
 Keep changes narrow and add tests through public seams. Provider tests should
 use fake transports and must not require live API credentials. Validate provider
 output before any publisher can consume it. Treat diffs, source comments,
