@@ -309,7 +309,12 @@ def analyze_diff(
             raise _invalid("diff exceeds the configured byte limit")
         enumeration_complete = False
     lines_truncated = False
-    lines = diff.splitlines()
+    # Diff records end at LF; CR and other source separators belong to the
+    # record body. Drop only split's terminal sentinel, not real blank lines.
+    lines = diff.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    total_lines = len(lines)
     if len(lines) > line_limit:
         if not allow_incomplete:
             raise _invalid("diff exceeds the configured line limit")
@@ -782,7 +787,6 @@ def analyze_diff(
     unique_renames: dict[tuple[str, str], None] = {}
     for pair in renamed_pairs:
         unique_renames.setdefault(pair, None)
-    total_lines = len(diff.splitlines())
     return DiffAnalysis(
         changed_lines={path: frozenset(values) for path, values in changed.items()},
         changed_paths=tuple(paths),

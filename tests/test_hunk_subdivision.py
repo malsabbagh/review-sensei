@@ -25,6 +25,18 @@ from review_sensei.service import ReviewService
 from review_sensei.stages import Stage
 from review_sensei.work_recovery import WorkRecoveryStore
 
+SOURCE_SEPARATORS = (
+    "\r",
+    "\v",
+    "\f",
+    "\x1c",
+    "\x1d",
+    "\x1e",
+    "\x85",
+    "\u2028",
+    "\u2029",
+)
+
 
 class HunkSubdivisionTests(unittest.TestCase):
     def fixture(self, patch):
@@ -143,11 +155,12 @@ class HunkSubdivisionTests(unittest.TestCase):
             with self.subTest(remaining=value), self.assertRaises(ReviewInputError):
                 SubdivisionAllowance(value)
 
-    def test_crlf_input_and_multibyte_lines_conserve_the_canonical_utf8_body(self):
-        snapshot, _, record, hunk = self.fixture("@@ -0,0 +1,2 @@\r\n+新\r\n+é\r\n")
-        # Diff parsing canonicalizes line endings before subdivision. Identity
-        # and byte offsets bind that canonical source, not the raw CRLF input.
-        self.assertEqual(hunk.text, "@@ -0,0 +1,2 @@\n+新\n+é\n")
+    def test_crlf_source_and_multibyte_lines_conserve_exact_utf8_bytes(self):
+        patch = "@@ -0,0 +1,2 @@\n+新\r\n+é\r\n"
+        snapshot, source, record, hunk = self.fixture(patch)
+        self.assertEqual(hunk.text, patch)
+        lf_source = self.fixture(patch.replace("\r\n", "\n"))[1]
+        self.assertNotEqual(source.evidence_id, lf_source.evidence_id)
         parts = subdivide_hunk(record, hunk, snapshot, admit=lambda part: False)
         bodies = [
             part.analysis.hunk_records[0].text.partition("\n")[2].encode("utf-8")
@@ -156,8 +169,68 @@ class HunkSubdivisionTests(unittest.TestCase):
         self.assertEqual(b"".join(bodies), hunk.text.partition("\n")[2].encode())
         self.assertEqual(
             [(part.fragment.body_start, part.fragment.body_end) for part in parts],
-            [(0, len(bodies[0])), (len(bodies[0]), sum(map(len, bodies)))],
+            [(0, 6), (6, 11)],
         )
+
+    def test_source_separators_and_prefixlike_text_stay_in_physical_line_units(self):
+        for separator in SOURCE_SEPARATORS:
+            for following in ("+addition", "-deletion", "\\ No newline at end of file"):
+                with self.subTest(separator=repr(separator), following=following):
+                    units = [
+                        f" context{separator}{following}\n",
+                        f"-old{separator}{following}\n\\ No newline at end of file\n",
+                        f"+新{separator}{following}\n\\ No newline at end of file\n",
+                        " tail\n",
+                    ]
+                    patch = "@@ -7,3 +11,3 @@ function\n" + "".join(units)
+                    snapshot, _, record, hunk = self.fixture(patch)
+                    probes = []
+                    parts = subdivide_hunk(
+                        record,
+                        hunk,
+                        snapshot,
+                        admit=lambda part: probes.append(part) or False,
+                    )
+                    self.assertEqual(len(parts), 4)
+                    self.assertEqual(len(probes), 7)
+                    body = "".join(units).encode()
+                    cursor = 0
+                    added, deleted = set(), set()
+                    for part, expected, counts in zip(
+                        parts, units, ((1, 1), (1, 0), (0, 1), (1, 1)), strict=True
+                    ):
+                        proof = part.fragment
+                        piece = part.analysis.hunk_records[0]
+                        actual = piece.text.partition("\n")[2].encode()
+                        self.assertEqual(actual, expected.encode())
+                        self.assertEqual((piece.old_count, piece.new_count), counts)
+                        self.assertEqual(proof.body_start, cursor)
+                        cursor += len(actual)
+                        self.assertEqual(proof.body_end, cursor)
+                        self.assertEqual(proof.body_bytes, len(body))
+                        self.assertEqual(
+                            proof.body_sha256, hashlib.sha256(actual).hexdigest()
+                        )
+                        self.assertEqual(
+                            proof.source_hunk_sha256,
+                            hashlib.sha256(hunk.text.encode()).hexdigest(),
+                        )
+                        self.assertEqual(
+                            proof.source_evidence_id,
+                            EvidenceRecord.from_diff_record(
+                                record, snapshot
+                            ).evidence_id,
+                        )
+                        self.assertEqual(
+                            actual, body[proof.body_start : proof.body_end]
+                        )
+                        added.update(piece.added_lines)
+                        deleted.update(piece.deleted_lines)
+                        self.assertFalse(part.complete)
+                    self.assertEqual(cursor, len(body))
+                    self.assertEqual(added, {12})
+                    self.assertEqual(deleted, {8})
+                    EvidenceBundle(snapshot, parts)
 
     def test_giant_line_and_part_ceiling_keep_unadmitted_evidence(self):
         snapshot, _, record, hunk = self.fixture(
