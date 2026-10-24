@@ -3026,6 +3026,7 @@ class GitHubApplication:
 
         if not isinstance(result, MaintainerCommandResult):
             return result
+        command_result: MaintainerCommandResult = result
         finalizer = getattr(self.reviewer, "finalizer", None)
         if evidence_budget is not None and isinstance(
             finalizer, ReviewApprovalFinalizer
@@ -3041,9 +3042,9 @@ class GitHubApplication:
             finalizer.evidence_budget = evidence_budget
         refinalize = getattr(finalizer, "refinalize_with_dispositions", None)
         if not callable(refinalize):
-            return result
+            return command_result
         failed = (
-            result.summary
+            command_result.summary
             + "; recorded; gate re-evaluation failed, comment `@reviewsensei verify` to retry"
         )
         try:
@@ -3063,7 +3064,7 @@ class GitHubApplication:
             )
             finding_ids = tuple(
                 item.reference
-                for item in result.receipts
+                for item in command_result.receipts
                 if item.outcome in {"recorded", "already-recorded"}
                 and item.reference.startswith("RS-")
             )
@@ -3082,27 +3083,32 @@ class GitHubApplication:
                 policy_digest=policy_digest,
             )
         except Exception:
-            return replace(result, summary=failed, evaluation_failed=True)
+            return replace(command_result, summary=failed, evaluation_failed=True)
+        from .approval_progress import render_command_progress
+
         if getattr(
             publication, "status", None
         ) == "gate_reevaluation_failed" and getattr(
             publication, "diagnostic", None
         ) in {"command_body_capacity_exceeded", "command_body_capacity_unverifiable"}:
-            return replace(
-                result,
-                summary=(
-                    result.summary
-                    + f"; gate re-evaluation blocked ({publication.diagnostic}); "
-                    "decisions retained; retain the original review and ledger "
-                    "for operator capacity/evidence repair"
+            return render_command_progress(
+                replace(
+                    command_result,
+                    summary=(
+                        command_result.summary
+                        + f"; gate re-evaluation blocked ({publication.diagnostic}); "
+                        "decisions retained; retain the original review and ledger "
+                        "for operator capacity/evidence repair"
+                    ),
+                    evaluation_failed=True,
                 ),
-                evaluation_failed=True,
+                publication,
             )
         thread_status = getattr(publication, "thread_resolution", None)
         if thread_status:
-            result = replace(
-                result,
-                summary=result.summary
+            command_result = replace(
+                command_result,
+                summary=command_result.summary
                 + (
                     "; matching threads resolved"
                     if thread_status == "resolved"
@@ -3110,7 +3116,10 @@ class GitHubApplication:
                 ),
             )
         if getattr(publication, "status", None) == "gate_reevaluation_failed":
-            return replace(result, summary=failed, evaluation_failed=True)
+            return render_command_progress(
+                replace(command_result, summary=failed, evaluation_failed=True),
+                publication,
+            )
         if getattr(publication, "status", None) in {"approved", "already_approved"}:
             suffix = (
                 "; approval submitted (maintainer-coverage-exception)"
@@ -3118,26 +3127,55 @@ class GitHubApplication:
                 == "maintainer_coverage_exception"
                 else "; approval submitted"
             )
-            return replace(result, summary=result.summary + suffix)
+            return render_command_progress(
+                replace(command_result, summary=command_result.summary + suffix),
+                publication,
+            )
+        progress = getattr(publication, "approval_progress", None)
+        if (
+            getattr(progress, "approval_state", None) == "not-observed"
+            and getattr(publication, "diagnostic", None) == "approval_withheld"
+        ):
+            return render_command_progress(
+                replace(
+                    command_result,
+                    summary=command_result.summary
+                    + "; approval outcome unconfirmed; reconcile the existing native "
+                    "review, then comment `@reviewsensei verify` to retry",
+                ),
+                publication,
+            )
         diagnostic = getattr(publication, "diagnostic", None)
         if diagnostic == "review_incomplete":
-            return replace(
-                result,
-                summary=(
-                    result.summary
-                    + "; approval withheld (review_incomplete); review evidence "
-                    "is still incomplete: verify rechecks finding decisions, "
-                    "not mixed media coverage. For unsupported-file coverage, "
-                    "use the original media confirmation to validate the "
-                    "current head/base and retained receipts. Other AI review "
-                    "gaps require review continuation."
+            return render_command_progress(
+                replace(
+                    command_result,
+                    summary=(
+                        command_result.summary
+                        + "; approval withheld (review_incomplete); review evidence "
+                        "is still incomplete: verify rechecks finding decisions, "
+                        "not mixed media coverage. For unsupported-file coverage, "
+                        "use the original media confirmation to validate the "
+                        "current head/base and retained receipts. Other AI review "
+                        "gaps require review continuation. Inspect the retained "
+                        "review before choosing `@reviewsensei review remaining`: "
+                        "it validates reusable text scope and refuses missing "
+                        "or stale evidence. This check did not establish coverage "
+                        "counts or the original media source comment ID."
+                    ),
                 ),
+                publication,
             )
         if diagnostic:
-            return replace(
-                result, summary=result.summary + f"; approval withheld ({diagnostic})"
+            return render_command_progress(
+                replace(
+                    command_result,
+                    summary=command_result.summary
+                    + f"; approval withheld ({diagnostic})",
+                ),
+                publication,
             )
-        return result
+        return render_command_progress(command_result, publication)
 
     def generate_and_publish_reply(
         self,

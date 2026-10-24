@@ -61,6 +61,7 @@ include tests/test_authenticated_partitions.py
 include tests/test_remaining_progress.py
 include tests/test_disposition_snapshots.py
 include tests/test_command_capacity_recovery.py
+include tests/test_approval_progress.py
 include tests/test_publication_future_capacity.py
 include tests/test_hosted_history_readers.py
 include tests/fixtures/regressions/pr316-history-shape.json

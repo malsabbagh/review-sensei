@@ -228,7 +228,9 @@ def _github_parser() -> argparse.ArgumentParser:
             "Record at most 10 assessed finding IDs per override comment. "
             "Use verify to retry approval/thread reconciliation without new inference. "
             "review continue unpauses; rescan starts fresh bounded analysis. "
-            "Check native APPROVED and the current check, not only workflow success."
+            "Check native APPROVED and the current check, not only workflow success. "
+            "When emitted, approval-progress separates requested checks from confirmed "
+            "writes and reports unknown evidence explicitly."
         ),
     )
     command.add_argument("--comment-body", required=True)

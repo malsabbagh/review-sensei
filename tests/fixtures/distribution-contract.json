@@ -88,6 +88,7 @@
         "tests/test_authenticated_partitions.py",
         "tests/test_disposition_snapshots.py",
         "tests/test_command_capacity_recovery.py",
+        "tests/test_approval_progress.py",
         "tests/test_publication_future_capacity.py",
         "tests/test_hosted_history_readers.py",
         "tests/fixtures/regressions/pr316-history-shape.json",

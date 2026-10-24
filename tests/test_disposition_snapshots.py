@@ -52,6 +52,102 @@ def snapshot():
 
 
 class DispositionSnapshotReaderTests(unittest.TestCase):
+    def test_audited_25_decisions_finish_bounded_threads_and_one_native_approval(self):
+        from review_sensei.disposition import (
+            FindingIdentity,
+            apply_session_command,
+            parse_maintainer_command,
+            session_dispositions,
+        )
+        from review_sensei.models import ReviewTransaction
+        from tests.test_command_capacity_recovery import CommandCapacityState
+
+        state = CommandCapacityState(
+            complete=True, human_count=25, inline_range=(0, 25), padded=False
+        )
+        state.resolved_threads.clear()
+        inventory = tuple(
+            FindingIdentity(
+                entry.instance,
+                entry.lifecycle,
+                overridable=entry.overridable,
+                needs_human=entry.needs_human,
+            )
+            for entry in state.entries
+        )
+        ids = [state.labels[e.instance] for e in state.entries if e.needs_human]
+        transaction = ReviewTransaction.create(
+            repository=IDENTITY.repository,
+            pull_request=1,
+            base_sha=BASE,
+            head_sha=HEAD,
+            policy_digest=POLICY,
+            configuration_digest="e" * 64,
+            evidence_digest="a" * 64,
+            reservation_id="f" * 64,
+            generation=1,
+        ).with_result(state.result.content_digest())
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            seed = LocalSessionLedger(path)
+            seed.initialize(IDENTITY)
+            seed.replace(
+                IDENTITY,
+                lambda record: record.evolve(
+                    generation=1,
+                    transaction=transaction,
+                    last_committed_reservation_id=transaction.reservation_id,
+                ),
+            )
+            for batch, start in enumerate(range(0, 25, 10)):
+                ledger = LocalSessionLedger(
+                    path,
+                    evidence_budget=EvidenceReadBudget(),
+                    enable_disposition_snapshot_writes=True,
+                )
+                _, outcome = apply_session_command(
+                    ledger,
+                    IDENTITY,
+                    parse_maintainer_command(
+                        "@reviewsensei override "
+                        + " ".join(ids[start : start + 10])
+                        + " acceptable risk",
+                        actor="alice",
+                        head_sha=HEAD,
+                    ),
+                    finding_inventory=inventory,
+                    actor_role="admin",
+                    policy_digest=POLICY,
+                    provenance=f"comment:{batch + 1}",
+                )
+                self.assertTrue(outcome.applied)
+                self.assertLessEqual(ledger.evidence_budget.calls, 60)
+            fresh = LocalSessionLedger(path, evidence_budget=EvidenceReadBudget())
+            record = fresh.load(IDENTITY).record
+            self.assertIsNotNone(record.disposition_snapshot)
+            decisions = session_dispositions(record, ledger=fresh)
+            self.assertEqual(len(decisions), 25)
+            self.assertTrue(
+                all(d.actor_role == "admin" and d.provenance for d in decisions)
+            )
+            progress = []
+            for _ in range(8):
+                outcome, budget, _ = state.verify(decisions)
+                progress.append(len(state.resolved_threads))
+                self.assertLessEqual(budget.calls, 60)
+                if outcome.status == "approved":
+                    break
+            self.assertEqual(outcome.status, "approved", progress)
+            self.assertGreater(len(progress), 1, progress)
+            self.assertEqual(len(state.resolved_threads), 25)
+            self.assertEqual(state.checks[-1]["conclusion"], "success")
+            replay, _, _ = state.verify(decisions)
+            self.assertEqual(replay.status, "already_approved")
+            state.head = "c" * 40
+            stale, _, _ = state.verify(decisions)
+            self.assertEqual(stale.status, "skipped_stale_head")
+        self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 1)
+
     def test_large_snapshot_is_one_complete_inventory_and_refuses_corruption(self):
         from review_sensei.disposition import session_dispositions
 

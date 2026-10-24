@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Preserve complete audited maintainer decisions in authenticated immutable
+  snapshot parts, retaining bounded commands, complete readback and existing
+  storage and request limits. Advance thread cleanup across retries without
+  spending each allowance on an already resolved prefix.
+- Add explicit bounded remaining-text review windows, bound to exact retained
+  source and unchanged scope. Preserve prior findings, reject stale or corrupt
+  evidence, and retain exact parents through interrupted checkpoint publication.
+- Report allowlisted approval/check/thread observations and actionable recovery
+  guidance without extra requests or new approval authority. Distinguish denied
+  checks and uncertain writes from confirmed publication, and preserve one native
+  approval under replay.
+- Align remaining-command routing across installed Python and Worker callers;
+  refuse unreadable original event intent instead of selecting ordinary review.
+
 ## review-sensei-github 0.3.12 - 2026-10-23
 
 - Pin `review-sensei==0.8.11`.

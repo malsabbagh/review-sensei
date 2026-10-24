@@ -70,6 +70,24 @@ atomic unit cannot fit or progress stops, repair the identified configuration or
 evidence issue. Fresh rescan remains a separate deliberate operation. Text
 coverage does not replace media/human assessment or independent approval gates.
 
+Complete file and hunk counts can coexist with a partial review. For example,
+incremental reconciliation keeps the result partial when older findings cannot
+be uniquely matched to current evidence. Finding overrides do not establish that
+the older concerns were fixed, and remaining-text analysis has no work to schedule
+if every text unit is already reviewed. Inspect the retained result and baseline
+before choosing a new operation. For confirmed prior-finding uncertainty, the
+existing full rescan starts a fresh bounded review without that incremental
+baseline:
+
+```text
+@reviewsensei rescan commit abc1234
+```
+
+Replace the prefix with the current head. Reconcile that one operation before
+requesting another. A full rescan can discover new findings or remain incomplete;
+it does not waive evidence requirements or guarantee approval. This full-rescan
+route is already available in core 0.8.11 / hosted 0.3.12.
+
 ## Record legitimate maintainer decisions in batches
 
 Assess every finding against its source and evidence before accepting its risk.
@@ -136,3 +154,48 @@ is not that receipt.
 When blocked, retain the source event, exact head, installed versions, reason,
 recorded/unrecorded decision counts, thread state and next supported command.
 Do not include tokens, raw provider output or private source in diagnostics.
+
+## Read finalization progress
+
+The **unreleased** command diagnostics can emit an `approval-progress` JSON line
+with schema version 1.0. Its head, result digest and source review ID identify
+the observation. `honored_findings` counts authenticated current index entries,
+not IDs merely requested in a comment. Unknown coverage counts, human counts
+and original media source IDs are null. Recorded qualification describes the
+retained fact; it does not claim this command freshly qualified a provider.
+
+`decided_thread_reconciliation` concerns decided findings, not every native
+thread. `requested_check_conclusion` is distinct from confirmed check publication.
+A missing check token is `not-attempted`; a failed or permission-denied request
+is `unconfirmed`. Only a successful create/update with an observed positive
+check ID is confirmed. An unreadable approval response is `not-observed`, since
+the write may have committed; it is not evidence that approval was withheld.
+Approval can be submitted even when a later check update fails, so preserve
+`approval_state` and reconcile that review before retrying. The observation adds
+no request, authority or budget and never feeds eligibility.
+
+For `next_action: inspect_partial_source`, inspect the referenced retained
+review. A verify command has not established reusable text scope or media
+confirmation authority. Choose validated remaining-text work, a fresh full rescan
+for confirmed prior-finding uncertainty, or the original media source replay as
+appropriate; do not repeat the same operation
+without checking its actual outcome. Missing evidence requires repair, not
+clearing a flag or relabeling partial analysis complete.
+
+## Explicitly accept an assessed coverage uncertainty
+
+A maintainer/admin may make the separately audited coverage-risk decision when
+the current supported policy permits it. Assess the exact missing evidence
+first and explain the accepted risk. This is a human policy exception, not proof
+that AI reviewed the missing work, and it cannot waive independent authority,
+source-integrity, required finding, thread or provider-qualification gates.
+
+```text
+@reviewsensei accept-coverage-uncertainty --reason Independently assessed remaining coverage risk and tracked mitigation
+@reviewsensei verify
+```
+
+The decision binds the current head and exact incomplete-evidence inventory.
+Inspect the resulting exception outcome and actual native review; a new source,
+head or policy needs fresh assessment. Do not use this command to hide a failed
+publication, corrupt receipt or unverified security requirement.
