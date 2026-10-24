@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Wait read-only for one exact original Python publication run to succeed."""
+"""Wait read-only for one exact original publication run to succeed."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ REPOSITORY = "malsabbagh/review-sensei"
 WORKFLOWS = {
     "release.yml": ("v", "Publish to PyPI with Trusted Publishing"),
     "release-github.yml": ("github-v", "Publish review-sensei-github to PyPI"),
+    "publish-npm.yml": ("v", "Publish npm packages with Trusted Publishing"),
 }
 MAX_WAIT = 90 * 60
 INTERVAL = 30
@@ -166,7 +167,9 @@ def wait_for_publication(
             else:
                 report.update(run_status="not-created", run_conclusion=None)
         except HTTPError as error:
-            if error.code not in {429, 500, 502, 503, 504}:
+            code = error.code
+            error.close()
+            if code not in {429, 500, 502, 503, 504}:
                 raise ValueError("publication readiness API access failed") from None
             report["run_status"] = "api-retry"
         except (URLError, TimeoutError):
@@ -180,12 +183,62 @@ def wait_for_publication(
         sleep(min(INTERVAL, remaining))
 
 
+def wait_for_pages_publication(
+    core_run_id: int,
+    tag: str,
+    source: str,
+    report: dict,
+    *,
+    read=None,
+    read_jobs=None,
+    read_original=None,
+    wait=None,
+) -> None:
+    """Defer Pages for split npm, preserving historical combined-run recovery."""
+    import release_docs as docs
+
+    if type(core_run_id) is not int or core_run_id < 1:
+        raise ValueError("Pages readiness requires an exact core run ID")
+    read = docs.api if read is None else read
+    read_jobs = docs.api_pages if read_jobs is None else read_jobs
+    read_original = docs.channel_run if read_original is None else read_original
+    wait = wait_for_publication if wait is None else wait
+    run = read(f"actions/runs/{core_run_id}")
+    if (
+        type(run.get("id")) is not int
+        or run.get("id") != core_run_id
+        or run.get("head_branch") != tag
+        or run.get("head_sha") != source
+        or type(run.get("run_attempt")) is not int
+        or run["run_attempt"] < 1
+    ):
+        raise ValueError("Pages core publication identity differs")
+    jobs = read_jobs(f"actions/runs/{core_run_id}/jobs?filter=all", "jobs")
+    split = docs.uses_independent_npm_channel(jobs)
+    docs.validate_run(run, jobs, split_npm=split)
+    report.update(core_run_id=core_run_id, core_run_attempt=run["run_attempt"])
+    if not split:
+        report.update(status="PASS", workflow="release.yml", mode="combined")
+        return
+    original = read_original("release.yml", tag, source)
+    if any(
+        original.get(key) != run.get(key)
+        for key in ("id", "run_attempt", "status", "conclusion")
+    ):
+        raise ValueError("Pages original core publication changed")
+    report["mode"] = "split"
+    wait("publish-npm.yml", tag, source, report)
+    # This is readiness only. Pages still recomputes full channel/artifact,
+    # consumer/recorder, signature, provenance and high-water eligibility.
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workflow", choices=tuple(WORKFLOWS), required=True)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--source", required=True)
     parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument("--pages-core-run-id", type=int)
     args = parser.parse_args()
     report = {
         "status": "ERROR",
@@ -194,7 +247,14 @@ def main() -> int:
         "source": args.source,
     }
     try:
-        wait_for_publication(args.workflow, args.tag, args.source, report)
+        if args.pages_core_run_id is None:
+            wait_for_publication(args.workflow, args.tag, args.source, report)
+        elif args.workflow == "publish-npm.yml":
+            wait_for_pages_publication(
+                args.pages_core_run_id, args.tag, args.source, report
+            )
+        else:
+            raise ValueError("Pages core classification is only for npm readiness")
     except PublicationTimeout:
         report["reason"] = "publication-timeout"
         print(

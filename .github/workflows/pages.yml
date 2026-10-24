@@ -35,6 +35,7 @@ jobs:
         github.event.workflow_run.head_repository.full_name == github.repository
       )
     runs-on: ubuntu-latest
+    timeout-minutes: 95
     permissions:
       contents: read
       actions: read
@@ -48,6 +49,25 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
+      - name: Wait for matching npm publication before documentation verification
+        if: github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ github.event.workflow_run.id }}
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
+          RELEASE_SOURCE: ${{ github.event.workflow_run.head_sha }}
+        run: >-
+          python scripts/wait_for_publication.py --workflow publish-npm.yml
+          --tag "$RELEASE_TAG" --source "$RELEASE_SOURCE"
+          --pages-core-run-id "$RELEASE_RUN_ID"
+          --report "$RUNNER_TEMP/pages-npm-readiness.json"
+      - name: Retain npm publication readiness receipt
+        if: always() && github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Release'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pages-npm-publication-readiness
+          path: ${{ runner.temp }}/pages-npm-readiness.json
+          if-no-files-found: error
       - name: Select exact successful release run
         id: selection
         env:
