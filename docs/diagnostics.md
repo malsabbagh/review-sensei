@@ -164,3 +164,26 @@ Local `review continue` cannot reclaim a held reservation: it reports
 hold. A local ledger has no authenticated Actions completion proof. Hosted
 recovery applies only to its corresponding hosted session ledger; an abandoned
 local process requires investigation rather than a silent unpause or timer unlock.
+
+## GitHub check publication
+
+Check failures report one closed diagnostic. These observations do not establish
+why a particular live check is missing, and do not change review approval policy.
+
+| Diagnostic | Observed evidence |
+| --- | --- |
+| `check_capability_unavailable` | No check token, or a generic capability acquisition failure. |
+| `check_access_denied` | An observed HTTP 401 or 403; missing grants are not inferred. |
+| `check_temporarily_unavailable` | A typed transient failure, HTTP 429, or HTTP 5xx. |
+| `check_publication_failed` | Other, unknown, malformed, lookup, create, or update failure. |
+| `check_permission` | Legacy readable code; its cause is unconfirmed. |
+
+New generic failures no longer emit `check_permission`. New review bodies retain
+`check_published=false` in their eligibility evidence when check publication is
+unconfirmed, with a visible warning. Host stderr and Actions summaries retain
+this warning even on replay, when no new review body is written. When the summary
+budget is full, the concise warning is retained as review framing within the
+existing GitHub body limit. An otherwise eligible review may still be approved.
+No new requests, retries, or permission changes are made. Failure evidence retains
+only closed operation labels (`capability`, `lookup`, `create`, `update`) and
+observed numeric HTTP status, never exception text or response content.

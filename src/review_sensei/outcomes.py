@@ -64,6 +64,15 @@ PUBLIC_SCHEMA_VERSION = "1.0"
 FAILURE_RUN_STATUSES = frozenset(
     {"provider_failed", "budget_exhausted", "publication_failed", "action_required"}
 )
+CHECK_PUBLICATION_DIAGNOSTICS = frozenset(
+    {
+        "check_permission",
+        "check_capability_unavailable",
+        "check_access_denied",
+        "check_temporarily_unavailable",
+        "check_publication_failed",
+    }
+)
 PUBLIC_DIAGNOSTICS = frozenset(
     {
         "broker_rejected",
@@ -72,7 +81,7 @@ PUBLIC_DIAGNOSTICS = frozenset(
         "approval_withheld",
         "app_authored",
         "cancelled",
-        "check_permission",
+        *CHECK_PUBLICATION_DIAGNOSTICS,
         "coverage-incomplete",
         "coverage-partial",
         "baseline_capacity_exceeded",
@@ -698,6 +707,8 @@ def render_actions_summary(outcome: RunOutcome) -> str:
         lines.append(f"- pull_request: {outcome.pull_request_number}")
     if outcome.diagnostic:
         lines.append(f"- diagnostic: `{sanitize_diagnostic(outcome.diagnostic)}`")
+    if outcome.diagnostic in CHECK_PUBLICATION_DIAGNOSTICS:
+        lines.append("- warning: Check publication could not be confirmed.")
     if outcome.stage_summary:
         lines.append("- stages:")
         for name, status in outcome.stage_summary.items():
@@ -730,7 +741,13 @@ def emit_host_outcome(outcome: RunOutcome, *, output_path: Path | None = None) -
     if outcome.diagnostic is not None:
         reason = stages.get("baseline_recovery")
         print(
-            f"review-sensei: {outcome.status}: {outcome.diagnostic}"
+            "review-sensei: "
+            + (
+                "warning: check publication could not be confirmed: "
+                if outcome.diagnostic in CHECK_PUBLICATION_DIAGNOSTICS
+                else ""
+            )
+            + f"{outcome.status}: {outcome.diagnostic}"
             + (f": {reason}" if reason is not None else ""),
             file=sys.stderr,
         )

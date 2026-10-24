@@ -1346,10 +1346,10 @@ class ReviewPublisherTests(unittest.TestCase):
             auto_approve=True,
         )
         self.assertEqual(ungated.status, "published")
-        self.assertEqual(ungated.diagnostic, "check_permission")
+        self.assertEqual(ungated.diagnostic, "check_capability_unavailable")
         self.assertEqual(posted_events(ungated_calls), ["COMMENT", "APPROVE"])
         ungated_review_body = review_payloads(ungated_calls)[0]["body"]
-        self.assertIn("ReviewSensei merge gate unavailable", ungated_review_body)
+        self.assertIn("ReviewSensei merge gate unconfirmed", ungated_review_body)
         self.assertIn(
             "an otherwise eligible review can still be approved under the "
             "configured auto-approval policy.",
@@ -1405,10 +1405,10 @@ class ReviewPublisherTests(unittest.TestCase):
         )
 
         self.assertEqual(outcome.status, "published")
-        self.assertEqual(outcome.diagnostic, "check_permission")
+        self.assertEqual(outcome.diagnostic, "check_capability_unavailable")
         self.assertEqual(posted_events(calls), ["COMMENT", "APPROVE"])
         body = review_payloads(calls)[0]["body"]
-        self.assertIn("ReviewSensei merge gate unavailable", body)
+        self.assertIn("ReviewSensei merge gate unconfirmed", body)
         self.assertIn("Auto-approval may proceed when otherwise eligible.", body)
         self.assertLessEqual(len(body.split("\n\n", 1)[0].encode("utf-8")), 640)
 

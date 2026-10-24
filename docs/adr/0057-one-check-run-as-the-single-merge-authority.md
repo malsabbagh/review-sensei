@@ -321,3 +321,15 @@ reconciled to match the updated persisted eligibility state.
 - [ADR 0035](0035-request-changes-for-blocking-findings.md) (superseded by this record)
 - [ADR 0043](0043-structured-run-outcomes-budgets-and-publication-recovery.md)
 - [ADR 0055](0055-merge-focused-default-and-legacy-retirement.md)
+
+### Diagnostic accuracy correction
+
+New attempts distinguish absent or generic capability failures
+(`check_capability_unavailable`), observed HTTP 401/403 (`check_access_denied`),
+typed transient or HTTP 429/5xx (`check_temporarily_unavailable`), and other check
+publication failures (`check_publication_failed`). `check_permission` remains
+readable for historical outcomes with neutral wording. These diagnostics do not
+change the approval authority, check policy, request sequence, or retry behavior
+above. Uncertain publication is reported as unconfirmed; diagnostics do not infer
+missing App grants. The [diagnostic catalog](../diagnostics.md#github-check-publication)
+describes current warnings and bounded failure evidence.
