@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.12 - 2026-10-24
+
 - Preserve complete audited maintainer decisions in authenticated immutable
   snapshot parts, retaining bounded commands, complete readback and existing
   storage and request limits. Advance thread cleanup across retries without
@@ -15,6 +17,10 @@
   approval under replay.
 - Align remaining-command routing across installed Python and Worker callers;
   refuse unreadable original event intent instead of selecting ordinary review.
+
+## review-sensei-github 0.3.13 - 2026-10-24
+
+- Pin `review-sensei==0.8.12`.
 
 ## review-sensei-github 0.3.12 - 2026-10-23
 
