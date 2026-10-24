@@ -46,8 +46,8 @@ clean, and mypy must pass for `src`. Keep provider-specific transport and
 authentication under `src/review_sensei/providers/`; review business logic stays
 independent of GitHub and model-provider SDKs.
 
-The proposed registry-only core installer contract (ADR 0109, unreleased after
-hosted 0.3.13) binds complete reusable-workflow bytes to a trusted append-only
+The registry-only core installer contract introduced with the hosted 0.3.14
+workflow (ADR 0109) binds complete reusable-workflow bytes to a trusted append-only
 digest list in `scripts/python_release_sources.py`. Every workflow-byte change,
 including comments, needs review of all execution paths and an explicit policy
 addition. Never derive allowed digests from a selected release, selector or
@@ -286,9 +286,10 @@ is not a declaration that every native thread is resolved. Follow the indicated
 next action after reconciling uncertain writes; do not repeat unchanged commands
 or treat a requested check conclusion as a confirmed publication.
 
-The separate operational-failure observation described in the recovery guide is
-unreleased after hosted 0.3.13. When present in a compatible runtime, inspect the
-first phase/stage and original budget facts before retrying an unchanged
+Hosted 0.3.14 introduced the separate operational-failure observation described
+in the recovery guide. Confirm that installed version or a compatible later
+release, then inspect the first phase/stage and original budget facts before
+retrying an unchanged
 operation. An attempted HTTP adapter request is not proof of network dispatch;
 retain uncertain native outcomes and do not broaden permissions from a generic
 transport error. These observations never supply approval authority.

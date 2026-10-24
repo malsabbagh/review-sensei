@@ -1,7 +1,11 @@
 # ADR 0108: Observe operational finalization failures
 
-Status: Proposed. Implementation and qualification in progress; not published
-in hosted 0.3.13.
+Status: Proposed. Implemented and published in hosted 0.3.14; not available
+in hosted 0.3.13. Publication is separate from channel activation.
+
+The published diagnostic observes `verify` and finding-disposition
+re-finalization. It does not establish the cause of historical live failures or
+prove automatic cleanup or native approval succeeds.
 
 An exact-head complete review with all current human decisions honored can have
 a successful REST check while later automatic thread cleanup and native approval

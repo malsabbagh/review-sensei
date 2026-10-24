@@ -282,9 +282,10 @@ no repository variable selects it. The published hosted 0.3.13 workflow uses
 its executing commit as source fallback when an exact distribution is unavailable;
 network and authentication failures remain fatal.
 
-The **registry-only core contract is unreleased after hosted 0.3.13**. Once a
-qualified release and channel activation adopt it, every runtime lane requires
-the exact published `review-sensei` core from PyPI. Missing distribution,
+The **hosted 0.3.14 workflow introduces the registry-only core contract**.
+Confirm its qualified signed source and channel activation before expecting this
+behavior from `v5`; updating a checkout does not update an installed workflow.
+Every runtime lane in this contract requires the exact published `review-sensei` core from PyPI. Missing distribution,
 network/authentication failure or installed-version mismatch stops installation;
 there is no core Git source fallback or alternate version. The separately pinned
 `review-sensei-github` package retains fallback to its own signed workflow source,
