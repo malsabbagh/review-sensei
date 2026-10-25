@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewsensei.dev/schemas/v1/api-run-accounting.schema.json",
+  "title": "Current caller API request accounting values",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "identity",
+    "configuration",
+    "owner",
+    "startup",
+    "startup_used",
+    "prior_nonstartup_liability",
+    "blocks",
+    "completed",
+    "version"
+  ],
+  "properties": {
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository_id",
+        "run_id"
+      ],
+      "properties": {
+        "repository_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "run_id": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commit",
+        "digest",
+        "limit"
+      ],
+      "properties": {
+        "commit": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "owner": {
+      "$ref": "#/$defs/owner"
+    },
+    "startup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slots"
+      ],
+      "properties": {
+        "slots": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "job",
+              "attempt",
+              "requests"
+            ],
+            "properties": {
+              "job": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+              },
+              "attempt": {
+                "type": "integer",
+                "enum": [
+                  1,
+                  2
+                ]
+              },
+              "requests": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+                },
+                "minItems": 1
+              }
+            }
+          },
+          "minItems": 1
+        }
+      }
+    },
+    "startup_used": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+          },
+          {
+            "type": "integer",
+            "enum": [
+              1,
+              2
+            ]
+          }
+        ],
+        "items": false,
+        "minItems": 2,
+        "maxItems": 2
+      }
+    },
+    "prior_nonstartup_liability": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "blocks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "block_id",
+          "issued_by",
+          "undispatched",
+          "pending"
+        ],
+        "properties": {
+          "block_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+          },
+          "issued_by": {
+            "$ref": "#/$defs/owner"
+          },
+          "undispatched": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "pending": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/request"
+            }
+          }
+        }
+      }
+    },
+    "completed": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/request"
+      }
+    },
+    "version": {
+      "const": "caller-requests-v1"
+    }
+  },
+  "$defs": {
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_attempt",
+        "job",
+        "generation"
+      ],
+      "properties": {
+        "run_attempt": {
+          "type": "integer",
+          "enum": [
+            1,
+            2
+          ]
+        },
+        "job": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "deadline_unix_ms"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+        },
+        "deadline_unix_ms": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

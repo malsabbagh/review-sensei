@@ -263,6 +263,14 @@ def _stored_assessment_queue(value: object) -> dict[str, object] | None:
     return normalized
 
 
+def _stored_api_accounting(value: object) -> dict[str, object] | None:
+    if value is None:
+        return None
+    from .api_work import ApiRunAccounting
+
+    return ApiRunAccounting.from_document(value).to_document()
+
+
 def _stored_convergence_history(
     value: object,
 ) -> dict[str, object] | None:
@@ -854,6 +862,7 @@ class SessionRecord:
     rescan_state: Mapping[str, object] | None = None
     assessment_queue: Mapping[str, object] | None = None
     disposition_snapshot: Mapping[str, object] | None = None
+    api_run_accounting: Mapping[str, object] | None = None
     # The shape is selected only while loading an existing untrusted document;
     # it is not part of the public record or its equality contract.
     _digest_shape_input: InitVar[str] = "current"
@@ -970,6 +979,21 @@ class SessionRecord:
             "convergence_history",
             _stored_convergence_history(self.convergence_history),
         )
+        object.__setattr__(
+            self, "api_run_accounting", _stored_api_accounting(self.api_run_accounting)
+        )
+        if self.api_run_accounting is not None:
+            if self._digest_shape != "current":
+                raise ReviewInputError(
+                    "API accounting requires the current digest shape"
+                )
+            if (
+                cast(Mapping[str, object], self.api_run_accounting["identity"])[
+                    "repository_id"
+                ]
+                != self.repository_id
+            ):
+                raise ReviewInputError("API accounting repository identity conflicts")
         if self.transaction is not None:
             if not isinstance(self.transaction, ReviewTransaction):
                 raise ReviewInputError("session transaction is invalid")
@@ -1104,6 +1128,8 @@ class SessionRecord:
             payload["assessment_queue"] = dict(self.assessment_queue)
         if self.disposition_snapshot is not None:
             payload["disposition_snapshot"] = dict(self.disposition_snapshot)
+        if self.api_run_accounting is not None:
+            payload["api_run_accounting"] = dict(self.api_run_accounting)
         return payload
 
     def _payload_without_dispositions(self) -> dict[str, object]:
@@ -1158,6 +1184,7 @@ class SessionRecord:
         rescan_state: Mapping[str, object] | None = None,
         assessment_queue: Mapping[str, object] | None = None,
         disposition_snapshot: Mapping[str, object] | None = None,
+        api_run_accounting: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         normalized_dispositions = _stored_dispositions(dispositions)
         normalized_grants = _stored_continuation_grants(continuation_grants)
@@ -1199,6 +1226,9 @@ class SessionRecord:
         from .disposition_snapshot import normalize_snapshot
 
         normalized_snapshot = normalize_snapshot(disposition_snapshot)
+        normalized_api = _stored_api_accounting(api_run_accounting)
+        if normalized_api is not None:
+            payload["api_run_accounting"] = normalized_api
         if normalized_snapshot is not None:
             payload["disposition_snapshot"] = normalized_snapshot
         if (
@@ -1235,6 +1265,7 @@ class SessionRecord:
             rescan_state=rescan_state,
             assessment_queue=normalized_queue,
             disposition_snapshot=normalized_snapshot,
+            api_run_accounting=normalized_api,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -1308,6 +1339,9 @@ class SessionRecord:
         has_owner = "reservation_owner" in value
         has_queue = "assessment_queue" in value
         has_snapshot = "disposition_snapshot" in value
+        has_api_accounting = "api_run_accounting" in value
+        if has_api_accounting and value["api_run_accounting"] is None:
+            raise ReviewInputError("API accounting cannot be a null absence marker")
         if has_snapshot and value["disposition_snapshot"] is None:
             raise ReviewInputError(
                 "disposition snapshot cannot be a null absence marker"
@@ -1329,6 +1363,7 @@ class SessionRecord:
             or has_owner
             or has_queue
             or has_snapshot
+            or has_api_accounting
             or "rescan_state" in value
             else "operator-paused"
             if has_operator_paused
@@ -1411,6 +1446,7 @@ class SessionRecord:
             disposition_snapshot=cast(
                 Mapping[str, object] | None, value.get("disposition_snapshot")
             ),
+            api_run_accounting=_stored_api_accounting(value.get("api_run_accounting")),
             _digest_shape_input=digest_shape,
         )
         validate_public_document(record.to_dict(), "session-record")
@@ -1440,6 +1476,7 @@ class SessionRecord:
         rescan_state: Mapping[str, object] | None = None,
         assessment_queue: Mapping[str, object] | None = None,
         disposition_snapshot: Mapping[str, object] | None = None,
+        api_run_accounting: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         created = _aware_now(now)
         if isinstance(expires_at, str):
@@ -1479,6 +1516,7 @@ class SessionRecord:
             rescan_state=rescan_state,
             assessment_queue=assessment_queue,
             disposition_snapshot=disposition_snapshot,
+            api_run_accounting=api_run_accounting,
         )
 
     def evolve(
@@ -1502,8 +1540,17 @@ class SessionRecord:
         rescan_state: Mapping[str, object] | None | object = ...,
         assessment_queue: Mapping[str, object] | None | object = ...,
         disposition_snapshot: Mapping[str, object] | None | object = ...,
+        api_run_accounting: Mapping[str, object] | None | object = ...,
     ) -> "SessionRecord":
         updated = _format_datetime(_aware_now(now))
+        if self.api_run_accounting is not None and api_run_accounting is not ...:
+            if api_run_accounting is None:
+                raise ReviewInputError("API accounting cannot be removed")
+            from .api_work import ApiRunAccounting
+
+            ApiRunAccounting.from_document(self.api_run_accounting).require_successor(
+                ApiRunAccounting.from_document(api_run_accounting)
+            )
         return type(self)._construct(
             repository=self.repository,
             pull_request=self.pull_request,
@@ -1580,6 +1627,11 @@ class SessionRecord:
                 self.disposition_snapshot
                 if disposition_snapshot is ...
                 else cast(Mapping[str, object] | None, disposition_snapshot)
+            ),
+            api_run_accounting=(
+                self.api_run_accounting
+                if api_run_accounting is ...
+                else cast(Mapping[str, object] | None, api_run_accounting)
             ),
             convergence_history=(
                 self.convergence_history
@@ -3926,6 +3978,14 @@ def _history_preserve_sources(
 
 
 def _validate_queue_retention(before: SessionRecord, after: SessionRecord) -> None:
+    if before.api_run_accounting is not None:
+        if after.api_run_accounting is None:
+            raise ReviewInputError("API accounting cannot be silently discarded")
+        from .api_work import ApiRunAccounting
+
+        ApiRunAccounting.from_document(before.api_run_accounting).require_successor(
+            ApiRunAccounting.from_document(after.api_run_accounting)
+        )
     if before.disposition_snapshot is not None and after.disposition_snapshot is None:
         raise ReviewInputError("disposition snapshot cannot be silently discarded")
     if after.disposition_snapshot is not None and len(

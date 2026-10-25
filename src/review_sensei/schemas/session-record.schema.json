@@ -22,6 +22,9 @@
     "record_sha256"
   ],
   "properties": {
+    "api_run_accounting": {
+      "$ref": "https://reviewsensei.dev/schemas/v1/api-run-accounting.schema.json"
+    },
     "disposition_snapshot": {
       "type": "object",
       "additionalProperties": false,

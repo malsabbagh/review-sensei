@@ -6,6 +6,7 @@ from dataclasses import replace
 from review_sensei.api_work import (
     ACCOUNTING_VERSION,
     ApiExecutionOwner,
+    ApiRunAccounting,
     ApiRunIdentity,
     CallerRequestBlock,
     FrozenApiConfiguration,
@@ -231,3 +232,36 @@ class CallerAccountingTests(unittest.TestCase):
         self.assertEqual(resumed.prior_nonstartup_liability, 7)
         self.assertEqual(resumed.confirmed, 1)
         self.assertEqual(resumed.remaining, state.remaining - 1)
+
+    def test_document_roundtrip_cannot_transfer_crashed_owner_capacity(self):
+        state = accounting().reserve("old", 4)
+        successor = state.claim_startup(ApiExecutionOwner(2, "analyze", 1))
+        forged = replace(
+            successor,
+            blocks=(
+                replace(state.blocks[0], undispatched=0),
+                CallerRequestBlock("new", successor.owner, 4),
+            ),
+        )
+        self.assertEqual(forged.remaining, state.remaining)
+        with self.assertRaisesRegex(ReviewInputError, "transfer"):
+            state.require_successor(
+                ApiRunAccounting.from_document(forged.to_document())
+            )
+
+    def test_completed_and_unknown_request_bindings_survive_document_restore(self):
+        settled = PendingApiRequest("settled", 100)
+        unknown = PendingApiRequest("unknown", 200)
+        state = (
+            accounting(prior=3)
+            .reserve("work", 4)
+            .dispatch("work", settled)
+            .confirm(settled)
+            .dispatch("work", unknown)
+        )
+        restored = ApiRunAccounting.from_document(state.to_document())
+        self.assertEqual(restored, state)
+        self.assertEqual(restored.blocks[0].pending, (unknown,))
+        self.assertEqual(restored.completed, (settled,))
+        with self.assertRaisesRegex(ReviewInputError, "used"):
+            restored.dispatch("work", PendingApiRequest("settled", 300))

@@ -67,9 +67,17 @@ values/transitions, caller-only broker charging and caller-only terminal reserve
 The values deliberately authenticate nothing and cannot themselves authorize HTTP.
 They do not implement a durable writer or certify that a reservation is confirmed.
 
-**Not completed by this block:** measured production startup slots, authenticated
-record serialization/persistence, writer cessation/serialization enforcement,
-one-counter CLI/workflow integration, current-only grant/readers, and service-owned
+The next bounded block embeds a closed accounting document inside the existing
+session record's digest/schema and App-author boundary. Existing ledger mutations
+preserve accounting charges, request history and foreign-owner reservations.
+Live Actions reads check the current finite hosted owner and predecessor cessation;
+a local exclusive startup claim rejects same-slot restarts before HTTP. The local
+claim is not a distributed lock. Existing authoritative PR serialization remains
+mandatory.
+
+**Not completed by these blocks:** production bootstrap orchestration and all-job
+startup policy, authoritative workflow-owner wiring, one-counter CLI/workflow
+integration, current-only grant/readers, historical run rollover, and service-owned
 Worker plan selection. Existing metadata-window constructors remain pending.
 This commit is a review checkpoint, not a qualified runtime feature or release.
 
@@ -104,6 +112,28 @@ Full acceptance still requires physical startup/crash traces and real public
 approval, withheld and failure paths with fake HTTP, authenticated restart,
 unsupported-overlap refusal, real Worker enforcement and joint distribution gates.
 The four previously held socket tests remain excluded.
+
+The one-job persistence fixture now executes the real Python broker and ledger
+create/update/readback APIs with fake external HTTP: 10 startup requests, then
+14 recovery requests. Synthetic valid receipts reporting 9, 12 or 30 internal
+dispatches leave these caller counts unchanged. It does not qualify the real
+Worker or activate a public workflow path. Both startup slots remain prefunded:
+28 initial + 50 recovery = 78, derived from the actual seven-request prelude,
+existing ten-physical-request list bounds, native mutation/readback calls and
+two fresh predecessor-job observations. A separate 31-request native replacement
+block stays charged to its original owner, leaving 19 unallocated at 128. This is
+conservative liability, not 109 observed requests or a full workflow success.
+The successor cannot use the crashed owner's block; another conservative
+31-request block would exceed available capacity by 12. That is a next-operation
+admission constraint, not proof of an unavoidable 140-request physical minimum.
+No limit is raised or reservation shrunk to make it pass.
+
+An unknown initial POST with a retained owned record can recover without a
+replacement POST. If the record cannot be established, recovery refuses instead
+of recreating it. Lost PATCH responses use the planned readback slot to observe
+the exact retained root without repeating the write. Active/changed predecessor
+evidence, incomplete job inventories, same-slot restarts and third attempts
+refuse. All-phase integration waits for review of this bounded result.
 
 ## Rollout and rollback
 

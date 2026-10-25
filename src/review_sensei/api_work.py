@@ -7,8 +7,10 @@ before using it. A generation is conflict detection, never a comment-PATCH CAS.
 
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
+from typing import Any, Mapping, cast
 
 from .errors import ReviewInputError
 
@@ -335,6 +337,78 @@ class ApiRunAccounting:
             raise ReviewInputError(
                 "caller accounting run or frozen configuration conflicts"
             )
+
+    def to_document(self) -> dict[str, object]:
+        """Closed value serialization; this does not authenticate a checkpoint."""
+        return cast(dict[str, object], json.loads(json.dumps(asdict(self))))
+
+    def require_successor(self, candidate: ApiRunAccounting) -> None:
+        """Value retention at a checked root; no replacement owner authority.
+
+        Authenticating/serializing the actual writer remains the adapter's job.
+        This check prevents a record builder from erasing prepaid uncertainty,
+        resetting counters or moving a crashed owner's remainder into new work.
+        """
+        self.require_binding(candidate.identity, candidate.configuration)
+        if (
+            candidate.startup != self.startup
+            or candidate.startup_used[: len(self.startup_used)] != self.startup_used
+            or candidate.completed[: len(self.completed)] != self.completed
+            or candidate.prior_nonstartup_liability < self.prior_nonstartup_liability
+            or candidate.remaining > self.remaining
+            or candidate.owner.generation < self.owner.generation
+        ):
+            raise ReviewInputError(
+                "caller accounting cannot discard prior charges or history"
+            )
+        current = {b.block_id: b for b in candidate.blocks}
+        for previous in self.blocks:
+            block = current.get(previous.block_id)
+            if (
+                block is None
+                or block.issued_by != previous.issued_by
+                or block.issued_by != candidate.owner
+                and block.undispatched != previous.undispatched
+                or any(
+                    p not in block.pending and p not in candidate.completed
+                    for p in previous.pending
+                )
+            ):
+                raise ReviewInputError(
+                    "caller accounting cannot transfer or discard owner liability"
+                )
+
+    @classmethod
+    def from_document(cls, value: object) -> ApiRunAccounting:
+        from .schemas import validate_public_document
+
+        validate_public_document(value, "api-run-accounting")
+        document = cast(Mapping[str, Any], value)
+
+        def block(item: dict[str, Any]) -> CallerRequestBlock:
+            return CallerRequestBlock(
+                item["block_id"],
+                ApiExecutionOwner(**item["issued_by"]),
+                item["undispatched"],
+                tuple(PendingApiRequest(**p) for p in item["pending"]),
+            )
+
+        return cls(
+            identity=ApiRunIdentity(**document["identity"]),
+            configuration=FrozenApiConfiguration(**document["configuration"]),
+            owner=ApiExecutionOwner(**document["owner"]),
+            startup=StartupPlan(
+                tuple(
+                    StartupSlot(s["job"], s["attempt"], tuple(s["requests"]))
+                    for s in document["startup"]["slots"]
+                )
+            ),
+            startup_used=tuple((s[0], s[1]) for s in document["startup_used"]),
+            prior_nonstartup_liability=document["prior_nonstartup_liability"],
+            blocks=tuple(block(b) for b in document["blocks"]),
+            completed=tuple(PendingApiRequest(**p) for p in document["completed"]),
+            version=document["version"],
+        )
 
 
 def initial_accounting(

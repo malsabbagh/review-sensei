@@ -6,6 +6,11 @@
   and immutable run-accounting transitions. Charge each broker POST once,
   independently of Worker-internal dispatches. Durable startup/persistence and
   complete run integration remain unqualified; this foundation is not activation.
+- Retain caller request identities and owner-bound reservations in the App-owned
+  session record. Keep conservative prior liability separate from confirmed
+  requests, and exercise one offline startup/recovery without resetting capacity
+  or repeating uncertain writes. Full workflow and release qualification remain
+  pending.
 - Distinguish unavailable check capabilities, observed access denials, temporary
   failures and other check publication failures. Retain neutral legacy diagnostic
   wording and visible warnings when summary space is exhausted, without changing
