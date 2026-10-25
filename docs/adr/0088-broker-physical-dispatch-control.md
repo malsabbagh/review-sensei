@@ -60,21 +60,26 @@ before any transport or partial debit.
 ## Consequences and alternatives
 
 Unattended analysis admission prepays 30 internal dispatches plus its caller
-HTTP request from the original metadata budget. This covers the cold JWKS path,
-failed Git advertisement followed by an annotated-tag REST lookup, installation
-and repository checks, session capability, current head, App identity, and both
-enrollment witnesses at the reader's own 10-request page ladder. A witness
-restarts that ladder at a smaller page size when a page exceeds the response
-byte cap, so one complete inventory can legally cost ten dispatches; the
-reservation funds both in full, and the byte cap alone can no longer exhaust
-admission. The same factory reserves 12 for the witness-free rescan
-authorization exchange, which stops at the capability token. These are bounded
-reservations, not a promise that arbitrary paginated histories fit. A witness
-that exhausts its own 10-request cap still refuses with its closed inventory
-code; it cannot produce a successful enrollment from an incomplete inventory.
-Funding only one complete page each, as the earlier 12-dispatch reservation
-did, refused every history whose first page exceeded the byte cap and charged
-the retry ladder as an unfunded dispatch. Admission and completion own separate
+HTTP request from the original metadata budget. Thirty is the exact enumerated
+ceiling, not an estimate: cold JWKS (1), failed Git advertisement with its
+annotated-tag REST fallback (3), installation and repository checks with the
+session capability (4), current head (1), App identity (1), and both enrollment
+witnesses at the reader's own 10-request page ladder (20). None of those paths
+retries, refreshes or re-reads, so the reservation leaves no spare dispatch: a
+dispatch added to this exchange must raise the reservation in the same change,
+and the explicit analysis-admission qualification would surface the drift as
+`broker_control_budget_exhausted` in the funded annotated-tag history instead of
+the witness's closed code. A witness restarts its ladder at a smaller page size
+when a page exceeds the response byte cap, so one complete inventory can
+legally cost ten dispatches; with both ladders funded in full, the byte cap
+alone can no longer exhaust admission. The same factory reserves 12 for the
+witness-free rescan authorization exchange, which stops at the capability
+token. These are bounded reservations, not a promise that arbitrary paginated
+histories fit. A witness that exhausts its own 10-request cap still refuses
+with its closed inventory code; it cannot produce a successful enrollment from
+an incomplete inventory. Funding only one complete page each, as the earlier
+12-dispatch reservation did, refused every history whose first page exceeded
+the byte cap and charged the retry ladder as an unfunded dispatch. Admission and completion own separate
 original budgets, so the larger reservation does not reduce the review's
 completion allowance. The 64 total / 60 ordinary call ceilings, original
 deadline, exact receipt binding, and no-refund rule are unchanged. This

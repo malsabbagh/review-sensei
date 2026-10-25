@@ -9,7 +9,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from review_sensei_github.errors import GitHubBrokerClientError
-from review_sensei_github.review_hooks import GitHubReviewHooks
+from review_sensei_github.review_hooks import (
+    _ANALYSIS_SESSION_INTERNAL_DISPATCHES,
+    GitHubReviewHooks,
+)
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
@@ -109,7 +112,12 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
                 self.assertEqual(budget.calls, 31)
 
     def test_last_funded_request_and_atomic_unfunded_refusal(self):
-        for prior in (29, 30):
+        liability = _ANALYSIS_SESSION_INTERNAL_DISPATCHES
+        ceiling = EvidenceReadBudget().ordinary_remaining()
+        # One admission needs its whole prepaid liability plus the caller HTTP
+        # request, so the boundary sits at the ceiling minus both, not at the
+        # liability itself; deriving it keeps the pair tracking the constant.
+        for prior in (ceiling - liability - 1, ceiling - liability):
             with self.subTest(prior=prior):
                 budget = EvidenceReadBudget()
                 for _ in range(prior):
@@ -118,12 +126,12 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
 
                 def transport(request, timeout):
                     dispatched.append(request)
-                    return self.response(request)
+                    return self.response(request, dispatched=liability)
 
-                client = self.client(budget, transport)
-                if prior == 29:
+                client = self.client(budget, transport, liability=liability)
+                if prior == ceiling - liability - 1:
                     self.open_session(client)
-                    self.assertEqual(budget.calls, 60)
+                    self.assertEqual(budget.ordinary_remaining(), 0)
                     self.assertEqual(len(dispatched), 1)
                 else:
                     with self.assertRaisesRegex(ReviewInputError, "original budget"):

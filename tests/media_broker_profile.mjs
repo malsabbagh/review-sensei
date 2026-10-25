@@ -162,8 +162,14 @@ for (const mode of ["git", "fallback-annotated"]) {
           // up to the reader's own 10-request ladder per enrollment witness.
           const prefix = 8 + (mode === "fallback-annotated" ? 2 : 0);
           if (history === "full-page" && maximum < prefix + 10) {
+            // Each arm is cold by construction: the cache is reset above and the
+            // refusal breaks before the warm exchange runs. The deterministic
+            // prefix is therefore charged in full, and the budget refuses the
+            // witness page the ladder asked for once its slots run out.
             assert.equal(error, "broker_control_budget_exhausted");
             assert.equal(dispatched, maximum);
+            const witnessReads = attempts.slice(start).filter(item => item.path === "/repos/acme/widgets/pulls/7/reviews").length;
+            assert.equal(witnessReads, Math.max(0, maximum - prefix));
             assert.equal(result, undefined);
           } else if (history === "full-page") {
             // The funded liability covers the whole ladder, so the refusal is now

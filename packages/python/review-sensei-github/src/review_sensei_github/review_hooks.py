@@ -20,6 +20,8 @@ from review_sensei_github.http import GitHubHttp
 # reader's own 10-request page ladder (20). A witness restarts that ladder when
 # a page exceeds the response byte cap, so one complete inventory can legally
 # cost the full 10; funding less refuses histories the reader is built to read.
+# This is the exact enumerated ceiling with no spare dispatch, because no path
+# in the exchange retries; a new dispatch here must raise this number with it.
 _ANALYSIS_SESSION_INTERNAL_DISPATCHES = 30
 
 # The rescan authorization exchange stops at the capability token and reads no
