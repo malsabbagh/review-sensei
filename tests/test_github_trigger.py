@@ -75,6 +75,35 @@ INLINE_COMMAND_PREFILTER_START = (
 )
 
 
+def inline_command_prefilter_paths(root: Path) -> set[str]:
+    """Inventory source copies without traversing concurrent build output."""
+    marker = INLINE_COMMAND_PREFILTER_START.encode("utf-8")
+    pruned = {
+        ".claude",
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+        "node_modules",
+    }
+    found: set[str] = set()
+    for directory, subdirectories, files in os.walk(root):
+        subdirectories[:] = [name for name in subdirectories if name not in pruned]
+        # Parallel candidate tests create and remove files under these root
+        # build destinations. Nested source directories stay in the inventory.
+        if Path(directory) == root:
+            subdirectories[:] = [
+                name for name in subdirectories if name not in {"build", "dist"}
+            ]
+        for name in files:
+            path = Path(directory) / name
+            if marker in path.read_bytes():
+                found.add(path.relative_to(root).as_posix())
+    return found
+
+
 def inline_command_prefilter(text: str) -> re.Pattern[str]:
     """Return the inline command prefilter exactly as the heredoc evaluates it.
 
@@ -707,26 +736,8 @@ class InlineCallerResolverTests(unittest.TestCase):
         pinned by the MERGE_FOCUSED_V4_CALLER_SHA256 digest in both languages.
         """
 
-        marker = INLINE_COMMAND_PREFILTER_START.encode("utf-8")
-        pruned = {
-            ".claude",
-            ".git",
-            ".mypy_cache",
-            ".pytest_cache",
-            ".ruff_cache",
-            ".venv",
-            "__pycache__",
-            "node_modules",
-        }
-        found: set[str] = set()
-        for directory, subdirectories, files in os.walk(ROOT):
-            subdirectories[:] = [name for name in subdirectories if name not in pruned]
-            for name in files:
-                path = Path(directory) / name
-                if marker in path.read_bytes():
-                    found.add(path.relative_to(ROOT).as_posix())
         self.assertEqual(
-            found,
+            inline_command_prefilter_paths(ROOT),
             {
                 ".github/workflows/review-sensei-review.yml",
                 "deploy/cloudflare/fixtures/merge-focused-v4-caller.yml",
@@ -744,6 +755,50 @@ class InlineCallerResolverTests(unittest.TestCase):
                 "tests/test_github_trigger.py",
             },
         )
+
+    def test_prefilter_inventory_ignores_disappearing_build_outputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sources = {
+                "src/unexpected.py",
+                "src/build/unexpected.py",
+                "src/dist/unexpected.py",
+            }
+            for relative in sources:
+                source = root / relative
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_bytes(INLINE_COMMAND_PREFILTER_START.encode("utf-8"))
+            generated = []
+            for directory in ("build", "dist"):
+                cache = root / directory / "npm-tmp" / "node-compile-cache"
+                cache.mkdir(parents=True)
+                output = cache / "vanishing-cache"
+                output.write_bytes(b"temporary build data")
+                generated.append(output)
+            read_bytes = Path.read_bytes
+
+            def read_source(path):
+                if path in generated:
+                    path.unlink()
+                return read_bytes(path)
+
+            with mock.patch.object(Path, "read_bytes", read_source):
+                self.assertEqual(inline_command_prefilter_paths(root), sources)
+
+    def test_prefilter_inventory_does_not_hide_missing_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "unexpected.py"
+            source.write_bytes(INLINE_COMMAND_PREFILTER_START.encode("utf-8"))
+            read_bytes = Path.read_bytes
+
+            def read_source(path):
+                path.unlink()
+                return read_bytes(path)
+
+            with mock.patch.object(Path, "read_bytes", read_source):
+                with self.assertRaises(FileNotFoundError):
+                    inline_command_prefilter_paths(root)
 
     def test_inline_fallback_matches_trigger_module_outputs(self):
         script = inline_resolver_script(REPO_CALLER.read_text(encoding="utf-8"))
