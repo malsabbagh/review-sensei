@@ -443,7 +443,11 @@ class EvidenceReadBudget:
         self._ordinary_hold = 0
 
     def ordinary_remaining(self) -> int:
-        """Ordinary dispatches the current phase may still admit, after any hold."""
+        """Ordinary dispatches the current phase may still admit, after any hold.
+
+        This is the single authoritative ordinary ceiling. Admission callers
+        must use it rather than re-deriving the fence and hold offsets.
+        """
         return MAX_PART_READS - 4 - self._ordinary_hold - self.calls
 
     def preflight(self, calls: int) -> None:

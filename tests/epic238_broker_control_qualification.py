@@ -192,7 +192,13 @@ class BrokerControlQualification(unittest.TestCase):
             self.assertLessEqual(self.budget.calls, 64)
             self.assertEqual(self.budget.wall_deadline_ms, deadline)
             progress.append(len(state.resolved_threads))
-            if any(review["state"] == "APPROVED" for review in state.reviews):
+            # Approval is funded before cleanup can finish. Later supported
+            # verifies must keep reconciling the remaining decided threads
+            # without submitting a second native approval.
+            if (
+                any(review["state"] == "APPROVED" for review in state.reviews)
+                and len(state.resolved_threads) == 21
+            ):
                 break
             if attempt:
                 self.assertGreater(

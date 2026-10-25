@@ -199,6 +199,20 @@ class BrokerDispatchControlTests(unittest.TestCase):
         self.assertEqual(control.admit(verification=False)["max_dispatches"], 13)
         self.assertEqual(budget.calls, 44)
 
+    def test_held_allowance_admits_exactly_the_liability_and_request(self):
+        budget = EvidenceReadBudget()
+        for _ in range(30):
+            budget.consume()
+        budget.hold_ordinary(18)
+        control = BrokerDispatchAccounting(budget, "a" * 64, 11, 1)
+        self.assertEqual(budget.ordinary_remaining(), 12)
+        # The whole exchange (liability plus its request) fits exactly.
+        self.assertEqual(control.admit(verification=False)["max_dispatches"], 11)
+        self.assertEqual(budget.calls, 41)
+        with self.assertRaises(ReviewInputError):
+            control.admit(verification=True)
+        self.assertEqual(budget.calls, 41)
+
     def test_receipt_scope_requires_exact_json_types(self):
         budget = EvidenceReadBudget()
         accounting = BrokerDispatchAccounting(budget, "a" * 64, 1, 1)

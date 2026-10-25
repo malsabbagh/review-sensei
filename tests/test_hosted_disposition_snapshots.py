@@ -477,7 +477,9 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
         self.assertLess(len(self.state.resolved_threads), 25, self.last_output)
         self.assertEqual(len(self.load()[1]), 25)
         self.assertEqual(
-            sum(r["state"] == "APPROVED" for r in self.state.reviews), 1, self.last_output
+            sum(r["state"] == "APPROVED" for r in self.state.reviews),
+            1,
+            self.last_output,
         )
         progress = json.loads(
             next(

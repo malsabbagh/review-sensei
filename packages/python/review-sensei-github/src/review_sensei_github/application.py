@@ -2351,7 +2351,7 @@ class GitHubApplication:
                     evidence_budget=command_budget,
                     incomplete_coverage=derived_incomplete_coverage,
                     policy_digest=command_policy_digest,
-                    prepared_review_token=review_capability_token,
+                    _prepared_review_token=review_capability_token,
                 )
                 if isinstance(refinalized, MaintainerCommandResult):
                     produced = refinalized
@@ -2395,7 +2395,7 @@ class GitHubApplication:
                 evidence_budget=command_budget,
                 incomplete_coverage=derived_incomplete_coverage,
                 policy_digest=command_policy_digest,
-                prepared_review_token=review_capability_token,
+                _prepared_review_token=review_capability_token,
             )
             if isinstance(refinalized, MaintainerCommandResult):
                 result = refinalized
@@ -3039,7 +3039,7 @@ class GitHubApplication:
         evidence_budget: EvidenceReadBudget | None = None,
         incomplete_coverage: Sequence[str] | None = None,
         policy_digest: str | None = None,
-        prepared_review_token: str | None = None,
+        _prepared_review_token: str | None = None,
     ) -> object:
         """Re-check approval after a hosted override. A failed check leaves the ledger write."""
 
@@ -3057,7 +3057,11 @@ class GitHubApplication:
         ):
             from copy import copy
 
-            existing = finalizer.evidence_budget or finalizer._operation_budget
+            existing = (
+                finalizer.evidence_budget
+                if finalizer.evidence_budget is not None
+                else finalizer._operation_budget
+            )
             if existing is not None and existing is not evidence_budget:
                 raise ReviewInputError(
                     "command finalization budget identity mismatches"
@@ -3092,7 +3096,7 @@ class GitHubApplication:
             # Reuse only a review_publish capability minted by this operation.
             # Any other capability, including a hosted session grant, is refused
             # by construction because it never reaches this argument.
-            review_token = prepared_review_token or self.broker.exchange(
+            review_token = _prepared_review_token or self.broker.exchange(
                 oidc_token, capability="review_publish"
             )
             from review_sensei.session import SessionRecord

@@ -2678,18 +2678,22 @@ class ReviewApprovalFinalizer:
                 reserve=reserve,
             )
 
-        # The command path must not spend another whole check-token liability
-        # before cleanup can make durable progress. It also must not consume
-        # the room that the following capability exchange, check publication
-        # and approval need; cleanup resumes on the next supported verify.
-        # Explicit-token callers keep their existing check-first order.
+        # Only the deferred command path mints its check capability after
+        # cleanup. Explicit-token callers keep their existing check-first
+        # order and their own accounting, so the reserve must not narrow them.
+        deferred_command = check_token_provider is not None
+        # The deferred command must not spend another whole check-token
+        # liability before cleanup can make durable progress, and must not
+        # consume the room that the following capability exchange, check
+        # publication and approval need; cleanup resumes on a later verify.
         resolution = (
             reconcile_cleanup(COMMAND_FINALIZATION_RESERVE)
-            if check_token_provider is not None
+            if deferred_command
             else None
         )
         check_failed = False
-        if check_token_provider is not None:
+        if deferred_command:
+            assert check_token_provider is not None
             self._observe_stage("check.capability")
             try:
                 check_token = check_token_provider()
@@ -3161,10 +3165,21 @@ class ReviewApprovalFinalizer:
                 and not live.app_authored
             )
 
-        budget = self.evidence_budget or self._operation_budget
+        budget = (
+            self.evidence_budget
+            if self.evidence_budget is not None
+            else self._operation_budget
+        )
         if reserve and budget is None:
-            raise ReviewInputError("thread cleanup reserve requires original accounting")
+            raise ReviewInputError(
+                "thread cleanup reserve requires original accounting"
+            )
         if reserve:
+            assert budget is not None
+            # The command path mints every following capability from this same
+            # budget instance; its token provider rejects a foreign accounting
+            # envelope, so the hold narrows the exact allowance broker
+            # admission reads.
             budget.hold_ordinary(reserve)
         try:
             try:
@@ -3188,7 +3203,7 @@ class ReviewApprovalFinalizer:
                     self._operation_observer.exception(exc)
                 return ThreadResolutionResult(unconfirmed=tuple(sorted(instances)))
         finally:
-            if reserve:
+            if reserve and budget is not None:
                 budget.release_ordinary()
 
     def finalize_recorded_decisions(
