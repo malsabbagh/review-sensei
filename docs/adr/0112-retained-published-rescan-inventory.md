@@ -29,8 +29,10 @@ Only the authenticated explicit-rescan resolver opts the reader into this path.
 Both full and remaining intent keep their existing permission, event, current PR,
 publication and incomplete-coverage gates. Inventory scope still binds repository,
 PR, base/head, result, policy, configuration, evidence and numeric Bot producer.
-The receipt's source review must occur among the independently verified original
-publication roots. Existing complete explanation validation remains in force.
+The receipt's exact source review must be an independently verified original
+publication root and retain its own complete explanation. An earlier review with
+the same digest cannot substitute its visible prose. Existing complete explanation
+validation remains in force.
 
 Retained inventory contexts cannot stage writes, including reconciliation through
 the staging API. An ordinary reader cannot attach their authenticated store.
