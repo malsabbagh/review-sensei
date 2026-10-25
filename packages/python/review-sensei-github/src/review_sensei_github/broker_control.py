@@ -16,6 +16,11 @@ from review_sensei.errors import ReviewInputError
 
 from .errors import GitHubBrokerClientError
 
+# Internal dispatches the hosted command broker admits per capability exchange.
+# The command finalization reserve derives from this value; a broker configured
+# with a different liability reports it back so the reserve follows the broker.
+COMMAND_EXCHANGE_DISPATCH_LIABILITY = 10
+
 
 @dataclass(frozen=True)
 class BrokerDispatchAccounting:
@@ -42,8 +47,13 @@ class BrokerDispatchAccounting:
         )
         self.budget.check()
         # Include the caller's HTTP request, charged by the same client's
-        # before_request callback. Refuse an unfunded whole request atomically.
-        if self.budget.calls + liability + 1 > MAX_PART_READS - 4:
+        # before_request callback. Refuse an unfunded whole request atomically,
+        # including any ordinary hold a later phase owns.
+        # ``ordinary_remaining`` already subtracts the consumed calls, so this
+        # comparison is exactly ``calls + liability + 1 <= ceiling - hold``: the
+        # hold is the only term added to the older pre-hold admission test, and
+        # nothing is counted twice.
+        if liability + 1 > self.budget.ordinary_remaining():
             raise ReviewInputError("broker internal liability exceeds original budget")
         for _ in range(liability):
             self.budget.consume()

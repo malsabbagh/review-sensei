@@ -260,6 +260,10 @@ class EvidenceReadBudget:
 
     Callers pass the same instance throughout an operation. No resolver resets
     its deadline or calls. Four calls are reserved until explicit finalization.
+    A caller may additionally hold ordinary calls for work that must follow a
+    bounded phase; the hold spends nothing and only narrows that phase. A hold
+    is phase-local and is never part of the snapshot: a restored budget starts
+    unheld, so a resumed operation re-establishes any reservation it needs.
     Transport adapters charge dispatches themselves; the codec only checks time.
     """
 
@@ -273,6 +277,7 @@ class EvidenceReadBudget:
         self.clock = clock
         self.restored = snapshot is not None
         self._tail_ticket: EvidenceTailTicket | None = None
+        self._ordinary_hold = 0
         self._live_attempts: dict[str, str] = {}
         self._live_attempt_owners: dict[str, object] = {}
         self._failed_attempts: set[str] = set()
@@ -316,7 +321,12 @@ class EvidenceReadBudget:
                 "ordinary dispatch cannot use prepaid activation work"
             )
         remaining = self._remaining_seconds()
-        if self.calls >= MAX_PART_READS - (0 if fence else 4):
+        # Fence dispatches draw on the fixed four-read reconciliation reserve;
+        # every other dispatch must fit the single ordinary ceiling.
+        exhausted = (
+            self.calls >= MAX_PART_READS if fence else self.ordinary_remaining() <= 0
+        )
+        if exhausted:
             raise ReviewInputError("partition shared request budget exhausted")
         self.calls += 1
         # Addition/subtraction near a float exponent boundary can round above
@@ -344,7 +354,11 @@ class EvidenceReadBudget:
             raise NonResumableActivationError(
                 "activation restart requires authenticated original attempt accounting"
             )
-        if self._tail_ticket is not None or not isinstance(plan, ActivationTailPlan):
+        if (
+            self._tail_ticket is not None
+            or self._ordinary_hold
+            or not isinstance(plan, ActivationTailPlan)
+        ):
             raise ReviewInputError("activation tail reservation is already outstanding")
         projected = self.calls
         for step in plan.steps:
@@ -420,9 +434,72 @@ class EvidenceReadBudget:
         self._live_attempts.pop(scope, None)
         self._live_attempt_owners.pop(scope, None)
 
+    def hold_ordinary(self, calls: int) -> None:
+        """Reserve ordinary dispatches for a phase that must follow this one.
+
+        The hold is strictly non-reentrant: only one phase may hold, it cannot
+        hold while an activation tail owns the remaining dispatch liability,
+        and it must release exactly the count it reserved. While it is
+        outstanding, every ordinary dispatch - including a capability exchange
+        admitted through a broker sharing this budget - draws on the unheld
+        room only, so the reserve cannot be spent around. A phase that later
+        needs its own exchange must run after the release; the command path
+        releases cleanup's hold before acquiring check authority. Acquisition
+        is all-or-nothing and validates with the same strict ``int`` test as
+        ``release_ordinary``, so a refused call leaves nothing reserved and a
+        caller cannot hold a count it would be unable to release.
+
+        The hold is applied even when ``ordinary_remaining`` is already below
+        ``calls``: it narrows a ceiling that may be non-positive and cannot
+        rescue a phase that is already over budget. A successful hold is
+        therefore not proof that the reserved work is fundable.
+        """
+        if type(calls) is not int or not 0 < calls <= MAX_PART_READS - 4:
+            raise ReviewInputError("ordinary dispatch hold is invalid")
+        if self._ordinary_hold:
+            raise ReviewInputError("ordinary dispatch hold is already outstanding")
+        if self._tail_ticket is not None:
+            raise ReviewInputError(
+                "ordinary dispatch hold cannot coexist with an activation tail"
+            )
+        self._ordinary_hold = calls
+
+    def release_ordinary(self, calls: int) -> None:
+        """Release the hold reserved for ``calls``; a mismatch is refused.
+
+        Requiring the reserved count keeps a nested or repeated release from
+        silently discarding another phase's reservation.
+        """
+        if type(calls) is not int or self._ordinary_hold != calls:
+            raise ReviewInputError("ordinary dispatch hold release does not match")
+        self._ordinary_hold = 0
+
+    def ordinary_remaining(self) -> int:
+        """Ordinary dispatches the current phase may still admit, after any hold.
+
+        This is the single authoritative ordinary ceiling: ``consume``,
+        ``preflight``, ``BrokerDispatchAccounting.admit`` and the hosted-media
+        approval tail all read it rather than re-deriving the fence and hold
+        offsets. Fence dispatches draw on the separate
+        four-read reconciliation reserve instead, so they can advance
+        ``calls`` past the ordinary ceiling and make this value negative; it
+        is a remaining-room figure, not a licence, and every caller treats any
+        value at or below zero as exhausted.
+
+        The figure is exactly ``MAX_PART_READS - 4 - hold - calls``. Both the
+        reconciliation reserve and every dispatch already spent through
+        ``consume`` are subtracted here, so a caller compares a remaining
+        liability against this value directly and adds nothing of its own.
+        Every writer of ``calls`` stops at ``MAX_PART_READS`` and the hold is
+        validated against ``MAX_PART_READS - 4``, so this can never report more
+        than ``MAX_PART_READS - 4``: a caller comparing a liability against it
+        still enforces the hard ceiling without repeating the constant.
+        """
+        return MAX_PART_READS - 4 - self._ordinary_hold - self.calls
+
     def preflight(self, calls: int) -> None:
         self.check()
-        if self.calls + calls > MAX_PART_READS - 4:
+        if calls > self.ordinary_remaining():
             raise ReviewInputError(
                 "partition shared request budget cannot stage complete inventory"
             )

@@ -308,6 +308,38 @@ def _command_from_bytes(payload: bytes) -> object:
     )
 
 
+class _PreparedReviewCapability:
+    """A review_publish token minted by this application's own exchange.
+
+    Tokens are opaque strings, so a finalizer cannot otherwise distinguish one
+    this operation minted from a caller-supplied value. Binding the token to the
+    broker instance and OIDC assertion it was exchanged for closes that gap
+    without making the credential reusable by any other context. Redemption is
+    idempotent for that same pair: an in-operation retry after a transient
+    failure must not be refused because a token it never sent was already
+    claimed.
+    """
+
+    __slots__ = ("_broker", "_assertion_digest", "_token")
+
+    def __init__(self, broker: object, assertion: str, token: str) -> None:
+        self._broker = broker
+        self._assertion_digest = sha256(assertion.encode("utf-8")).digest()
+        self._token = token
+
+    def redeem(self, broker: object, assertion: str) -> str:
+        if broker is not self._broker:
+            raise GitHubPublicationError("prepared review capability broker mismatch")
+        if (
+            not isinstance(assertion, str)
+            or sha256(assertion.encode("utf-8")).digest() != self._assertion_digest
+        ):
+            raise GitHubPublicationError(
+                "prepared review capability assertion mismatch"
+            )
+        return self._token
+
+
 class GitHubApplication:
     """Thin composition seam for workflow callers."""
 
@@ -2120,6 +2152,11 @@ class GitHubApplication:
         # does not need a broker capability or a GitHub write opt-in. Hosted
         # ledgers still exchange below because the issue comment must be read
         # through the broker-owned installation token.
+        # A non-hosted command may already hold a review_publish capability for
+        # its ledger mutation. Reacquiring the same capability for refinalization
+        # would spend another whole internal-dispatch liability and can starve
+        # the check and approval that follow thread cleanup.
+        prepared_review_capability: _PreparedReviewCapability | None = None
         ledger = (
             self.session_ledger
             if command.action == "status" and not options.github_session_ledger
@@ -2156,6 +2193,15 @@ class GitHubApplication:
                     exchange_input,
                     capability=capability,
                 )
+                if capability == "review_publish":
+                    # Both refinalization call sites require a truthy
+                    # ``oidc_token`` and pass that same value, so redemption
+                    # always sees the exact assertion this capability was
+                    # minted for. A capability minted from a refreshed
+                    # assertion is never redeemed and simply goes unused.
+                    prepared_review_capability = _PreparedReviewCapability(
+                        self.broker, exchange_input, token
+                    )
             ledger = self._session_ledger_for_token(
                 token,
                 options=options,
@@ -2344,6 +2390,7 @@ class GitHubApplication:
                     evidence_budget=command_budget,
                     incomplete_coverage=derived_incomplete_coverage,
                     policy_digest=command_policy_digest,
+                    _prepared_review_capability=prepared_review_capability,
                 )
                 if isinstance(refinalized, MaintainerCommandResult):
                     produced = refinalized
@@ -2373,6 +2420,9 @@ class GitHubApplication:
             }
             and (result.applied or command.action == "verify")
         ):
+            # The operation-entry branch above returns `produced`, so only one
+            # of these two refinalize calls can run; redemption stays
+            # idempotent if a future retry revisits this path.
             refinalized = self._refinalize_command(
                 result,
                 oidc_token=oidc_token,
@@ -2387,6 +2437,7 @@ class GitHubApplication:
                 evidence_budget=command_budget,
                 incomplete_coverage=derived_incomplete_coverage,
                 policy_digest=command_policy_digest,
+                _prepared_review_capability=prepared_review_capability,
             )
             if isinstance(refinalized, MaintainerCommandResult):
                 result = refinalized
@@ -3030,6 +3081,9 @@ class GitHubApplication:
         evidence_budget: EvidenceReadBudget | None = None,
         incomplete_coverage: Sequence[str] | None = None,
         policy_digest: str | None = None,
+        # Private cross-call reuse: None, or the capability this operation's
+        # broker exchange minted. Never a caller-supplied token.
+        _prepared_review_capability: _PreparedReviewCapability | None = None,
     ) -> object:
         """Re-check approval after a hosted override. A failed check leaves the ledger write."""
 
@@ -3047,7 +3101,11 @@ class GitHubApplication:
         ):
             from copy import copy
 
-            existing = finalizer.evidence_budget or finalizer._operation_budget
+            existing = (
+                finalizer.evidence_budget
+                if finalizer.evidence_budget is not None
+                else finalizer._operation_budget
+            )
             if existing is not None and existing is not evidence_budget:
                 raise ReviewInputError(
                     "command finalization budget identity mismatches"
@@ -3057,6 +3115,28 @@ class GitHubApplication:
         refinalize = getattr(finalizer, "refinalize_with_dispositions", None)
         if not callable(refinalize):
             return command_result
+        # Derive the cleanup hold from this broker's configured exchange
+        # liability. The packaged default cannot see a caller-provided broker,
+        # and a reserve below the actual liability would starve the check. The
+        # liability is read from whatever control object the broker exposes,
+        # so a wrapper or proxy that reports it cannot silently fall back to
+        # the packaged default. This is a best-effort narrowing of *this*
+        # budget, not of the broker's admission path: the derived reserve is
+        # the fixed one-request/two-check/five-approval minimum plus the
+        # reported liability, so this budget's own phase minimum is always
+        # covered, while a broker bound to a different envelope can only cause
+        # an over-hold here, which defers cleanup rather than starving it. Such
+        # a broker cannot mint cleanup authority anyway, because the token
+        # provider refuses the foreign accounting envelope. Only a broker whose
+        # control reports no usable liability keeps the packaged default. A
+        # liability too large to hold is passed through rather than replaced:
+        # the finalizer refuses an oversized reserve, so an unfundable broker
+        # fails loudly instead of silently inheriting the smaller default.
+        command_finalization_reserve: int | None = None
+        control = getattr(self.broker, "control", None)
+        liability = getattr(control, "exchange_liability", None)
+        if type(liability) is int and liability > 0:
+            command_finalization_reserve = 1 + liability + 2 + 5
         failed = (
             command_result.summary
             + "; recorded; gate re-evaluation failed, comment `@reviewsensei verify` to retry"
@@ -3079,7 +3159,26 @@ class GitHubApplication:
             return token
 
         try:
-            review_token = self.broker.exchange(oidc_token, capability="review_publish")
+            # Reuse only a review_publish capability minted by this operation.
+            # The object binds the token to the minting broker and the exact
+            # OIDC assertion, so another capability, a hosted session grant or
+            # a caller-supplied string cannot reach this finalizer. Redemption
+            # is idempotent for that same pair so an in-operation retry cannot
+            # fail on a token it never sent.
+            if _prepared_review_capability is not None:
+                if not isinstance(
+                    _prepared_review_capability, _PreparedReviewCapability
+                ):
+                    raise GitHubPublicationError(
+                        "prepared review capability is invalid"
+                    )
+                review_token = _prepared_review_capability.redeem(
+                    self.broker, oidc_token
+                )
+            else:
+                review_token = self.broker.exchange(
+                    oidc_token, capability="review_publish"
+                )
             from review_sensei.session import SessionRecord
 
             dispositions = (
@@ -3112,6 +3211,7 @@ class GitHubApplication:
                 check_token_provider=lambda budget: command_token(
                     budget, "check_publish"
                 ),
+                command_finalization_reserve=command_finalization_reserve,
             )
         except Exception as exc:
             return render_command_progress(

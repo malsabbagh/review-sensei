@@ -98,6 +98,23 @@ class TicketTests(unittest.TestCase):
     def plan(self, *steps):
         return ActivationTailPlan("local", "a" * 64, tuple(steps))
 
+    def test_ordinary_hold_refuses_tail_reservation_until_released(self):
+        plan = self.plan(TailDispatch("scan:1"))
+        budget = EvidenceReadBudget(clock=lambda: 10, wall_clock=lambda: 1000)
+        budget.hold_ordinary(18)
+        with self.assertRaises(ReviewInputError):
+            budget.reserve_tail(plan)
+        budget.release_ordinary(18)
+        ticket = budget.reserve_tail(plan)
+        # Releasing the hold restores the ordinary tail path exactly: the
+        # ticket charged by the reservation can complete its activation, so the
+        # hold leaves no residue behind for the prepaid sequence.
+        ticket.seal("b" * 64)
+        ticket.start(scope_sha256=plan.scope_sha256, root_sha256="b" * 64)
+        self.assertEqual(ticket.consume("scan:1"), 60)
+        ticket.finish()
+        self.assertEqual(ticket.dispatched, 1)
+
     def test_nonrefundable_precharge_optional_scan_and_one_use(self):
         budget = EvidenceReadBudget(clock=lambda: 10, wall_clock=lambda: 1000)
         budget.consume()

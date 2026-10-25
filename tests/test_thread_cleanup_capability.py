@@ -4,18 +4,27 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from review_sensei_github.application import GitHubApplication, GitHubWriteOptions
+from review_sensei_github.application import (
+    GitHubApplication,
+    GitHubWriteOptions,
+    _PreparedReviewCapability,
+)
 from review_sensei_github.broker_client import BrokerClient
 from review_sensei_github.broker_control import BrokerDispatchAccounting
 from review_sensei_github.errors import GitHubBrokerClientError, GitHubPublicationError
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.operation_diagnostics import OperationObserver
-from review_sensei_github.publication import ReviewApprovalFinalizer, ReviewPublisher
+from review_sensei_github.publication import (
+    COMMAND_FINALIZATION_RESERVE,
+    ReviewApprovalFinalizer,
+    ReviewPublisher,
+)
 from review_sensei_github.publication_recovery import publication_http
 from review_sensei_github.thread_resolution import FindingThreadResolver
 
-from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.bounded_evidence import MAX_PART_READS, EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
 from review_sensei.session import LocalSessionLedger
 from tests.fake_github_http import json_response
@@ -388,6 +397,608 @@ class CleanupCommandCompositionTests(unittest.TestCase):
         self.assertEqual(outcome.status, "skipped_stale_head")
         self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
 
+    def test_unavailable_reserve_hold_defers_cleanup_without_spending_approval(self):
+        # A prepaid activation tail refuses any ordinary hold. Cleanup must
+        # leave every decided thread unconfirmed instead of spending the room
+        # the following check/approval phases need; a later verify resumes it.
+        state = CommandCapacityState(
+            complete=True, schema="1", inline_range=(0, 1), human_count=1, padded=False
+        )
+        state.resolved_threads.clear()
+        budget = EvidenceReadBudget()
+        with tempfile.TemporaryDirectory() as directory:
+            dispositions = state.record(directory)
+            with patch.object(
+                budget,
+                "hold_ordinary",
+                side_effect=ReviewInputError(
+                    "ordinary dispatch hold cannot coexist with an activation tail"
+                ),
+            ) as hold:
+                finalizer = ReviewApprovalFinalizer(
+                    http=GitHubHttp(
+                        api_url="https://api.github.test", opener=state.open
+                    ),
+                    evidence_budget=budget,
+                )
+                outcome = finalizer.refinalize_with_dispositions(
+                    token="synthetic-review",
+                    check_token=None,
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha=HEAD,
+                    app_slug=APP,
+                    actor="alice",
+                    finding_ids=(),
+                    dispositions=dispositions,
+                    thread_cleanup_token_provider=lambda _budget: "synthetic-cleanup",
+                    check_token_provider=lambda _budget: "synthetic-check",
+                )
+        hold.assert_called_once_with(COMMAND_FINALIZATION_RESERVE)
+        self.assertEqual(state.resolved_threads, set())
+        self.assertEqual(outcome.thread_resolution, "unconfirmed")
+        self.assertEqual(
+            outcome.approval_progress.decided_thread_reconciliation, "unconfirmed"
+        )
+        self.assertEqual(outcome.status, "approved")
+        self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 1)
+        diagnostics = outcome.operation_diagnostics.to_dict()
+        self.assertEqual(diagnostics["cleanup"]["first"]["stage"], "cleanup.hold")
+        self.assertEqual(diagnostics["cleanup"]["first"]["reason"], "hold-conflict")
+
+    def test_failed_hold_release_cannot_mask_a_completed_cleanup(self):
+        # The sole holder releases exactly what it reserved, so a mismatch is
+        # unreachable. If it happens anyway, the cleanup outcome and the
+        # following approval must survive; the conflict is observed rather
+        # than escalated into an evaluation failure.
+        state = CommandCapacityState(
+            complete=True, schema="1", inline_range=(0, 1), human_count=1, padded=False
+        )
+        state.resolved_threads.clear()
+        budget = EvidenceReadBudget()
+        with tempfile.TemporaryDirectory() as directory:
+            dispositions = state.record(directory)
+            with patch.object(
+                budget,
+                "release_ordinary",
+                side_effect=ReviewInputError(
+                    "ordinary dispatch hold release does not match"
+                ),
+            ) as release:
+                outcome = ReviewApprovalFinalizer(
+                    http=GitHubHttp(
+                        api_url="https://api.github.test", opener=state.open
+                    ),
+                    evidence_budget=budget,
+                ).refinalize_with_dispositions(
+                    token="synthetic-review",
+                    check_token=None,
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha=HEAD,
+                    app_slug=APP,
+                    actor="alice",
+                    finding_ids=(),
+                    dispositions=dispositions,
+                    thread_cleanup_token_provider=lambda _budget: "synthetic-cleanup",
+                    check_token_provider=lambda _budget: "synthetic-check",
+                )
+        release.assert_called_once_with(COMMAND_FINALIZATION_RESERVE)
+        self.assertEqual(state.resolved_threads, {100})
+        self.assertEqual(outcome.status, "approved")
+        self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 1)
+        diagnostics = outcome.operation_diagnostics.to_dict()
+        self.assertEqual(diagnostics["cleanup"]["first"]["stage"], "cleanup.hold")
+        self.assertEqual(diagnostics["cleanup"]["first"]["reason"], "hold-conflict")
+
+    def test_refused_hold_spends_no_discovery_or_resolution_calls(self):
+        from types import SimpleNamespace
+
+        from review_sensei_github.publication import FindingIndex, IndexedFinding
+
+        budget = EvidenceReadBudget()
+        finalizer = ReviewApprovalFinalizer(
+            http=GitHubHttp(api_url="https://api.github.test"),
+            evidence_budget=budget,
+        )
+        calls_before = budget.calls
+        with patch.object(
+            budget,
+            "hold_ordinary",
+            side_effect=ReviewInputError(
+                "ordinary dispatch hold cannot coexist with an activation tail"
+            ),
+        ) as hold:
+            result = finalizer.reconcile_decided_threads(
+                token="synthetic-review",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD,
+                app_slug=APP,
+                eligibility=SimpleNamespace(result_digest="b" * 64, human_review=None),
+                index=FindingIndex(
+                    result_digest="b" * 64,
+                    base_sha=BASE,
+                    entries=(
+                        IndexedFinding(
+                            instance="rs-1",
+                            lifecycle=None,
+                            blocking=False,
+                            needs_human=True,
+                        ),
+                    ),
+                ),
+                reviews=(),
+                honored_instances=frozenset({"rs-1"}),
+                reserve=COMMAND_FINALIZATION_RESERVE,
+            )
+        hold.assert_called_once_with(COMMAND_FINALIZATION_RESERVE)
+        self.assertEqual(result.unconfirmed, ("rs-1",))
+        # The failed reservation returns before discovery or the capability
+        # exchange, so the check/approval room it protects is untouched.
+        self.assertEqual(budget.calls, calls_before)
+
+    def test_reserve_without_owned_accounting_is_refused_before_dispatch(self):
+        # ``refinalize_with_dispositions`` always supplies an operation budget,
+        # so only a direct caller can reach this state. It must fail closed
+        # before the hold or any dispatch rather than clean up unreserved.
+        from types import SimpleNamespace
+
+        from review_sensei_github.publication import FindingIndex, IndexedFinding
+
+        finalizer = ReviewApprovalFinalizer(
+            http=GitHubHttp(api_url="https://api.github.test")
+        )
+        with self.assertRaisesRegex(
+            ReviewInputError, "thread cleanup reserve requires original accounting"
+        ):
+            finalizer.reconcile_decided_threads(
+                token="synthetic-review",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD,
+                app_slug=APP,
+                eligibility=SimpleNamespace(result_digest="b" * 64, human_review=None),
+                index=FindingIndex(
+                    result_digest="b" * 64,
+                    base_sha=BASE,
+                    entries=(
+                        IndexedFinding(
+                            instance="rs-1",
+                            lifecycle=None,
+                            blocking=False,
+                            needs_human=True,
+                        ),
+                    ),
+                ),
+                reviews=(),
+                honored_instances=frozenset({"rs-1"}),
+                reserve=COMMAND_FINALIZATION_RESERVE,
+            )
+
+    def test_real_activation_tail_defers_cleanup_and_releases_on_abort(self):
+        # A prepaid tail is a real, non-reentrant conflict with the cleanup
+        # hold, not only an injected error: the ticket stays outstanding, the
+        # decided threads stay unconfirmed, and aborting it restores ordinary
+        # capacity so a later request can clean up.
+        from types import SimpleNamespace
+
+        from review_sensei_github.publication import FindingIndex, IndexedFinding
+
+        from review_sensei.bounded_evidence import ActivationTailPlan, TailDispatch
+
+        budget = EvidenceReadBudget()
+        ticket = budget.reserve_tail(
+            ActivationTailPlan(
+                adapter="github",
+                scope_sha256="a" * 64,
+                steps=(TailDispatch(label="scan"),),
+            )
+        )
+        finalizer = ReviewApprovalFinalizer(
+            http=GitHubHttp(api_url="https://api.github.test"),
+            evidence_budget=budget,
+        )
+        calls_before = budget.calls
+        result = finalizer.reconcile_decided_threads(
+            token="synthetic-review",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD,
+            app_slug=APP,
+            eligibility=SimpleNamespace(result_digest="b" * 64, human_review=None),
+            index=FindingIndex(
+                result_digest="b" * 64,
+                base_sha=BASE,
+                entries=(
+                    IndexedFinding(
+                        instance="rs-1",
+                        lifecycle=None,
+                        blocking=False,
+                        needs_human=True,
+                    ),
+                ),
+            ),
+            reviews=(),
+            honored_instances=frozenset({"rs-1"}),
+            reserve=COMMAND_FINALIZATION_RESERVE,
+        )
+        self.assertEqual(result.unconfirmed, ("rs-1",))
+        # The refused hold spends nothing beyond the prepaid tail step and
+        # leaves nothing reserved. The distinct ``cleanup.hold`` stage this
+        # branch reports is asserted through the public ``operation_diagnostics``
+        # in ``test_unavailable_reserve_hold_defers_cleanup_without_spending_approval``.
+        self.assertEqual(budget.calls, calls_before)
+        self.assertEqual(budget.ordinary_remaining(), MAX_PART_READS - 4 - calls_before)
+        with self.assertRaises(ReviewInputError):
+            budget.consume()
+        ticket.abort()
+        budget.hold_ordinary(COMMAND_FINALIZATION_RESERVE)
+        budget.release_ordinary(COMMAND_FINALIZATION_RESERVE)
+        budget.consume()
+
+    def test_cleanup_reserve_follows_the_broker_exchange_liability(self):
+        # The packaged default cannot see a caller-provided broker. The
+        # application derives the hold from the broker's configured exchange
+        # liability so a larger liability cannot starve the check/approval.
+        state = CommandCapacityState(
+            complete=True, schema="1", inline_range=(0, 1), human_count=1, padded=False
+        )
+        state.resolved_threads.clear()
+        configured_liability = 12
+        budget = EvidenceReadBudget()
+        observed_holds = []
+        original_hold = budget.hold_ordinary
+
+        def hold(calls):
+            observed_holds.append(calls)
+            original_hold(calls)
+
+        def exchange(request, timeout):
+            payload = json.loads(request.data)
+            return FakeResponse(
+                json.dumps(
+                    {
+                        "token": "synthetic-" + payload["capability"],
+                        "capability": payload["capability"],
+                        "control_receipt": {
+                            **payload["control_budget"],
+                            "dispatched": 6,
+                        },
+                    }
+                ).encode()
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            state.record(directory)
+            http = GitHubHttp(api_url="https://api.github.test", opener=state.open)
+            app = GitHubApplication(
+                broker=BrokerClient(
+                    opener=exchange,
+                    control=BrokerDispatchAccounting(
+                        budget, "f" * 64, configured_liability, 1
+                    ),
+                ),
+                http=http,
+                reviewer=ReviewPublisher(http=http),
+                learner=None,
+                replier=None,
+            )
+            app.session_ledger = LocalSessionLedger(Path(directory) / "ledger")
+            app.reviewer.finalizer.human_inventory_reader_factory = None
+            with patch.object(budget, "hold_ordinary", side_effect=hold):
+                app.apply_maintainer_command(
+                    options=GitHubWriteOptions(github_writes=True),
+                    oidc_token="synthetic",
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha=HEAD,
+                    app_slug=APP,
+                    actor_login="alice",
+                    association="OWNER",
+                    body="@reviewsensei verify",
+                    command_budget=budget,
+                )
+        # One request, the broker's configured exchange liability, two check
+        # reads and five approval reads.
+        expected_reserve = 1 + configured_liability + 2 + 5
+        self.assertGreater(
+            expected_reserve,
+            COMMAND_FINALIZATION_RESERVE,
+            "the packaged default cannot see this broker's larger liability",
+        )
+        self.assertEqual(observed_holds, [expected_reserve])
+        self.assertLessEqual(budget.calls, 64)
+
+    def test_low_allowance_holds_the_reserve_and_resumes_on_a_later_verify(self):
+        # A request can reach cleanup with less than the reserve left. The full
+        # hold must still apply: spending that remainder on discovery cannot
+        # fund the separate thread_resolve authority, while the check and
+        # approval can still observe the resolved prefix and report their
+        # outcome. A later verify under its own allowance finishes the work.
+        state = CommandCapacityState(
+            complete=True, schema="1", inline_range=(0, 3), human_count=3, padded=False
+        )
+        state.resolved_threads = {100}
+        decided = sum(
+            entry.needs_human and not entry.body_placed for entry in state.entries
+        )
+        self.assertEqual(decided, 3)
+
+        def exchange_for(budget):
+            def exchange(request, timeout):
+                payload = json.loads(request.data)
+                return FakeResponse(
+                    json.dumps(
+                        {
+                            "token": "synthetic-" + payload["capability"],
+                            "capability": payload["capability"],
+                            "control_receipt": {
+                                **payload["control_budget"],
+                                "dispatched": 6,
+                            },
+                        }
+                    ).encode()
+                )
+
+            return exchange
+
+        with tempfile.TemporaryDirectory() as directory:
+            state.record(directory)
+            http = GitHubHttp(api_url="https://api.github.test", opener=state.open)
+            app = GitHubApplication(
+                broker=BrokerClient(),
+                http=http,
+                reviewer=ReviewPublisher(http=http),
+                learner=None,
+                replier=None,
+            )
+            app.session_ledger = LocalSessionLedger(Path(directory) / "ledger")
+            app.reviewer.finalizer.human_inventory_reader_factory = None
+
+            def verify(budget, operation_id):
+                app.broker = BrokerClient(
+                    opener=exchange_for(budget),
+                    control=BrokerDispatchAccounting(budget, operation_id, 10, 1),
+                )
+                return app.apply_maintainer_command(
+                    options=GitHubWriteOptions(github_writes=True),
+                    oidc_token="synthetic",
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha=HEAD,
+                    app_slug=APP,
+                    actor_login="alice",
+                    association="OWNER",
+                    body="@reviewsensei verify",
+                    command_budget=budget,
+                )
+
+            budget = EvidenceReadBudget()
+            observed_holds = []
+            original_hold = budget.hold_ordinary
+
+            def hold(calls):
+                # Spend the remaining allowance down at the moment cleanup asks
+                # for its hold, so the low-allowance scenario exists regardless
+                # of the command's measured setup cost rather than through a
+                # hard-coded pre-consumption.
+                while budget.ordinary_remaining() >= calls:
+                    budget.consume()
+                observed_holds.append((calls, budget.ordinary_remaining()))
+                original_hold(calls)
+
+            with patch.object(budget, "hold_ordinary", side_effect=hold):
+                first = verify(budget, "c" * 64)
+
+            self.assertEqual(len(observed_holds), 1)
+            self.assertEqual(observed_holds[0][0], COMMAND_FINALIZATION_RESERVE)
+            self.assertEqual(
+                observed_holds[0][1],
+                COMMAND_FINALIZATION_RESERVE - 1,
+                "the request must reach cleanup one call short of the reserve",
+            )
+            self.assertEqual(state.resolved_threads, {100})
+            self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 0)
+            self.assertIn(
+                '"decided_thread_reconciliation":"unconfirmed"', first.summary
+            )
+            self.assertIn('"check_state":"confirmed"', first.summary)
+            self.assertIn('"approval_state":"not-observed"', first.summary)
+            self.assertLessEqual(budget.calls, 64)
+
+            budget = EvidenceReadBudget()
+            retry = verify(budget, "d" * 64)
+
+            self.assertEqual(state.resolved_threads, {100, 101, 102})
+            self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 1)
+            self.assertIn('"approval_state":"submitted"', retry.summary)
+            self.assertFalse(retry.evaluation_failed)
+            self.assertLessEqual(budget.calls, 64)
+
+    def test_partial_cleanup_progress_still_leaves_check_and_approval_funded(self):
+        # Cleanup can also start above the reserve and still run out partway
+        # through the decided threads. That partial progress must not eat the
+        # room the following check exchange, publication and approval need:
+        # the hold covers them, the resolved prefix stays resolved, and the
+        # unconfirmed remainder is what a later verify resumes.
+        state = CommandCapacityState(
+            complete=True, schema="1", inline_range=(0, 3), human_count=3, padded=False
+        )
+        state.resolved_threads = {100}
+        decided = sum(
+            entry.needs_human and not entry.body_placed for entry in state.entries
+        )
+        self.assertEqual(decided, 3)
+
+        def exchange_for(budget):
+            def exchange(request, timeout):
+                payload = json.loads(request.data)
+                return FakeResponse(
+                    json.dumps(
+                        {
+                            "token": "synthetic-" + payload["capability"],
+                            "capability": payload["capability"],
+                            "control_receipt": {
+                                **payload["control_budget"],
+                                "dispatched": 6,
+                            },
+                        }
+                    ).encode()
+                )
+
+            return exchange
+
+        with tempfile.TemporaryDirectory() as directory:
+            state.record(directory)
+            http = GitHubHttp(api_url="https://api.github.test", opener=state.open)
+            app = GitHubApplication(
+                broker=BrokerClient(),
+                http=http,
+                reviewer=ReviewPublisher(http=http),
+                learner=None,
+                replier=None,
+            )
+            app.session_ledger = LocalSessionLedger(Path(directory) / "ledger")
+            app.reviewer.finalizer.human_inventory_reader_factory = None
+
+            budget = EvidenceReadBudget()
+            app.broker = BrokerClient(
+                opener=exchange_for(budget),
+                control=BrokerDispatchAccounting(budget, "c" * 64, 10, 1),
+            )
+            # Cleanup's own fixed cost is discovery, thread authentication, the
+            # thread_resolve exchange and its receipt: eighteen dispatches at
+            # this fixture. One more funds exactly one thread resolution, so
+            # the resolved set is a strict, non-empty subset. The room is set
+            # when the hold is taken rather than by pre-consuming the command's
+            # setup, so this premise does not depend on the setup cost.
+            cleanup_fixed_cost = 18
+            cleanup_headroom = cleanup_fixed_cost + 1
+            observed_holds = []
+            original_hold = budget.hold_ordinary
+
+            def hold(calls):
+                while budget.ordinary_remaining() > calls + cleanup_headroom:
+                    budget.consume()
+                observed_holds.append((calls, budget.ordinary_remaining()))
+                original_hold(calls)
+
+            with patch.object(budget, "hold_ordinary", side_effect=hold):
+                outcome = app.apply_maintainer_command(
+                    options=GitHubWriteOptions(github_writes=True),
+                    oidc_token="synthetic",
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha=HEAD,
+                    app_slug=APP,
+                    actor_login="alice",
+                    association="OWNER",
+                    body="@reviewsensei verify",
+                    command_budget=budget,
+                )
+
+        self.assertEqual(len(observed_holds), 1)
+        self.assertEqual(observed_holds[0][0], COMMAND_FINALIZATION_RESERVE)
+        self.assertEqual(
+            observed_holds[0][1],
+            COMMAND_FINALIZATION_RESERVE + cleanup_headroom,
+            "cleanup must start with exactly its own headroom above the reserve",
+        )
+        resolved_now = state.resolved_threads - {100}
+        self.assertTrue(
+            0 < len(resolved_now) < decided,
+            f"cleanup must acquire authority and resolve a strict subset: "
+            f"{resolved_now=} room={observed_holds[0][1]}",
+        )
+        self.assertIn('"decided_thread_reconciliation":"unconfirmed"', outcome.summary)
+        self.assertIn('"check_state":"confirmed"', outcome.summary)
+        self.assertIn('"approval_state":"submitted"', outcome.summary)
+        self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 1)
+        self.assertLessEqual(budget.calls, 64)
+
+    def test_explicit_check_token_callers_keep_cleanup_unreserved(self):
+        # Only the deferred command path narrows cleanup; explicit-token
+        # callers keep their check-first order and their own accounting, so no
+        # hold may be taken or released on their behalf.
+        state = CommandCapacityState(
+            complete=True, schema="1", inline_range=(0, 1), human_count=1, padded=False
+        )
+        state.resolved_threads.clear()
+        budget = EvidenceReadBudget()
+        with tempfile.TemporaryDirectory() as directory:
+            dispositions = state.record(directory)
+            with (
+                patch.object(
+                    budget,
+                    "hold_ordinary",
+                    side_effect=AssertionError("explicit-token callers hold nothing"),
+                ) as hold,
+                patch.object(
+                    budget,
+                    "release_ordinary",
+                    side_effect=AssertionError(
+                        "explicit-token callers release nothing"
+                    ),
+                ) as release,
+            ):
+                outcome = ReviewApprovalFinalizer(
+                    http=GitHubHttp(
+                        api_url="https://api.github.test", opener=state.open
+                    ),
+                    evidence_budget=budget,
+                ).refinalize_with_dispositions(
+                    token="synthetic-review",
+                    check_token="synthetic-check",
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha=HEAD,
+                    app_slug=APP,
+                    actor="alice",
+                    finding_ids=(),
+                    dispositions=dispositions,
+                )
+        hold.assert_not_called()
+        release.assert_not_called()
+        self.assertEqual(state.resolved_threads, {100})
+        self.assertEqual(outcome.thread_resolution, "resolved")
+        self.assertEqual(outcome.status, "approved")
+
+    def test_out_of_range_command_finalization_reserve_is_refused(self):
+        # The reserve is bounded before any dispatch so a wrapped control
+        # object cannot smuggle an unfundable value past admission.
+        finalizer = ReviewApprovalFinalizer(http=GitHubHttp())
+        for reserve in (0, -1, MAX_PART_READS - 3, True, "18"):
+            with (
+                self.subTest(reserve=reserve),
+                self.assertRaisesRegex(
+                    GitHubPublicationError, "command finalization reserve is invalid"
+                ),
+            ):
+                finalizer.refinalize_with_dispositions(
+                    token="synthetic-review",
+                    check_token=None,
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha=HEAD,
+                    app_slug=APP,
+                    actor="alice",
+                    finding_ids=(),
+                    dispositions=(),
+                    check_token_provider=lambda budget: "synthetic-check",
+                    command_finalization_reserve=reserve,
+                )
+
     def test_explicit_and_deferred_check_credentials_are_not_ambiguous(self):
         finalizer = ReviewApprovalFinalizer(http=GitHubHttp())
         with self.assertRaises(GitHubPublicationError):
@@ -475,6 +1086,264 @@ class CleanupCommandCompositionTests(unittest.TestCase):
             self.assertTrue(result.evaluation_failed)
             self.assertIn("decisions retained", result.summary)
 
+    def test_reserve_follows_a_foreign_broker_accounting_liability(self):
+        # The reserve follows the broker's configured liability, not budget
+        # identity. This broker cannot mint cleanup authority for this budget
+        # (the token provider refuses the foreign envelope), but the hold must
+        # never silently fall back to the packaged default.
+        from types import SimpleNamespace
+
+        from review_sensei.disposition import MaintainerCommandResult
+
+        configured_liability = 12
+        budget = EvidenceReadBudget()
+        captured = []
+
+        def exchange(request, timeout):
+            body = json.loads(request.data)
+            return FakeResponse(
+                json.dumps(
+                    {
+                        "token": "synthetic",
+                        "capability": body["capability"],
+                        "control_receipt": {
+                            **body["control_budget"],
+                            "dispatched": 1,
+                        },
+                    }
+                ).encode()
+            )
+
+        def refinalize(**kwargs):
+            captured.append(kwargs["command_finalization_reserve"])
+            return SimpleNamespace(
+                status="already_approved", thread_resolution=None, diagnostic=None
+            )
+
+        app = GitHubApplication(
+            broker=BrokerClient(
+                opener=exchange,
+                control=BrokerDispatchAccounting(
+                    EvidenceReadBudget(), "e" * 64, configured_liability, 1
+                ),
+            ),
+            http=None,
+            reviewer=SimpleNamespace(
+                finalizer=SimpleNamespace(refinalize_with_dispositions=refinalize)
+            ),
+            learner=None,
+            replier=None,
+        )
+        result = app._refinalize_command(
+            MaintainerCommandResult(
+                action="verify",
+                applied=True,
+                operator_paused=False,
+                summary="decisions retained",
+            ),
+            oidc_token="synthetic",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD,
+            app_slug=APP,
+            actor="alice",
+            record=None,
+            evidence_budget=budget,
+        )
+        expected_reserve = 1 + configured_liability + 2 + 5
+        self.assertGreater(expected_reserve, COMMAND_FINALIZATION_RESERVE)
+        self.assertEqual(captured, [expected_reserve])
+        self.assertFalse(getattr(result, "evaluation_failed", False), result.summary)
+
+    def test_reserve_reads_liability_from_a_wrapped_control_object(self):
+        # A broker may expose a control wrapper that forwards the liability
+        # rather than the packaged accounting type. The derivation must read
+        # that value, not silently fall back to the packaged default.
+        from types import SimpleNamespace
+
+        from review_sensei.disposition import MaintainerCommandResult
+
+        configured_liability = 14
+        budget = EvidenceReadBudget()
+        captured = []
+
+        def refinalize(**kwargs):
+            captured.append(kwargs["command_finalization_reserve"])
+            return SimpleNamespace(
+                status="already_approved", thread_resolution=None, diagnostic=None
+            )
+
+        broker = SimpleNamespace(
+            control=SimpleNamespace(
+                budget=budget, exchange_liability=configured_liability
+            ),
+            exchange=lambda _token, capability: f"synthetic-{capability}",
+        )
+        app = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=SimpleNamespace(
+                finalizer=SimpleNamespace(refinalize_with_dispositions=refinalize)
+            ),
+            learner=None,
+            replier=None,
+        )
+        result = app._refinalize_command(
+            MaintainerCommandResult(
+                action="verify",
+                applied=True,
+                operator_paused=False,
+                summary="decisions retained",
+            ),
+            oidc_token="synthetic",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD,
+            app_slug=APP,
+            actor="alice",
+            record=None,
+            evidence_budget=budget,
+        )
+        self.assertEqual(captured, [1 + configured_liability + 2 + 5])
+        self.assertFalse(getattr(result, "evaluation_failed", False), result.summary)
+
+    def test_reserve_derives_from_the_packaged_accounting_type(self):
+        # The built-in control reports its own ``exchange_liability``; deriving
+        # through the same attribute a wrapper uses keeps the default broker
+        # from falling back to the packaged reserve if the field is renamed.
+        captured, result = self._reserve_passed_with_control(
+            BrokerDispatchAccounting(
+                budget=EvidenceReadBudget(),
+                operation_id="a" * 64,
+                exchange_liability=14,
+                verification_liability=1,
+            )
+        )
+        self.assertEqual(captured, [1 + 14 + 2 + 5])
+        self.assertFalse(getattr(result, "evaluation_failed", False), result.summary)
+
+    def test_reserve_keeps_the_packaged_default_without_a_reported_liability(self):
+        # A control that reports nothing usable is the only case that keeps the
+        # packaged default; the value is passed as None so the finalizer, not
+        # this derivation, decides what that default funds.
+        from types import SimpleNamespace
+
+        for control in (
+            None,
+            SimpleNamespace(budget=EvidenceReadBudget()),
+            SimpleNamespace(budget=EvidenceReadBudget(), exchange_liability=0),
+            SimpleNamespace(budget=EvidenceReadBudget(), exchange_liability=True),
+        ):
+            with self.subTest(control=control):
+                captured, result = self._reserve_passed_with_control(control)
+                self.assertEqual(captured, [None])
+                self.assertFalse(getattr(result, "evaluation_failed", False))
+
+    def test_oversized_liability_is_passed_through_not_replaced(self):
+        # A liability whose derived reserve cannot be held must not be silently
+        # swapped for the smaller packaged default, which would under-reserve.
+        from types import SimpleNamespace
+
+        oversized = MAX_PART_READS - 4 - 7 + 1
+        captured, _ = self._reserve_passed_with_control(
+            SimpleNamespace(budget=EvidenceReadBudget(), exchange_liability=oversized)
+        )
+        self.assertEqual(captured, [1 + oversized + 2 + 5])
+        self.assertGreater(captured[0], MAX_PART_READS - 4)
+
+    def test_unfundable_reserve_fails_loudly_instead_of_running_cleanup(self):
+        from types import SimpleNamespace
+
+        from review_sensei.disposition import MaintainerCommandResult
+
+        oversized = MAX_PART_READS - 4 - 7 + 1
+        budget = EvidenceReadBudget()
+        broker = SimpleNamespace(
+            control=SimpleNamespace(budget=budget, exchange_liability=oversized),
+            exchange=lambda _token, capability: f"synthetic-{capability}",
+        )
+        app = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=SimpleNamespace(
+                finalizer=ReviewApprovalFinalizer(
+                    http=GitHubHttp(api_url="https://api.github.test")
+                )
+            ),
+            learner=None,
+            replier=None,
+        )
+        result = app._refinalize_command(
+            MaintainerCommandResult(
+                action="verify",
+                applied=True,
+                operator_paused=False,
+                summary="decisions retained",
+            ),
+            oidc_token="synthetic",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD,
+            app_slug=APP,
+            actor="alice",
+            record=None,
+            evidence_budget=budget,
+        )
+        self.assertTrue(getattr(result, "evaluation_failed", False), result.summary)
+
+    def _reserve_passed_with_control(self, control):
+        from types import SimpleNamespace
+
+        from review_sensei.disposition import MaintainerCommandResult
+
+        # Mirror the production call shape: the command budget is the same
+        # object the broker's control accounts against when it exposes one.
+        budget = getattr(control, "budget", None)
+        if not isinstance(budget, EvidenceReadBudget):
+            budget = EvidenceReadBudget()
+        captured = []
+
+        def refinalize(**kwargs):
+            captured.append(kwargs["command_finalization_reserve"])
+            return SimpleNamespace(
+                status="already_approved", thread_resolution=None, diagnostic=None
+            )
+
+        broker = SimpleNamespace(
+            control=control,
+            exchange=lambda _token, capability: f"synthetic-{capability}",
+        )
+        app = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=SimpleNamespace(
+                finalizer=SimpleNamespace(refinalize_with_dispositions=refinalize)
+            ),
+            learner=None,
+            replier=None,
+        )
+        result = app._refinalize_command(
+            MaintainerCommandResult(
+                action="verify",
+                applied=True,
+                operator_paused=False,
+                summary="decisions retained",
+            ),
+            oidc_token="synthetic",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD,
+            app_slug=APP,
+            actor="alice",
+            record=None,
+            evidence_budget=budget,
+        )
+        return captured, result
+
     def test_larger_ledger_makes_bounded_progress_without_renewing_a_request(self):
         state = CommandCapacityState(
             complete=True,
@@ -484,6 +1353,13 @@ class CleanupCommandCompositionTests(unittest.TestCase):
             padded=False,
         )
         state.resolved_threads.clear()
+        # The invariant is "every decided inline thread is resolved", not the
+        # fixture's current count: match the resolver's candidate predicate,
+        # which sees the honored (needs_human) entries recorded by the fixture.
+        decided = sum(
+            entry.needs_human and not entry.body_placed for entry in state.entries
+        )
+        self.assertEqual(decided, 21, "the decided-thread fixture contract changed")
         progress = []
         with tempfile.TemporaryDirectory() as directory:
             state.record(directory)
@@ -536,13 +1412,33 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 progress.append(len(state.resolved_threads))
                 self.assertEqual(budget.wall_deadline_ms, deadline)
                 self.assertLessEqual(budget.calls, 64)
-                if any(r["state"] == "APPROVED" for r in state.reviews):
+                # Approval no longer waits for the whole ledger: it is funded
+                # from the same original allowance, ahead of the remaining
+                # cleanup that resumes on the next supported verify. Cleanup
+                # only moves forward, and every attempt below the target must
+                # resolve at least one more thread; only the already-complete
+                # set may be revisited without new progress.
+                if attempt:
+                    self.assertGreaterEqual(
+                        progress[-1], progress[-2], (progress, result.summary)
+                    )
+                    if progress[-1] < decided:
+                        self.assertGreater(
+                            progress[-1], progress[-2], (progress, result.summary)
+                        )
+                if len(state.resolved_threads) >= decided:
                     break
-                self.assertTrue(
-                    attempt == 0 or progress[-1] > progress[-2],
-                    (progress, result.summary),
+            else:
+                self.fail(
+                    f"bounded cleanup did not converge in 25 attempts: {progress}"
                 )
+        # The bounded allowance cannot finish this ledger in one request; the
+        # scenario exists to prove progress resumes under later allowances.
+        self.assertGreater(len(progress), 1, progress)
         self.assertEqual(len(state.resolved_threads), 21, (progress, result.summary))
+        self.assertEqual(
+            len(state.resolved_threads), decided, (progress, result.summary)
+        )
         self.assertEqual(
             sum(r["state"] == "APPROVED" for r in state.reviews),
             1,
@@ -609,22 +1505,25 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 body="@reviewsensei verify",
                 command_budget=budget,
             )
+        # One review_publish capability funds both the ledger mutation and the
+        # refinalization. Cleanup then acquires its separate capability, and
+        # the held reserve still funds the check and the approval.
         self.assertEqual(
             [name for name, _ in exchanges],
-            ["review_publish", "review_publish", "thread_resolve", "check_publish"],
+            ["review_publish", "thread_resolve", "check_publish"],
             (result.summary, budget.calls, len(requests)),
         )
         self.assertEqual(budget.wall_deadline_ms, original_deadline)
         self.assertLessEqual(budget.calls, 64)
         self.assertEqual(state.resolved_threads, {100})
         self.assertEqual(
-            sum(r["state"] == "APPROVED" for r in state.reviews), 0, result
+            sum(r["state"] == "APPROVED" for r in state.reviews), 1, result
         )
-        self.assertIn('"approval_state":"not-observed"', result.summary)
-        self.assertIn('"next_action":"retry_verify"', result.summary)
-        # Cleanup made durable progress but left no room for approval. A new
-        # supported verify observes the resolved thread and acquires no new
-        # privileged token. It never enlarges either request's allowance.
+        self.assertIn('"approval_state":"submitted"', result.summary)
+        self.assertIn('"next_action":"none"', result.summary)
+        # Cleanup made durable progress and left the check and approval fully
+        # funded. A replay observes the resolved thread and acquires no cleanup
+        # authority; it never enlarges either request's allowance.
         budget = EvidenceReadBudget()
         original_deadline = budget.wall_deadline_ms
         app.broker = BrokerClient(
@@ -647,13 +1546,42 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 body="@reviewsensei verify",
                 command_budget=budget,
             )
+        self.assertEqual(state.resolved_threads, {100})
         self.assertEqual(
             sum(r["state"] == "APPROVED" for r in state.reviews), 1, replay
         )
-        self.assertNotIn("thread_resolve", [name for name, _ in exchanges[before:]])
+        # Cleanup is already complete, so the replay has no unresolved
+        # candidate and never acquires thread_resolve. Command finalization
+        # still acquires exactly one fresh check_publish before approval, so
+        # this list is the stable replay contract rather than an accident of
+        # the first attempt's remaining allowance.
+        self.assertEqual(
+            [name for name, _ in exchanges[before:]],
+            ["review_publish", "check_publish"],
+            (replay.summary, len(exchanges)),
+        )
         self.assertLessEqual(budget.calls, 64)
         for _, body, auth in requests:
             if body and body.get("operationName") == "ResolveReviewThread":
                 self.assertEqual(auth, "Bearer synthetic-thread_resolve")
             elif auth == "Bearer synthetic-thread_resolve":
                 self.fail("cleanup token leaked into ordinary publication/read path")
+
+
+class PreparedReviewCapabilityTests(unittest.TestCase):
+    def test_capability_is_bound_and_redeems_idempotently_for_the_same_pair(self):
+        broker = object()
+        capability = _PreparedReviewCapability(broker, "assertion", "synthetic-token")
+        self.assertEqual(capability.redeem(broker, "assertion"), "synthetic-token")
+        # An in-operation retry after a transient failure reuses the capability
+        # it never sent instead of failing as already used.
+        self.assertEqual(capability.redeem(broker, "assertion"), "synthetic-token")
+
+    def test_rejected_redemption_does_not_spend_the_capability(self):
+        broker = object()
+        capability = _PreparedReviewCapability(broker, "assertion", "synthetic-token")
+        with self.assertRaisesRegex(GitHubPublicationError, "broker mismatch"):
+            capability.redeem(object(), "assertion")
+        with self.assertRaisesRegex(GitHubPublicationError, "assertion mismatch"):
+            capability.redeem(broker, "different")
+        self.assertEqual(capability.redeem(broker, "assertion"), "synthetic-token")

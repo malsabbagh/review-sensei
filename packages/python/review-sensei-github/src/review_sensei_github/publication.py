@@ -74,6 +74,7 @@ from .approval import (
     restrict_result_qualification,
 )
 from .approval_progress import ApprovalProgress, build_approval_progress
+from .broker_control import COMMAND_EXCHANGE_DISPATCH_LIABILITY
 from .check_diagnostics import CHECK_FAILURE_CODES, CheckFailure, CheckOperationError
 from .checks import (
     REVIEW_POLICY_MODES,
@@ -137,6 +138,16 @@ MAX_PUBLISHED_REVIEW_BODY_BYTES = 65_536
 MAX_REVIEW_THREAD_PAGES = 10
 RESERVED_RECONCILIATION_READS = 4
 ORDINARY_EVIDENCE_READ_LIMIT = MAX_PART_READS - RESERVED_RECONCILIATION_READS
+# A deferred command's cleanup cannot know whether it is the last phase. Hold
+# the calls the following phases consume so cleanup cannot spend them in one
+# request: 1 request + the check_publish capability exchange's internal
+# liability, 2 check-publication calls (lookup plus create/update) and 5
+# approval reads (up to three pull preflights, one review-thread scan and one
+# persisted-reviews readback). The hold spends nothing: cleanup resumes on the
+# next supported verify. The hosted application derives the exchange term from
+# the broker's configured liability; this value is the packaged default when
+# that accounting is unavailable.
+COMMAND_FINALIZATION_RESERVE = 1 + COMMAND_EXCHANGE_DISPATCH_LIABILITY + 2 + 5
 
 _REVIEW_THREADS_QUERY = """
 query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String, $first: Int!) {
@@ -2126,14 +2137,25 @@ class ReviewApprovalFinalizer:
         thread_cleanup_token_provider: Callable[[EvidenceReadBudget], str]
         | None = None,
         check_token_provider: Callable[[EvidenceReadBudget], str] | None = None,
+        command_finalization_reserve: int | None = None,
     ) -> PublicationResult:
         """Re-evaluate one published head after an override, without a provider call.
 
         Adjusted eligibility is updated in the original review before approval.
-        A failed patch does not submit an approval.
+        A failed patch does not submit an approval. ``command_finalization_reserve``
+        is an internal command-path seam, not a caller tuning knob: it must fund
+        the following check exchange's liability, that phase's two reads and
+        finalization's five approval reads. Callers pass the value their own
+        broker accounting derives, never a lower bound, because an
+        under-reserve reintroduces the starvation this parameter prevents.
         """
         if check_token is not None and check_token_provider is not None:
             raise GitHubPublicationError("check credential configuration is ambiguous")
+        if command_finalization_reserve is not None and (
+            type(command_finalization_reserve) is not int
+            or not 1 <= command_finalization_reserve <= MAX_PART_READS - 4
+        ):
+            raise GitHubPublicationError("command finalization reserve is invalid")
         owns_operation_budget = (
             self.evidence_budget is None and self._operation_budget is None
         )
@@ -2173,6 +2195,7 @@ class ReviewApprovalFinalizer:
                     check_token_provider=(lambda: check_token_provider(budget))
                     if check_token_provider is not None
                     else None,
+                    command_finalization_reserve=command_finalization_reserve,
                 )
             except (GitHubHTTPError, GitHubPublicationError, ReviewInputError) as exc:
                 observer.exception(exc)
@@ -2235,6 +2258,7 @@ class ReviewApprovalFinalizer:
         incomplete_coverage: Sequence[str] | None = None,
         policy_digest: str | None = None,
         check_token_provider: Callable[[], str] | None = None,
+        command_finalization_reserve: int | None = None,
     ) -> PublicationResult:
         from .checks import ReviewCheckPublisher, review_check_outcome
 
@@ -2657,7 +2681,7 @@ class ReviewApprovalFinalizer:
                 return PublicationResult(status="skipped_stale_base")
             return None
 
-        def reconcile_cleanup():
+        def reconcile_cleanup(reserve: int = 0):
             return self.reconcile_decided_threads(
                 token=token,
                 repository=repository,
@@ -2669,14 +2693,29 @@ class ReviewApprovalFinalizer:
                 index=index,
                 reviews=reviews,
                 honored_instances=honored_instances,
+                reserve=reserve,
             )
 
-        # The command path must not spend another whole check-token liability
-        # before cleanup can make durable progress. Explicit-token callers keep
-        # their existing check-first order. No request allowance is renewed.
-        resolution = reconcile_cleanup() if check_token_provider is not None else None
+        # Only the deferred command path mints its check capability after
+        # cleanup. Explicit-token callers keep their existing check-first
+        # order and their own accounting, so the reserve must not narrow them.
+        deferred_command = check_token_provider is not None
+        # The deferred command must not spend another whole check-token
+        # liability before cleanup can make durable progress, and must not
+        # consume the room that the following capability exchange, check
+        # publication and approval need; cleanup resumes on a later verify.
+        resolution = (
+            reconcile_cleanup(
+                command_finalization_reserve
+                if command_finalization_reserve is not None
+                else COMMAND_FINALIZATION_RESERVE
+            )
+            if deferred_command
+            else None
+        )
         check_failed = False
-        if check_token_provider is not None:
+        if deferred_command:
+            assert check_token_provider is not None
             self._observe_stage("check.capability")
             try:
                 check_token = check_token_provider()
@@ -3039,6 +3078,7 @@ class ReviewApprovalFinalizer:
         reviews: Sequence[Any],
         honored_instances: frozenset[str] = frozenset(),
         _skip_resolved: bool = True,
+        reserve: int = 0,
     ):
         """Retry durable decisions, observing resolved threads without new writes.
 
@@ -3046,6 +3086,8 @@ class ReviewApprovalFinalizer:
         Resolved observations need no mutation fence; fresh authority fences
         remain mandatory for unresolved mutations and final approval. Repeating
         those reads for the resolved prefix can starve every later retry.
+        ``reserve`` holds ordinary dispatches for work that follows cleanup in
+        the same request; it is never spent by this phase.
         """
         from .thread_resolution import (
             FindingThreadResolver,
@@ -3145,26 +3187,85 @@ class ReviewApprovalFinalizer:
                 and not live.app_authored
             )
 
-        try:
-            return FindingThreadResolver(self.http).resolve(
-                token=token,
-                repository=repository,
-                repository_id=repository_id,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                base_sha=index.base_sha,
-                app_slug=app_slug,
-                instances=instances,
-                records=records,
-                fence=fence,
-                skip_resolved=_skip_resolved,
-                observer=self._operation_observer,
-                cleanup_token_provider=self._thread_cleanup_token_provider,
+        budget = (
+            self.evidence_budget
+            if self.evidence_budget is not None
+            else self._operation_budget
+        )
+        if reserve and budget is None:
+            # ``refinalize_with_dispositions`` always supplies an operation
+            # budget, so a reserve without accounting is only reachable from a
+            # direct caller. Refuse before the hold or any dispatch rather than
+            # run cleanup unreserved; the threads stay unconfirmed.
+            raise ReviewInputError(
+                "thread cleanup reserve requires original accounting"
             )
-        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError) as exc:
-            if self._operation_observer is not None:
-                self._operation_observer.exception(exc)
-            return ThreadResolutionResult(unconfirmed=tuple(sorted(instances)))
+        if reserve:
+            assert budget is not None
+            # The command path mints every following capability from this same
+            # budget instance; its token provider rejects a foreign accounting
+            # envelope, so the hold narrows the exact allowance broker
+            # admission reads. A prepaid activation tail or an existing hold
+            # cannot coexist with cleanup; leave the threads unconfirmed so the
+            # reserved check/approval phases still run and cleanup resumes on a
+            # later verify. An outstanding tail also refuses every ordinary
+            # dispatch, so discovery cannot proceed here; record the distinct
+            # stage so the operation report names the actual cause rather than
+            # a later generic cleanup failure.
+            #
+            # The hold stays unconditional when the remaining allowance is
+            # already below the reserve. Spending it on cleanup cannot reliably
+            # fund discovery plus the separate thread_resolve authority, while
+            # withholding it leaves the check and approval as much of their
+            # liability as the request can still provide. Cleanup remains
+            # unconfirmed and resumes under a later request's own allowance.
+            #
+            # A successful hold is only a negative constraint: it narrows the
+            # ceiling and never proves the reserved work is fundable here. Each
+            # exchange, check and approval dispatch is still admitted against
+            # ``ordinary_remaining`` before it is sent, so an underfunded
+            # reserve fails that phase's own preflight instead of letting a
+            # partial write through.
+            try:
+                budget.hold_ordinary(reserve)
+            except ReviewInputError as exc:
+                self._observe_stage("cleanup.hold")
+                if self._operation_observer is not None:
+                    self._operation_observer.exception(exc)
+                return ThreadResolutionResult(unconfirmed=tuple(sorted(instances)))
+        try:
+            try:
+                return FindingThreadResolver(self.http).resolve(
+                    token=token,
+                    repository=repository,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=index.base_sha,
+                    app_slug=app_slug,
+                    instances=instances,
+                    records=records,
+                    fence=fence,
+                    skip_resolved=_skip_resolved,
+                    observer=self._operation_observer,
+                    cleanup_token_provider=self._thread_cleanup_token_provider,
+                )
+            except (GitHubHTTPError, GitHubPublicationError, ReviewInputError) as exc:
+                if self._operation_observer is not None:
+                    self._operation_observer.exception(exc)
+                return ThreadResolutionResult(unconfirmed=tuple(sorted(instances)))
+        finally:
+            if reserve and budget is not None:
+                try:
+                    budget.release_ordinary(reserve)
+                except ReviewInputError as exc:
+                    # This phase is the sole holder and releases exactly what
+                    # it reserved, so a mismatch is unreachable. If it does
+                    # occur, observe it instead of replacing the cleanup
+                    # outcome and escaping the caller's error handling.
+                    self._observe_stage("cleanup.hold")
+                    if self._operation_observer is not None:
+                        self._operation_observer.exception(exc)
 
     def finalize_recorded_decisions(
         self,
