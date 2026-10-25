@@ -11,6 +11,12 @@
   requests, and exercise one offline startup/recovery without resetting capacity
   or repeating uncertain writes. Full workflow and release qualification remain
   pending.
+- Authenticate retained published inventory for explicit full rescans after a
+  failed continuation leaves no current transaction. Keep the receipt and ledger
+  unchanged, fence the same root on reads, and forbid inventory writes through
+  this read-only authority. Ordinary decision and finalization readers still
+  require their current transaction; coverage and approval gates are unchanged.
+
 - Distinguish unavailable check capabilities, observed access denials, temporary
   failures and other check publication failures. Retain neutral legacy diagnostic
   wording and visible warnings when summary space is exhausted, without changing

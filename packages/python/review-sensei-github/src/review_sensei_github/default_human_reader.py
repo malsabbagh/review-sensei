@@ -35,6 +35,7 @@ from .publication import (
     parse_finding_index,
 )
 from .publication_recovery import publication_http, publication_session_ledger
+from .retained_publication_source import RetainedPublishedInventorySource
 
 
 def transaction_publication_digest(transaction: Any) -> str:
@@ -139,6 +140,7 @@ class DefaultHumanInventoryReader:
         head_sha: str,
         app_slug: str,
         budget: EvidenceReadBudget,
+        _retained_source: RetainedPublishedInventorySource | None = None,
     ) -> None:
         self.http = publication_http(http, budget)
         self.ledger = publication_session_ledger(ledger, budget)
@@ -148,6 +150,7 @@ class DefaultHumanInventoryReader:
         self.head_sha = head_sha
         self.app_slug = app_slug
         self.budget = budget
+        self._retained_source = _retained_source
         self._admitted_store: HumanInventoryStore | None = None
         self.store: HumanInventoryStore | None = None
         self.document: dict[str, object] | None = None
@@ -163,6 +166,7 @@ class DefaultHumanInventoryReader:
         context = store.context
         if (
             context.budget is not self.budget
+            or context.retained_source is not self._retained_source
             or store.token != self.token
             or _publication_transport(store.http)
             is not _publication_transport(self.http)
@@ -195,6 +199,9 @@ class DefaultHumanInventoryReader:
         if self.reference is not None:
             if reference != self.reference or self.inventory is None:
                 raise ReviewInputError("default human inventory reference conflicts")
+            if self._retained_source is not None:
+                assert self.store is not None
+                self.store.revalidate_snapshot()
             return self.inventory
         admitted = self._admitted_store
         if admitted is not None:
@@ -223,7 +230,13 @@ class DefaultHumanInventoryReader:
             )
         identity = SessionIdentity(self.repository, self.pull_request, repository_id)
         loaded = self.ledger.load(identity)
-        transaction = loaded.record.transaction if loaded.record is not None else None
+        transaction = (
+            self._retained_source.select(loaded)
+            if self._retained_source is not None
+            else loaded.record.transaction
+            if loaded.record is not None
+            else None
+        )
         if loaded.status not in {"ok", "migrated"} or transaction is None:
             raise ReviewInputError(
                 "default human inventory independent checkpoint unavailable"
@@ -241,6 +254,7 @@ class DefaultHumanInventoryReader:
             configuration_digest=transaction.configuration_digest,
             evidence_digest=transaction.evidence_digest,
             budget=self.budget,
+            _retained_source=self._retained_source,
         )
         store = HumanInventoryStore(self.http, self.token, self.ledger, context)
         document = store.read(reference)
@@ -328,6 +342,12 @@ class DefaultHumanInventoryReader:
                 originals.append(item)
         if not originals:
             raise ReviewInputError("default human inventory original root unavailable")
+        if self._retained_source is not None and not any(
+            item["id"] == self._retained_source.review_id for item in originals
+        ):
+            raise ReviewInputError(
+                "retained inventory published receipt root unavailable"
+            )
         return expected, originals[0]
 
     def validate_root(self, review: object, reviews: list[Any]) -> None:
@@ -396,3 +416,5 @@ class DefaultHumanInventoryReader:
                 raise ReviewInputError(
                     "default human inventory visible prose conflicts"
                 )
+        if self._retained_source is not None:
+            self.store.revalidate_snapshot()

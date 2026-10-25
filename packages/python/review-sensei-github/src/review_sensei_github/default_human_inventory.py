@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
 
@@ -37,6 +37,7 @@ from .operation_host import (
 from .prose_publication import VisibleProseReceipt
 from .publication import finding_index_marker, parse_finding_index
 from .publication_recovery import publication_http, publication_session_ledger
+from .retained_publication_source import RetainedPublishedInventorySource
 
 PURPOSE = "default-human-inventory"
 INTENT_MARKER = "<!-- reviewsensei:default-human-inventory-intent:v1 -->"
@@ -103,6 +104,9 @@ class HumanInventoryContext:
     configuration_digest: str
     evidence_digest: str
     budget: EvidenceReadBudget
+    retained_source: RetainedPublishedInventorySource | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
         SessionIdentity(self.repository, self.pull_request, self.repository_id)
@@ -114,6 +118,8 @@ class HumanInventoryContext:
             or re.fullmatch(r"[A-Za-z0-9_-]+\[bot\]", self.app_slug, re.I | re.ASCII)
             is None
             or not isinstance(self.budget, EvidenceReadBudget)
+            or self.retained_source is not None
+            and not isinstance(self.retained_source, RetainedPublishedInventorySource)
             or not all(_digest(value, 40) for value in (self.base_sha, self.head_sha))
             or not all(
                 _digest(getattr(self, field))
@@ -183,7 +189,13 @@ def _transaction(
         )
     context.budget.check()
     record = loaded.record
-    transaction = record.transaction if record is not None else None
+    transaction = (
+        context.retained_source.select(loaded)
+        if context.retained_source is not None
+        else record.transaction
+        if record is not None
+        else None
+    )
     if (
         loaded.status not in {"ok", "migrated"}
         or record is None
@@ -273,6 +285,7 @@ def build_human_inventory_context(
     evidence_digest: str,
     budget: EvidenceReadBudget,
     _loaded: SessionLoadResult | None = None,
+    _retained_source: RetainedPublishedInventorySource | None = None,
 ) -> HumanInventoryContext:
     """Select durable transaction independently, then authenticate live Bot and PR."""
     budget.check()
@@ -286,7 +299,13 @@ def build_human_inventory_context(
     ledger = publication_session_ledger(ledger, budget)
     loaded = _loaded if _loaded is not None else ledger.load(identity)
     budget.check()
-    transaction = loaded.record.transaction if loaded.record is not None else None
+    transaction = (
+        _retained_source.select(loaded)
+        if _retained_source is not None
+        else loaded.record.transaction
+        if loaded.record is not None
+        else None
+    )
     if (
         loaded.status not in {"ok", "migrated"}
         or transaction is None
@@ -324,6 +343,7 @@ def build_human_inventory_context(
         configuration_digest,
         evidence_digest,
         budget,
+        _retained_source,
     )
     _transaction(ledger, context, loaded=_loaded)
     _live_pr(transport, token, context)
@@ -613,6 +633,8 @@ class HumanInventoryStore:
         self, document: dict[str, object], *, allow_start: bool = False
     ) -> HumanInventoryReference:
         """Reconcile complete parts; starting requires original live admission."""
+        if self.context.retained_source is not None:
+            raise ReviewInputError("retained published inventory permits reads only")
         if not isinstance(allow_start, bool):
             raise ReviewInputError("default human inventory start authority is invalid")
         payload = self._payload(document)

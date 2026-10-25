@@ -83,6 +83,7 @@
         "tests/test_publication_recovery_phase.py",
         "tests/test_default_human_reader_binding.py",
         "tests/test_default_human_rescan.py",
+        "tests/test_retained_full_rescan.py",
         "tests/test_schema5_public_contract.py",
         "tests/test_feedback_fence_budget.py",
         "tests/test_local_partition_read_cache.py",
