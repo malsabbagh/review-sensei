@@ -14,14 +14,19 @@
   publication and native approval (1 request + the broker's capability-exchange
   liability + 2 check-publication calls + 5 approval reads), and reuse the
   operation's own review capability during refinalization, bound to the
-  minting broker and OIDC assertion and claimable once. The packaged default is
-  18 (exchange liability 10); a caller-provided broker reports its configured
-  liability, so the application derives the hold from the same accounting the
-  broker admits against. Decided-thread cleanup can no longer spend the room
-  that lets the gate publish; the hold stays in force when a request reaches
-  cleanup below the reserve, is non-reentrant, and is released only by the
-  exact count reserved. An outstanding activation tail or an existing hold
-  refuses the reservation without spending allowance, records the distinct
+  minting broker and OIDC assertion and idempotent for that same pair so an
+  in-operation retry cannot be refused for a token it never sent. The packaged
+  default is 18 (exchange liability 10); a caller-provided broker reports its
+  configured liability, so the application derives the hold from that
+  accounting regardless of which budget the envelope is bound to. A foreign
+  envelope cannot mint cleanup authority, but the packaged default is never
+  silently substituted for a broker that reports a larger liability.
+  Decided-thread cleanup can no longer spend the room that lets the gate
+  publish; the hold stays in force when a request reaches cleanup below the
+  reserve, is non-reentrant, and is released only by the exact count reserved.
+  A refused release is observed at `cleanup.hold` instead of replacing the
+  cleanup outcome. An outstanding activation tail or an existing hold refuses
+  the reservation without spending allowance, records the distinct
   `cleanup.hold` stage with reason `hold-conflict`, and leaves cleanup
   unconfirmed to resume under a later supported request's allowance.
 

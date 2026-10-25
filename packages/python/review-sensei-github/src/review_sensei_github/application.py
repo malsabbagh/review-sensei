@@ -310,25 +310,25 @@ def _command_from_bytes(payload: bytes) -> object:
 
 
 class _PreparedReviewCapability:
-    """A one-shot review_publish token minted by this application's own exchange.
+    """A review_publish token minted by this application's own exchange.
 
     Tokens are opaque strings, so a finalizer cannot otherwise distinguish one
     this operation minted from a caller-supplied value. Binding the token to the
-    broker instance and OIDC assertion it was exchanged for, and claiming it on
-    first use, closes that gap without making the credential reusable.
+    broker instance and OIDC assertion it was exchanged for closes that gap
+    without making the credential reusable by any other context. Redemption is
+    idempotent for that same pair: an in-operation retry after a transient
+    failure must not be refused because a token it never sent was already
+    claimed.
     """
 
-    __slots__ = ("_broker", "_assertion_digest", "_token", "_redeemed")
+    __slots__ = ("_broker", "_assertion_digest", "_token")
 
     def __init__(self, broker: object, assertion: str, token: str) -> None:
         self._broker = broker
         self._assertion_digest = sha256(assertion.encode("utf-8")).digest()
         self._token = token
-        self._redeemed = False
 
     def redeem(self, broker: object, assertion: str) -> str:
-        if self._redeemed:
-            raise GitHubPublicationError("prepared review capability was already used")
         if broker is not self._broker:
             raise GitHubPublicationError("prepared review capability broker mismatch")
         if (
@@ -338,7 +338,6 @@ class _PreparedReviewCapability:
             raise GitHubPublicationError(
                 "prepared review capability assertion mismatch"
             )
-        self._redeemed = True
         return self._token
 
 
@@ -2418,8 +2417,8 @@ class GitHubApplication:
             and (result.applied or command.action == "verify")
         ):
             # The operation-entry branch above returns `produced`, so only one
-            # of these two refinalize calls can run and the one-shot review
-            # capability is never redeemed twice.
+            # of these two refinalize calls can run; redemption stays
+            # idempotent if a future retry revisits this path.
             refinalized = self._refinalize_command(
                 result,
                 oidc_token=oidc_token,
@@ -3078,8 +3077,8 @@ class GitHubApplication:
         evidence_budget: EvidenceReadBudget | None = None,
         incomplete_coverage: Sequence[str] | None = None,
         policy_digest: str | None = None,
-        # Private cross-call reuse: None, or the one-shot capability this
-        # operation's broker exchange minted. Never a caller-supplied token.
+        # Private cross-call reuse: None, or the capability this operation's
+        # broker exchange minted. Never a caller-supplied token.
         _prepared_review_capability: _PreparedReviewCapability | None = None,
     ) -> object:
         """Re-check approval after a hosted override. A failed check leaves the ledger write."""
@@ -3114,14 +3113,15 @@ class GitHubApplication:
             return command_result
         # Derive the cleanup hold from this broker's configured exchange
         # liability. The packaged default cannot see a caller-provided broker,
-        # and a reserve below the actual liability would starve the check.
+        # and a reserve below the actual liability would starve the check. The
+        # derivation does not depend on budget identity: a broker bound to a
+        # different envelope cannot mint cleanup authority (the token provider
+        # refuses it), and the larger hold still protects this budget's
+        # approval reads. Only a broker with no accounting keeps the packaged
+        # default.
         command_finalization_reserve: int | None = None
         control = getattr(self.broker, "control", None)
-        if (
-            evidence_budget is not None
-            and isinstance(control, BrokerDispatchAccounting)
-            and control.budget is evidence_budget
-        ):
+        if isinstance(control, BrokerDispatchAccounting):
             command_finalization_reserve = 1 + control.exchange_liability + 2 + 5
         failed = (
             command_result.summary
@@ -3146,9 +3146,11 @@ class GitHubApplication:
 
         try:
             # Reuse only a review_publish capability minted by this operation.
-            # The one-shot object binds the token to the minting broker and the
-            # exact OIDC assertion, so another capability, a hosted session
-            # grant or a caller-supplied string cannot reach this finalizer.
+            # The object binds the token to the minting broker and the exact
+            # OIDC assertion, so another capability, a hosted session grant or
+            # a caller-supplied string cannot reach this finalizer. Redemption
+            # is idempotent for that same pair so an in-operation retry cannot
+            # fail on a token it never sent.
             if _prepared_review_capability is not None:
                 if not isinstance(
                     _prepared_review_capability, _PreparedReviewCapability

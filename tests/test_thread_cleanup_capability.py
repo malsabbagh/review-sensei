@@ -447,6 +447,100 @@ class CleanupCommandCompositionTests(unittest.TestCase):
         self.assertEqual(diagnostics["cleanup"]["first"]["stage"], "cleanup.hold")
         self.assertEqual(diagnostics["cleanup"]["first"]["reason"], "hold-conflict")
 
+    def test_failed_hold_release_cannot_mask_a_completed_cleanup(self):
+        # The sole holder releases exactly what it reserved, so a mismatch is
+        # unreachable. If it happens anyway, the cleanup outcome and the
+        # following approval must survive; the conflict is observed rather
+        # than escalated into an evaluation failure.
+        state = CommandCapacityState(
+            complete=True, schema="1", inline_range=(0, 1), human_count=1, padded=False
+        )
+        state.resolved_threads.clear()
+        budget = EvidenceReadBudget()
+        with tempfile.TemporaryDirectory() as directory:
+            dispositions = state.record(directory)
+            with patch.object(
+                budget,
+                "release_ordinary",
+                side_effect=ReviewInputError(
+                    "ordinary dispatch hold release does not match"
+                ),
+            ) as release:
+                outcome = ReviewApprovalFinalizer(
+                    http=GitHubHttp(
+                        api_url="https://api.github.test", opener=state.open
+                    ),
+                    evidence_budget=budget,
+                ).refinalize_with_dispositions(
+                    token="synthetic-review",
+                    check_token=None,
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha=HEAD,
+                    app_slug=APP,
+                    actor="alice",
+                    finding_ids=(),
+                    dispositions=dispositions,
+                    thread_cleanup_token_provider=lambda _budget: "synthetic-cleanup",
+                    check_token_provider=lambda _budget: "synthetic-check",
+                )
+        release.assert_called_once_with(COMMAND_FINALIZATION_RESERVE)
+        self.assertEqual(state.resolved_threads, {100})
+        self.assertEqual(outcome.status, "approved")
+        self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 1)
+        diagnostics = outcome.operation_diagnostics.to_dict()
+        self.assertEqual(diagnostics["cleanup"]["first"]["stage"], "cleanup.hold")
+        self.assertEqual(diagnostics["cleanup"]["first"]["reason"], "hold-conflict")
+
+    def test_refused_hold_spends_no_discovery_or_resolution_calls(self):
+        from types import SimpleNamespace
+
+        from review_sensei_github.publication import FindingIndex, IndexedFinding
+
+        budget = EvidenceReadBudget()
+        finalizer = ReviewApprovalFinalizer(
+            http=GitHubHttp(api_url="https://api.github.test"),
+            evidence_budget=budget,
+        )
+        calls_before = budget.calls
+        with patch.object(
+            budget,
+            "hold_ordinary",
+            side_effect=ReviewInputError(
+                "ordinary dispatch hold cannot coexist with an activation tail"
+            ),
+        ) as hold:
+            result = finalizer.reconcile_decided_threads(
+                token="synthetic-review",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD,
+                app_slug=APP,
+                eligibility=SimpleNamespace(result_digest="b" * 64, human_review=None),
+                index=FindingIndex(
+                    result_digest="b" * 64,
+                    base_sha=BASE,
+                    entries=(
+                        IndexedFinding(
+                            instance="rs-1",
+                            lifecycle=None,
+                            blocking=False,
+                            needs_human=True,
+                        ),
+                    ),
+                ),
+                reviews=(),
+                honored_instances=frozenset({"rs-1"}),
+                reserve=COMMAND_FINALIZATION_RESERVE,
+            )
+        hold.assert_called_once_with(COMMAND_FINALIZATION_RESERVE)
+        self.assertEqual(result.unconfirmed, ("rs-1",))
+        # The failed reservation returns before discovery or the capability
+        # exchange, so the check/approval room it protects is untouched.
+        self.assertEqual(budget.calls, calls_before)
+
     def test_real_activation_tail_defers_cleanup_and_releases_on_abort(self):
         # A prepaid tail is a real, non-reentrant conflict with the cleanup
         # hold, not only an injected error: the ticket stays outstanding, the
@@ -516,6 +610,7 @@ class CleanupCommandCompositionTests(unittest.TestCase):
             complete=True, schema="1", inline_range=(0, 1), human_count=1, padded=False
         )
         state.resolved_threads.clear()
+        configured_liability = 12
         budget = EvidenceReadBudget()
         observed_holds = []
         original_hold = budget.hold_ordinary
@@ -545,7 +640,9 @@ class CleanupCommandCompositionTests(unittest.TestCase):
             app = GitHubApplication(
                 broker=BrokerClient(
                     opener=exchange,
-                    control=BrokerDispatchAccounting(budget, "f" * 64, 12, 1),
+                    control=BrokerDispatchAccounting(
+                        budget, "f" * 64, configured_liability, 1
+                    ),
                 ),
                 http=http,
                 reviewer=ReviewPublisher(http=http),
@@ -568,7 +665,15 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                     body="@reviewsensei verify",
                     command_budget=budget,
                 )
-        self.assertEqual(observed_holds, [1 + 12 + 2 + 5])
+        # One request, the broker's configured exchange liability, two check
+        # reads and five approval reads.
+        expected_reserve = 1 + configured_liability + 2 + 5
+        self.assertGreater(
+            expected_reserve,
+            COMMAND_FINALIZATION_RESERVE,
+            "the packaged default cannot see this broker's larger liability",
+        )
+        self.assertEqual(observed_holds, [expected_reserve])
         self.assertLessEqual(budget.calls, 64)
 
     def test_low_allowance_holds_the_reserve_and_resumes_on_a_later_verify(self):
@@ -637,9 +742,13 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 )
 
             budget = EvidenceReadBudget()
-            # The command's own setup consumes sixteen ordinary calls before
-            # cleanup; leaving thirty-two starts cleanup below the reserve.
-            for _ in range(28):
+            # The command's own setup consumes roughly sixteen ordinary calls
+            # before cleanup. Pre-consume enough that the remainder at cleanup
+            # entry is below the reserve; the hold recorder below asserts that
+            # entry room, so a changed setup cost surfaces there instead of
+            # silently making this scenario unreachable.
+            pre_consumed_calls = 28
+            for _ in range(pre_consumed_calls):
                 budget.consume()
             observed_holds = []
             original_hold = budget.hold_ordinary
@@ -763,6 +872,76 @@ class CleanupCommandCompositionTests(unittest.TestCase):
             self.assertTrue(result.evaluation_failed)
             self.assertIn("decisions retained", result.summary)
 
+    def test_reserve_follows_a_foreign_broker_accounting_liability(self):
+        # The reserve follows the broker's configured liability, not budget
+        # identity. This broker cannot mint cleanup authority for this budget
+        # (the token provider refuses the foreign envelope), but the hold must
+        # never silently fall back to the packaged default.
+        from types import SimpleNamespace
+
+        from review_sensei.disposition import MaintainerCommandResult
+
+        configured_liability = 12
+        budget = EvidenceReadBudget()
+        captured = []
+
+        def exchange(request, timeout):
+            body = json.loads(request.data)
+            return FakeResponse(
+                json.dumps(
+                    {
+                        "token": "synthetic",
+                        "capability": body["capability"],
+                        "control_receipt": {
+                            **body["control_budget"],
+                            "dispatched": 1,
+                        },
+                    }
+                ).encode()
+            )
+
+        def refinalize(**kwargs):
+            captured.append(kwargs["command_finalization_reserve"])
+            return SimpleNamespace(
+                status="already_approved", thread_resolution=None, diagnostic=None
+            )
+
+        app = GitHubApplication(
+            broker=BrokerClient(
+                opener=exchange,
+                control=BrokerDispatchAccounting(
+                    EvidenceReadBudget(), "e" * 64, configured_liability, 1
+                ),
+            ),
+            http=None,
+            reviewer=SimpleNamespace(
+                finalizer=SimpleNamespace(refinalize_with_dispositions=refinalize)
+            ),
+            learner=None,
+            replier=None,
+        )
+        result = app._refinalize_command(
+            MaintainerCommandResult(
+                action="verify",
+                applied=True,
+                operator_paused=False,
+                summary="decisions retained",
+            ),
+            oidc_token="synthetic",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD,
+            app_slug=APP,
+            actor="alice",
+            record=None,
+            evidence_budget=budget,
+        )
+        expected_reserve = 1 + configured_liability + 2 + 5
+        self.assertGreater(expected_reserve, COMMAND_FINALIZATION_RESERVE)
+        self.assertEqual(captured, [expected_reserve])
+        self.assertFalse(getattr(result, "evaluation_failed", False), result.summary)
+
     def test_larger_ledger_makes_bounded_progress_without_renewing_a_request(self):
         state = CommandCapacityState(
             complete=True,
@@ -778,6 +957,7 @@ class CleanupCommandCompositionTests(unittest.TestCase):
         decided = sum(
             entry.needs_human and not entry.body_placed for entry in state.entries
         )
+        self.assertEqual(decided, 21, "the decided-thread fixture contract changed")
         progress = []
         with tempfile.TemporaryDirectory() as directory:
             state.record(directory)
@@ -832,17 +1012,28 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 self.assertLessEqual(budget.calls, 64)
                 # Approval no longer waits for the whole ledger: it is funded
                 # from the same original allowance, ahead of the remaining
-                # cleanup that resumes on the next supported verify. An
-                # attempt may also reach the target without exceeding the
-                # previous count, so accept progress or completion.
-                self.assertTrue(
-                    attempt == 0
-                    or progress[-1] > progress[-2]
-                    or progress[-1] == decided,
-                    (progress, result.summary),
-                )
+                # cleanup that resumes on the next supported verify. Cleanup
+                # only moves forward, and every attempt below the target must
+                # resolve at least one more thread; only the already-complete
+                # set may be revisited without new progress.
+                if attempt:
+                    self.assertGreaterEqual(
+                        progress[-1], progress[-2], (progress, result.summary)
+                    )
+                    if progress[-1] < decided:
+                        self.assertGreater(
+                            progress[-1], progress[-2], (progress, result.summary)
+                        )
                 if len(state.resolved_threads) >= decided:
                     break
+            else:
+                self.fail(
+                    f"bounded cleanup did not converge in 25 attempts: {progress}"
+                )
+        # The bounded allowance cannot finish this ledger in one request; the
+        # scenario exists to prove progress resumes under later allowances.
+        self.assertGreater(len(progress), 1, progress)
+        self.assertEqual(len(state.resolved_threads), 21, (progress, result.summary))
         self.assertEqual(
             len(state.resolved_threads), decided, (progress, result.summary)
         )
@@ -953,9 +1144,15 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 body="@reviewsensei verify",
                 command_budget=budget,
             )
+        self.assertEqual(state.resolved_threads, {100})
         self.assertEqual(
             sum(r["state"] == "APPROVED" for r in state.reviews), 1, replay
         )
+        # Cleanup is already complete, so the replay has no unresolved
+        # candidate and never acquires thread_resolve. Command finalization
+        # still acquires exactly one fresh check_publish before approval, so
+        # this list is the stable replay contract rather than an accident of
+        # the first attempt's remaining allowance.
         self.assertEqual(
             [name for name, _ in exchanges[before:]],
             ["review_publish", "check_publish"],
@@ -970,12 +1167,13 @@ class CleanupCommandCompositionTests(unittest.TestCase):
 
 
 class PreparedReviewCapabilityTests(unittest.TestCase):
-    def test_capability_is_one_shot_and_bound_to_broker_and_assertion(self):
+    def test_capability_is_bound_and_redeems_idempotently_for_the_same_pair(self):
         broker = object()
         capability = _PreparedReviewCapability(broker, "assertion", "synthetic-token")
         self.assertEqual(capability.redeem(broker, "assertion"), "synthetic-token")
-        with self.assertRaisesRegex(GitHubPublicationError, "already used"):
-            capability.redeem(broker, "assertion")
+        # An in-operation retry after a transient failure reuses the capability
+        # it never sent instead of failing as already used.
+        self.assertEqual(capability.redeem(broker, "assertion"), "synthetic-token")
 
     def test_rejected_redemption_does_not_spend_the_capability(self):
         broker = object()

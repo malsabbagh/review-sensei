@@ -49,15 +49,22 @@ packaged default is 18, from
 `COMMAND_FINALIZATION_RESERVE` in `publication.py` is that packaged default.
 A caller-provided broker reports its configured liability through
 `BrokerDispatchAccounting`, and the application derives the hold from that
-exact accounting so a larger liability cannot be under-reserved. The hold
-spends nothing;
+exact accounting so a larger liability cannot be under-reserved. Derivation
+does not depend on the accounting being bound to this request's budget: a
+foreign envelope cannot mint cleanup authority (the token provider refuses it),
+but the packaged default is never silently substituted for a broker that
+reports a larger liability. The hold spends nothing;
 it only narrows cleanup, which remains unconfirmed and can resume under a later
-supported request's own allowance. The hold stays unconditional when less than
-the reserve remains: that allowance cannot reliably fund discovery plus the
-separate `thread_resolve` authority, while withholding it leaves the check and
-approval as much of their liability as the request can still provide. The hold
-is non-reentrant and is released only by the exact count reserved, so a nested
-or mismatched release cannot discard another phase's reservation. A prepaid
+supported request's own allowance. Broker admission reads the same narrowed
+ceiling while the hold is outstanding, so cleanup's own capability exchange
+may use only the unheld room; the check exchange runs after the release. The
+hold stays unconditional when less than the reserve remains: that allowance
+cannot reliably fund discovery plus the separate `thread_resolve` authority,
+while withholding it leaves the check and approval as much of their liability
+as the request can still provide. The hold is non-reentrant and is released
+only by the exact count reserved, so a nested or mismatched release cannot
+discard another phase's reservation. A refused release is observed at
+`cleanup.hold` instead of replacing the cleanup outcome. A prepaid
 activation tail or an existing hold refuses the reservation without spending
 allowance; because an outstanding tail also refuses every ordinary dispatch,
 cleanup cannot proceed and the request records the distinct `cleanup.hold`

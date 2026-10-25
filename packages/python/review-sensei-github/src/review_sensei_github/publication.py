@@ -2142,7 +2142,12 @@ class ReviewApprovalFinalizer:
         """Re-evaluate one published head after an override, without a provider call.
 
         Adjusted eligibility is updated in the original review before approval.
-        A failed patch does not submit an approval.
+        A failed patch does not submit an approval. ``command_finalization_reserve``
+        is an internal command-path seam, not a caller tuning knob: it must fund
+        the following check exchange's liability, that phase's two reads and
+        finalization's five approval reads. Callers pass the value their own
+        broker accounting derives, never a lower bound, because an
+        under-reserve reintroduces the starvation this parameter prevents.
         """
         if check_token is not None and check_token_provider is not None:
             raise GitHubPublicationError("check credential configuration is ambiguous")
@@ -3240,7 +3245,16 @@ class ReviewApprovalFinalizer:
                 return ThreadResolutionResult(unconfirmed=tuple(sorted(instances)))
         finally:
             if reserve and budget is not None:
-                budget.release_ordinary(reserve)
+                try:
+                    budget.release_ordinary(reserve)
+                except ReviewInputError as exc:
+                    # This phase is the sole holder and releases exactly what
+                    # it reserved, so a mismatch is unreachable. If it does
+                    # occur, observe it instead of replacing the cleanup
+                    # outcome and escaping the caller's error handling.
+                    self._observe_stage("cleanup.hold")
+                    if self._operation_observer is not None:
+                        self._operation_observer.exception(exc)
 
     def finalize_recorded_decisions(
         self,

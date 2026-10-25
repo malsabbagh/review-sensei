@@ -151,6 +151,7 @@ class BrokerControlQualification(unittest.TestCase):
         decided = sum(
             entry.needs_human and not entry.body_placed for entry in state.entries
         )
+        self.assertEqual(decided, 21, "the decided-thread fixture contract changed")
         state.record(self.temporary.name)
         self.bridge.call(
             "set_snapshot", snapshot={"repository": "owner/repo", "repositoryId": 1}
@@ -198,6 +199,18 @@ class BrokerControlQualification(unittest.TestCase):
             self.assertLessEqual(self.budget.calls, 64)
             self.assertEqual(self.budget.wall_deadline_ms, deadline)
             progress.append(len(state.resolved_threads))
+            if attempt:
+                # Cleanup only moves forward. Below the completion target every
+                # attempt must resolve at least one more decided thread; an
+                # attempt that no longer progresses may only revisit the
+                # already-complete set while approval catches up.
+                self.assertGreaterEqual(
+                    progress[-1], progress[-2], (progress, outcome.summary)
+                )
+                if progress[-1] < decided:
+                    self.assertGreater(
+                        progress[-1], progress[-2], (progress, outcome.summary)
+                    )
             # Approval is funded before cleanup can finish. Later supported
             # verifies must keep reconciling the remaining decided threads
             # without submitting a second native approval.
@@ -206,14 +219,11 @@ class BrokerControlQualification(unittest.TestCase):
                 and len(state.resolved_threads) >= decided
             ):
                 break
-            if attempt:
-                # Approval can lag cleanup, so a later attempt may revisit the
-                # completed cleanup set. Accept either strict progress or
-                # reaching the completion target.
-                self.assertTrue(
-                    progress[-1] > progress[-2] or progress[-1] == decided,
-                    (progress, outcome.summary),
-                )
+        else:
+            self.fail(
+                f"cleanup and approval did not converge in 25 attempts: {progress}"
+            )
+        self.assertEqual(len(state.resolved_threads), 21, (progress, outcome.summary))
         self.assertEqual(
             len(state.resolved_threads), decided, (progress, outcome.summary)
         )

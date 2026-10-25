@@ -437,7 +437,12 @@ class EvidenceReadBudget:
 
         The hold is strictly non-reentrant: only one phase may hold, it cannot
         hold while an activation tail owns the remaining dispatch liability,
-        and it must release exactly the count it reserved.
+        and it must release exactly the count it reserved. While it is
+        outstanding, every ordinary dispatch - including a capability exchange
+        admitted through a broker sharing this budget - draws on the unheld
+        room only, so the reserve cannot be spent around. A phase that later
+        needs its own exchange must run after the release; the command path
+        releases cleanup's hold before acquiring check authority.
         """
         if (
             isinstance(calls, bool)
