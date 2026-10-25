@@ -11,13 +11,7 @@ writes hold without blind recreation. One original finite evidence budget covers
 publication/reply broker/storage/readers/mutable fences. Missing/conflicting evidence withholds
 decisions. Require reader-first rollout and trusted complete emission. See ADR 0094.
 
-Explicit full and remaining rescan admission may select a retained published
-transaction from the latest applicable receipt when no current transaction or
-reservation exists. The read-only reference binds the unchanged authenticated
-ledger root and exact receipt; inventory, numeric producer and original visible
-publication checks remain mandatory. Ordinary disposition and finalization
-readers retain their current-transaction requirement, and retained authority
-cannot stage inventory. See [Proposed ADR 0112](adr/0112-retained-published-rescan-inventory.md).
+Explicit rescan source admission is documented in ADR 0112 in the [ADR index](adr/README.md).
 
 ## Publication and recovery
 
