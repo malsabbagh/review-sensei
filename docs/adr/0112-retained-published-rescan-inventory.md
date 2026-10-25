@@ -69,7 +69,23 @@ latest-per-head selection, ordinary reader refusal and retained write refusal.
 The installed-distribution lane includes the same regression.
 
 Source, installed package, CI and independent review results must be recorded
-before publication. The existing four held socket tests remain excluded.
+before publication.
+
+## Accounting-path preservation
+
+The retained reference supplies source selection only. Reads still pass through
+the existing publication HTTP and session-ledger wrappers with the original
+`EvidenceReadBudget`, including fresh authority fences and cached-read checks.
+Authentication adds no grant, refund or replacement budget. The generation,
+dispositions, receipts, failed-attempt counts and completed-round counts stay
+unchanged during admission. The ordinary downstream admission, consumption and
+publication paths still account for any newly authorized analysis.
+
+The later API-work redesign can retain this selector and route these same read
+interfaces through its authenticated cumulative counter. It must cover retained
+admission in combined resolver/reader/accounting tests, debit every actual read
+and preserve refusal when capacity is exhausted. The retained reference must
+never become owner, reservation or write authority, or a path around accounting.
 
 ## Rollout and rollback
 
