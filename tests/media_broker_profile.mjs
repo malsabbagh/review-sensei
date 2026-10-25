@@ -26,7 +26,7 @@ registerHooks({
 
 const { consumingBroker, requestAttestation, SHA } = await import("../deploy/cloudflare/test/epic238-consuming-broker-fixture.ts");
 const { TokenBroker } = await import("../deploy/cloudflare/src/token-broker.ts");
-const { GitHubApi } = await import("../deploy/cloudflare/src/github-api.ts");
+const { GitHubApi, readBoundedHistory } = await import("../deploy/cloudflare/src/github-api.ts");
 const { resetOidcJwksCacheForTesting } = await import("../deploy/cloudflare/src/oidc.ts");
 
 function pktLine(value) { return (Buffer.byteLength(value) + 4).toString(16).padStart(4, "0") + value; }
@@ -240,4 +240,106 @@ for (const mode of ["git", "fallback-annotated"]) {
     }
   }
 }
-process.stdout.write(JSON.stringify({ schema_version: "media-broker-profile-v1", profiles: output }, null, 2) + "\n");
+// Reuse the consuming-broker fixture used by enrollment-plan qualification.
+// These legacy-envelope cases add no candidate capacity/profile policy. Every
+// transport is synthetic, including signed OIDC; unknown fixture URLs refuse.
+const finiteReviews = Array.from({ length: 61 }, (_, index) => ({ id: index + 1, user: { type: "User", login: "synthetic" }, state: "COMMENTED", commit_id: "b".repeat(40), body: "r".repeat(4800) }));
+const finiteComments = Array.from({ length: 46 }, (_, index) => ({ id: index + 1, user: { type: "User", login: "synthetic" }, body: "x".repeat(14300) }));
+assert(Buffer.byteLength(JSON.stringify(finiteReviews)) < 524288);
+assert(Buffer.byteLength(JSON.stringify(finiteComments)) > 524288);
+assert(Buffer.byteLength(JSON.stringify(finiteComments.slice(0, 25))) < 524288);
+async function qualifiedWitnessExchange({ name, mode, maximum, history, dispatched: expected, reviewReads, commentReads, error: expectedError }) {
+  const fixture = await consumingBroker();
+  const env = { ...fixture.broker.env, GITHUB_API_URL: "https://api.github.com" };
+  const broker = new TokenBroker(env, new GitHubApi(env));
+  const attempts = [];
+  const priorFetch = globalThis.fetch;
+  resetOidcJwksCacheForTesting();
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    const attempt = { method: init?.method ?? "GET", path: url.pathname, query: url.search };
+    attempts.push(attempt);
+    if (url.hostname === "github.com") return mode === "git" ? new Response(advertisement) : new Response("", { status: 503 });
+    if (url.pathname === "/repos/malsabbagh/review-sensei/git/ref/tags/v5") return Response.json({ object: { type: "tag", sha: "b".repeat(40) } });
+    if (url.pathname.startsWith("/repos/malsabbagh/review-sensei/git/tags/")) return Response.json({ object: { type: "commit", sha: SHA } });
+    if (url.pathname === "/repos/acme/widgets/pulls/7/reviews" || url.pathname === "/repos/acme/widgets/issues/7/comments") {
+      const isReview = url.pathname.endsWith("/reviews");
+      const size = Number(url.searchParams.get("per_page"));
+      const page = Number(url.searchParams.get("page"));
+      assert([100, 50, 25, 5, 1].includes(size));
+      assert(page >= 1 && page <= 10);
+      let selected;
+      if (history === "maximum") {
+        // Nine full pages and a final empty page complete each inventory with
+        // ten reads. No row can match an App witness and shortcut comments.
+        selected = page < 10 ? Array.from({ length: size }, (_, index) => ({ id: (page - 1) * size + index + 1, body: "synthetic" })) : [];
+      } else if (history === "byte-cap-exhausted") {
+        // Four oversized responses, then six full single-item pages consume
+        // the SAME ten-request counter across page-size restarts.
+        selected = size > 1 ? [{ body: "x".repeat(525000) }] : [{ id: page, body: "synthetic" }];
+      } else {
+        const rows = isReview && history !== "both-oversized" ? finiteReviews : finiteComments;
+        selected = rows.slice((page - 1) * size, page * size);
+      }
+      const payload = JSON.stringify(selected);
+      attempt.response_bytes = Buffer.byteLength(payload);
+      return new Response(payload, { headers: { "content-type": "application/json" } });
+    }
+    const mapped = new URL(url);
+    if (mapped.hostname === "api.github.com") mapped.hostname = "api.github.test";
+    return fixture.transport(mapped, init);
+  };
+  const control = { schema_version: "1.0", operation_id: "c".repeat(64), request_id: "d".repeat(64), deadline_unix_ms: Date.now() + 60000, max_dispatches: maximum };
+  let result, error;
+  try {
+    result = await broker.exchange({ oidc_token: await fixture.oidcToken(), capability: "review_session", session: { repository_id: 987654321, pull_request: 7, head_sha: SHA }, control_budget: control });
+  } catch (caught) { error = caught.message; }
+  finally { globalThis.fetch = priorFetch; fixture.close(); }
+  assert.equal(error, expectedError);
+  assert.equal(attempts.length, expected);
+  assert(attempts.length <= maximum);
+  const reads = witnessReads(attempts);
+  assert.deepEqual(reads, { review: reviewReads, comment: commentReads });
+  if (error) assert.equal(result, undefined);
+  else {
+    assert.equal(result.session_state, "enrolled");
+    assert.deepEqual(result.control_receipt, { ...control, dispatched: expected });
+  }
+  const commentQueries = attempts.filter(row => row.path.endsWith("/comments")).map(row => row.query);
+  if (history === "finite") assert.deepEqual(commentQueries, ["?per_page=100&page=1", "?per_page=50&page=1", "?per_page=25&page=1", "?per_page=25&page=2"]);
+  if (history === "both-oversized") {
+    for (const path of ["/reviews", "/comments"]) {
+      const pages = attempts.filter(row => row.path.endsWith(path));
+      assert.deepEqual(pages.map(row => row.query), ["?per_page=100&page=1", "?per_page=50&page=1", "?per_page=25&page=1", "?per_page=25&page=2"]);
+      assert(pages[0].response_bytes > 524288 && pages[1].response_bytes > 524288);
+      assert(pages[2].response_bytes < 524288 && pages[3].response_bytes < 524288);
+    }
+  }
+  if (history === "byte-cap-exhausted") assert.deepEqual(attempts.filter(row => row.path.endsWith("/reviews")).map(row => Number(new URLSearchParams(row.query).get("per_page"))), [100, 50, 25, 5, 1, 1, 1, 1, 1, 1]);
+  return { name, mode, maximum, history, dispatched: attempts.length, witness_reads: reads, ...(error ? { error } : { session_state: result.session_state }), attempts };
+}
+const witnessQualification = [];
+for (const row of [
+  { name: "finite-git", mode: "git", maximum: 30, history: "finite", dispatched: 13, reviewReads: 1, commentReads: 4 },
+  { name: "finite-fallback-annotated", mode: "fallback-annotated", maximum: 30, history: "finite", dispatched: 15, reviewReads: 1, commentReads: 4 },
+  { name: "both-ladders-git", mode: "git", maximum: 28, history: "maximum", dispatched: 28, reviewReads: 10, commentReads: 10 },
+  { name: "both-ladders-fallback-annotated", mode: "fallback-annotated", maximum: 30, history: "maximum", dispatched: 30, reviewReads: 10, commentReads: 10 },
+  { name: "both-ladders-one-short-git", mode: "git", maximum: 27, history: "maximum", dispatched: 27, reviewReads: 10, commentReads: 9, error: "broker_control_budget_exhausted" },
+  { name: "both-ladders-one-short-fallback-annotated", mode: "fallback-annotated", maximum: 29, history: "maximum", dispatched: 29, reviewReads: 10, commentReads: 9, error: "broker_control_budget_exhausted" },
+  { name: "both-oversized-fallback-annotated", mode: "fallback-annotated", maximum: 30, history: "both-oversized", dispatched: 18, reviewReads: 4, commentReads: 4 },
+  { name: "byte-ladder-cap-fallback-annotated", mode: "fallback-annotated", maximum: 30, history: "byte-cap-exhausted", dispatched: 20, reviewReads: 10, commentReads: 0, error: "github_session_witness_failed" },
+]) witnessQualification.push(await qualifiedWitnessExchange(row));
+
+// A restart after a partial prefix discards its items but retains all four
+// physical reads. This is the same bounded reader used by both witnesses.
+let restartedReads = 0;
+const restarted = await readBoundedHistory(async (size, page) => {
+  restartedReads++;
+  if (size === 100 && page === 1) return { status: 200, data: Array.from({ length: size }, () => ({ old: true })) };
+  if (size === 100) throw new Error("github_response_too_large");
+  return { status: 200, data: Array.from({ length: page === 1 ? size : 1 }, () => ({ fresh: true })) };
+}, "history_invalid");
+assert.equal(restartedReads, 4);
+assert.equal(restarted.length, 51);
+assert(restarted.every(row => row.fresh));
+process.stdout.write(JSON.stringify({ schema_version: "media-broker-profile-v1", profiles: output, witness_qualification: witnessQualification, reader_qualification: { restarted_reads: restartedReads, fresh_items: restarted.length } }, null, 2) + "\n");

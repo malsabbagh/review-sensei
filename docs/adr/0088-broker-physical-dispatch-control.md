@@ -66,8 +66,9 @@ annotated-tag REST fallback (3), installation and repository checks with the
 session capability (4), current head (1), App identity (1), and both enrollment
 witnesses at the reader's own 10-request page ladder (20). None of those paths
 retries, refreshes or re-reads, so the reservation leaves no spare dispatch: a
-dispatch added to this exchange must raise the reservation in the same change,
-and the explicit analysis-admission qualification would surface the drift as
+dispatch added to this exchange requires rederiving and qualifying the bound
+within the unchanged original operation budget. The explicit qualification
+would surface an unfunded dispatch as
 `broker_control_budget_exhausted` in the funded annotated-tag history instead of
 the witness's closed code. A witness restarts its ladder at a smaller page size
 when a page exceeds the response byte cap; every failed read is charged to the
@@ -81,11 +82,18 @@ arbitrary histories. The same factory reserves 12 for the witness-free rescan
 authorization exchange, which stops at the capability token. These are bounded
 reservations, not a promise that arbitrary paginated histories fit, and a
 witness that exhausts its own ten-request cap cannot produce a successful
-enrollment from an incomplete inventory. The earlier 12-dispatch reservation,
-which funded only one complete page each, refused every history whose first
-page exceeded the byte cap and charged the retry ladder as an unfunded
-dispatch. Admission and completion own separate original budgets, so the larger
-reservation does not reduce the review's completion allowance. The 64 total /
+enrollment from an incomplete inventory. The earlier 12-dispatch reservation
+funded the cold annotated-tag path with one page per witness; extra physical
+reads could exhaust it. Some smaller or warm fallback histories still fit that
+allowance. The retained-data reconstruction of PR374 required 13 internal
+dispatches through Git or 15 through annotated-tag fallback; these are offline
+measurements of reconstructed inputs, not counters from its failed live request.
+Admission and completion own separate original budgets, so the larger
+reservation does not reduce the review's completion allowance. Enrollment and
+rescan authorization share the admission budget: 30 plus 12 internal units and
+two caller POSTs reserve 44 ordinary units before caller OIDC and authority
+reads, leaving at most 16 of its 60 ordinary units. This does not prove that a
+complete rescan lifecycle fits. The 64 total /
 60 ordinary call ceilings, original
 deadline, exact receipt binding, and no-refund rule are unchanged. This
 accounting correction applies when the containing hosted package is released;

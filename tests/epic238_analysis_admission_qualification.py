@@ -46,9 +46,10 @@ class AnalysisAdmissionQualification(unittest.TestCase):
             timeout=60,
             check=True,
         )
+        document = json.loads(result.stdout)
         profiles = [
             item
-            for item in json.loads(result.stdout)["profiles"]
+            for item in document["profiles"]
             if item.get("capability") == "analysis-admission"
         ]
         self.assertEqual(len(profiles), 11)
@@ -61,6 +62,23 @@ class AnalysisAdmissionQualification(unittest.TestCase):
         # literal rather than echoing the value pinned above, so this total is
         # evidence independent of the constant it just checked.
         self.assertEqual(budget.calls, 30)
+        witnesses = {item["name"]: item for item in document["witness_qualification"]}
+        self.assertEqual(len(witnesses), 8)
+        maximum = witnesses["both-ladders-fallback-annotated"]
+        self.assertEqual(maximum["dispatched"], 30)
+        self.assertEqual(maximum["witness_reads"], {"review": 10, "comment": 10})
+        self.assertEqual(maximum["session_state"], "enrolled")
+        one_short = witnesses["both-ladders-one-short-fallback-annotated"]
+        self.assertEqual(one_short["dispatched"], 29)
+        self.assertEqual(one_short["error"], "broker_control_budget_exhausted")
+        self.assertEqual(
+            witnesses["byte-ladder-cap-fallback-annotated"]["error"],
+            "github_session_witness_failed",
+        )
+        self.assertEqual(
+            document["reader_qualification"],
+            {"restarted_reads": 4, "fresh_items": 51},
+        )
 
 
 if __name__ == "__main__":
