@@ -26,8 +26,10 @@ from review_sensei_github.http import GitHubHttp
 ANALYSIS_SESSION_INTERNAL_DISPATCHES = 30
 
 # The rescan authorization exchange stops at the capability token and reads no
-# witness, so it keeps the prefix-only reservation.
-_ANALYSIS_ACTION_INTERNAL_DISPATCHES = 12
+# witness, so it keeps the prefix-only 12-dispatch reservation. Like the session
+# ceiling above, this is part of the admission contract the qualification tests
+# pin, so both reservations are public and their exact values are asserted there.
+ANALYSIS_ACTION_INTERNAL_DISPATCHES = 12
 
 
 class GitHubReviewHooks:
@@ -69,7 +71,7 @@ class GitHubReviewHooks:
         if not isinstance(budget, EvidenceReadBudget):
             raise ReviewInputError("analysis admission has no original metadata budget")
         broker = self._admission_broker(
-            args, budget, _ANALYSIS_ACTION_INTERNAL_DISPATCHES
+            args, budget, ANALYSIS_ACTION_INTERNAL_DISPATCHES
         )
         actions_token = broker.exchange(
             args.oidc_token or broker.request_oidc_token(), capability="review_actions"

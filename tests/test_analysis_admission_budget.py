@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from review_sensei_github.errors import GitHubBrokerClientError
 from review_sensei_github.review_hooks import (
+    ANALYSIS_ACTION_INTERNAL_DISPATCHES,
     ANALYSIS_SESSION_INTERNAL_DISPATCHES,
     GitHubReviewHooks,
 )
@@ -94,7 +95,10 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
         self.assertEqual(budget.calls, liability + 1)
 
     def test_rescan_exchange_keeps_the_prefix_only_reservation(self):
-        liability = 12
+        # Pin the documented action reservation alongside the session ceiling
+        # above, so a change to either contract value fails here.
+        self.assertEqual(ANALYSIS_ACTION_INTERNAL_DISPATCHES, 12)
+        liability = ANALYSIS_ACTION_INTERNAL_DISPATCHES
         budget = EvidenceReadBudget()
         controls = []
 
@@ -173,7 +177,7 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
                 )
                 with self.assertRaises(GitHubBrokerClientError):
                     self.open_session(client)
-                self.assertEqual(budget.calls, 31)
+                self.assertEqual(budget.calls, ANALYSIS_SESSION_INTERNAL_DISPATCHES + 1)
 
     def test_expired_original_deadline_refuses_before_transport(self):
         clock = [0.0]
@@ -222,7 +226,7 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
                 pull_request=args.pull_request,
                 head_sha=args.head_sha,
             )
-            self.assertEqual(budget.calls, 31)
+            self.assertEqual(budget.calls, ANALYSIS_SESSION_INTERNAL_DISPATCHES + 1)
             with (
                 patch.dict(os.environ, env),
                 patch.object(
@@ -235,8 +239,16 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
             self.assertEqual(authorized.request_id, 10)
             self.assertEqual(authorized.review_id, state.reviews[-1]["id"])
             self.assertIs(ledger.evidence_budget, budget)
-            self.assertEqual(liabilities, [12])
-            self.assertEqual(budget.calls, 44 + len(state.rescan_calls))
+            self.assertEqual(liabilities, [ANALYSIS_ACTION_INTERNAL_DISPATCHES])
+            # One admission and one rescan, each prepaying its internal
+            # liability plus its caller HTTP dispatch, plus the rescan's own
+            # reads. Reference both constants so the relation stays visible.
+            self.assertEqual(
+                budget.calls,
+                (ANALYSIS_SESSION_INTERNAL_DISPATCHES + 1)
+                + (ANALYSIS_ACTION_INTERNAL_DISPATCHES + 1)
+                + len(state.rescan_calls),
+            )
             self.assertLessEqual(budget.calls, 60)
             self.assertEqual(budget.wall_deadline_ms, deadline)
             self.assertEqual(len(controls), 2)
@@ -244,7 +256,10 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
             self.assertEqual(len({item["request_id"] for item in controls}), 2)
             self.assertEqual(
                 [item["max_dispatches"] for item in controls],
-                [ANALYSIS_SESSION_INTERNAL_DISPATCHES, 12],
+                [
+                    ANALYSIS_SESSION_INTERNAL_DISPATCHES,
+                    ANALYSIS_ACTION_INTERNAL_DISPATCHES,
+                ],
             )
 
 

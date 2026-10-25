@@ -64,6 +64,14 @@ class AnalysisAdmissionQualification(unittest.TestCase):
         self.assertEqual(budget.calls, 30)
         witnesses = {item["name"]: item for item in document["witness_qualification"]}
         self.assertEqual(len(witnesses), 8)
+        # Name the cases we index so a harness rename fails as a readable
+        # membership error instead of a KeyError at the indexing line.
+        for name in (
+            "both-ladders-fallback-annotated",
+            "both-ladders-one-short-fallback-annotated",
+            "byte-ladder-cap-fallback-annotated",
+        ):
+            self.assertIn(name, witnesses)
         maximum = witnesses["both-ladders-fallback-annotated"]
         self.assertEqual(maximum["dispatched"], 30)
         self.assertEqual(maximum["witness_reads"], {"review": 10, "comment": 10})
