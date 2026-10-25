@@ -27,6 +27,9 @@ from review_sensei_github.publication_recovery import (
     publication_http,
     publication_session_ledger,
 )
+from review_sensei_github.retained_publication_source import (
+    RetainedPublishedInventorySource,
+)
 from review_sensei_github.trigger import (
     choose_head_sha,
     extract_requested_commit,
@@ -393,6 +396,11 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
         return (
             None  # Old queued events and original-run retries are ordinary duplicates.
         )
+    retained_source = (
+        RetainedPublishedInventorySource.from_checkpoint(loaded, source)
+        if loaded.record.transaction is None
+        else None
+    )
     reader = DefaultHumanInventoryReader(
         http=http,
         ledger=ledger,
@@ -402,6 +410,7 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
         head_sha=args.head_sha,
         app_slug=args.app_slug,
         budget=budget,
+        _retained_source=retained_source,
     )
     eligibility = approval_eligibility_from_body(
         latest["body"], human_inventory_reader=reader
