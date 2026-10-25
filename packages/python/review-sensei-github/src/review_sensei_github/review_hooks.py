@@ -14,11 +14,22 @@ from review_sensei_github.broker_control import BrokerDispatchAccounting
 from review_sensei_github.commands import report_broker_failure, run_hosted_provider
 from review_sensei_github.http import GitHubHttp
 
-# Cold unattended admission: JWKS (1), failed Git plus annotated-tag REST
-# fallback (3), installation/repository/capability (4), head/App identity and
-# single-page review/comment witnesses (4). Longer histories remain bounded by
-# the same reservation and must refuse if they cannot complete within it.
-_ANALYSIS_ADMISSION_INTERNAL_DISPATCHES = 12
+# Cold unattended admission funds the whole session exchange: JWKS (1), failed
+# Git plus annotated-tag REST fallback (3), installation/repository/capability
+# (4), current head (1), App identity (1), and both enrollment witnesses at the
+# reader's own 10-request page ladder (20). A witness restarts that ladder when
+# a page exceeds the response byte cap, so one complete inventory can legally
+# cost the full 10; funding less refuses histories the reader is built to read.
+# This is the exact enumerated ceiling with no spare dispatch, because no path
+# in the exchange retries; changed work requires rederiving and qualifying the
+# reservation within the unchanged original operation budget.
+ANALYSIS_SESSION_INTERNAL_DISPATCHES = 30
+
+# The rescan authorization exchange stops at the capability token and reads no
+# witness, so it keeps the prefix-only 12-dispatch reservation. Like the session
+# ceiling above, this is part of the admission contract the qualification tests
+# pin, so both reservations are public and their exact values are asserted there.
+ANALYSIS_ACTION_INTERNAL_DISPATCHES = 12
 
 
 class GitHubReviewHooks:
@@ -29,7 +40,9 @@ class GitHubReviewHooks:
     ) -> SessionLedger:
         budget = EvidenceReadBudget()
         return resolve_hosted_session_ledger(
-            broker=self._admission_broker(args, budget),
+            broker=self._admission_broker(
+                args, budget, liability=ANALYSIS_SESSION_INTERNAL_DISPATCHES
+            ),
             http=GitHubHttp(),
             oidc_token=getattr(args, "oidc_token", None),
             repository=args.repository,
@@ -57,21 +70,26 @@ class GitHubReviewHooks:
         budget = getattr(ledger, "evidence_budget", None)
         if not isinstance(budget, EvidenceReadBudget):
             raise ReviewInputError("analysis admission has no original metadata budget")
-        broker = self._admission_broker(args, budget)
+        broker = self._admission_broker(
+            args, budget, liability=ANALYSIS_ACTION_INTERNAL_DISPATCHES
+        )
         actions_token = broker.exchange(
             args.oidc_token or broker.request_oidc_token(), capability="review_actions"
         )
         return resolve_rescan(args, ledger, actions_token=actions_token)
 
     @staticmethod
-    def _admission_broker(args, budget):
+    def _admission_broker(args, budget, *, liability):
+        # Every caller must name its prepaid reservation, so a third caller
+        # cannot silently inherit a smaller value by position and a zero
+        # liability cannot turn every admission into a pre-transport refusal.
+        if liability <= 0:
+            raise ValueError("admission liability must be positive")
         operation = hashlib.sha256(
             f"analysis-admission:{args.repository_id}:{args.pull_request}:{args.head_sha}".encode()
         ).hexdigest()
         return BrokerClient(
-            control=BrokerDispatchAccounting(
-                budget, operation, _ANALYSIS_ADMISSION_INTERNAL_DISPATCHES, 1
-            )
+            control=BrokerDispatchAccounting(budget, operation, liability, 1)
         )
 
     def run_provider(

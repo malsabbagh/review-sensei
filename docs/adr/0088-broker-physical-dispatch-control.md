@@ -59,20 +59,51 @@ before any transport or partial debit.
 
 ## Consequences and alternatives
 
-Unattended analysis admission prepays 12 internal dispatches plus its caller
-HTTP request from the original metadata budget. This covers the cold JWKS path,
-failed Git advertisement followed by an annotated-tag REST lookup, installation
-and repository checks, session capability, current head, App identity, and one
-complete page each of review and operation-comment witnesses. The same factory
-conservatively reserves 12 for the rescan authorization exchange. These are
-bounded reservations, not a promise that arbitrary paginated histories fit.
-Additional witness pages remain charged and refuse before an unfunded dispatch;
-they cannot produce a successful enrollment from an incomplete inventory.
-The 64 total / 60 ordinary call ceilings, original deadline, exact receipt
-binding, and no-refund rule are unchanged. This accounting correction applies
-when the containing hosted package is released; it does not authorize renewing
-a previously refused live attempt or attribute any historical failure to this
-fallback without its original dispatch evidence.
+Unattended analysis admission prepays 30 internal dispatches plus its caller
+HTTP request from the original metadata budget. Thirty is the exact enumerated
+ceiling, not an estimate, and it counts the maximum, annotated-tag fallback
+case: cold JWKS (1), the failed Git advertisement plus its two annotated-tag
+REST reads (3), installation and repository checks with the session capability
+(4), current head (1), App identity (1), and both enrollment witnesses at the
+reader's own 10-request page ladder (20). The fallback's 3 is the one step
+that differs by path: the Git path completes the same resolution with a single
+successful advertisement, so the deterministic non-witness prefix is ten
+dispatches on the fallback path and eight on the Git path, and the reservation
+funds the larger fallback case. None of those paths retries, refreshes or
+re-reads, so the reservation leaves no spare dispatch: a dispatch added to
+this exchange requires rederiving and qualifying the bound within the
+unchanged original operation budget. The explicit qualification
+would surface an unfunded dispatch as
+`broker_control_budget_exhausted` in the funded annotated-tag history instead of
+the witness's closed code. A witness restarts its ladder at a smaller page size
+when a page exceeds the response byte cap; every failed read is charged to the
+witness's own ten-request allowance, and a restart does not reset it, so one
+complete inventory can legally cost ten dispatches. With both ladders funded
+in full, a byte-cap restart can no longer become an unfunded admission
+dispatch: it either completes within the witness's remaining requests or
+refuses with the witness's closed `github_session_witness_failed` inventory
+code. The reservation therefore bounds the admission budget, not the size of
+arbitrary histories. The same factory reserves 12 for the witness-free rescan
+authorization exchange, which stops at the capability token. These are bounded
+reservations, not a promise that arbitrary paginated histories fit, and a
+witness that exhausts its own ten-request cap cannot produce a successful
+enrollment from an incomplete inventory. The earlier 12-dispatch reservation
+funded the cold annotated-tag path with one page per witness; extra physical
+reads could exhaust it. Some smaller or warm fallback histories still fit that
+allowance. The retained-data reconstruction of PR374 required 13 internal
+dispatches through Git or 15 through annotated-tag fallback; these are offline
+measurements of reconstructed inputs, not counters from its failed live request.
+Admission and completion own separate original budgets, so the larger
+reservation does not reduce the review's completion allowance. Enrollment and
+rescan authorization share the admission budget: 30 plus 12 internal units and
+two caller POSTs reserve 44 ordinary units before caller OIDC and authority
+reads, leaving at most 16 of its 60 ordinary units. This does not prove that a
+complete rescan lifecycle fits. The 64 total /
+60 ordinary call ceilings, original
+deadline, exact receipt binding, and no-refund rule are unchanged. This
+accounting correction applies when the containing hosted package is released;
+it does not authorize renewing a previously refused live attempt or attribute
+any historical failure to this fallback without its original dispatch evidence.
 
 This deliberately charges a conservative admitted liability when a cached or
 failed request uses fewer internal calls. Its returned count is evidence, not a
