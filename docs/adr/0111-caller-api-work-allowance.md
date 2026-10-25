@@ -160,9 +160,11 @@ the CLI, then implement the authenticated serialized adapter with conservative
 restart bounds. Wire the same accounting through every phase; remove obsolete
 authority branches; qualify current Worker plans and full lifecycle failures.
 
-## First public-command integration measurement
+## Historical c8f563f public-command experiment (superseded)
 
-The opt-in offline host hook now supplies the same native ledger and confirmed
+**This rejected experiment is retained as evidence; the finite plan below replaces its whole-remainder reservation.**
+
+The opt-in offline host hook supplied the same native ledger and confirmed
 caller tranche to the real core CLI admission, provider metadata and analysis
 completion. The source-selected one-job startup plan remains28+50=78; its
 fixture executes OIDC, broker, workflow PR/configuration and Actions reads outside
@@ -177,7 +179,7 @@ fixture runs one fake provider call through normal operation-entry metadata and
 retains its raw result. At the first completion-checkpoint preflight it has spent
 20 ordinary requests, leaving30 usable. Native replacement requires its existing
 three ten-request scans plus PATCH:31. It refuses before any request for that
-mutation, a conservative-plan deficit of1. This is not a physical lower bound or
+mutation, a conservative-plan deficit of 1. This is not a physical lower bound or
 permission to select129. Normal failure handling then spends four reads; both
 abort mutations also refuse before writes. Total actual caller requests are34
 (10 startup plus24 ordinary), with26 usable ordinary requests, no unallocated
@@ -199,3 +201,101 @@ and reader then charge every GET, including native ledger fences, to the same
 previously used caller transport, without another reader-budget constructor or a
 write to that retained root. All20 decisions remain. This proves the read seam,
 not production historical run-accounting rollover or an end-to-end hosted rescan.
+
+
+## Finite complete-lifecycle qualification checkpoint
+
+The current source-selected plan is in
+[api_run_plan.py](../../packages/python/review-sensei-github/src/review_sensei_github/api_run_plan.py).
+It covers the qualified fresh-review template: one changed file, at most one
+finding, an inline baseline, and no preexisting decided threads. It does not
+activate a workflow, establish arbitrary-input support, or choose a shipping
+minimum/default/maximum.
+
+The native evidence reader differs from ordinary HTTP pagination. Its existing
+`_fetch_pages` loop can step up the five-size ladder after positive pages and
+allows 1,000 items. A complete conservative walk bound is
+`(1,000 + terminal 1) * ladder 5 = 5,005`; ordinary operation-comment walks retain
+their ten-request ceiling. Four native discovery/rediscovery/preactivation/
+readback walks plus PATCH bound an evidence-fenced mutation at 20,021 caller
+requests. No scan, fallback, item, byte or timeout bound is removed to fit.
+The twelve named publication authority stages and thirteen named history stages
+are explicit in the plan. Their source invocations and all 32-part carrier
+ceilings remain visible for independent review.
+
+| Planned work | Reserved caller liability |
+| --- | ---: |
+| Admission observations, reservation and transaction attachment |55,057|
+| Provider operation metadata and bounded result parts |91|
+| Retention and analysis completion |20,117|
+| Publication, inventory, check and normal approval |101,111|
+| First-owner ordinary work total |176,376|
+| Protected terminal/failure tail |70,081|
+| One owner total |246,457|
+| Initial plus one recovery startup |78|
+| **Test-only qualification: startup plus two owners** |**492,992**|
+
+These are conservative reservations, not physical requests or a recommended
+product limit. The parser's provisional default remains 128. At128 the complete
+initial/successor/terminal plan refuses before creating a marker or calling a
+provider. Increasing the test configuration is not a proposal to ship that value.
+The qualification value is computed from the declared plan, not increased until
+a fixture passes.
+
+`initialize_and_activate` now reserves the finite work and terminal tranches,
+leaving one owner total free inside the original allowance. A larger configured
+limit does not enlarge the first owner's tranche. Before inference, hooks verify
+the intact owner-bound terminal tranche and preflight all remaining planned work.
+A single caller-budget facade checks the already authenticated physical meter;
+it creates no60/64 phase window and cannot serialize an old metadata snapshot.
+Its known ordinary counter carries retained request IDs across restoration;
+startup and opaque predecessor reservations are not relabeled as confirmed calls.
+Every new physical request retains its own bounded deadline.
+
+Terminal completion belongs to the application. Retention's existing pre-write
+`publication_failed` uncertainty fence now uses a separately named mutation with
+the same transaction/result/generation checks. It does not claim terminal
+completion or add a write. Analysis cleanup claims its protected tail once before
+its first read; nested error paths cannot retry an uncertain or unfunded abort.
+The terminal selection is one-way and gives no access to another owner's blocks.
+
+The actual core CLI plus public `GitHubApplication` controls use synthetic
+external HTTP/provider responses and real admission, provider metadata,
+retention, inventory, checks, approval and transaction mutations:
+
+| Control | Physical attempts | Result |
+| --- | ---: | --- |
+| Complete review, no findings |82| One native approval, successful check, transaction completed once |
+| Complete review with human decision pending |78| No approval, action-required check, transaction completed once |
+| Provider failure |36| One cleanup owner; failed attempt recorded once |
+| Interrupted first owner followed by supported recovery |101| Old capacity stays unavailable; successor completes normally |
+| Unknown cleanup PATCH response |27| One pending request; no subsequent HTTP or repeated cleanup |
+
+At normal approval,72 ordinary requests are confirmed, 246,385 remain reserved
+undispatched, 78 startup units remain occupied, and 246,457 remain free for the
+successor. On recovery, the authenticated predecessor's 246,455 remaining reserved
+units stay opaque and unusable. Retained known request IDs survive; the observed
+unknown response is not converted to a success or refunded. Live versus durable
+confirmed counters differ by prepaid write/readback effects after sealing, as
+in the accepted native checkpoint contract; the retained reservation covers that
+uncertainty without minting capacity.
+
+Worker receipts observing 9/12/30 session-internal requests yield identical
+public-path caller counts. Action exchanges retain their independent 12 bound,
+and publication exchanges retain their own service bound. No Workflow allowance
+is sent as a Worker grant claim and no aggregate Worker allocator is introduced.
+Real Worker qualification remains a separate gate.
+
+The PR377 final exact-review selector is ported from tree `dc3b21a`. Its new
+regression first reproduced the old incorrect prose selection, then passed. The
+same-budget read proof again charges 20 GETs after a prior ordinary request,
+preserves the ledger root and 20 decisions, and constructs no fallback window.
+
+Before production/PR/release qualification, independently review this plan,
+wire and qualify the full source-owned workflow bootstrap/job inventory, remove
+remaining obsolete executable authorization/selector routes, integrate actual
+main, and run joint installed core/adapter and platform gates. The adapter now
+uses the core's named pre-write mutation, so coordinated versions/dependency pins
+are required. No installed-wheel, deployment, release, live rescan or TaskAlong
+approval is established by these offline controls. Full publication crash/CAS/
+check/approval fault coverage and arbitrary-history run rollover remain pending.

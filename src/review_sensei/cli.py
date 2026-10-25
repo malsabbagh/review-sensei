@@ -2967,6 +2967,8 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
         transaction_configuration_context: dict[str, object] | None = None
         transaction_evidence_digest: str | None = None
 
+        analysis_cleanup_started = False
+
         def cleanup_analysis_reservation(*, charge_failed_attempt: bool) -> None:
             """Clean up only while this invocation still owns the reservation.
 
@@ -2985,6 +2987,13 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 or held_reservation is None
                 or policy.mode not in OPERATOR_REVIEW_MODES
             ):
+                return
+            nonlocal analysis_cleanup_started
+            if analysis_cleanup_started:
+                return
+            analysis_cleanup_started = True
+            claim = getattr(ledger, "claim_analysis_cleanup", None)
+            if callable(claim) and not claim(identity, held_reservation):
                 return
             loaded = ledger.load(identity)
             if loaded.status not in {"ok", "migrated"} or loaded.record is None:

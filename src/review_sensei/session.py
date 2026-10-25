@@ -2989,14 +2989,12 @@ def grant_successor_continuation(
     return updated, applied
 
 
-def complete_review_publication(
-    ledger: SessionLedger,
-    identity: SessionIdentity,
+def _publication_state_mutation(
     transaction: ReviewTransaction,
     *,
     published: bool,
     now: datetime | None = None,
-) -> SessionRecord:
+) -> Callable[[SessionRecord], SessionRecord]:
     """Advance publication state without charging the failed-attempt budget.
 
     Publication failures remain retryable.  The failed-attempt counter is
@@ -3057,7 +3055,40 @@ def complete_review_publication(
             now=now, generation=next_generation, transaction=updated_transaction
         )
 
-    return ledger.replace(identity, mutate, now=now)
+    return mutate
+
+
+def complete_review_publication(
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    transaction: ReviewTransaction,
+    *,
+    published: bool,
+    now: datetime | None = None,
+) -> SessionRecord:
+    """The application's sole terminal publication completion/failed outcome."""
+    mutation = _publication_state_mutation(transaction, published=published, now=now)
+    claim = getattr(ledger, "claim_publication_completion", None)
+    if callable(claim):
+        claim(identity, transaction, published)
+    return ledger.replace(identity, mutation, now=now)
+
+
+def mark_review_publication_unconfirmed(
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    transaction: ReviewTransaction,
+    *,
+    now: datetime | None = None,
+) -> SessionRecord:
+    """Fence a pre-publication write; never claim terminal completion authority.
+
+    Retain the existing publication_failed uncertainty state and every exact
+    transaction/result/generation check. This is the original write-intent
+    mutation, not a finalizer or an extra state/allowance.
+    """
+    mutation = _publication_state_mutation(transaction, published=False, now=now)
+    return ledger.replace(identity, mutation, now=now)
 
 
 def suppress_review_publication(

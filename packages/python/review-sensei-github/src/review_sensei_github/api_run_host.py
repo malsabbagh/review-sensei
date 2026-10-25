@@ -91,6 +91,7 @@ class ApiRunReviewHooks:
             or state.configuration.commit != self.base_sha
         ):
             raise ReviewInputError("caller hosted admission scope conflicts")
+        self.ledger.caller.label_phase("admission")
         return self.ledger
 
     def begin_provider_phase(self, ledger):
@@ -98,13 +99,39 @@ class ApiRunReviewHooks:
             raise ReviewInputError(
                 "caller provider phase does not own the admitted run"
             )
+        from .api_run_plan import (
+            COMPLETION,
+            PROVIDER_METADATA,
+            PUBLICATION,
+            TERMINAL_REQUESTS,
+        )
+
+        terminal = next(
+            (
+                b
+                for b in self.ledger.caller.accounting.blocks
+                if b.block_id == self.ledger.caller._terminal_block
+            ),
+            None,
+        )
+        if (
+            terminal is None
+            or terminal.issued_by != self.ledger.caller.accounting.owner
+            or terminal.undispatched != TERMINAL_REQUESTS
+        ):
+            raise ReviewInputError("provider has no original protected terminal tail")
+        self.ledger.caller.budget_view.preflight(
+            sum(row.requests for row in (*PROVIDER_METADATA, *COMPLETION, *PUBLICATION))
+        )
         self._provider_started = True
+        self.ledger.caller.label_phase("provider")
         return self.ledger
 
     def begin_completion_phase(self, ledger):
         if ledger is not self.ledger or not self._provider_started:
             raise ReviewInputError("caller completion has no admitted provider phase")
         self._completion_started = True
+        self.ledger.caller.label_phase("completion")
         return self.ledger
 
     def run_provider(
@@ -122,3 +149,33 @@ class ApiRunReviewHooks:
 
     def report_failure(self, error: BaseException, args: Any) -> bool:
         return GitHubReviewHooks().report_failure(error, args)
+
+    def publish_review(self, application: Any, **kwargs: Any) -> Any:
+        from .api_run_plan import PUBLICATION
+
+        if (
+            application.session_ledger is not self.ledger
+            or not self._completion_started
+        ):
+            raise ReviewInputError("publication does not own the analyzed caller run")
+        self.ledger.caller.label_phase("publication")
+        self.ledger.caller.budget_view.preflight(
+            sum(row.requests for row in PUBLICATION)
+        )
+        # The workflow's pre-publication current-head read is also caller work.
+        status, pull = self.ledger.http.request(
+            "GET",
+            self.ledger.http.repository_path(
+                self.identity.repository, f"/pulls/{self.identity.pull_request}"
+            ),
+            token=self.ledger.token,
+        )
+        if (
+            status != 200
+            or not isinstance(pull, dict)
+            or pull.get("head", {}).get("sha") != self.head_sha
+        ):
+            raise ReviewInputError("caller workflow publication head changed")
+        return application.publish_review(
+            publication_budget=self.ledger.caller.budget_view, **kwargs
+        )

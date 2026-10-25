@@ -112,6 +112,62 @@ class ApiRunRequestTransport:
         self._checkpoint_readback_attempted = False
         self._producer: str | None = None
         self._reservation_started = False
+        self._terminal_block: str | None = None
+        self._terminal_reason: str | None = None
+        self._budget_view: Any = None
+        self._logical_phase = "startup"
+        self.native_walks: dict[str, int] = {}
+
+    def label_phase(self, phase: str) -> None:
+        if phase not in {
+            "admission",
+            "provider",
+            "completion",
+            "publication",
+            "terminal",
+        }:
+            raise ReviewInputError("caller lifecycle phase is invalid")
+        self._logical_phase = phase
+
+    @property
+    def budget_view(self) -> Any:
+        if self._budget_view is None:
+            from .api_run_budget import CallerRunBudget
+
+            self._budget_view = CallerRunBudget(self)
+        return self._budget_view
+
+    def begin_terminal(self, reason: str) -> None:
+        """One-way use of the original owner's already prepaid terminal work."""
+        if self._terminal_reason is not None or self._terminal_block is None:
+            raise ReviewInputError(
+                "caller terminal completion is unavailable or already claimed"
+            )
+        block = next(
+            (b for b in self.accounting.blocks if b.block_id == self._terminal_block),
+            None,
+        )
+        if block is None or block.issued_by != self.accounting.owner:
+            raise ReviewInputError("caller terminal reservation owner conflicts")
+        self._terminal_reason = reason
+        self._block = self._terminal_block
+        self.label_phase("terminal")
+
+    def bind_terminal_reservation(self, block_id: str) -> None:
+        from .api_run_plan import TERMINAL_REQUESTS
+
+        block = next(
+            (b for b in self.accounting.blocks if b.block_id == block_id), None
+        )
+        if (
+            self._terminal_block is not None
+            or block is None
+            or block.issued_by != self.accounting.owner
+            or block.undispatched != TERMINAL_REQUESTS
+        ):
+            raise ReviewInputError("caller terminal reservation conflicts")
+        self._terminal_block = block_id
+        self.label_phase("admission")
 
     @property
     def accounting(self) -> ApiRunAccounting:
@@ -180,6 +236,7 @@ class ApiRunRequestTransport:
             self._state = self._state.dispatch(self._block, pending)
         observation = {
             "phase": phase,
+            "lifecycle_phase": self._logical_phase,
             "request_id": request_id,
             "deadline_unix_ms": deadline,
             "outcome": "unknown",
@@ -221,13 +278,16 @@ class ApiRunRequestTransport:
     ) -> None:
         if not isinstance(ledger, GitHubIssueCommentSessionLedger):
             raise ReviewInputError("caller transport requires the native ledger")
-        opener = ledger.http.opener
+        from .publication_recovery import _publication_transport
+
+        opener = _publication_transport(ledger.http).opener
         if (
             not ledger.app_slug
             or identity.repository_id != self.run.repository_id
             or getattr(opener, "__self__", None) is not self
             or getattr(opener, "__func__", None) is not ApiRunRequestTransport.open
             or ledger.evidence_budget is not None
+            and ledger.evidence_budget is not self._budget_view
             or ledger._broker is not None
             or ledger._activation_ticket is not None
         ):
@@ -317,7 +377,8 @@ class ApiRunRequestTransport:
         existing marker. The host must already have authenticated the frozen
         config, current Actions owner and authoritative writer serialization.
         This bounded first-run path does not roll over historical run records.
-        All remaining capacity is reserved once, not replenished per phase.
+        Work and terminal reservations are finite source liabilities. One
+        complete successor remains unallocated inside the original allowance.
         """
         self._require_ledger(ledger, identity)
         if self._reservation_started or self._state is not None:
@@ -331,6 +392,8 @@ class ApiRunRequestTransport:
         self._reservation_started = True
 
         def prepare(record: SessionRecord) -> SessionRecord:
+            from .api_run_plan import OWNER_REQUESTS, TERMINAL_REQUESTS, WORK_REQUESTS
+
             state = initial_accounting(
                 self.run,
                 configuration,
@@ -338,11 +401,13 @@ class ApiRunRequestTransport:
                 self.plan,
                 prior_nonstartup_liability_upper_bound=0,
             )
-            if state.remaining < NATIVE_REPLACE_CALLER_REQUESTS:
-                raise ReviewInputError("initial caller persistence tranche is unfunded")
-            # The full remainder is one durable tranche. Native writes still
-            # require their complete bounded persistence tail before dispatch.
-            state = state.reserve("hosted-review", state.remaining)
+            if state.remaining < 2 * OWNER_REQUESTS:
+                raise ReviewInputError(
+                    "initial and successor lifecycle plan is unfunded"
+                )
+            state = state.reserve("hosted-review", WORK_REQUESTS).reserve(
+                "hosted-terminal", TERMINAL_REQUESTS
+            )
             updated = record.evolve(api_run_accounting=state.to_document())
             self._activation = updated, "hosted-review"
             return updated
@@ -351,7 +416,9 @@ class ApiRunRequestTransport:
         # A genuinely missing ledger has no observed marker author yet. The
         # native initializer authenticates the configured Bot on exact readback.
         self._producer = ledger.evidence_producer()
-        return self._accept_activation(ledger, confirmed)
+        accepted = self._accept_activation(ledger, confirmed)
+        self.bind_terminal_reservation("hosted-terminal")
+        return accepted
 
     def reconcile_activation(
         self, ledger: GitHubIssueCommentSessionLedger, identity: SessionIdentity
@@ -382,7 +449,14 @@ class ApiRunRequestTransport:
         if self._checkpoint is not None:
             raise ReviewInputError("caller checkpoint has unresolved publication")
         self.accounting
-        if self.usable < NATIVE_REPLACE_CALLER_REQUESTS:
+        from .api_run_plan import NATIVE_BOUND_REPLACE_CALLS
+
+        required = (
+            NATIVE_BOUND_REPLACE_CALLS
+            if ledger.evidence_budget is not None
+            else NATIVE_REPLACE_CALLER_REQUESTS
+        )
+        if self.usable < required:
             raise ReviewInputError("caller checkpoint operation is unfunded")
         self._checkpoint_readback_attempted = False
 
@@ -458,6 +532,32 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         caller.accounting
         self.__dict__.update(native.__dict__)
         self.caller = caller
+        self.evidence_budget = caller.budget_view
+        self._terminal_claimed = False
+
+    def _fetch_pages(
+        self, identity: SessionIdentity, *, since: str | None
+    ) -> list[Any]:
+        phase = self.caller._logical_phase
+        self.caller.native_walks[phase] = self.caller.native_walks.get(phase, 0) + 1
+        return super()._fetch_pages(identity, since=since)
+
+    def claim_analysis_cleanup(
+        self, identity: SessionIdentity, reservation: str
+    ) -> bool:
+        if self._terminal_claimed:
+            return False
+        self._terminal_claimed = True
+        self.caller.begin_terminal("analysis-abort")
+        return True
+
+    def claim_publication_completion(
+        self, identity: SessionIdentity, transaction: Any, published: bool
+    ) -> None:
+        if self._terminal_claimed:
+            raise ReviewInputError("caller terminal mutation was already attempted")
+        self._terminal_claimed = True
+        self.caller.begin_terminal("publication-completion")
 
     def replace(
         self,

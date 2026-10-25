@@ -500,7 +500,7 @@ class GitHubApplication:
             budget = EvidenceReadBudget()
         if budget is not None:
             budget.check()
-            if budget.calls >= 60:
+            if budget.ordinary_remaining() <= 0:
                 raise GitHubPublicationError(
                     "publication shared request budget exhausted"
                 )

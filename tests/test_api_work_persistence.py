@@ -130,7 +130,9 @@ class StartupFixture:
                 "capability": capability,
                 "control_receipt": {
                     **payload["control_budget"],
-                    "dispatched": self.fanout,
+                    "dispatched": min(
+                        self.fanout, payload["control_budget"]["max_dispatches"]
+                    ),
                 },
             }
             if capability == "review_session":
@@ -278,7 +280,12 @@ class StartupFixture:
         )
         if session.reservation_owner != {"run_id": "456", "head_sha": HEAD}:
             raise ReviewInputError("broker owner scope conflicts")
-        actions_token = client.exchange(oidc, capability="review_actions")
+        actions_client = BrokerClient(
+            broker_url="https://broker.github.test/api/github/token",
+            opener=self.accounted.open,
+            control=BrokerDispatchAccounting(budget, "c" * 64, 12, 1),
+        )
+        actions_token = actions_client.exchange(oidc, capability="review_actions")
         _, pull = self.http.request(
             "GET", "/repos/owner/repo/pulls/7", token=session.token
         )
