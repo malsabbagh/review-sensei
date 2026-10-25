@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.13 - 2026-10-25
+
 - Distinguish unavailable check capabilities, observed access denials, temporary
   failures and other check publication failures. Retain neutral legacy diagnostic
   wording and visible warnings when summary space is exhausted, without changing
@@ -32,6 +34,10 @@
   the reservation without spending allowance, records the distinct
   `cleanup.hold` stage with reason `hold-conflict`, and leaves cleanup
   unconfirmed to resume under a later supported request's allowance.
+
+## review-sensei-github 0.3.18 - 2026-10-25
+
+- Pin `review-sensei==0.8.13`.
 
 ## review-sensei-github 0.3.17 - 2026-10-24
 
