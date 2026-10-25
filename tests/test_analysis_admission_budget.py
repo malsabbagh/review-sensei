@@ -32,7 +32,9 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
         )
 
     def client(self, budget, transport, liability=ANALYSIS_SESSION_INTERNAL_DISPATCHES):
-        client = GitHubReviewHooks._admission_broker(self.args, budget, liability)
+        client = GitHubReviewHooks._admission_broker(
+            self.args, budget, liability=liability
+        )
         client.opener = transport
         return client
 
@@ -115,6 +117,27 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
         self.assertEqual(
             [item["max_dispatches"] for item in controls], [liability, liability]
         )
+        # The action ceiling is the whole receipt bound, not just the value the
+        # warm transport happens to echo: one dispatch above it must refuse.
+        over = self.client(
+            EvidenceReadBudget(),
+            lambda request, timeout: self.response(request, dispatched=liability + 1),
+            liability=liability,
+        )
+        with self.assertRaises(GitHubBrokerClientError):
+            self.open_session(over)
+
+    def test_combined_reservations_fit_one_ordinary_admission_budget(self):
+        # Enrollment and rescan authorization share the admission budget: both
+        # prepaid reservations plus their two caller POSTs must fit the ordinary
+        # ceiling, or a complete rescan lifecycle refuses only in production.
+        ceiling = EvidenceReadBudget().ordinary_remaining()
+        self.assertLessEqual(
+            ANALYSIS_SESSION_INTERNAL_DISPATCHES
+            + ANALYSIS_ACTION_INTERNAL_DISPATCHES
+            + 2,
+            ceiling,
+        )
 
     def test_full_reservation_is_kept_when_the_exchange_reports_fewer_dispatches(
         self,
@@ -124,6 +147,9 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
         # rather than a mismatch. Both arms keep the full prepaid reservation
         # plus the caller's outer HTTP dispatch; unused liability is not
         # refunded. Reference the constant so the total cannot drift alone.
+        # A second cold admission cannot follow in the same budget: two full
+        # reservations plus their caller POSTs exceed the ordinary ceiling, a
+        # bound the combined-reservation test above asserts.
         for dispatched in (9, ANALYSIS_SESSION_INTERNAL_DISPATCHES):
             with self.subTest(dispatched=dispatched):
                 budget = EvidenceReadBudget()
@@ -210,14 +236,14 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
                 controls.append(payload["control_budget"])
                 return self.response(request, dispatched=6)
 
-            def admission_broker(broker_args, allowance, internal_dispatches):
-                liabilities.append(internal_dispatches)
-                client = original_factory(broker_args, allowance, internal_dispatches)
+            def admission_broker(broker_args, allowance, *, liability):
+                liabilities.append(liability)
+                client = original_factory(broker_args, allowance, liability=liability)
                 client.opener = transport
                 return client
 
             client = original_factory(
-                args, budget, ANALYSIS_SESSION_INTERNAL_DISPATCHES
+                args, budget, liability=ANALYSIS_SESSION_INTERNAL_DISPATCHES
             )
             client.opener = transport
             client.open_session(

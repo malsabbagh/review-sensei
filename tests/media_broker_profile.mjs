@@ -132,22 +132,26 @@ for (const order of [["review_session", "check_publish"], ["check_publish", "rev
 // Git and annotated-tag fallback with the caller's admitted liability: the old
 // underfunded prefix-only value, and the funded value that reaches the reader's
 // own per-witness 10-request page ladder. Usage:
-//   node tests/media_broker_profile.mjs [analysis-liability]
-// The optional positional argument is the analysis-admission liability and must
-// be a decimal integer, so a shifted or non-numeric argument fails at parsing
-// rather than as an unexplained reservation error. The only special arm is the
-// pre-ADR prefix-only 12; every other value must fund at least the current
-// 30-dispatch ceiling. The exact ceiling is not restated here as an upper bound:
-// it is pinned to the production constant by test_analysis_admission_budget and
-// by the qualification oracle, which pass that constant in, so a silent drift
-// fails there instead of being echoed back as this harness's own expectation.
+//   node tests/media_broker_profile.mjs <analysis-liability>
+// The required positional argument is the liability the caller actually
+// admitted, so this harness holds no default copy of the production constant.
+// It must be a decimal integer, so a shifted or non-numeric argument fails at
+// parsing rather than as an unexplained reservation error. The only special arm
+// is the pre-ADR prefix-only 12; every other value must fund at least the
+// current 30-dispatch ceiling. The exact ceiling is not restated here as an
+// upper bound: it is pinned to the production constant by
+// test_analysis_admission_budget and by the qualification oracle in
+// tests/epic238_analysis_admission_qualification.py, which pass that constant
+// in, so a silent drift fails there instead of being echoed back as this
+// harness's own expectation.
 const analysisArgument = process.argv[2];
-const analysisMaximum = analysisArgument === undefined ? 30 : Number(analysisArgument);
 assert.ok(
-  analysisArgument === undefined ||
-    (/^\d+$/.test(analysisArgument) && Number.isSafeInteger(analysisMaximum)),
+  analysisArgument !== undefined &&
+    /^\d+$/.test(analysisArgument) &&
+    Number.isSafeInteger(Number(analysisArgument)),
   `analysis admission liability must be a decimal integer, got ${JSON.stringify(analysisArgument)}`,
 );
+const analysisMaximum = Number(analysisArgument);
 assert.ok(analysisMaximum === 12 || analysisMaximum >= 30,
   "analysis admission must be the pre-ADR 12 or fund the 30-dispatch ceiling");
 for (const mode of ["git", "fallback-annotated"]) {

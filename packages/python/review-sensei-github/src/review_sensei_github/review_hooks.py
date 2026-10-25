@@ -41,7 +41,7 @@ class GitHubReviewHooks:
         budget = EvidenceReadBudget()
         return resolve_hosted_session_ledger(
             broker=self._admission_broker(
-                args, budget, ANALYSIS_SESSION_INTERNAL_DISPATCHES
+                args, budget, liability=ANALYSIS_SESSION_INTERNAL_DISPATCHES
             ),
             http=GitHubHttp(),
             oidc_token=getattr(args, "oidc_token", None),
@@ -71,7 +71,7 @@ class GitHubReviewHooks:
         if not isinstance(budget, EvidenceReadBudget):
             raise ReviewInputError("analysis admission has no original metadata budget")
         broker = self._admission_broker(
-            args, budget, ANALYSIS_ACTION_INTERNAL_DISPATCHES
+            args, budget, liability=ANALYSIS_ACTION_INTERNAL_DISPATCHES
         )
         actions_token = broker.exchange(
             args.oidc_token or broker.request_oidc_token(), capability="review_actions"
@@ -79,12 +79,16 @@ class GitHubReviewHooks:
         return resolve_rescan(args, ledger, actions_token=actions_token)
 
     @staticmethod
-    def _admission_broker(args, budget, internal_dispatches):
+    def _admission_broker(args, budget, *, liability):
+        # Every caller must name its prepaid reservation, so a third caller
+        # cannot silently inherit a smaller value by position and a zero
+        # liability cannot turn every admission into a pre-transport refusal.
+        assert liability > 0
         operation = hashlib.sha256(
             f"analysis-admission:{args.repository_id}:{args.pull_request}:{args.head_sha}".encode()
         ).hexdigest()
         return BrokerClient(
-            control=BrokerDispatchAccounting(budget, operation, internal_dispatches, 1)
+            control=BrokerDispatchAccounting(budget, operation, liability, 1)
         )
 
     def run_provider(

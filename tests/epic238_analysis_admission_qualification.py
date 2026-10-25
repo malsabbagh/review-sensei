@@ -29,7 +29,7 @@ class AnalysisAdmissionQualification(unittest.TestCase):
         client = GitHubReviewHooks._admission_broker(
             SimpleNamespace(repository_id=987654321, pull_request=7, head_sha="a" * 40),
             budget,
-            liability,
+            liability=liability,
         )
         request = client.control.admit(verification=False)
         self.assertEqual(request["max_dispatches"], liability)
@@ -75,6 +75,15 @@ class AnalysisAdmissionQualification(unittest.TestCase):
         maximum = witnesses["both-ladders-fallback-annotated"]
         self.assertEqual(maximum["dispatched"], 30)
         self.assertEqual(maximum["witness_reads"], {"review": 10, "comment": 10})
+        # The ceiling is exact, so assert its composition and not only the
+        # total: the funded arm must spend ten non-witness dispatches (JWKS 1,
+        # failed Git plus annotated-tag fallback 3, installation/repository/
+        # capability 4, head 1, App identity 1). If the exchange grows one of
+        # those while the constant stays 30, a maximum history flips from the
+        # witness's closed code to budget exhaustion.
+        self.assertEqual(
+            maximum["dispatched"] - sum(maximum["witness_reads"].values()), 10
+        )
         self.assertEqual(maximum["session_state"], "enrolled")
         one_short = witnesses["both-ladders-one-short-fallback-annotated"]
         self.assertEqual(one_short["dispatched"], 29)
