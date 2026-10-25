@@ -137,6 +137,12 @@ MAX_PUBLISHED_REVIEW_BODY_BYTES = 65_536
 MAX_REVIEW_THREAD_PAGES = 10
 RESERVED_RECONCILIATION_READS = 4
 ORDINARY_EVIDENCE_READ_LIMIT = MAX_PART_READS - RESERVED_RECONCILIATION_READS
+# A deferred command's cleanup cannot know whether it is the last phase. Hold
+# one whole capability exchange (ten internal dispatches plus its request),
+# the check publication write pair and the final approval reads so cleanup
+# cannot spend the room those following phases need in one request. The hold
+# spends nothing: cleanup resumes on the next supported verify.
+COMMAND_FINALIZATION_RESERVE = 18
 
 _REVIEW_THREADS_QUERY = """
 query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String, $first: Int!) {
@@ -2657,7 +2663,7 @@ class ReviewApprovalFinalizer:
                 return PublicationResult(status="skipped_stale_base")
             return None
 
-        def reconcile_cleanup():
+        def reconcile_cleanup(reserve: int = 0):
             return self.reconcile_decided_threads(
                 token=token,
                 repository=repository,
@@ -2669,12 +2675,19 @@ class ReviewApprovalFinalizer:
                 index=index,
                 reviews=reviews,
                 honored_instances=honored_instances,
+                reserve=reserve,
             )
 
         # The command path must not spend another whole check-token liability
-        # before cleanup can make durable progress. Explicit-token callers keep
-        # their existing check-first order. No request allowance is renewed.
-        resolution = reconcile_cleanup() if check_token_provider is not None else None
+        # before cleanup can make durable progress. It also must not consume
+        # the room that the following capability exchange, check publication
+        # and approval need; cleanup resumes on the next supported verify.
+        # Explicit-token callers keep their existing check-first order.
+        resolution = (
+            reconcile_cleanup(COMMAND_FINALIZATION_RESERVE)
+            if check_token_provider is not None
+            else None
+        )
         check_failed = False
         if check_token_provider is not None:
             self._observe_stage("check.capability")
@@ -3039,6 +3052,7 @@ class ReviewApprovalFinalizer:
         reviews: Sequence[Any],
         honored_instances: frozenset[str] = frozenset(),
         _skip_resolved: bool = True,
+        reserve: int = 0,
     ):
         """Retry durable decisions, observing resolved threads without new writes.
 
@@ -3046,6 +3060,8 @@ class ReviewApprovalFinalizer:
         Resolved observations need no mutation fence; fresh authority fences
         remain mandatory for unresolved mutations and final approval. Repeating
         those reads for the resolved prefix can starve every later retry.
+        ``reserve`` holds ordinary dispatches for work that follows cleanup in
+        the same request; it is never spent by this phase.
         """
         from .thread_resolution import (
             FindingThreadResolver,
@@ -3145,26 +3161,35 @@ class ReviewApprovalFinalizer:
                 and not live.app_authored
             )
 
+        budget = self.evidence_budget or self._operation_budget
+        if reserve and budget is None:
+            raise ReviewInputError("thread cleanup reserve requires original accounting")
+        if reserve:
+            budget.hold_ordinary(reserve)
         try:
-            return FindingThreadResolver(self.http).resolve(
-                token=token,
-                repository=repository,
-                repository_id=repository_id,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                base_sha=index.base_sha,
-                app_slug=app_slug,
-                instances=instances,
-                records=records,
-                fence=fence,
-                skip_resolved=_skip_resolved,
-                observer=self._operation_observer,
-                cleanup_token_provider=self._thread_cleanup_token_provider,
-            )
-        except (GitHubHTTPError, GitHubPublicationError, ReviewInputError) as exc:
-            if self._operation_observer is not None:
-                self._operation_observer.exception(exc)
-            return ThreadResolutionResult(unconfirmed=tuple(sorted(instances)))
+            try:
+                return FindingThreadResolver(self.http).resolve(
+                    token=token,
+                    repository=repository,
+                    repository_id=repository_id,
+                    pull_request=pull_request,
+                    head_sha=head_sha,
+                    base_sha=index.base_sha,
+                    app_slug=app_slug,
+                    instances=instances,
+                    records=records,
+                    fence=fence,
+                    skip_resolved=_skip_resolved,
+                    observer=self._operation_observer,
+                    cleanup_token_provider=self._thread_cleanup_token_provider,
+                )
+            except (GitHubHTTPError, GitHubPublicationError, ReviewInputError) as exc:
+                if self._operation_observer is not None:
+                    self._operation_observer.exception(exc)
+                return ThreadResolutionResult(unconfirmed=tuple(sorted(instances)))
+        finally:
+            if reserve:
+                budget.release_ordinary()
 
     def finalize_recorded_decisions(
         self,

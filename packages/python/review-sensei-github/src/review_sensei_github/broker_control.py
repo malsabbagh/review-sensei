@@ -42,8 +42,9 @@ class BrokerDispatchAccounting:
         )
         self.budget.check()
         # Include the caller's HTTP request, charged by the same client's
-        # before_request callback. Refuse an unfunded whole request atomically.
-        if self.budget.calls + liability + 1 > MAX_PART_READS - 4:
+        # before_request callback. Refuse an unfunded whole request atomically,
+        # including any ordinary hold a later phase owns.
+        if liability + 1 > self.budget.ordinary_remaining():
             raise ReviewInputError("broker internal liability exceeds original budget")
         for _ in range(liability):
             self.budget.consume()

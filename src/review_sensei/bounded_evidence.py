@@ -260,6 +260,8 @@ class EvidenceReadBudget:
 
     Callers pass the same instance throughout an operation. No resolver resets
     its deadline or calls. Four calls are reserved until explicit finalization.
+    A caller may additionally hold ordinary calls for work that must follow a
+    bounded phase; the hold spends nothing and only narrows that phase.
     Transport adapters charge dispatches themselves; the codec only checks time.
     """
 
@@ -273,6 +275,7 @@ class EvidenceReadBudget:
         self.clock = clock
         self.restored = snapshot is not None
         self._tail_ticket: EvidenceTailTicket | None = None
+        self._ordinary_hold = 0
         self._live_attempts: dict[str, str] = {}
         self._live_attempt_owners: dict[str, object] = {}
         self._failed_attempts: set[str] = set()
@@ -316,7 +319,7 @@ class EvidenceReadBudget:
                 "ordinary dispatch cannot use prepaid activation work"
             )
         remaining = self._remaining_seconds()
-        if self.calls >= MAX_PART_READS - (0 if fence else 4):
+        if self.calls >= MAX_PART_READS - (0 if fence else 4 + self._ordinary_hold):
             raise ReviewInputError("partition shared request budget exhausted")
         self.calls += 1
         # Addition/subtraction near a float exponent boundary can round above
@@ -344,7 +347,11 @@ class EvidenceReadBudget:
             raise NonResumableActivationError(
                 "activation restart requires authenticated original attempt accounting"
             )
-        if self._tail_ticket is not None or not isinstance(plan, ActivationTailPlan):
+        if (
+            self._tail_ticket is not None
+            or self._ordinary_hold
+            or not isinstance(plan, ActivationTailPlan)
+        ):
             raise ReviewInputError("activation tail reservation is already outstanding")
         projected = self.calls
         for step in plan.steps:
@@ -420,9 +427,28 @@ class EvidenceReadBudget:
         self._live_attempts.pop(scope, None)
         self._live_attempt_owners.pop(scope, None)
 
+    def hold_ordinary(self, calls: int) -> None:
+        """Reserve ordinary dispatches for a phase that must follow this one."""
+        if (
+            isinstance(calls, bool)
+            or not isinstance(calls, int)
+            or not 0 < calls <= MAX_PART_READS - 4
+            or self._tail_ticket is not None
+            or self._ordinary_hold
+        ):
+            raise ReviewInputError("ordinary dispatch hold is invalid")
+        self._ordinary_hold = calls
+
+    def release_ordinary(self) -> None:
+        self._ordinary_hold = 0
+
+    def ordinary_remaining(self) -> int:
+        """Ordinary dispatches the current phase may still admit, after any hold."""
+        return MAX_PART_READS - 4 - self._ordinary_hold - self.calls
+
     def preflight(self, calls: int) -> None:
         self.check()
-        if self.calls + calls > MAX_PART_READS - 4:
+        if self.calls + calls > MAX_PART_READS - 4 - self._ordinary_hold:
             raise ReviewInputError(
                 "partition shared request budget cannot stage complete inventory"
             )

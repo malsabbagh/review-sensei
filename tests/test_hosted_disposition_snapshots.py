@@ -438,7 +438,11 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
                 break
         self.assertEqual(len(approved), 1, self.last_output)
         self.assertEqual(approved[0]["commit_id"], HEAD)
-        self.assertEqual(len(self.state.resolved_threads), 25)
+        # Resolving every previously decided thread is optional and cannot fit
+        # beside check publication and approval in one original allowance. The
+        # honored decisions do not withhold approval, so the gate publishes and
+        # leaves the cleanup observation unconfirmed for a later allowance.
+        self.assertLess(len(self.state.resolved_threads), 25, self.last_output)
         self.assertEqual(self.state.checks[-1]["conclusion"], "success")
         before = len(self.broker.requests)
         self.command("@reviewsensei verify", 80)
@@ -454,7 +458,7 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
             1,
         )
 
-    def test_unfunded_check_after_cleanup_retains_progress_and_defers_new_approval(
+    def test_command_reserve_funds_check_and_approval_when_cleanup_cannot_fit(
         self,
     ):
         for start, event in ((0, 20), (10, 21), (20, 22)):
@@ -466,11 +470,14 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
             review for review in self.state.reviews if review["state"] != "APPROVED"
         ]
         self.command("@reviewsensei verify", 30)
-        self.assertGreater(len(self.state.resolved_threads), 0, self.last_output)
+        # The held reserve leaves cleanup without the whole capability exchange,
+        # but the check and approval it protects are both funded from the same
+        # original allowance. Cleanup remains unconfirmed for a later allowance;
+        # honored decisions do not withhold approval.
         self.assertLess(len(self.state.resolved_threads), 25, self.last_output)
         self.assertEqual(len(self.load()[1]), 25)
-        self.assertFalse(
-            any(review["state"] == "APPROVED" for review in self.state.reviews)
+        self.assertEqual(
+            sum(r["state"] == "APPROVED" for r in self.state.reviews), 1, self.last_output
         )
         progress = json.loads(
             next(
@@ -479,9 +486,20 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
                 if line.startswith("approval-progress: ")
             )
         )
-        self.assertNotEqual(progress["check_state"], "confirmed")
-        self.assertEqual(progress["approval_state"], "not-observed")
+        self.assertEqual(progress["check_state"], "confirmed")
+        self.assertEqual(progress["approval_state"], "submitted")
+        self.assertEqual(progress["decided_thread_reconciliation"], "unconfirmed")
         self.assertEqual(progress["next_action"], "retry_verify")
+        report = json.loads(
+            next(
+                line.split(": ", 1)[1]
+                for line in self.last_output.splitlines()
+                if line.startswith("approval-operation-failure: ")
+            )
+        )
+        self.assertEqual(report["cleanup"]["first"]["stage"], "cleanup.capability")
+        self.assertEqual(report["cleanup"]["first"]["reason"], "call-limit")
+        self.assertIsNone(report["check"])
 
     def test_refused_deferred_check_preserves_existing_approval_without_new_write(self):
         for start, event in ((0, 20), (10, 21), (20, 22)):
@@ -490,7 +508,7 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
             self.command("@reviewsensei verify", 30 + attempt)
             if any(r["state"] == "APPROVED" for r in self.state.reviews):
                 break
-        self.assertEqual(len(self.state.resolved_threads), 25)
+        self.assertLess(len(self.state.resolved_threads), 25)
         approved = [
             review for review in self.state.reviews if review["state"] == "APPROVED"
         ]
@@ -519,7 +537,10 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
         )
         self.assertEqual(progress["approval_state"], "observed-existing")
         self.assertNotEqual(progress["check_state"], "confirmed")
-        self.assertEqual(progress["next_action"], "reconcile_current_check")
+        # Cleanup also remains unconfirmed in this allowance, and its
+        # reconciliation takes precedence in the next-action diagnostic.
+        self.assertEqual(progress["decided_thread_reconciliation"], "unconfirmed")
+        self.assertEqual(progress["next_action"], "retry_verify")
         report = json.loads(
             next(
                 line.split(": ", 1)[1]

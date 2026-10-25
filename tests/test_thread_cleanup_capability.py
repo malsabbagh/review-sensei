@@ -536,7 +536,10 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 progress.append(len(state.resolved_threads))
                 self.assertEqual(budget.wall_deadline_ms, deadline)
                 self.assertLessEqual(budget.calls, 64)
-                if any(r["state"] == "APPROVED" for r in state.reviews):
+                # Approval no longer waits for the whole ledger: it is funded
+                # from the same original allowance, ahead of the remaining
+                # cleanup that resumes on the next supported verify.
+                if len(state.resolved_threads) == 21:
                     break
                 self.assertTrue(
                     attempt == 0 or progress[-1] > progress[-2],
@@ -609,22 +612,25 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 body="@reviewsensei verify",
                 command_budget=budget,
             )
+        # One review_publish capability funds both the ledger mutation and the
+        # refinalization. Cleanup then acquires its separate capability, and
+        # the held reserve still funds the check and the approval.
         self.assertEqual(
             [name for name, _ in exchanges],
-            ["review_publish", "review_publish", "thread_resolve", "check_publish"],
+            ["review_publish", "thread_resolve", "check_publish"],
             (result.summary, budget.calls, len(requests)),
         )
         self.assertEqual(budget.wall_deadline_ms, original_deadline)
         self.assertLessEqual(budget.calls, 64)
         self.assertEqual(state.resolved_threads, {100})
         self.assertEqual(
-            sum(r["state"] == "APPROVED" for r in state.reviews), 0, result
+            sum(r["state"] == "APPROVED" for r in state.reviews), 1, result
         )
-        self.assertIn('"approval_state":"not-observed"', result.summary)
-        self.assertIn('"next_action":"retry_verify"', result.summary)
-        # Cleanup made durable progress but left no room for approval. A new
-        # supported verify observes the resolved thread and acquires no new
-        # privileged token. It never enlarges either request's allowance.
+        self.assertIn('"approval_state":"submitted"', result.summary)
+        self.assertIn('"next_action":"none"', result.summary)
+        # Cleanup made durable progress and left the check and approval fully
+        # funded. A replay observes the resolved thread and acquires no cleanup
+        # authority; it never enlarges either request's allowance.
         budget = EvidenceReadBudget()
         original_deadline = budget.wall_deadline_ms
         app.broker = BrokerClient(
@@ -650,7 +656,11 @@ class CleanupCommandCompositionTests(unittest.TestCase):
         self.assertEqual(
             sum(r["state"] == "APPROVED" for r in state.reviews), 1, replay
         )
-        self.assertNotIn("thread_resolve", [name for name, _ in exchanges[before:]])
+        self.assertEqual(
+            [name for name, _ in exchanges[before:]],
+            ["review_publish", "check_publish"],
+            (replay.summary, len(exchanges)),
+        )
         self.assertLessEqual(budget.calls, 64)
         for _, body, auth in requests:
             if body and body.get("operationName") == "ResolveReviewThread":

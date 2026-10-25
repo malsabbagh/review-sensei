@@ -39,11 +39,16 @@ allowance. Neither issuance nor a retry resets an existing request's budget.
 Command finalization performs cleanup before lazily acquiring the separate
 check token. Otherwise retained hosted-ledger reads plus eager check issuance
 can consume the entire allowance before the first cleanup token fits, making
-every retry repeat the same non-progress. Keep the intended check conclusion
-independent of acquisition. An unfunded or failed deferred check retains cleanup
-progress and defers a new native approval; an exact-head approval already
-observed remains a truthful observation. The next supported request can observe
-resolved threads without another cleanup token and finish check/approval work.
+every retry repeat the same non-progress. Cleanup therefore runs under a fixed
+ordinary hold covering one whole check-capability exchange, the check
+publication write pair and the final approval reads. The hold spends nothing;
+it only narrows cleanup, which remains unconfirmed and can resume under a later
+supported request's own allowance. Keep the
+intended check conclusion independent of acquisition. An unfunded or failed
+deferred check retains cleanup progress and defers a new native approval; an
+exact-head approval already observed remains a truthful observation. The next
+supported request can observe resolved threads without another cleanup token
+and finish check/approval work.
 Explicit-check-token callers retain their existing check-first behavior; this
 is not a new universal claim that native approval always depended on check
 confirmation. Token liabilities, call ceilings and final authority fences stay

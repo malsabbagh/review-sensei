@@ -2120,6 +2120,11 @@ class GitHubApplication:
         # does not need a broker capability or a GitHub write opt-in. Hosted
         # ledgers still exchange below because the issue comment must be read
         # through the broker-owned installation token.
+        # A non-hosted command may already hold a review_publish capability for
+        # its ledger mutation. Reacquiring the same capability for refinalization
+        # would spend another whole internal-dispatch liability and can starve
+        # the check and approval that follow thread cleanup.
+        review_capability_token: str | None = None
         ledger = (
             self.session_ledger
             if command.action == "status" and not options.github_session_ledger
@@ -2156,6 +2161,8 @@ class GitHubApplication:
                     exchange_input,
                     capability=capability,
                 )
+                if capability == "review_publish":
+                    review_capability_token = token
             ledger = self._session_ledger_for_token(
                 token,
                 options=options,
@@ -2344,6 +2351,7 @@ class GitHubApplication:
                     evidence_budget=command_budget,
                     incomplete_coverage=derived_incomplete_coverage,
                     policy_digest=command_policy_digest,
+                    prepared_review_token=review_capability_token,
                 )
                 if isinstance(refinalized, MaintainerCommandResult):
                     produced = refinalized
@@ -2387,6 +2395,7 @@ class GitHubApplication:
                 evidence_budget=command_budget,
                 incomplete_coverage=derived_incomplete_coverage,
                 policy_digest=command_policy_digest,
+                prepared_review_token=review_capability_token,
             )
             if isinstance(refinalized, MaintainerCommandResult):
                 result = refinalized
@@ -3030,6 +3039,7 @@ class GitHubApplication:
         evidence_budget: EvidenceReadBudget | None = None,
         incomplete_coverage: Sequence[str] | None = None,
         policy_digest: str | None = None,
+        prepared_review_token: str | None = None,
     ) -> object:
         """Re-check approval after a hosted override. A failed check leaves the ledger write."""
 
@@ -3079,7 +3089,12 @@ class GitHubApplication:
             return token
 
         try:
-            review_token = self.broker.exchange(oidc_token, capability="review_publish")
+            # Reuse only a review_publish capability minted by this operation.
+            # Any other capability, including a hosted session grant, is refused
+            # by construction because it never reaches this argument.
+            review_token = prepared_review_token or self.broker.exchange(
+                oidc_token, capability="review_publish"
+            )
             from review_sensei.session import SessionRecord
 
             dispositions = (

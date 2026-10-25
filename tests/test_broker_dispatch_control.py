@@ -159,6 +159,46 @@ class BrokerDispatchControlTests(unittest.TestCase):
             ).exchange("synthetic", capability="review_session")
         self.assertEqual(budget.calls, 48)
 
+    def test_ordinary_hold_narrows_the_phase_ceiling_without_spending_calls(self):
+        budget = EvidenceReadBudget()
+        for calls in (0, True, 61):
+            with self.subTest(calls=calls):
+                with self.assertRaises(ReviewInputError):
+                    budget.hold_ordinary(calls)
+        budget.hold_ordinary(48)
+        with self.assertRaises(ReviewInputError):
+            budget.hold_ordinary(10)
+        self.assertEqual(budget.ordinary_remaining(), 12)
+        for _ in range(12):
+            budget.consume()
+        with self.assertRaises(ReviewInputError):
+            budget.consume()
+        with self.assertRaises(ReviewInputError):
+            budget.preflight(1)
+        self.assertEqual(budget.calls, 12)
+        budget.release_ordinary()
+        self.assertEqual(budget.ordinary_remaining(), 48)
+        budget.preflight(13)
+        self.assertEqual(budget.calls, 12)
+        budget.consume()
+        self.assertEqual(budget.calls, 13)
+
+    def test_held_ordinary_allowance_refuses_one_unfunded_exchange_atomically(self):
+        budget = EvidenceReadBudget()
+        for _ in range(30):
+            budget.consume()
+        budget.hold_ordinary(18)
+        control = BrokerDispatchAccounting(budget, "a" * 64, 13, 1)
+        with self.assertRaises(ReviewInputError):
+            control.admit(verification=False)
+        self.assertEqual(budget.calls, 30)
+        # The hold narrows the ceiling; it does not block a funded verification.
+        self.assertEqual(control.admit(verification=True)["max_dispatches"], 1)
+        self.assertEqual(budget.calls, 31)
+        budget.release_ordinary()
+        self.assertEqual(control.admit(verification=False)["max_dispatches"], 13)
+        self.assertEqual(budget.calls, 44)
+
     def test_receipt_scope_requires_exact_json_types(self):
         budget = EvidenceReadBudget()
         accounting = BrokerDispatchAccounting(budget, "a" * 64, 1, 1)

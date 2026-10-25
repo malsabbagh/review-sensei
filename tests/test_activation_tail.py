@@ -98,6 +98,14 @@ class TicketTests(unittest.TestCase):
     def plan(self, *steps):
         return ActivationTailPlan("local", "a" * 64, tuple(steps))
 
+    def test_ordinary_hold_refuses_tail_reservation_until_released(self):
+        budget = EvidenceReadBudget()
+        budget.hold_ordinary(18)
+        with self.assertRaises(ReviewInputError):
+            budget.reserve_tail(self.plan(TailDispatch("scan:1")))
+        budget.release_ordinary()
+        budget.reserve_tail(self.plan(TailDispatch("scan:1")))
+
     def test_nonrefundable_precharge_optional_scan_and_one_use(self):
         budget = EvidenceReadBudget(clock=lambda: 10, wall_clock=lambda: 1000)
         budget.consume()
