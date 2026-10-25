@@ -70,14 +70,18 @@ dispatch added to this exchange must raise the reservation in the same change,
 and the explicit analysis-admission qualification would surface the drift as
 `broker_control_budget_exhausted` in the funded annotated-tag history instead of
 the witness's closed code. A witness restarts its ladder at a smaller page size
-when a page exceeds the response byte cap, so one complete inventory can
-legally cost ten dispatches; with both ladders funded in full, the byte cap
-alone can no longer exhaust admission. The same factory reserves 12 for the
-witness-free rescan authorization exchange, which stops at the capability
-token. These are bounded reservations, not a promise that arbitrary paginated
-histories fit. A witness that exhausts its own 10-request cap still refuses
-with its closed inventory code; it cannot produce a successful enrollment from
-an incomplete inventory. Funding only one complete page each, as the earlier
+when a page exceeds the response byte cap; every failed read is charged to the
+witness's own ten-request allowance, and a restart does not reset it, so one
+complete inventory can legally cost ten dispatches. With both ladders funded
+in full, a byte-cap restart can no longer become an unfunded admission
+dispatch: it either completes within the witness's remaining requests or
+refuses with the witness's closed `github_session_witness_failed` inventory
+code. The reservation therefore bounds the admission budget, not the size of
+arbitrary histories. The same factory reserves 12 for the witness-free rescan
+authorization exchange, which stops at the capability token. These are bounded
+reservations, not a promise that arbitrary paginated histories fit, and a
+witness that exhausts its own ten-request cap cannot produce a successful
+enrollment from an incomplete inventory. Funding only one complete page each, as the earlier
 12-dispatch reservation did, refused every history whose first page exceeded
 the byte cap and charged the retry ladder as an unfunded dispatch. Admission and completion own separate
 original budgets, so the larger reservation does not reduce the review's

@@ -131,7 +131,11 @@ for (const order of [["review_session", "check_publish"], ["check_publish", "rev
 // Unattended analysis does not carry a command attestation. Exercise the actual
 // Git and annotated-tag fallback with the caller's admitted liability: the old
 // underfunded prefix-only value, and the funded value that reaches the reader's
-// own per-witness 10-request page ladder.
+// own per-witness 10-request page ladder. The funded value is the caller's
+// admitted liability, not a second copy of the ceiling: exact drift is pinned
+// to the ADR literal in test_analysis_admission_budget, so the Python oracle
+// supplies the production constant and this harness only refuses funding below
+// the documented minimum.
 const analysisMaximum = Number(process.argv[2] ?? 30);
 assert.ok(Number.isSafeInteger(analysisMaximum) && analysisMaximum >= 30,
   "analysis admission must fund at least the documented 30-dispatch ceiling");

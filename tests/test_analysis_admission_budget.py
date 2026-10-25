@@ -30,12 +30,16 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
             app_slug="reviewsensei[bot]",
         )
 
-    def client(self, budget, transport, liability=30):
+    def client(
+        self, budget, transport, liability=_ANALYSIS_SESSION_INTERNAL_DISPATCHES
+    ):
         client = GitHubReviewHooks._admission_broker(self.args, budget, liability)
         client.opener = transport
         return client
 
-    def response(self, request, *, dispatched=30, fault=None):
+    def response(
+        self, request, *, dispatched=_ANALYSIS_SESSION_INTERNAL_DISPATCHES, fault=None
+    ):
         payload = json.loads(request.data)
         control = payload["control_budget"]
         receipt = {**control, "dispatched": dispatched}
@@ -61,14 +65,21 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
         )
 
     def test_fallback_prepays_thirty_internal_and_one_outer_dispatch(self):
+        # 30 is the exact enumerated cold ceiling in ADR 0088, not an estimate.
+        # Pin the production constant to that literal so a dispatch added to the
+        # exchange fails here together with the ADR instead of drifting quietly.
+        self.assertEqual(_ANALYSIS_SESSION_INTERNAL_DISPATCHES, 30)
+        liability = _ANALYSIS_SESSION_INTERNAL_DISPATCHES
         budget = EvidenceReadBudget()
         deadline = budget.wall_deadline_ms
         requests = []
 
         def transport(request, timeout):
             requests.append(json.loads(request.data))
-            self.assertEqual(budget.calls, 31)
-            self.assertEqual(requests[-1]["control_budget"]["max_dispatches"], 30)
+            self.assertEqual(budget.calls, liability + 1)
+            self.assertEqual(
+                requests[-1]["control_budget"]["max_dispatches"], liability
+            )
             return self.response(request)
 
         self.assertEqual(
@@ -82,7 +93,7 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
                 f"analysis-admission:987654321:7:{self.args.head_sha}".encode()
             ).hexdigest(),
         )
-        self.assertEqual(budget.calls, 31)
+        self.assertEqual(budget.calls, liability + 1)
 
     def test_rescan_exchange_keeps_the_prefix_only_reservation(self):
         liability = 12
@@ -104,7 +115,7 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
         )
 
     def test_full_reservation_is_kept_for_a_warm_shorter_exchange(self):
-        for dispatched in (9, 30):
+        for dispatched in (9, _ANALYSIS_SESSION_INTERNAL_DISPATCHES):
             with self.subTest(dispatched=dispatched):
                 budget = EvidenceReadBudget()
                 client = self.client(
@@ -196,7 +207,9 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
                 client.opener = transport
                 return client
 
-            client = original_factory(args, budget, 30)
+            client = original_factory(
+                args, budget, _ANALYSIS_SESSION_INTERNAL_DISPATCHES
+            )
             client.opener = transport
             client.open_session(
                 args.oidc_token,
@@ -224,7 +237,10 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
             self.assertEqual(len(controls), 2)
             self.assertEqual(len({item["operation_id"] for item in controls}), 1)
             self.assertEqual(len({item["request_id"] for item in controls}), 2)
-            self.assertEqual([item["max_dispatches"] for item in controls], [30, 12])
+            self.assertEqual(
+                [item["max_dispatches"] for item in controls],
+                [_ANALYSIS_SESSION_INTERNAL_DISPATCHES, 12],
+            )
 
 
 if __name__ == "__main__":
