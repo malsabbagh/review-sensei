@@ -8,10 +8,13 @@ import unittest
 from unittest.mock import patch
 
 from review_sensei_github.broker_client import BrokerClient
-from review_sensei_github.broker_control import BrokerDispatchAccounting
+from review_sensei_github.broker_control import (
+    COMMAND_EXCHANGE_DISPATCH_LIABILITY,
+    BrokerDispatchAccounting,
+)
 from review_sensei_github.errors import GitHubBrokerClientError
 
-from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.bounded_evidence import MAX_PART_READS, EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
 from tests.test_github_broker_client import FakeResponse
 
@@ -206,20 +209,70 @@ class BrokerDispatchControlTests(unittest.TestCase):
         self.assertEqual(budget.calls, 44)
 
     def test_held_allowance_admits_exactly_the_liability_and_request(self):
-        budget = EvidenceReadBudget()
-        for _ in range(31):
-            budget.consume()
-        budget.hold_ordinary(18)
         # The command broker's check_publish exchange liability is 10 internal
         # dispatches; the same client charges its request separately, so the
         # whole exchange costs exactly the 11 calls still under the ceiling.
-        control = BrokerDispatchAccounting(budget, "a" * 64, 10, 1)
-        self.assertEqual(budget.ordinary_remaining(), 11)
-        self.assertEqual(control.admit(verification=False)["max_dispatches"], 10)
-        self.assertEqual(budget.calls, 41)
+        liability = COMMAND_EXCHANGE_DISPATCH_LIABILITY
+        hold = 18
+        request_cost = liability + 1
+        budget = EvidenceReadBudget()
+        pre_consumed = MAX_PART_READS - 4 - hold - request_cost
+        for _ in range(pre_consumed):
+            budget.consume()
+        budget.hold_ordinary(hold)
+        control = BrokerDispatchAccounting(budget, "a" * 64, liability, 1)
+        self.assertEqual(budget.ordinary_remaining(), request_cost)
+        self.assertEqual(control.admit(verification=False)["max_dispatches"], liability)
+        self.assertEqual(budget.calls, pre_consumed + liability)
         with self.assertRaises(ReviewInputError):
             control.admit(verification=True)
-        self.assertEqual(budget.calls, 41)
+        self.assertEqual(budget.calls, pre_consumed + liability)
+
+    def test_admission_boundary_is_exact_at_the_narrowed_ceiling(self):
+        # ``ordinary_remaining`` already subtracts the consumed calls, so an
+        # exchange is one whole-request test against that room. Pin both sides:
+        # a request that exactly fills the room is admitted, and one call short
+        # is refused atomically.
+        liability = COMMAND_EXCHANGE_DISPATCH_LIABILITY
+        request_cost = liability + 1
+        for shortfall in (0, 1):
+            with self.subTest(shortfall=shortfall):
+                budget = EvidenceReadBudget()
+                target = request_cost - shortfall
+                for _ in range(budget.ordinary_remaining() - target):
+                    budget.consume()
+                self.assertEqual(budget.ordinary_remaining(), target)
+                pre_consumed = budget.calls
+                control = BrokerDispatchAccounting(budget, "a" * 64, liability, 1)
+                if shortfall:
+                    with self.assertRaises(ReviewInputError):
+                        control.admit(verification=False)
+                    self.assertEqual(budget.calls, pre_consumed)
+                else:
+                    self.assertEqual(
+                        control.admit(verification=False)["max_dispatches"],
+                        liability,
+                    )
+                    self.assertEqual(budget.calls, pre_consumed + liability)
+
+    def test_refused_hold_leaves_no_reservation_to_release(self):
+        # Acquisition is all-or-nothing and validates with the same strict
+        # integer test as the release, so a refused call never leaves a hold a
+        # caller could not release.
+        budget = EvidenceReadBudget()
+        ceiling = budget.ordinary_remaining()
+        for calls in (0, True, 61):
+            with self.subTest(calls=calls):
+                with self.assertRaises(ReviewInputError):
+                    budget.hold_ordinary(calls)
+                self.assertEqual(budget.ordinary_remaining(), ceiling)
+        budget.hold_ordinary(18)
+        with self.assertRaises(ReviewInputError):
+            budget.hold_ordinary(10)
+        # A refused reentrant hold must preserve the outstanding reservation.
+        self.assertEqual(budget.ordinary_remaining(), ceiling - 18)
+        budget.release_ordinary(18)
+        self.assertEqual(budget.ordinary_remaining(), ceiling)
 
     def test_receipt_scope_requires_exact_json_types(self):
         budget = EvidenceReadBudget()

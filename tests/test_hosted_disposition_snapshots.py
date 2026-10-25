@@ -457,6 +457,13 @@ class HostedDecisionSnapshotTests(unittest.TestCase):
         before = len(self.broker.requests)
         self.command("@reviewsensei verify", 80)
         self.assertNotIn("thread_resolve", self.broker.requests[before:])
+        # A larger allowance must still attempt cleanup at the same bounded
+        # stage. A regression that refused cleanup permanently would drop the
+        # attempt entirely; `test_low_allowance_holds_the_reserve_and_resumes`
+        # proves a later allowance eventually resolves the decided threads.
+        retry = self.observation("approval-operation-failure: ")
+        self.assertEqual(retry["cleanup"]["first"]["stage"], "cleanup.capability")
+        self.assertEqual(retry["cleanup"]["first"]["reason"], "call-limit")
         self.assertEqual(
             len(
                 [

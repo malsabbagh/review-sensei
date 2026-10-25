@@ -541,6 +541,45 @@ class CleanupCommandCompositionTests(unittest.TestCase):
         # exchange, so the check/approval room it protects is untouched.
         self.assertEqual(budget.calls, calls_before)
 
+    def test_reserve_without_owned_accounting_is_refused_before_dispatch(self):
+        # ``refinalize_with_dispositions`` always supplies an operation budget,
+        # so only a direct caller can reach this state. It must fail closed
+        # before the hold or any dispatch rather than clean up unreserved.
+        from types import SimpleNamespace
+
+        from review_sensei_github.publication import FindingIndex, IndexedFinding
+
+        finalizer = ReviewApprovalFinalizer(
+            http=GitHubHttp(api_url="https://api.github.test")
+        )
+        with self.assertRaisesRegex(
+            ReviewInputError, "thread cleanup reserve requires original accounting"
+        ):
+            finalizer.reconcile_decided_threads(
+                token="synthetic-review",
+                repository="owner/repo",
+                repository_id=1,
+                pull_request=1,
+                head_sha=HEAD,
+                app_slug=APP,
+                eligibility=SimpleNamespace(result_digest="b" * 64, human_review=None),
+                index=FindingIndex(
+                    result_digest="b" * 64,
+                    base_sha=BASE,
+                    entries=(
+                        IndexedFinding(
+                            instance="rs-1",
+                            lifecycle=None,
+                            blocking=False,
+                            needs_human=True,
+                        ),
+                    ),
+                ),
+                reviews=(),
+                honored_instances=frozenset({"rs-1"}),
+                reserve=COMMAND_FINALIZATION_RESERVE,
+            )
+
     def test_real_activation_tail_defers_cleanup_and_releases_on_abort(self):
         # A prepaid tail is a real, non-reentrant conflict with the cleanup
         # hold, not only an injected error: the ticket stays outstanding, the
@@ -940,6 +979,59 @@ class CleanupCommandCompositionTests(unittest.TestCase):
         expected_reserve = 1 + configured_liability + 2 + 5
         self.assertGreater(expected_reserve, COMMAND_FINALIZATION_RESERVE)
         self.assertEqual(captured, [expected_reserve])
+        self.assertFalse(getattr(result, "evaluation_failed", False), result.summary)
+
+    def test_reserve_reads_liability_from_a_wrapped_control_object(self):
+        # A broker may expose a control wrapper that forwards the liability
+        # rather than the packaged accounting type. The derivation must read
+        # that value, not silently fall back to the packaged default.
+        from types import SimpleNamespace
+
+        from review_sensei.disposition import MaintainerCommandResult
+
+        configured_liability = 14
+        budget = EvidenceReadBudget()
+        captured = []
+
+        def refinalize(**kwargs):
+            captured.append(kwargs["command_finalization_reserve"])
+            return SimpleNamespace(
+                status="already_approved", thread_resolution=None, diagnostic=None
+            )
+
+        broker = SimpleNamespace(
+            control=SimpleNamespace(
+                budget=budget, exchange_liability=configured_liability
+            ),
+            exchange=lambda _token, capability: f"synthetic-{capability}",
+        )
+        app = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=SimpleNamespace(
+                finalizer=SimpleNamespace(refinalize_with_dispositions=refinalize)
+            ),
+            learner=None,
+            replier=None,
+        )
+        result = app._refinalize_command(
+            MaintainerCommandResult(
+                action="verify",
+                applied=True,
+                operator_paused=False,
+                summary="decisions retained",
+            ),
+            oidc_token="synthetic",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD,
+            app_slug=APP,
+            actor="alice",
+            record=None,
+            evidence_budget=budget,
+        )
+        self.assertEqual(captured, [1 + configured_liability + 2 + 5])
         self.assertFalse(getattr(result, "evaluation_failed", False), result.summary)
 
     def test_larger_ledger_makes_bounded_progress_without_renewing_a_request(self):

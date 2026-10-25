@@ -261,7 +261,9 @@ class EvidenceReadBudget:
     Callers pass the same instance throughout an operation. No resolver resets
     its deadline or calls. Four calls are reserved until explicit finalization.
     A caller may additionally hold ordinary calls for work that must follow a
-    bounded phase; the hold spends nothing and only narrows that phase.
+    bounded phase; the hold spends nothing and only narrows that phase. A hold
+    is phase-local and is never part of the snapshot: a restored budget starts
+    unheld, so a resumed operation re-establishes any reservation it needs.
     Transport adapters charge dispatches themselves; the codec only checks time.
     """
 
@@ -442,13 +444,12 @@ class EvidenceReadBudget:
         admitted through a broker sharing this budget - draws on the unheld
         room only, so the reserve cannot be spent around. A phase that later
         needs its own exchange must run after the release; the command path
-        releases cleanup's hold before acquiring check authority.
+        releases cleanup's hold before acquiring check authority. Acquisition
+        is all-or-nothing and validates with the same strict ``int`` test as
+        ``release_ordinary``, so a refused call leaves nothing reserved and a
+        caller cannot hold a count it would be unable to release.
         """
-        if (
-            isinstance(calls, bool)
-            or not isinstance(calls, int)
-            or not 0 < calls <= MAX_PART_READS - 4
-        ):
+        if type(calls) is not int or not 0 < calls <= MAX_PART_READS - 4:
             raise ReviewInputError("ordinary dispatch hold is invalid")
         if self._ordinary_hold:
             raise ReviewInputError("ordinary dispatch hold is already outstanding")
@@ -474,7 +475,10 @@ class EvidenceReadBudget:
         This is the single authoritative ordinary ceiling: ``consume``,
         ``preflight`` and broker admission all read it rather than re-deriving
         the fence and hold offsets. Fence dispatches draw on the separate
-        four-read reconciliation reserve instead.
+        four-read reconciliation reserve instead, so they can advance
+        ``calls`` past the ordinary ceiling and make this value negative; it
+        is a remaining-room figure, not a licence, and every caller treats any
+        value at or below zero as exhausted.
         """
         return MAX_PART_READS - 4 - self._ordinary_hold - self.calls
 

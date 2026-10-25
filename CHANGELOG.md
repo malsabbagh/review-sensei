@@ -17,13 +17,15 @@
   minting broker and OIDC assertion and idempotent for that same pair so an
   in-operation retry cannot be refused for a token it never sent. The packaged
   default is 18 (exchange liability 10); a caller-provided broker reports its
-  configured liability, so the application derives the hold from that
-  accounting regardless of which budget the envelope is bound to. A foreign
-  envelope cannot mint cleanup authority, but the packaged default is never
-  silently substituted for a broker that reports a larger liability.
+  configured liability on its control object, so the application derives the
+  hold from it regardless of control type or which budget the envelope is
+  bound to. A foreign envelope cannot mint cleanup authority, but the packaged
+  default is never silently substituted for a broker that reports a larger
+  liability.
   Decided-thread cleanup can no longer spend the room that lets the gate
   publish; the hold stays in force when a request reaches cleanup below the
-  reserve, is non-reentrant, and is released only by the exact count reserved.
+  reserve, is non-reentrant, is acquired all-or-nothing, and is released only
+  by the exact count reserved.
   A refused release is observed at `cleanup.hold` instead of replacing the
   cleanup outcome. An outstanding activation tail or an existing hold refuses
   the reservation without spending allowance, records the distinct

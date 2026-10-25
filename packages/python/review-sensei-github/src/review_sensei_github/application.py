@@ -10,7 +10,7 @@ from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
 
 from review_sensei.baseline import ReviewBaseline
-from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.bounded_evidence import MAX_PART_READS, EvidenceReadBudget
 from review_sensei.budgets import ReviewWorkBudgets
 from review_sensei.context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from review_sensei.convergence import (
@@ -72,7 +72,6 @@ from .approval import (
     qualification_state_for_publication,
 )
 from .broker_client import BrokerClient
-from .broker_control import BrokerDispatchAccounting
 from .check_diagnostics import CheckCapability, check_failure, observed_http_status
 from .checks import REVIEW_POLICY_MODES
 from .conversation import (
@@ -3114,15 +3113,18 @@ class GitHubApplication:
         # Derive the cleanup hold from this broker's configured exchange
         # liability. The packaged default cannot see a caller-provided broker,
         # and a reserve below the actual liability would starve the check. The
-        # derivation does not depend on budget identity: a broker bound to a
-        # different envelope cannot mint cleanup authority (the token provider
-        # refuses it), and the larger hold still protects this budget's
-        # approval reads. Only a broker with no accounting keeps the packaged
-        # default.
+        # liability is read from whatever control object the broker exposes,
+        # so a wrapper or proxy that reports it cannot silently fall back to
+        # the packaged default. The derivation does not depend on budget
+        # identity: a broker bound to a different envelope cannot mint cleanup
+        # authority (the token provider refuses it), and the larger hold still
+        # protects this budget's approval reads. Only a broker whose control
+        # reports no usable liability keeps the packaged default.
         command_finalization_reserve: int | None = None
         control = getattr(self.broker, "control", None)
-        if isinstance(control, BrokerDispatchAccounting):
-            command_finalization_reserve = 1 + control.exchange_liability + 2 + 5
+        liability = getattr(control, "exchange_liability", None)
+        if type(liability) is int and 0 < liability <= MAX_PART_READS - 4:
+            command_finalization_reserve = 1 + liability + 2 + 5
         failed = (
             command_result.summary
             + "; recorded; gate re-evaluation failed, comment `@reviewsensei verify` to retry"

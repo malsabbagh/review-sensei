@@ -49,6 +49,10 @@ class BrokerDispatchAccounting:
         # Include the caller's HTTP request, charged by the same client's
         # before_request callback. Refuse an unfunded whole request atomically,
         # including any ordinary hold a later phase owns.
+        # ``ordinary_remaining`` already subtracts the consumed calls, so this
+        # comparison is exactly ``calls + liability + 1 <= ceiling - hold``: the
+        # hold is the only term added to the older pre-hold admission test, and
+        # nothing is counted twice.
         if liability + 1 > self.budget.ordinary_remaining():
             raise ReviewInputError("broker internal liability exceeds original budget")
         for _ in range(liability):

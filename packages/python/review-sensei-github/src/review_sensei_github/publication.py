@@ -3193,6 +3193,10 @@ class ReviewApprovalFinalizer:
             else self._operation_budget
         )
         if reserve and budget is None:
+            # ``refinalize_with_dispositions`` always supplies an operation
+            # budget, so a reserve without accounting is only reachable from a
+            # direct caller. Refuse before the hold or any dispatch rather than
+            # run cleanup unreserved; the threads stay unconfirmed.
             raise ReviewInputError(
                 "thread cleanup reserve requires original accounting"
             )

@@ -47,13 +47,14 @@ preflights, one review-thread scan and one persisted-reviews readback). The
 packaged default is 18, from
 `COMMAND_EXCHANGE_DISPATCH_LIABILITY = 10` in `broker_control.py`;
 `COMMAND_FINALIZATION_RESERVE` in `publication.py` is that packaged default.
-A caller-provided broker reports its configured liability through
-`BrokerDispatchAccounting`, and the application derives the hold from that
-exact accounting so a larger liability cannot be under-reserved. Derivation
-does not depend on the accounting being bound to this request's budget: a
-foreign envelope cannot mint cleanup authority (the token provider refuses it),
-but the packaged default is never silently substituted for a broker that
-reports a larger liability. The hold spends nothing;
+A caller-provided broker reports its configured liability on its control
+object, and the application reads `exchange_liability` from whatever control
+the broker exposes, not only the packaged accounting type, so a wrapper that
+forwards that value cannot be under-reserved. Derivation does not depend on the
+accounting being bound to this request's budget: a foreign envelope cannot mint
+cleanup authority (the token provider refuses it), but the packaged default is
+never silently substituted for a broker whose control reports a larger
+liability. The hold spends nothing;
 it only narrows cleanup, which remains unconfirmed and can resume under a later
 supported request's own allowance. Broker admission reads the same narrowed
 ceiling while the hold is outstanding, so cleanup's own capability exchange
@@ -63,7 +64,12 @@ cannot reliably fund discovery plus the separate `thread_resolve` authority,
 while withholding it leaves the check and approval as much of their liability
 as the request can still provide. The hold is non-reentrant and is released
 only by the exact count reserved, so a nested or mismatched release cannot
-discard another phase's reservation. A refused release is observed at
+discard another phase's reservation. Acquisition is all-or-nothing: a refused
+hold leaves nothing reserved and is validated with the same strict integer
+test as the release. The hold is phase-local and is deliberately excluded from
+the budget snapshot, so a restored budget starts unheld and a resumed operation
+re-establishes whatever reservation it still needs. A refused release is
+observed at
 `cleanup.hold` instead of replacing the cleanup outcome. A prepaid
 activation tail or an existing hold refuses the reservation without spending
 allowance; because an outstanding tail also refuses every ordinary dispatch,
