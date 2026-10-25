@@ -4,7 +4,7 @@
 - Date: 2026-10-25
 - Decision owner/reviewers: repository owner; Astra High
 - Related issue: [TaskAlong PR29](https://github.com/malsabbagh/taskalong/pull/29)
-- Pull request: pending source review
+- Pull request: [ReviewSensei PR377](https://github.com/malsabbagh/review-sensei/pull/377)
 
 ## Context
 
