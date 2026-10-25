@@ -159,3 +159,43 @@ Measure source-controlled startup slots, including workflow OIDC/PR calls outsid
 the CLI, then implement the authenticated serialized adapter with conservative
 restart bounds. Wire the same accounting through every phase; remove obsolete
 authority branches; qualify current Worker plans and full lifecycle failures.
+
+## First public-command integration measurement
+
+The opt-in offline host hook now supplies the same native ledger and confirmed
+caller tranche to the real core CLI admission, provider metadata and analysis
+completion. The source-selected one-job startup plan remains28+50=78; its
+fixture executes OIDC, broker, workflow PR/configuration and Actions reads outside
+the engine command. It is not the complete all-job reusable-workflow inventory.
+The first-run initializer confirms its native record before enabling the ordinary
+tranche. It rejects a rerun creating a new allowance; historical rollover remains
+unsupported. Native reserve/commit/abort use the same accounting-aware replace
+seam. No metadata phase budget factory runs in this selected command.
+
+At provisional128, the single ordinary tranche is50. The modest complete-review
+fixture runs one fake provider call through normal operation-entry metadata and
+retains its raw result. At the first completion-checkpoint preflight it has spent
+20 ordinary requests, leaving30 usable. Native replacement requires its existing
+three ten-request scans plus PATCH:31. It refuses before any request for that
+mutation, a conservative-plan deficit of1. This is not a physical lower bound or
+permission to select129. Normal failure handling then spends four reads; both
+abort mutations also refuse before writes. Total actual caller requests are34
+(10 startup plus24 ordinary), with26 usable ordinary requests, no unallocated
+capacity, and the original analysis transaction still held. No review, approval
+or terminal-success check is published. Approval/withholding controls and the
+complete publication/failure tail remain unqualified, so integration stops here.
+
+A separate lost-initial-record-response control preserves the first owner's50
+reserved requests. Recovery reads the actual retained marker, but its successor
+reservation refuses before mutation; the predecessor's remainder is never made
+usable. A comment carrier also requires its bounded write/confirmation room
+before POST/PATCH; this does not replace the still-pending complete lifecycle
+preflight. No activation or release entry selects these new hooks.
+
+The accepted retained-rescan repair is independently ported. Its reader regression
+uses a Bot-authenticated synthetic historical seed and a real native reservation
+and readback before selecting the retained root. The actual full-rescan resolver
+and reader then charge every GET, including native ledger fences, to the same
+previously used caller transport, without another reader-budget constructor or a
+write to that retained root. All20 decisions remain. This proves the read seam,
+not production historical run-accounting rollover or an end-to-end hosted rescan.

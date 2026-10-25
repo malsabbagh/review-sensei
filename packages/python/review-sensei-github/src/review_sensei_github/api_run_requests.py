@@ -11,16 +11,21 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
+from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from review_sensei.api_work import (
+    ApiExecutionOwner,
     ApiRunAccounting,
     ApiRunIdentity,
+    FrozenApiConfiguration,
     PendingApiRequest,
     StartupPlan,
+    initial_accounting,
 )
 from review_sensei.errors import ReviewInputError
 from review_sensei.session import SessionIdentity, SessionRecord
@@ -140,7 +145,7 @@ class ApiRunRequestTransport:
             if self.startup_dispatches >= len(self._slot.requests):
                 raise ReviewInputError("startup caller allowance is exhausted")
             if (
-                request.get_method() == "PATCH"
+                request.get_method() in {"POST", "PATCH"}
                 and self._activation is not None
                 and len(self._slot.requests) - self.startup_dispatches
                 < _WRITE_AND_READBACK
@@ -158,6 +163,16 @@ class ApiRunRequestTransport:
                 raise ReviewInputError(
                     "caller checkpoint write/readback tail is unfunded"
                 )
+            path = urlsplit(request.full_url).path
+            if (
+                request.get_method() in {"POST", "PATCH"}
+                and ("/issues/comments/" in path or path.endswith("/comments"))
+                and self.usable < _WRITE_AND_READBACK
+            ):
+                # Comment carriers can require a complete bounded listing to
+                # confirm their owned write. This checks room; it does not
+                # debit an internal liability or create a second allowance.
+                raise ReviewInputError("caller comment write/readback tail is unfunded")
             phase = "ordinary"
             request_id = f"caller-{self.run.repository_id}-{self.run.run_id}-{self._state.owner.generation}-{self._sequence}"
             pending = PendingApiRequest(request_id, deadline)
@@ -289,6 +304,55 @@ class ApiRunRequestTransport:
         confirmed = ledger.replace(identity, prepare)
         return self._accept_activation(ledger, confirmed)
 
+    def initialize_and_activate(
+        self,
+        ledger: GitHubIssueCommentSessionLedger,
+        identity: SessionIdentity,
+        configuration: FrozenApiConfiguration,
+        owner: ApiExecutionOwner,
+    ) -> ApiRunAccounting:
+        """Confirm a first run record before enabling its ordinary tranche.
+
+        The native initializer establishes complete absence and refuses an
+        existing marker. The host must already have authenticated the frozen
+        config, current Actions owner and authoritative writer serialization.
+        This bounded first-run path does not roll over historical run records.
+        All remaining capacity is reserved once, not replenished per phase.
+        """
+        self._require_ledger(ledger, identity)
+        if self._reservation_started or self._state is not None:
+            raise ReviewInputError("caller reservation was already attempted")
+        if (
+            owner.run_attempt != 1
+            or owner.run_attempt != self.attempt
+            or owner.job != "hosted"
+        ):
+            raise ReviewInputError("initial caller reservation owner conflicts")
+        self._reservation_started = True
+
+        def prepare(record: SessionRecord) -> SessionRecord:
+            state = initial_accounting(
+                self.run,
+                configuration,
+                owner,
+                self.plan,
+                prior_nonstartup_liability_upper_bound=0,
+            )
+            if state.remaining < NATIVE_REPLACE_CALLER_REQUESTS:
+                raise ReviewInputError("initial caller persistence tranche is unfunded")
+            # The full remainder is one durable tranche. Native writes still
+            # require their complete bounded persistence tail before dispatch.
+            state = state.reserve("hosted-review", state.remaining)
+            updated = record.evolve(api_run_accounting=state.to_document())
+            self._activation = updated, "hosted-review"
+            return updated
+
+        confirmed = ledger.initialize_with_mutation(identity, prepare)
+        # A genuinely missing ledger has no observed marker author yet. The
+        # native initializer authenticates the configured Bot on exact readback.
+        self._producer = ledger.evidence_producer()
+        return self._accept_activation(ledger, confirmed)
+
     def reconcile_activation(
         self, ledger: GitHubIssueCommentSessionLedger, identity: SessionIdentity
     ) -> ApiRunAccounting:
@@ -307,7 +371,12 @@ class ApiRunRequestTransport:
         return self._accept_activation(ledger, loaded.record)
 
     def replace_checkpoint(
-        self, ledger: GitHubIssueCommentSessionLedger, identity: SessionIdentity
+        self,
+        ledger: GitHubIssueCommentSessionLedger,
+        identity: SessionIdentity,
+        mutate: Callable[[SessionRecord], SessionRecord] | None = None,
+        *,
+        now: datetime | None = None,
     ) -> SessionRecord:
         self._require_ledger(ledger, identity)
         if self._checkpoint is not None:
@@ -322,14 +391,21 @@ class ApiRunRequestTransport:
                 raise ReviewInputError("caller checkpoint producer changed")
             if record.record_sha256 != self._root:
                 raise ReviewInputError("caller checkpoint root changed")
-            updated = record.evolve(
-                generation=record.generation + 1,
+            updated = (
+                mutate(record)
+                if mutate is not None
+                else record.evolve(generation=record.generation + 1)
+            ).evolve(
                 api_run_accounting=self.accounting.to_document(),
             )
             self._checkpoint = updated
             return updated
 
-        confirmed = ledger.replace(identity, prepare)
+        # Bypass only this accounting adapter's override, retaining the actual
+        # native mutation, fresh rediscovery and authenticated exact readback.
+        confirmed = GitHubIssueCommentSessionLedger.replace(
+            ledger, identity, prepare, now=now
+        )
         self._accept_checkpoint(ledger, confirmed)
         return confirmed
 
@@ -363,3 +439,31 @@ class ApiRunRequestTransport:
             raise ReviewInputError("caller checkpoint publication is unconfirmed")
         self._accept_checkpoint(ledger, loaded.record)
         return loaded.record
+
+
+class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
+    """Native transaction writes through one already confirmed caller owner.
+
+    reserve/commit/abort use the native public methods, which delegate to this
+    replace seam. There is no admission/provider/completion budget factory.
+    """
+
+    def __init__(
+        self,
+        native: GitHubIssueCommentSessionLedger,
+        caller: ApiRunRequestTransport,
+        identity: SessionIdentity,
+    ):
+        caller._require_ledger(native, identity)
+        caller.accounting
+        self.__dict__.update(native.__dict__)
+        self.caller = caller
+
+    def replace(
+        self,
+        identity: SessionIdentity,
+        mutate: Callable[[SessionRecord], SessionRecord],
+        *,
+        now: datetime | None = None,
+    ) -> SessionRecord:
+        return self.caller.replace_checkpoint(self, identity, mutate, now=now)
