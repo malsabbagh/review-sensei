@@ -184,6 +184,12 @@ for (const mode of ["git", "fallback-annotated"]) {
           } else {
             assert.equal(error, undefined);
             assert.equal(dispatched, prefix + 2 - (temperature === "warm" ? 1 : 0));
+            // An empty history is not prefix-only: both enrollment witnesses are
+            // read once, the operation record because the review witness finds
+            // no match. A witness ladder stops early only on a partial page, so
+            // multi-page funding is observable solely in the full-page arm.
+            const witnessReads = attempts.slice(start).filter(item => item.path === "/repos/acme/widgets/pulls/7/reviews" || item.path === "/repos/acme/widgets/issues/7/comments").length;
+            assert.equal(witnessReads, 2);
             assert.equal(result.session_state, "enrolled");
             assert.deepEqual(result.control_receipt, { ...control, dispatched });
           }
