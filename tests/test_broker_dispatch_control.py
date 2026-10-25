@@ -274,6 +274,24 @@ class BrokerDispatchControlTests(unittest.TestCase):
         budget.release_ordinary(18)
         self.assertEqual(budget.ordinary_remaining(), ceiling)
 
+    def test_restored_budget_starts_unheld_and_recovers_the_full_ceiling(self):
+        # A hold is phase-local and never part of the snapshot: a resumed
+        # operation re-establishes any reservation it needs, so restoring a
+        # snapshot taken mid-hold must report the un-narrowed ceiling rather
+        # than inherit a reservation nobody will release.
+        budget = EvidenceReadBudget()
+        for _ in range(10):
+            budget.consume()
+        budget.hold_ordinary(18)
+        self.assertEqual(budget.ordinary_remaining(), MAX_PART_READS - 4 - 18 - 10)
+        restored = EvidenceReadBudget(snapshot=budget.snapshot())
+        self.assertEqual(restored.calls, 10)
+        self.assertEqual(restored.ordinary_remaining(), MAX_PART_READS - 4 - 10)
+        for _ in range(MAX_PART_READS - 4 - 10):
+            restored.consume()
+        with self.assertRaises(ReviewInputError):
+            restored.consume()
+
     def test_receipt_scope_requires_exact_json_types(self):
         budget = EvidenceReadBudget()
         accounting = BrokerDispatchAccounting(budget, "a" * 64, 1, 1)

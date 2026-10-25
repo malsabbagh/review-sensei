@@ -478,8 +478,9 @@ class EvidenceReadBudget:
         """Ordinary dispatches the current phase may still admit, after any hold.
 
         This is the single authoritative ordinary ceiling: ``consume``,
-        ``preflight`` and broker admission all read it rather than re-deriving
-        the fence and hold offsets. Fence dispatches draw on the separate
+        ``preflight``, ``BrokerDispatchAccounting.admit`` and the hosted-media
+        approval tail all read it rather than re-deriving the fence and hold
+        offsets. Fence dispatches draw on the separate
         four-read reconciliation reserve instead, so they can advance
         ``calls`` past the ordinary ceiling and make this value negative; it
         is a remaining-room figure, not a licence, and every caller treats any
@@ -489,6 +490,10 @@ class EvidenceReadBudget:
         reconciliation reserve and every dispatch already spent through
         ``consume`` are subtracted here, so a caller compares a remaining
         liability against this value directly and adds nothing of its own.
+        Every writer of ``calls`` stops at ``MAX_PART_READS`` and the hold is
+        validated against ``MAX_PART_READS - 4``, so this can never report more
+        than ``MAX_PART_READS - 4``: a caller comparing a liability against it
+        still enforces the hard ceiling without repeating the constant.
         """
         return MAX_PART_READS - 4 - self._ordinary_hold - self.calls
 

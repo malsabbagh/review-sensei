@@ -3120,14 +3120,18 @@ class GitHubApplication:
         # and a reserve below the actual liability would starve the check. The
         # liability is read from whatever control object the broker exposes,
         # so a wrapper or proxy that reports it cannot silently fall back to
-        # the packaged default. The derivation does not depend on budget
-        # identity: a broker bound to a different envelope cannot mint cleanup
-        # authority (the token provider refuses it), and the larger hold still
-        # protects this budget's approval reads. Only a broker whose control
-        # reports no usable liability keeps the packaged default. A liability
-        # too large to hold is passed through rather than replaced: the
-        # finalizer refuses an oversized reserve, so an unfundable broker fails
-        # loudly instead of silently inheriting the smaller default.
+        # the packaged default. This is a best-effort narrowing of *this*
+        # budget, not of the broker's admission path: the derived reserve is
+        # the fixed one-request/two-check/five-approval minimum plus the
+        # reported liability, so this budget's own phase minimum is always
+        # covered, while a broker bound to a different envelope can only cause
+        # an over-hold here, which defers cleanup rather than starving it. Such
+        # a broker cannot mint cleanup authority anyway, because the token
+        # provider refuses the foreign accounting envelope. Only a broker whose
+        # control reports no usable liability keeps the packaged default. A
+        # liability too large to hold is passed through rather than replaced:
+        # the finalizer refuses an oversized reserve, so an unfundable broker
+        # fails loudly instead of silently inheriting the smaller default.
         command_finalization_reserve: int | None = None
         control = getattr(self.broker, "control", None)
         liability = getattr(control, "exchange_liability", None)

@@ -3219,6 +3219,13 @@ class ReviewApprovalFinalizer:
             # withholding it leaves the check and approval as much of their
             # liability as the request can still provide. Cleanup remains
             # unconfirmed and resumes under a later request's own allowance.
+            #
+            # A successful hold is only a negative constraint: it narrows the
+            # ceiling and never proves the reserved work is fundable here. Each
+            # exchange, check and approval dispatch is still admitted against
+            # ``ordinary_remaining`` before it is sent, so an underfunded
+            # reserve fails that phase's own preflight instead of letting a
+            # partial write through.
             try:
                 budget.hold_ordinary(reserve)
             except ReviewInputError as exc:

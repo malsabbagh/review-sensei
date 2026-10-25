@@ -599,12 +599,11 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 steps=(TailDispatch(label="scan"),),
             )
         )
-        observer = OperationObserver(budget)
         finalizer = ReviewApprovalFinalizer(
             http=GitHubHttp(api_url="https://api.github.test"),
             evidence_budget=budget,
         )
-        finalizer._operation_observer = observer
+        calls_before = budget.calls
         result = finalizer.reconcile_decided_threads(
             token="synthetic-review",
             repository="owner/repo",
@@ -630,9 +629,12 @@ class CleanupCommandCompositionTests(unittest.TestCase):
             reserve=COMMAND_FINALIZATION_RESERVE,
         )
         self.assertEqual(result.unconfirmed, ("rs-1",))
-        report = observer.report()
-        self.assertEqual(report.cleanup.first.stage, "cleanup.hold")
-        self.assertEqual(report.cleanup.first.reason, "hold-conflict")
+        # The refused hold spends nothing beyond the prepaid tail step and
+        # leaves nothing reserved. The distinct ``cleanup.hold`` stage this
+        # branch reports is asserted through the public ``operation_diagnostics``
+        # in ``test_unavailable_reserve_hold_defers_cleanup_without_spending_approval``.
+        self.assertEqual(budget.calls, calls_before)
+        self.assertEqual(budget.ordinary_remaining(), MAX_PART_READS - 4 - calls_before)
         with self.assertRaises(ReviewInputError):
             budget.consume()
         ticket.abort()
@@ -780,18 +782,16 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 )
 
             budget = EvidenceReadBudget()
-            # The command's own setup consumes roughly sixteen ordinary calls
-            # before cleanup. Pre-consume enough that the remainder at cleanup
-            # entry is below the reserve; the hold recorder below asserts that
-            # entry room, so a changed setup cost surfaces there instead of
-            # silently making this scenario unreachable.
-            pre_consumed_calls = 28
-            for _ in range(pre_consumed_calls):
-                budget.consume()
             observed_holds = []
             original_hold = budget.hold_ordinary
 
             def hold(calls):
+                # Spend the remaining allowance down at the moment cleanup asks
+                # for its hold, so the low-allowance scenario exists regardless
+                # of the command's measured setup cost rather than through a
+                # hard-coded pre-consumption.
+                while budget.ordinary_remaining() >= calls:
+                    budget.consume()
                 observed_holds.append((calls, budget.ordinary_remaining()))
                 original_hold(calls)
 
@@ -800,10 +800,10 @@ class CleanupCommandCompositionTests(unittest.TestCase):
 
             self.assertEqual(len(observed_holds), 1)
             self.assertEqual(observed_holds[0][0], COMMAND_FINALIZATION_RESERVE)
-            self.assertLess(
+            self.assertEqual(
                 observed_holds[0][1],
-                COMMAND_FINALIZATION_RESERVE,
-                "the request must reach cleanup below the reserve",
+                COMMAND_FINALIZATION_RESERVE - 1,
+                "the request must reach cleanup one call short of the reserve",
             )
             self.assertEqual(state.resolved_threads, {100})
             self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 0)
@@ -874,17 +874,20 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 opener=exchange_for(budget),
                 control=BrokerDispatchAccounting(budget, "c" * 64, 10, 1),
             )
-            # Leave cleanup enough room to acquire its capability and resolve a
-            # strict subset, but not the whole decided set. The recorded entry
-            # room below asserts that premise, so a changed setup cost surfaces
-            # there instead of silently turning this into the all-or-nothing
-            # scenario covered by the neighbouring tests.
-            for _ in range(5):
-                budget.consume()
+            # Cleanup's own fixed cost is discovery, thread authentication, the
+            # thread_resolve exchange and its receipt: eighteen dispatches at
+            # this fixture. One more funds exactly one thread resolution, so
+            # the resolved set is a strict, non-empty subset. The room is set
+            # when the hold is taken rather than by pre-consuming the command's
+            # setup, so this premise does not depend on the setup cost.
+            cleanup_fixed_cost = 18
+            cleanup_headroom = cleanup_fixed_cost + 1
             observed_holds = []
             original_hold = budget.hold_ordinary
 
             def hold(calls):
+                while budget.ordinary_remaining() > calls + cleanup_headroom:
+                    budget.consume()
                 observed_holds.append((calls, budget.ordinary_remaining()))
                 original_hold(calls)
 
@@ -905,15 +908,16 @@ class CleanupCommandCompositionTests(unittest.TestCase):
 
         self.assertEqual(len(observed_holds), 1)
         self.assertEqual(observed_holds[0][0], COMMAND_FINALIZATION_RESERVE)
-        self.assertGreaterEqual(
+        self.assertEqual(
             observed_holds[0][1],
-            COMMAND_FINALIZATION_RESERVE,
-            "cleanup must start above the reserve so its own work is what runs out",
+            COMMAND_FINALIZATION_RESERVE + cleanup_headroom,
+            "cleanup must start with exactly its own headroom above the reserve",
         )
         resolved_now = state.resolved_threads - {100}
         self.assertTrue(
             0 < len(resolved_now) < decided,
-            "cleanup must acquire authority and resolve a strict subset",
+            f"cleanup must acquire authority and resolve a strict subset: "
+            f"{resolved_now=} room={observed_holds[0][1]}",
         )
         self.assertIn('"decided_thread_reconciliation":"unconfirmed"', outcome.summary)
         self.assertIn('"check_state":"confirmed"', outcome.summary)
@@ -1295,6 +1299,11 @@ class CleanupCommandCompositionTests(unittest.TestCase):
 
         from review_sensei.disposition import MaintainerCommandResult
 
+        # Mirror the production call shape: the command budget is the same
+        # object the broker's control accounts against when it exposes one.
+        budget = getattr(control, "budget", None)
+        if not isinstance(budget, EvidenceReadBudget):
+            budget = EvidenceReadBudget()
         captured = []
 
         def refinalize(**kwargs):
@@ -1331,7 +1340,7 @@ class CleanupCommandCompositionTests(unittest.TestCase):
             app_slug=APP,
             actor="alice",
             record=None,
-            evidence_budget=EvidenceReadBudget(),
+            evidence_budget=budget,
         )
         return captured, result
 

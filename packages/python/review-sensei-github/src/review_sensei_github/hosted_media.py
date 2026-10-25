@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping
 from urllib.parse import quote
 
-from review_sensei.bounded_evidence import MAX_PART_READS, EvidenceReadBudget
+from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.context import finding_lifecycle_for_comment
 from review_sensei.errors import ReviewInputError
 from review_sensei.human_assessment import finding_instance_fingerprint
@@ -450,7 +450,7 @@ def prepare_hosted_media_context(
         budget.check()
         if type(required_dispatches) is not int or required_dispatches not in {2, 3}:
             raise ReviewInputError("hosted media approval tail is invalid")
-        if budget.calls + required_dispatches > MAX_PART_READS - 4:
+        if required_dispatches > budget.ordinary_remaining():
             raise ReviewInputError(
                 "media review receipt is retained; the original request budget "
                 "cannot fund approval readback; retry the same supported media command"
