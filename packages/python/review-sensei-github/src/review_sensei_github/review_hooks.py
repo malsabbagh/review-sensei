@@ -83,7 +83,8 @@ class GitHubReviewHooks:
         # Every caller must name its prepaid reservation, so a third caller
         # cannot silently inherit a smaller value by position and a zero
         # liability cannot turn every admission into a pre-transport refusal.
-        assert liability > 0
+        if liability <= 0:
+            raise ValueError("admission liability must be positive")
         operation = hashlib.sha256(
             f"analysis-admission:{args.repository_id}:{args.pull_request}:{args.head_sha}".encode()
         ).hexdigest()

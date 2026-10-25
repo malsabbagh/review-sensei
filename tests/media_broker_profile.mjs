@@ -183,10 +183,22 @@ for (const mode of ["git", "fallback-annotated"]) {
             result = await broker.exchange({ oidc_token: await fixture.oidcToken(), capability: "review_session", session: { repository_id: 987654321, pull_request: 7, head_sha: SHA }, control_budget: control });
           } catch (caught) { error = caught.message; }
           const dispatched = attempts.length - start;
-          // JWKS, the Git advertisement or annotated-tag fallback, and the four
-          // installation/repository/capability reads, then head, App identity and
-          // up to the reader's own 10-request ladder per enrollment witness.
-          const prefix = 8 + (mode === "fallback-annotated" ? 2 : 0);
+          // The deterministic non-witness prefix, itemized exactly as ADR 0088
+          // and the ANALYSIS_SESSION_INTERNAL_DISPATCHES comment enumerate it:
+          // cold JWKS (1), the single Git advertisement on the git path or the
+          // failed advertisement plus its two annotated-tag REST reads on the
+          // fallback path, installation/repository/capability (4), current
+          // head (1), App identity (1). The cold check below verifies the
+          // count against the observed attempts, so a read added outside this
+          // enumeration fails loudly here instead of drifting the literal.
+          const prefix = 1 + (mode === "fallback-annotated" ? 3 : 1) + 4 + 1 + 1;
+          const nonWitness = attempts
+            .slice(start)
+            .filter((row) => !row.path.endsWith("/reviews") && !row.path.endsWith("/comments"));
+          if (temperature === "cold") {
+            assert.equal(nonWitness.length, prefix,
+              "cold non-witness dispatches must be the enumerated admission prefix");
+          }
           if (history === "full-page" && maximum < prefix + 10) {
             // Each arm is cold by construction: the cache is reset above and the
             // refusal breaks before the warm exchange runs. The deterministic
@@ -332,7 +344,15 @@ for (const row of [
   { name: "both-ladders-one-short-fallback-annotated", mode: "fallback-annotated", maximum: 29, history: "maximum", dispatched: 29, reviewReads: 10, commentReads: 9, error: "broker_control_budget_exhausted" },
   { name: "both-oversized-fallback-annotated", mode: "fallback-annotated", maximum: 30, history: "both-oversized", dispatched: 18, reviewReads: 4, commentReads: 4 },
   { name: "byte-ladder-cap-fallback-annotated", mode: "fallback-annotated", maximum: 30, history: "byte-cap-exhausted", dispatched: 20, reviewReads: 10, commentReads: 0, error: "github_session_witness_failed" },
-]) witnessQualification.push(await qualifiedWitnessExchange(row));
+]) {
+  try {
+    witnessQualification.push(await qualifiedWitnessExchange(row));
+  } catch (caught) {
+    // Attribute the failing arm by name so one drifted row out of eight does
+    // not abort the run as an anonymous stack trace.
+    throw new Error(`witness arm ${row.name} failed: ${caught.message}`, { cause: caught });
+  }
+}
 
 // A restart after a partial prefix discards its items but retains all four
 // physical reads. This is the same bounded reader used by both witnesses.

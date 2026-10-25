@@ -61,13 +61,18 @@ before any transport or partial debit.
 
 Unattended analysis admission prepays 30 internal dispatches plus its caller
 HTTP request from the original metadata budget. Thirty is the exact enumerated
-ceiling, not an estimate: cold JWKS (1), failed Git advertisement with its
-annotated-tag REST fallback (3), installation and repository checks with the
-session capability (4), current head (1), App identity (1), and both enrollment
-witnesses at the reader's own 10-request page ladder (20). None of those paths
-retries, refreshes or re-reads, so the reservation leaves no spare dispatch: a
-dispatch added to this exchange requires rederiving and qualifying the bound
-within the unchanged original operation budget. The explicit qualification
+ceiling, not an estimate, and it counts the maximum, annotated-tag fallback
+case: cold JWKS (1), the failed Git advertisement plus its two annotated-tag
+REST reads (3), installation and repository checks with the session capability
+(4), current head (1), App identity (1), and both enrollment witnesses at the
+reader's own 10-request page ladder (20). The fallback's 3 is the one step
+that differs by path: the Git path completes the same resolution with a single
+successful advertisement, so the deterministic non-witness prefix is ten
+dispatches on the fallback path and eight on the Git path, and the reservation
+funds the larger fallback case. None of those paths retries, refreshes or
+re-reads, so the reservation leaves no spare dispatch: a dispatch added to
+this exchange requires rederiving and qualifying the bound within the
+unchanged original operation budget. The explicit qualification
 would surface an unfunded dispatch as
 `broker_control_budget_exhausted` in the funded annotated-tag history instead of
 the witness's closed code. A witness restarts its ladder at a smaller page size
