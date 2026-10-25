@@ -1960,9 +1960,8 @@ class GitHubApplication:
             from .hosted_media import prepare_hosted_media_context
 
             # The supported command must fund its check capability before any
-            # media publication. Keep the original allowance while funding
-            # cold JWKS plus the bounded annotated-tag REST fallback.
-            # Unused prepaid slots stay charged to the original allowance.
+            # media publication. Charge its caller POST in the original pool;
+            # cold JWKS/tag fallback remains independently Worker-bounded.
             check_broker = self.broker
             if type(check_broker) is BrokerClient:
                 from .broker_control import BrokerDispatchAccounting
@@ -3115,28 +3114,10 @@ class GitHubApplication:
         refinalize = getattr(finalizer, "refinalize_with_dispositions", None)
         if not callable(refinalize):
             return command_result
-        # Derive the cleanup hold from this broker's configured exchange
-        # liability. The packaged default cannot see a caller-provided broker,
-        # and a reserve below the actual liability would starve the check. The
-        # liability is read from whatever control object the broker exposes,
-        # so a wrapper or proxy that reports it cannot silently fall back to
-        # the packaged default. This is a best-effort narrowing of *this*
-        # budget, not of the broker's admission path: the derived reserve is
-        # the fixed one-request/two-check/five-approval minimum plus the
-        # reported liability, so this budget's own phase minimum is always
-        # covered, while a broker bound to a different envelope can only cause
-        # an over-hold here, which defers cleanup rather than starving it. Such
-        # a broker cannot mint cleanup authority anyway, because the token
-        # provider refuses the foreign accounting envelope. Only a broker whose
-        # control reports no usable liability keeps the packaged default. A
-        # liability too large to hold is passed through rather than replaced:
-        # the finalizer refuses an oversized reserve, so an unfundable broker
-        # fails loudly instead of silently inheriting the smaller default.
-        command_finalization_reserve: int | None = None
-        control = getattr(self.broker, "control", None)
-        liability = getattr(control, "exchange_liability", None)
-        if type(liability) is int and liability > 0:
-            command_finalization_reserve = 1 + liability + 2 + 5
+        # Reserve caller requests only: one broker POST, two check requests,
+        # and five approval reads. Worker internal fanout has its own service
+        # allowance and cannot narrow this caller's cleanup capacity.
+        command_finalization_reserve = 1 + 2 + 5
         failed = (
             command_result.summary
             + "; recorded; gate re-evaluation failed, comment `@reviewsensei verify` to retry"

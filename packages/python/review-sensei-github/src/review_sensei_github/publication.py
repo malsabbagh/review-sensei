@@ -74,7 +74,6 @@ from .approval import (
     restrict_result_qualification,
 )
 from .approval_progress import ApprovalProgress, build_approval_progress
-from .broker_control import COMMAND_EXCHANGE_DISPATCH_LIABILITY
 from .check_diagnostics import CHECK_FAILURE_CODES, CheckFailure, CheckOperationError
 from .checks import (
     REVIEW_POLICY_MODES,
@@ -138,16 +137,9 @@ MAX_PUBLISHED_REVIEW_BODY_BYTES = 65_536
 MAX_REVIEW_THREAD_PAGES = 10
 RESERVED_RECONCILIATION_READS = 4
 ORDINARY_EVIDENCE_READ_LIMIT = MAX_PART_READS - RESERVED_RECONCILIATION_READS
-# A deferred command's cleanup cannot know whether it is the last phase. Hold
-# the calls the following phases consume so cleanup cannot spend them in one
-# request: 1 request + the check_publish capability exchange's internal
-# liability, 2 check-publication calls (lookup plus create/update) and 5
-# approval reads (up to three pull preflights, one review-thread scan and one
-# persisted-reviews readback). The hold spends nothing: cleanup resumes on the
-# next supported verify. The hosted application derives the exchange term from
-# the broker's configured liability; this value is the packaged default when
-# that accounting is unavailable.
-COMMAND_FINALIZATION_RESERVE = 1 + COMMAND_EXCHANGE_DISPATCH_LIABILITY + 2 + 5
+# Caller-only tail: broker POST, check lookup/write, and approval reads.
+# Worker-internal dispatches use an independent service allowance.
+COMMAND_FINALIZATION_RESERVE = 1 + 2 + 5
 
 _REVIEW_THREADS_QUERY = """
 query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String, $first: Int!) {

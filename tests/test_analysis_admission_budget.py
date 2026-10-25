@@ -1,4 +1,4 @@
-"""Analysis admission prepays the cold fallback from its original budget."""
+"""Analysis broker exchanges charge caller POSTs independently of internal work."""
 
 import hashlib
 import json
@@ -65,7 +65,7 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
             head_sha=self.args.head_sha,
         )
 
-    def test_fallback_prepays_thirty_internal_and_one_outer_dispatch(self):
+    def test_fallback_reports_thirty_internal_and_charges_one_outer_dispatch(self):
         # 30 is the exact enumerated cold ceiling in ADR 0088, not an estimate.
         # Pin the production constant to that literal so a dispatch added to the
         # exchange fails here together with the ADR instead of drifting quietly.
@@ -77,7 +77,7 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
 
         def transport(request, timeout):
             requests.append(json.loads(request.data))
-            self.assertEqual(budget.calls, liability + 1)
+            self.assertEqual(budget.calls, 1)
             self.assertEqual(
                 requests[-1]["control_budget"]["max_dispatches"], liability
             )
@@ -94,7 +94,7 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
                 f"analysis-admission:987654321:7:{self.args.head_sha}".encode()
             ).hexdigest(),
         )
-        self.assertEqual(budget.calls, liability + 1)
+        self.assertEqual(budget.calls, 1)
 
     def test_rescan_exchange_keeps_the_prefix_only_reservation(self):
         # Pin the documented action reservation alongside the session ceiling
@@ -112,8 +112,8 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
         for _ in range(2):
             before = budget.calls
             self.open_session(client)
-            self.assertEqual(budget.calls - before, liability + 1)
-        self.assertEqual(budget.calls, 2 * (liability + 1))
+            self.assertEqual(budget.calls - before, 1)
+        self.assertEqual(budget.calls, 2)
         self.assertEqual(
             [item["max_dispatches"] for item in controls], [liability, liability]
         )
@@ -127,29 +127,7 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
         with self.assertRaises(GitHubBrokerClientError):
             self.open_session(over)
 
-    def test_combined_reservations_fit_one_ordinary_admission_budget(self):
-        # Enrollment and rescan authorization share the admission budget: both
-        # prepaid reservations plus their two caller POSTs must fit the ordinary
-        # ceiling, or a complete rescan lifecycle refuses only in production.
-        ceiling = EvidenceReadBudget().ordinary_remaining()
-        self.assertLessEqual(
-            ANALYSIS_SESSION_INTERNAL_DISPATCHES
-            + ANALYSIS_ACTION_INTERNAL_DISPATCHES
-            + 2,
-            ceiling,
-        )
-
-    def test_full_reservation_is_kept_when_the_exchange_reports_fewer_dispatches(
-        self,
-    ):
-        # Verification accepts any observed count inside the admitted maximum
-        # (0 <= dispatched <= max_dispatches), so 9 is a valid warm-path receipt
-        # rather than a mismatch. Both arms keep the full prepaid reservation
-        # plus the caller's outer HTTP dispatch; unused liability is not
-        # refunded. Reference the constant so the total cannot drift alone.
-        # A second cold admission cannot follow in the same budget: two full
-        # reservations plus their caller POSTs exceed the ordinary ceiling, a
-        # bound the combined-reservation test above asserts.
+    def test_fewer_internal_dispatches_never_refund_or_predebit_caller_capacity(self):
         for dispatched in (9, ANALYSIS_SESSION_INTERNAL_DISPATCHES):
             with self.subTest(dispatched=dispatched):
                 budget = EvidenceReadBudget()
@@ -160,19 +138,14 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
                     ),
                 )
                 self.open_session(client)
-                self.assertEqual(budget.calls, ANALYSIS_SESSION_INTERNAL_DISPATCHES + 1)
+                self.open_session(client)
+                self.assertEqual(budget.calls, 2)
 
     def test_last_funded_request_and_atomic_unfunded_refusal(self):
         liability = ANALYSIS_SESSION_INTERNAL_DISPATCHES
         ceiling = EvidenceReadBudget().ordinary_remaining()
-        # Four of the 64 calls stay reserved for finalization; pin that ceiling
-        # so a change to either offset fails here rather than moving the
-        # boundary silently. One admission needs its whole prepaid liability plus
-        # the caller HTTP request, so the boundary sits at the ceiling minus
-        # both, not at the liability itself.
         self.assertEqual(ceiling, MAX_PART_READS - 4)
-        self.assertGreaterEqual(ceiling - liability - 1, 0)
-        for prior in (ceiling - liability - 1, ceiling - liability):
+        for prior in (ceiling - 1, ceiling):
             with self.subTest(prior=prior):
                 budget = EvidenceReadBudget()
                 for _ in range(prior):
@@ -184,12 +157,12 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
                     return self.response(request, dispatched=liability)
 
                 client = self.client(budget, transport, liability=liability)
-                if prior == ceiling - liability - 1:
+                if prior == ceiling - 1:
                     self.open_session(client)
                     self.assertEqual(budget.ordinary_remaining(), 0)
                     self.assertEqual(len(dispatched), 1)
                 else:
-                    with self.assertRaisesRegex(ReviewInputError, "original budget"):
+                    with self.assertRaisesRegex(ReviewInputError, "caller budget"):
                         self.open_session(client)
                     self.assertEqual(budget.calls, prior)
                     self.assertEqual(dispatched, [])
@@ -203,7 +176,7 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
                 )
                 with self.assertRaises(GitHubBrokerClientError):
                     self.open_session(client)
-                self.assertEqual(budget.calls, ANALYSIS_SESSION_INTERNAL_DISPATCHES + 1)
+                self.assertEqual(budget.calls, 1)
 
     def test_expired_original_deadline_refuses_before_transport(self):
         clock = [0.0]
@@ -252,7 +225,7 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
                 pull_request=args.pull_request,
                 head_sha=args.head_sha,
             )
-            self.assertEqual(budget.calls, ANALYSIS_SESSION_INTERNAL_DISPATCHES + 1)
+            self.assertEqual(budget.calls, 1)
             with (
                 patch.dict(os.environ, env),
                 patch.object(
@@ -266,14 +239,11 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
             self.assertEqual(authorized.review_id, state.reviews[-1]["id"])
             self.assertIs(ledger.evidence_budget, budget)
             self.assertEqual(liabilities, [ANALYSIS_ACTION_INTERNAL_DISPATCHES])
-            # One admission and one rescan, each prepaying its internal
-            # liability plus its caller HTTP dispatch, plus the rescan's own
-            # reads. Reference both constants so the relation stays visible.
+            # Two caller POSTs plus direct rescan reads share the caller pool.
+            # Worker internal costs do not contribute to this counter.
             self.assertEqual(
                 budget.calls,
-                (ANALYSIS_SESSION_INTERNAL_DISPATCHES + 1)
-                + (ANALYSIS_ACTION_INTERNAL_DISPATCHES + 1)
-                + len(state.rescan_calls),
+                2 + len(state.rescan_calls),
             )
             self.assertLessEqual(budget.calls, 60)
             self.assertEqual(budget.wall_deadline_ms, deadline)

@@ -14,7 +14,7 @@ from review_sensei_github.broker_control import BrokerDispatchAccounting
 from review_sensei_github.commands import report_broker_failure, run_hosted_provider
 from review_sensei_github.http import GitHubHttp
 
-# Cold unattended admission funds the whole session exchange: JWKS (1), failed
+# The independent Worker session-exchange bound covers: JWKS (1), failed
 # Git plus annotated-tag REST fallback (3), installation/repository/capability
 # (4), current head (1), App identity (1), and both enrollment witnesses at the
 # reader's own 10-request page ladder (20). A witness restarts that ladder when
@@ -22,13 +22,12 @@ from review_sensei_github.http import GitHubHttp
 # cost the full 10; funding less refuses histories the reader is built to read.
 # This is the exact enumerated ceiling with no spare dispatch, because no path
 # in the exchange retries; changed work requires rederiving and qualifying the
-# reservation within the unchanged original operation budget.
+# service bound; internal counts do not debit the caller allowance.
 ANALYSIS_SESSION_INTERNAL_DISPATCHES = 30
 
 # The rescan authorization exchange stops at the capability token and reads no
-# witness, so it keeps the prefix-only 12-dispatch reservation. Like the session
-# ceiling above, this is part of the admission contract the qualification tests
-# pin, so both reservations are public and their exact values are asserted there.
+# witness, so its independent prefix-only service bound remains 12 dispatches.
+# Like the session ceiling above, this is a public bound pinned by qualification.
 ANALYSIS_ACTION_INTERNAL_DISPATCHES = 12
 
 
@@ -80,7 +79,7 @@ class GitHubReviewHooks:
 
     @staticmethod
     def _admission_broker(args, budget, *, liability):
-        # Every caller must name its prepaid reservation, so a third caller
+        # Every caller must name the expected service bound, so a third caller
         # cannot silently inherit a smaller value by position and a zero
         # liability cannot turn every admission into a pre-transport refusal.
         if liability <= 0:

@@ -1,4 +1,4 @@
-"""Prepaid original broker liability; production TS proves internal dispatches."""
+"""Caller POST accounting is independent of bounded broker internal work."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from unittest.mock import patch
 
 from review_sensei_github.broker_client import BrokerClient
 from review_sensei_github.broker_control import (
-    COMMAND_EXCHANGE_DISPATCH_LIABILITY,
     BrokerDispatchAccounting,
 )
 from review_sensei_github.errors import GitHubBrokerClientError
@@ -63,7 +62,7 @@ class BrokerDispatchControlTests(unittest.TestCase):
             self.client(budget, open_request).exchange(
                 "synthetic", capability="review_session"
             )
-        self.assertEqual(budget.calls, 14)
+        self.assertEqual(budget.calls, 1)
         self.assertEqual(budget.wall_deadline_ms, deadline)
 
     def client(self, budget, opener):
@@ -77,7 +76,7 @@ class BrokerDispatchControlTests(unittest.TestCase):
             ),
         )
 
-    def test_admits_internal_liability_before_transport_and_never_refunds_unused_slots(
+    def test_internal_receipt_is_observation_without_caller_predebit_or_refund(
         self,
     ):
         budget = EvidenceReadBudget()
@@ -86,7 +85,7 @@ class BrokerDispatchControlTests(unittest.TestCase):
 
         def open_request(request, timeout):
             dispatched.append(request)
-            self.assertEqual(budget.calls, 14)
+            self.assertEqual(budget.calls, 1)
             payload = json.loads(request.data)
             control = payload["control_budget"]
             self.assertEqual(control["deadline_unix_ms"], deadline)
@@ -109,10 +108,10 @@ class BrokerDispatchControlTests(unittest.TestCase):
             "synthetic",
         )
         self.assertEqual(len(dispatched), 1)
-        self.assertEqual(budget.calls, 14)
+        self.assertEqual(budget.calls, 1)
         self.assertEqual(budget.wall_deadline_ms, deadline)
 
-    def test_unknown_response_or_missing_changed_and_overspent_receipts_burn_liability(
+    def test_unknown_or_invalid_receipt_keeps_the_single_caller_dispatch(
         self,
     ):
         for fault in ("missing", "changed", "extra", "overspent", "type", "unknown"):
@@ -149,18 +148,18 @@ class BrokerDispatchControlTests(unittest.TestCase):
                     self.client(budget, open_request).exchange(
                         "synthetic", capability="review_session"
                     )
-                self.assertEqual(budget.calls, 14)
+                self.assertEqual(budget.calls, 1)
 
-    def test_unfunded_internal_liability_refuses_before_any_transport(self):
+    def test_exhausted_caller_budget_refuses_before_any_transport(self):
         budget = EvidenceReadBudget()
-        for _ in range(48):
+        for _ in range(60):
             budget.consume()
         with self.assertRaises(ReviewInputError):
             self.client(
                 budget,
                 lambda *_args, **_kwargs: self.fail("unfunded request dispatched"),
             ).exchange("synthetic", capability="review_session")
-        self.assertEqual(budget.calls, 48)
+        self.assertEqual(budget.calls, 60)
 
     def test_ordinary_hold_narrows_the_phase_ceiling_without_spending_calls(self):
         budget = EvidenceReadBudget()
@@ -192,68 +191,67 @@ class BrokerDispatchControlTests(unittest.TestCase):
         budget.consume()
         self.assertEqual(budget.calls, 13)
 
-    def test_held_ordinary_allowance_refuses_one_unfunded_exchange_atomically(self):
-        budget = EvidenceReadBudget()
-        for _ in range(30):
-            budget.consume()
-        budget.hold_ordinary(18)
-        control = BrokerDispatchAccounting(budget, "a" * 64, 13, 1)
-        with self.assertRaises(ReviewInputError):
-            control.admit(verification=False)
-        self.assertEqual(budget.calls, 30)
-        # The hold narrows the ceiling; it does not block a funded verification.
-        self.assertEqual(control.admit(verification=True)["max_dispatches"], 1)
-        self.assertEqual(budget.calls, 31)
-        budget.release_ordinary(18)
-        self.assertEqual(control.admit(verification=False)["max_dispatches"], 13)
-        self.assertEqual(budget.calls, 44)
-
-    def test_held_allowance_admits_exactly_the_liability_and_request(self):
-        # The command broker's check_publish exchange liability is 10 internal
-        # dispatches; the same client charges its request separately, so the
-        # whole exchange costs exactly the 11 calls still under the ceiling.
-        liability = COMMAND_EXCHANGE_DISPATCH_LIABILITY
-        hold = 18
-        request_cost = liability + 1
-        budget = EvidenceReadBudget()
-        pre_consumed = MAX_PART_READS - 4 - hold - request_cost
-        for _ in range(pre_consumed):
-            budget.consume()
-        budget.hold_ordinary(hold)
-        control = BrokerDispatchAccounting(budget, "a" * 64, liability, 1)
-        self.assertEqual(budget.ordinary_remaining(), request_cost)
-        self.assertEqual(control.admit(verification=False)["max_dispatches"], liability)
-        self.assertEqual(budget.calls, pre_consumed + liability)
-        with self.assertRaises(ReviewInputError):
-            control.admit(verification=True)
-        self.assertEqual(budget.calls, pre_consumed + liability)
-
-    def test_admission_boundary_is_exact_at_the_narrowed_ceiling(self):
-        # ``ordinary_remaining`` already subtracts the consumed calls, so an
-        # exchange is one whole-request test against that room. Pin both sides:
-        # a request that exactly fills the room is admitted, and one call short
-        # is refused atomically.
-        liability = COMMAND_EXCHANGE_DISPATCH_LIABILITY
-        request_cost = liability + 1
-        for shortfall in (0, 1):
-            with self.subTest(shortfall=shortfall):
+    def test_internal_fanout_9_12_30_has_identical_one_post_caller_cost(self):
+        for observed in (9, 12, 30):
+            with self.subTest(observed=observed):
                 budget = EvidenceReadBudget()
-                target = request_cost - shortfall
-                for _ in range(budget.ordinary_remaining() - target):
+                physical = []
+
+                def open_request(request, timeout):
+                    physical.append(request)
+                    control = json.loads(request.data)["control_budget"]
+                    return FakeResponse(
+                        json.dumps(
+                            {
+                                "token": "synthetic",
+                                "control_receipt": {**control, "dispatched": observed},
+                            }
+                        ).encode()
+                    )
+
+                client = BrokerClient(
+                    opener=open_request,
+                    control=BrokerDispatchAccounting(
+                        budget,
+                        "a" * 64,
+                        30,
+                        1,
+                    ),
+                )
+                client.exchange("synthetic", capability="review_session")
+                self.assertEqual(len(physical), 1)
+                self.assertEqual(budget.calls, 1)
+                self.assertEqual(budget.ordinary_remaining(), 59)
+
+    def test_admission_boundary_only_requires_the_single_caller_post(self):
+        for room in (0, 1):
+            with self.subTest(room=room):
+                budget = EvidenceReadBudget()
+                for _ in range(60 - room):
                     budget.consume()
-                self.assertEqual(budget.ordinary_remaining(), target)
-                pre_consumed = budget.calls
-                control = BrokerDispatchAccounting(budget, "a" * 64, liability, 1)
-                if shortfall:
+                control = BrokerDispatchAccounting(budget, "a" * 64, 30, 1)
+                if room:
+                    self.assertEqual(
+                        control.admit(verification=False)["max_dispatches"], 30
+                    )
+                    # Admission itself is not a physical HTTP request.
+                    self.assertEqual(budget.calls, 59)
+                else:
                     with self.assertRaises(ReviewInputError):
                         control.admit(verification=False)
-                    self.assertEqual(budget.calls, pre_consumed)
-                else:
-                    self.assertEqual(
-                        control.admit(verification=False)["max_dispatches"],
-                        liability,
-                    )
-                    self.assertEqual(budget.calls, pre_consumed + liability)
+                    self.assertEqual(budget.calls, 60)
+
+    def test_ordinary_hold_is_respected_independently_of_worker_fanout(self):
+        budget = EvidenceReadBudget()
+        budget.hold_ordinary(18)
+        for _ in range(42):
+            budget.consume()
+        control = BrokerDispatchAccounting(budget, "a" * 64, 30, 1)
+        with self.assertRaises(ReviewInputError):
+            control.admit(verification=False)
+        budget.release_ordinary(18)
+        self.assertEqual(control.admit(verification=False)["max_dispatches"], 30)
+        self.assertEqual(budget.calls, 42)
 
     def test_refused_hold_leaves_no_reservation_to_release(self):
         # Acquisition is all-or-nothing and validates with the same strict
@@ -305,7 +303,7 @@ class BrokerDispatchControlTests(unittest.TestCase):
                     accounting.verify(
                         {**request, field: value, "dispatched": 1}, request
                     )
-        self.assertEqual(budget.calls, 1)
+        self.assertEqual(budget.calls, 0)
 
     def test_other_before_request_budget_cannot_replace_original_owner(self):
         budget, other = EvidenceReadBudget(), EvidenceReadBudget()

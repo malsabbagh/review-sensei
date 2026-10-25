@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
+from .api_work import DEFAULT_API_REQUEST_LIMIT
 from .budgets import MAX_TOTAL_OUTPUT_BYTES, MAX_TOTAL_PROMPT_BYTES, ReviewWorkBudgets
 from .errors import ReviewInputError
 from .outcomes import (
@@ -89,7 +90,7 @@ _RETIRED_REPLACEMENT_PATTERN = re.compile(r"^[a-z][a-z0-9_.]*$")
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _OPENAI_DEFAULT_HOSTNAME = "api.openai.com"
 
-ROOT_FIELDS = ("schema", "inference", "github", "advanced")
+ROOT_FIELDS = ("schema", "api_request_limit", "inference", "github", "advanced")
 INFERENCE_FIELDS = ("backend", "model")
 GITHUB_FIELDS = (
     "automatic_reviews",
@@ -444,6 +445,7 @@ class ProductConfiguration:
     source: str | None
     root: Path
     declared: Mapping[str, int]
+    api_request_limit: int = DEFAULT_API_REQUEST_LIMIT
 
     def is_declared(self, field_path: str) -> bool:
         return field_path in self.declared
@@ -980,6 +982,12 @@ def _build_configuration(
     )
     github = _build_github(values.get("github"), lines, source=source, fail=fail)
     advanced = _build_advanced(values.get("advanced"), lines, source=source, fail=fail)
+    api_request_limit = values.get("api_request_limit", DEFAULT_API_REQUEST_LIMIT)
+    if type(api_request_limit) is not int or api_request_limit < 1:
+        raise fail(
+            "api_request_limit",
+            "must be a positive integer; admission also requires the measured startup envelope",
+        )
     return ProductConfiguration(
         schema=schema,
         inference=inference,
@@ -988,6 +996,7 @@ def _build_configuration(
         source=source,
         root=root,
         declared=dict(lines),
+        api_request_limit=api_request_limit,
     )
 
 
@@ -2459,6 +2468,7 @@ def render_configuration(
         f"configuration: {configuration.source or 'none (packaged defaults)'}"
         f" (schema {configuration.schema})",
         f"configuration root: {configuration.root}",
+        f"api_request_limit: {configuration.api_request_limit} (caller requests per Actions run; provisional)",
         "effective inference:",
     ]
     inference_rows = (
@@ -2616,6 +2626,7 @@ def _advanced_rows(configuration: ProductConfiguration) -> list[str]:
 
 _DEFAULT_FIELD_VALUES: Mapping[str, Any] = {
     "schema": SUPPORTED_SCHEMA_VERSION,
+    "api_request_limit": DEFAULT_API_REQUEST_LIMIT,
     "inference.backend": "local-ollama",
     "inference.model": "packaged default for the selected backend",
     "github.automatic_reviews": True,

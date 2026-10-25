@@ -642,10 +642,8 @@ class CleanupCommandCompositionTests(unittest.TestCase):
         budget.release_ordinary(COMMAND_FINALIZATION_RESERVE)
         budget.consume()
 
-    def test_cleanup_reserve_follows_the_broker_exchange_liability(self):
-        # The packaged default cannot see a caller-provided broker. The
-        # application derives the hold from the broker's configured exchange
-        # liability so a larger liability cannot starve the check/approval.
+    def test_cleanup_reserve_is_independent_of_broker_internal_fanout(self):
+        # A larger Worker internal plan cannot narrow caller cleanup room.
         state = CommandCapacityState(
             complete=True, schema="1", inline_range=(0, 1), human_count=1, padded=False
         )
@@ -705,14 +703,9 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                     body="@reviewsensei verify",
                     command_budget=budget,
                 )
-        # One request, the broker's configured exchange liability, two check
-        # reads and five approval reads.
-        expected_reserve = 1 + configured_liability + 2 + 5
-        self.assertGreater(
-            expected_reserve,
-            COMMAND_FINALIZATION_RESERVE,
-            "the packaged default cannot see this broker's larger liability",
-        )
+        # One caller POST, two check requests and five approval reads.
+        expected_reserve = 8
+        self.assertEqual(expected_reserve, COMMAND_FINALIZATION_RESERVE)
         self.assertEqual(observed_holds, [expected_reserve])
         self.assertLessEqual(budget.calls, 64)
 
@@ -875,12 +868,12 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 control=BrokerDispatchAccounting(budget, "c" * 64, 10, 1),
             )
             # Cleanup's own fixed cost is discovery, thread authentication, the
-            # thread_resolve exchange and its receipt: eighteen dispatches at
+            # thread_resolve caller POST and its receipt: eight requests at
             # this fixture. One more funds exactly one thread resolution, so
             # the resolved set is a strict, non-empty subset. The room is set
             # when the hold is taken rather than by pre-consuming the command's
             # setup, so this premise does not depend on the setup cost.
-            cleanup_fixed_cost = 18
+            cleanup_fixed_cost = 8
             cleanup_headroom = cleanup_fixed_cost + 1
             observed_holds = []
             original_hold = budget.hold_ordinary
@@ -1086,11 +1079,9 @@ class CleanupCommandCompositionTests(unittest.TestCase):
             self.assertTrue(result.evaluation_failed)
             self.assertIn("decisions retained", result.summary)
 
-    def test_reserve_follows_a_foreign_broker_accounting_liability(self):
-        # The reserve follows the broker's configured liability, not budget
-        # identity. This broker cannot mint cleanup authority for this budget
-        # (the token provider refuses the foreign envelope), but the hold must
-        # never silently fall back to the packaged default.
+    def test_foreign_broker_fanout_cannot_change_caller_reserve(self):
+        # Foreign internal plan metadata cannot change the caller reserve.
+        # The token provider still refuses cleanup from a foreign envelope.
         from types import SimpleNamespace
 
         from review_sensei.disposition import MaintainerCommandResult
@@ -1151,15 +1142,13 @@ class CleanupCommandCompositionTests(unittest.TestCase):
             record=None,
             evidence_budget=budget,
         )
-        expected_reserve = 1 + configured_liability + 2 + 5
-        self.assertGreater(expected_reserve, COMMAND_FINALIZATION_RESERVE)
+        expected_reserve = 8
+        self.assertEqual(expected_reserve, COMMAND_FINALIZATION_RESERVE)
         self.assertEqual(captured, [expected_reserve])
         self.assertFalse(getattr(result, "evaluation_failed", False), result.summary)
 
-    def test_reserve_reads_liability_from_a_wrapped_control_object(self):
-        # A broker may expose a control wrapper that forwards the liability
-        # rather than the packaged accounting type. The derivation must read
-        # that value, not silently fall back to the packaged default.
+    def test_wrapped_control_fanout_cannot_change_caller_reserve(self):
+        # Wrapping an internal plan cannot affect the caller-only reserve.
         from types import SimpleNamespace
 
         from review_sensei.disposition import MaintainerCommandResult
@@ -1206,13 +1195,11 @@ class CleanupCommandCompositionTests(unittest.TestCase):
             record=None,
             evidence_budget=budget,
         )
-        self.assertEqual(captured, [1 + configured_liability + 2 + 5])
+        self.assertEqual(captured, [8])
         self.assertFalse(getattr(result, "evaluation_failed", False), result.summary)
 
-    def test_reserve_derives_from_the_packaged_accounting_type(self):
-        # The built-in control reports its own ``exchange_liability``; deriving
-        # through the same attribute a wrapper uses keeps the default broker
-        # from falling back to the packaged reserve if the field is renamed.
+    def test_packaged_control_fanout_cannot_change_caller_reserve(self):
+        # Packaged service bounds are independent of the caller-only reserve.
         captured, result = self._reserve_passed_with_control(
             BrokerDispatchAccounting(
                 budget=EvidenceReadBudget(),
@@ -1221,13 +1208,11 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 verification_liability=1,
             )
         )
-        self.assertEqual(captured, [1 + 14 + 2 + 5])
+        self.assertEqual(captured, [8])
         self.assertFalse(getattr(result, "evaluation_failed", False), result.summary)
 
-    def test_reserve_keeps_the_packaged_default_without_a_reported_liability(self):
-        # A control that reports nothing usable is the only case that keeps the
-        # packaged default; the value is passed as None so the finalizer, not
-        # this derivation, decides what that default funds.
+    def test_missing_internal_plan_does_not_change_caller_reserve(self):
+        # The same fixed caller tail applies without an internal plan.
         from types import SimpleNamespace
 
         for control in (
@@ -1238,20 +1223,18 @@ class CleanupCommandCompositionTests(unittest.TestCase):
         ):
             with self.subTest(control=control):
                 captured, result = self._reserve_passed_with_control(control)
-                self.assertEqual(captured, [None])
+                self.assertEqual(captured, [8])
                 self.assertFalse(getattr(result, "evaluation_failed", False))
 
-    def test_oversized_liability_is_passed_through_not_replaced(self):
-        # A liability whose derived reserve cannot be held must not be silently
-        # swapped for the smaller packaged default, which would under-reserve.
+    def test_large_internal_plan_does_not_change_caller_reserve(self):
+        # Invalid/large internal bounds cannot reserve workflow allowance.
         from types import SimpleNamespace
 
         oversized = MAX_PART_READS - 4 - 7 + 1
         captured, _ = self._reserve_passed_with_control(
             SimpleNamespace(budget=EvidenceReadBudget(), exchange_liability=oversized)
         )
-        self.assertEqual(captured, [1 + oversized + 2 + 5])
-        self.assertGreater(captured[0], MAX_PART_READS - 4)
+        self.assertEqual(captured, [8])
 
     def test_unfundable_reserve_fails_loudly_instead_of_running_cleanup(self):
         from types import SimpleNamespace
