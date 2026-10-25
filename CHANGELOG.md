@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Authenticate retained published inventory for explicit full rescans after a
+  failed continuation leaves no current transaction. Keep the receipt and ledger
+  unchanged, fence the same root on reads, and forbid inventory writes through
+  this read-only authority. Ordinary decision and finalization readers still
+  require their current transaction; coverage and approval gates are unchanged.
 ## 0.8.13 - 2026-10-25
 
 - Distinguish unavailable check capabilities, observed access denials, temporary

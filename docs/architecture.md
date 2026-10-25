@@ -11,6 +11,8 @@ writes hold without blind recreation. One original finite evidence budget covers
 publication/reply broker/storage/readers/mutable fences. Missing/conflicting evidence withholds
 decisions. Require reader-first rollout and trusted complete emission. See ADR 0094.
 
+Explicit rescan source admission is documented in ADR 0112 in the [ADR index](adr/README.md).
+
 ## Publication and recovery
 
 Writers default to at most 64 findings; readers accept 250. Only trusted
