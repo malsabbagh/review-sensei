@@ -112,7 +112,14 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
             [item["max_dispatches"] for item in controls], [liability, liability]
         )
 
-    def test_full_reservation_is_kept_for_a_warm_shorter_exchange(self):
+    def test_full_reservation_is_kept_when_the_exchange_reports_fewer_dispatches(
+        self,
+    ):
+        # Verification accepts any observed count inside the admitted maximum
+        # (0 <= dispatched <= max_dispatches), so 9 is a valid warm-path receipt
+        # rather than a mismatch. Both arms keep the full prepaid reservation
+        # plus the caller's outer HTTP dispatch; unused liability is not
+        # refunded. Reference the constant so the total cannot drift alone.
         for dispatched in (9, ANALYSIS_SESSION_INTERNAL_DISPATCHES):
             with self.subTest(dispatched=dispatched):
                 budget = EvidenceReadBudget()
@@ -123,7 +130,7 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
                     ),
                 )
                 self.open_session(client)
-                self.assertEqual(budget.calls, 31)
+                self.assertEqual(budget.calls, ANALYSIS_SESSION_INTERNAL_DISPATCHES + 1)
 
     def test_last_funded_request_and_atomic_unfunded_refusal(self):
         liability = ANALYSIS_SESSION_INTERNAL_DISPATCHES
