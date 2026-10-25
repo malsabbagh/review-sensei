@@ -15,6 +15,7 @@ _STAGES = frozenset(
         "check.publication",
         "check.capability",
         "cleanup.discovery",
+        "cleanup.hold",
         "cleanup.capability",
         "cleanup.root-readback",
         "cleanup.authority-fence",
@@ -179,6 +180,13 @@ class OperationObserver:
                 and calls >= MAX_PART_READS - 4
             ):
                 reason = "call-limit"
+                break
+            if message in {
+                "ordinary dispatch hold is already outstanding",
+                "ordinary dispatch hold cannot coexist with an activation tail",
+                "ordinary dispatch hold release does not match",
+            }:
+                reason = "hold-conflict"
                 break
             if message == "partition read deadline exhausted":
                 reason = "deadline"

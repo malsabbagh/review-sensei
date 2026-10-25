@@ -74,6 +74,7 @@ from .approval import (
     restrict_result_qualification,
 )
 from .approval_progress import ApprovalProgress, build_approval_progress
+from .broker_control import COMMAND_EXCHANGE_DISPATCH_LIABILITY
 from .check_diagnostics import CHECK_FAILURE_CODES, CheckFailure, CheckOperationError
 from .checks import (
     REVIEW_POLICY_MODES,
@@ -139,12 +140,14 @@ RESERVED_RECONCILIATION_READS = 4
 ORDINARY_EVIDENCE_READ_LIMIT = MAX_PART_READS - RESERVED_RECONCILIATION_READS
 # A deferred command's cleanup cannot know whether it is the last phase. Hold
 # the calls the following phases consume so cleanup cannot spend them in one
-# request: 1 request + 10 internal dispatches for the check_publish capability
-# exchange (the command broker's configured liability), 2 check-publication
-# calls (lookup plus create/update) and 5 approval reads (up to three pull
-# preflights, one review-thread scan and one persisted-reviews readback). The
-# hold spends nothing: cleanup resumes on the next supported verify.
-COMMAND_FINALIZATION_RESERVE = 1 + 10 + 2 + 5
+# request: 1 request + the check_publish capability exchange's internal
+# liability, 2 check-publication calls (lookup plus create/update) and 5
+# approval reads (up to three pull preflights, one review-thread scan and one
+# persisted-reviews readback). The hold spends nothing: cleanup resumes on the
+# next supported verify. The hosted application derives the exchange term from
+# the broker's configured liability; this value is the packaged default when
+# that accounting is unavailable.
+COMMAND_FINALIZATION_RESERVE = 1 + COMMAND_EXCHANGE_DISPATCH_LIABILITY + 2 + 5
 
 _REVIEW_THREADS_QUERY = """
 query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String, $first: Int!) {
@@ -2134,6 +2137,7 @@ class ReviewApprovalFinalizer:
         thread_cleanup_token_provider: Callable[[EvidenceReadBudget], str]
         | None = None,
         check_token_provider: Callable[[EvidenceReadBudget], str] | None = None,
+        command_finalization_reserve: int | None = None,
     ) -> PublicationResult:
         """Re-evaluate one published head after an override, without a provider call.
 
@@ -2142,6 +2146,11 @@ class ReviewApprovalFinalizer:
         """
         if check_token is not None and check_token_provider is not None:
             raise GitHubPublicationError("check credential configuration is ambiguous")
+        if command_finalization_reserve is not None and (
+            type(command_finalization_reserve) is not int
+            or not 1 <= command_finalization_reserve <= MAX_PART_READS - 4
+        ):
+            raise GitHubPublicationError("command finalization reserve is invalid")
         owns_operation_budget = (
             self.evidence_budget is None and self._operation_budget is None
         )
@@ -2181,6 +2190,7 @@ class ReviewApprovalFinalizer:
                     check_token_provider=(lambda: check_token_provider(budget))
                     if check_token_provider is not None
                     else None,
+                    command_finalization_reserve=command_finalization_reserve,
                 )
             except (GitHubHTTPError, GitHubPublicationError, ReviewInputError) as exc:
                 observer.exception(exc)
@@ -2243,6 +2253,7 @@ class ReviewApprovalFinalizer:
         incomplete_coverage: Sequence[str] | None = None,
         policy_digest: str | None = None,
         check_token_provider: Callable[[], str] | None = None,
+        command_finalization_reserve: int | None = None,
     ) -> PublicationResult:
         from .checks import ReviewCheckPublisher, review_check_outcome
 
@@ -2689,7 +2700,11 @@ class ReviewApprovalFinalizer:
         # consume the room that the following capability exchange, check
         # publication and approval need; cleanup resumes on a later verify.
         resolution = (
-            reconcile_cleanup(COMMAND_FINALIZATION_RESERVE)
+            reconcile_cleanup(
+                command_finalization_reserve
+                if command_finalization_reserve is not None
+                else COMMAND_FINALIZATION_RESERVE
+            )
             if deferred_command
             else None
         )
@@ -3184,7 +3199,10 @@ class ReviewApprovalFinalizer:
             # admission reads. A prepaid activation tail or an existing hold
             # cannot coexist with cleanup; leave the threads unconfirmed so the
             # reserved check/approval phases still run and cleanup resumes on a
-            # later verify.
+            # later verify. An outstanding tail also refuses every ordinary
+            # dispatch, so discovery cannot proceed here; record the distinct
+            # stage so the operation report names the actual cause rather than
+            # a later generic cleanup failure.
             #
             # The hold stays unconditional when the remaining allowance is
             # already below the reserve. Spending it on cleanup cannot reliably
@@ -3195,6 +3213,7 @@ class ReviewApprovalFinalizer:
             try:
                 budget.hold_ordinary(reserve)
             except ReviewInputError as exc:
+                self._observe_stage("cleanup.hold")
                 if self._operation_observer is not None:
                     self._operation_observer.exception(exc)
                 return ThreadResolutionResult(unconfirmed=tuple(sorted(instances)))
@@ -3221,7 +3240,7 @@ class ReviewApprovalFinalizer:
                 return ThreadResolutionResult(unconfirmed=tuple(sorted(instances)))
         finally:
             if reserve and budget is not None:
-                budget.release_ordinary()
+                budget.release_ordinary(reserve)
 
     def finalize_recorded_decisions(
         self,

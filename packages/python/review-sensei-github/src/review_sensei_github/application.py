@@ -72,6 +72,7 @@ from .approval import (
     qualification_state_for_publication,
 )
 from .broker_client import BrokerClient
+from .broker_control import BrokerDispatchAccounting
 from .check_diagnostics import CheckCapability, check_failure, observed_http_status
 from .checks import REVIEW_POLICY_MODES
 from .conversation import (
@@ -2416,6 +2417,9 @@ class GitHubApplication:
             }
             and (result.applied or command.action == "verify")
         ):
+            # The operation-entry branch above returns `produced`, so only one
+            # of these two refinalize calls can run and the one-shot review
+            # capability is never redeemed twice.
             refinalized = self._refinalize_command(
                 result,
                 oidc_token=oidc_token,
@@ -3108,6 +3112,17 @@ class GitHubApplication:
         refinalize = getattr(finalizer, "refinalize_with_dispositions", None)
         if not callable(refinalize):
             return command_result
+        # Derive the cleanup hold from this broker's configured exchange
+        # liability. The packaged default cannot see a caller-provided broker,
+        # and a reserve below the actual liability would starve the check.
+        command_finalization_reserve: int | None = None
+        control = getattr(self.broker, "control", None)
+        if (
+            evidence_budget is not None
+            and isinstance(control, BrokerDispatchAccounting)
+            and control.budget is evidence_budget
+        ):
+            command_finalization_reserve = 1 + control.exchange_liability + 2 + 5
         failed = (
             command_result.summary
             + "; recorded; gate re-evaluation failed, comment `@reviewsensei verify` to retry"
@@ -3180,6 +3195,7 @@ class GitHubApplication:
                 check_token_provider=lambda budget: command_token(
                     budget, "check_publish"
                 ),
+                command_finalization_reserve=command_finalization_reserve,
             )
         except Exception as exc:
             return render_command_progress(

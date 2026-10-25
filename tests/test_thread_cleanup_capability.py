@@ -411,7 +411,9 @@ class CleanupCommandCompositionTests(unittest.TestCase):
             with patch.object(
                 budget,
                 "hold_ordinary",
-                side_effect=ReviewInputError("prepaid activation tail cannot hold"),
+                side_effect=ReviewInputError(
+                    "ordinary dispatch hold cannot coexist with an activation tail"
+                ),
             ) as hold:
                 finalizer = ReviewApprovalFinalizer(
                     http=GitHubHttp(
@@ -441,6 +443,133 @@ class CleanupCommandCompositionTests(unittest.TestCase):
         )
         self.assertEqual(outcome.status, "approved")
         self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 1)
+        diagnostics = outcome.operation_diagnostics.to_dict()
+        self.assertEqual(diagnostics["cleanup"]["first"]["stage"], "cleanup.hold")
+        self.assertEqual(diagnostics["cleanup"]["first"]["reason"], "hold-conflict")
+
+    def test_real_activation_tail_defers_cleanup_and_releases_on_abort(self):
+        # A prepaid tail is a real, non-reentrant conflict with the cleanup
+        # hold, not only an injected error: the ticket stays outstanding, the
+        # decided threads stay unconfirmed, and aborting it restores ordinary
+        # capacity so a later request can clean up.
+        from types import SimpleNamespace
+
+        from review_sensei_github.publication import FindingIndex, IndexedFinding
+
+        from review_sensei.bounded_evidence import ActivationTailPlan, TailDispatch
+
+        budget = EvidenceReadBudget()
+        ticket = budget.reserve_tail(
+            ActivationTailPlan(
+                adapter="github",
+                scope_sha256="a" * 64,
+                steps=(TailDispatch(label="scan"),),
+            )
+        )
+        observer = OperationObserver(budget)
+        finalizer = ReviewApprovalFinalizer(
+            http=GitHubHttp(api_url="https://api.github.test"),
+            evidence_budget=budget,
+        )
+        finalizer._operation_observer = observer
+        result = finalizer.reconcile_decided_threads(
+            token="synthetic-review",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD,
+            app_slug=APP,
+            eligibility=SimpleNamespace(result_digest="b" * 64, human_review=None),
+            index=FindingIndex(
+                result_digest="b" * 64,
+                base_sha=BASE,
+                entries=(
+                    IndexedFinding(
+                        instance="rs-1",
+                        lifecycle=None,
+                        blocking=False,
+                        needs_human=True,
+                    ),
+                ),
+            ),
+            reviews=(),
+            honored_instances=frozenset({"rs-1"}),
+            reserve=COMMAND_FINALIZATION_RESERVE,
+        )
+        self.assertEqual(result.unconfirmed, ("rs-1",))
+        self.assertIs(budget._tail_ticket, ticket)
+        report = observer.report()
+        self.assertEqual(report.cleanup.first.stage, "cleanup.hold")
+        self.assertEqual(report.cleanup.first.reason, "hold-conflict")
+        with self.assertRaises(ReviewInputError):
+            budget.consume()
+        ticket.abort()
+        budget.hold_ordinary(COMMAND_FINALIZATION_RESERVE)
+        budget.release_ordinary(COMMAND_FINALIZATION_RESERVE)
+        budget.consume()
+
+    def test_cleanup_reserve_follows_the_broker_exchange_liability(self):
+        # The packaged default cannot see a caller-provided broker. The
+        # application derives the hold from the broker's configured exchange
+        # liability so a larger liability cannot starve the check/approval.
+        state = CommandCapacityState(
+            complete=True, schema="1", inline_range=(0, 1), human_count=1, padded=False
+        )
+        state.resolved_threads.clear()
+        budget = EvidenceReadBudget()
+        observed_holds = []
+        original_hold = budget.hold_ordinary
+
+        def hold(calls):
+            observed_holds.append(calls)
+            original_hold(calls)
+
+        def exchange(request, timeout):
+            payload = json.loads(request.data)
+            return FakeResponse(
+                json.dumps(
+                    {
+                        "token": "synthetic-" + payload["capability"],
+                        "capability": payload["capability"],
+                        "control_receipt": {
+                            **payload["control_budget"],
+                            "dispatched": 6,
+                        },
+                    }
+                ).encode()
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            state.record(directory)
+            http = GitHubHttp(api_url="https://api.github.test", opener=state.open)
+            app = GitHubApplication(
+                broker=BrokerClient(
+                    opener=exchange,
+                    control=BrokerDispatchAccounting(budget, "f" * 64, 12, 1),
+                ),
+                http=http,
+                reviewer=ReviewPublisher(http=http),
+                learner=None,
+                replier=None,
+            )
+            app.session_ledger = LocalSessionLedger(Path(directory) / "ledger")
+            app.reviewer.finalizer.human_inventory_reader_factory = None
+            with patch.object(budget, "hold_ordinary", side_effect=hold):
+                app.apply_maintainer_command(
+                    options=GitHubWriteOptions(github_writes=True),
+                    oidc_token="synthetic",
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha=HEAD,
+                    app_slug=APP,
+                    actor_login="alice",
+                    association="OWNER",
+                    body="@reviewsensei verify",
+                    command_budget=budget,
+                )
+        self.assertEqual(observed_holds, [1 + 12 + 2 + 5])
+        self.assertLessEqual(budget.calls, 64)
 
     def test_low_allowance_holds_the_reserve_and_resumes_on_a_later_verify(self):
         # A request can reach cleanup with less than the reserve left. The full
@@ -519,8 +648,8 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 observed_holds.append((calls, budget.ordinary_remaining()))
                 original_hold(calls)
 
-            budget.hold_ordinary = hold
-            first = verify(budget, "c" * 64)
+            with patch.object(budget, "hold_ordinary", side_effect=hold):
+                first = verify(budget, "c" * 64)
 
             self.assertEqual(len(observed_holds), 1)
             self.assertEqual(observed_holds[0][0], COMMAND_FINALIZATION_RESERVE)

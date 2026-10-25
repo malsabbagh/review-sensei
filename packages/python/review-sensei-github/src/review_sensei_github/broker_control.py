@@ -16,6 +16,11 @@ from review_sensei.errors import ReviewInputError
 
 from .errors import GitHubBrokerClientError
 
+# Internal dispatches the hosted command broker admits per capability exchange.
+# The command finalization reserve derives from this value; a broker configured
+# with a different liability reports it back so the reserve follows the broker.
+COMMAND_EXCHANGE_DISPATCH_LIABILITY = 10
+
 
 @dataclass(frozen=True)
 class BrokerDispatchAccounting:

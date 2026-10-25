@@ -1100,7 +1100,10 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
             http = GitHubHttp()
             media_budget = None
             from review_sensei.bounded_evidence import EvidenceReadBudget
-            from review_sensei_github.broker_control import BrokerDispatchAccounting
+            from review_sensei_github.broker_control import (
+                COMMAND_EXCHANGE_DISPATCH_LIABILITY,
+                BrokerDispatchAccounting,
+            )
             from review_sensei_github.publication_recovery import publication_http
 
             command_budget = (
@@ -1116,7 +1119,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                         hashlib.sha256(
                             f"command:{args.repository_id}:{args.pull_request}:{args.head_sha}:{source_comment_id}".encode()
                         ).hexdigest(),
-                        10,
+                        COMMAND_EXCHANGE_DISPATCH_LIABILITY,
                         1,
                     )
                 )
@@ -1131,7 +1134,7 @@ def _run_github(args: argparse.Namespace, *, argv: list[str]) -> int:
                         hashlib.sha256(
                             f"media:{args.repository_id}:{args.pull_request}:{args.head_sha}:{source_comment_id}".encode()
                         ).hexdigest(),
-                        10,
+                        COMMAND_EXCHANGE_DISPATCH_LIABILITY,
                         1,
                     )
                 )

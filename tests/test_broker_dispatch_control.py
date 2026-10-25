@@ -176,7 +176,13 @@ class BrokerDispatchControlTests(unittest.TestCase):
         with self.assertRaises(ReviewInputError):
             budget.preflight(1)
         self.assertEqual(budget.calls, 12)
-        budget.release_ordinary()
+        with self.assertRaises(ReviewInputError):
+            budget.release_ordinary(47)
+        # A mismatched release must not discard the outstanding hold.
+        with self.assertRaises(ReviewInputError):
+            budget.consume()
+        self.assertEqual(budget.calls, 12)
+        budget.release_ordinary(48)
         self.assertEqual(budget.ordinary_remaining(), 48)
         budget.preflight(13)
         self.assertEqual(budget.calls, 12)
@@ -195,7 +201,7 @@ class BrokerDispatchControlTests(unittest.TestCase):
         # The hold narrows the ceiling; it does not block a funded verification.
         self.assertEqual(control.admit(verification=True)["max_dispatches"], 1)
         self.assertEqual(budget.calls, 31)
-        budget.release_ordinary()
+        budget.release_ordinary(18)
         self.assertEqual(control.admit(verification=False)["max_dispatches"], 13)
         self.assertEqual(budget.calls, 44)
 

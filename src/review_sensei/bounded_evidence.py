@@ -433,18 +433,34 @@ class EvidenceReadBudget:
         self._live_attempt_owners.pop(scope, None)
 
     def hold_ordinary(self, calls: int) -> None:
-        """Reserve ordinary dispatches for a phase that must follow this one."""
+        """Reserve ordinary dispatches for a phase that must follow this one.
+
+        The hold is strictly non-reentrant: only one phase may hold, it cannot
+        hold while an activation tail owns the remaining dispatch liability,
+        and it must release exactly the count it reserved.
+        """
         if (
             isinstance(calls, bool)
             or not isinstance(calls, int)
             or not 0 < calls <= MAX_PART_READS - 4
-            or self._tail_ticket is not None
-            or self._ordinary_hold
         ):
             raise ReviewInputError("ordinary dispatch hold is invalid")
+        if self._ordinary_hold:
+            raise ReviewInputError("ordinary dispatch hold is already outstanding")
+        if self._tail_ticket is not None:
+            raise ReviewInputError(
+                "ordinary dispatch hold cannot coexist with an activation tail"
+            )
         self._ordinary_hold = calls
 
-    def release_ordinary(self) -> None:
+    def release_ordinary(self, calls: int) -> None:
+        """Release the hold reserved for ``calls``; a mismatch is refused.
+
+        Requiring the reserved count keeps a nested or repeated release from
+        silently discarding another phase's reservation.
+        """
+        if type(calls) is not int or self._ordinary_hold != calls:
+            raise ReviewInputError("ordinary dispatch hold release does not match")
         self._ordinary_hold = 0
 
     def ordinary_remaining(self) -> int:

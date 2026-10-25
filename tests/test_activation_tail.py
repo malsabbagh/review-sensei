@@ -103,7 +103,7 @@ class TicketTests(unittest.TestCase):
         budget.hold_ordinary(18)
         with self.assertRaises(ReviewInputError):
             budget.reserve_tail(self.plan(TailDispatch("scan:1")))
-        budget.release_ordinary()
+        budget.release_ordinary(18)
         budget.reserve_tail(self.plan(TailDispatch("scan:1")))
 
     def test_nonrefundable_precharge_optional_scan_and_one_use(self):

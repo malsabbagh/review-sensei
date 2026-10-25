@@ -39,18 +39,30 @@ allowance. Neither issuance nor a retry resets an existing request's budget.
 Command finalization performs cleanup before lazily acquiring the separate
 check token. Otherwise retained hosted-ledger reads plus eager check issuance
 can consume the entire allowance before the first cleanup token fits, making
-every retry repeat the same non-progress. Cleanup therefore runs under a fixed
-ordinary hold of 18 calls: `1 + 10 + 2 + 5`, meaning one request plus the
-`check_publish` exchange's 10 internal dispatches, check publication's lookup
-and create/update, and finalization's five approval reads (up to three pull
-preflights, one review-thread scan and one persisted-reviews readback).
-`COMMAND_FINALIZATION_RESERVE` in `publication.py` records the same derivation.
-The hold spends nothing;
+every retry repeat the same non-progress. Cleanup therefore runs under an
+ordinary hold derived as `1 + exchange liability + 2 + 5`: one request, the
+`check_publish` exchange's internal dispatches, check publication's lookup and
+create/update, and finalization's five approval reads (up to three pull
+preflights, one review-thread scan and one persisted-reviews readback). The
+packaged default is 18, from
+`COMMAND_EXCHANGE_DISPATCH_LIABILITY = 10` in `broker_control.py`;
+`COMMAND_FINALIZATION_RESERVE` in `publication.py` is that packaged default.
+A caller-provided broker reports its configured liability through
+`BrokerDispatchAccounting`, and the application derives the hold from that
+exact accounting so a larger liability cannot be under-reserved. The hold
+spends nothing;
 it only narrows cleanup, which remains unconfirmed and can resume under a later
 supported request's own allowance. The hold stays unconditional when less than
 the reserve remains: that allowance cannot reliably fund discovery plus the
 separate `thread_resolve` authority, while withholding it leaves the check and
-approval as much of their liability as the request can still provide. Keep the
+approval as much of their liability as the request can still provide. The hold
+is non-reentrant and is released only by the exact count reserved, so a nested
+or mismatched release cannot discard another phase's reservation. A prepaid
+activation tail or an existing hold refuses the reservation without spending
+allowance; because an outstanding tail also refuses every ordinary dispatch,
+cleanup cannot proceed and the request records the distinct `cleanup.hold`
+stage with reason `hold-conflict` before leaving the threads unconfirmed for a
+later request. Keep the
 intended check conclusion independent of acquisition. An unfunded or failed
 deferred check retains cleanup progress and defers a new native approval; an
 exact-head approval already observed remains a truthful observation. The next
