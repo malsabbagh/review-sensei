@@ -1,8 +1,8 @@
 {
-  "base_sha": "768e72f17c1ee2329545326cf69bf062c532e71d",
-  "engine_tag": "v0.8.13",
+  "base_sha": "476a69fa20e3b192be0073a5aaf03390e2857f9a",
+  "engine_tag": "",
   "files": {
-    "CHANGELOG.md": "726174178f34526daf359bc710aa6996b0f12f656c108f1e970865fe7353b1d1",
+    "CHANGELOG.md": "c8a029a6f6a75ea886cd9191fe320c888cb9ad95076db08b4ad1ccfe2d2cdec0",
     "README.md": "67534f2b3d53b48f72ec32845223061f0a7d905d5d88f85e2d136a33624c1a7a",
     "docs/installation.md": "b8fb75dbc87441423900336c19ede8c6ec6bc8498f1f33d905e1211b3e402030",
     "docs/site/data/site-manifest.json": "5fca7ed4e0d6c6d2f69c9a4a83c5a0a8c74f62444a089b6f4347e2d1f2996156",
@@ -22,12 +22,12 @@
     "packages/npm/platforms/linux-x64-gnu/package.json": "14decbcfe4d165152b9f232bf33b5fc9fe890aeba79632899199a74bc28bf2b3",
     "packages/npm/platforms/win32-x64/README.md": "573c8ea26c9d1d97fd8cb8524bef0eca577bc8b71c53000f684c9083212872e4",
     "packages/npm/platforms/win32-x64/package.json": "83d129b32fcf6dfb63524751c207d1768f216cd03c4910d0cd39b513b398f7f2",
-    "packages/python/review-sensei-github/pyproject.toml": "c8bb417c25818600c6d1f976de18f465a46c85b19d0980efb115db81944c38a6",
+    "packages/python/review-sensei-github/pyproject.toml": "66ad11bc3f42a8b9cf1ec71ba9226eb8e7bfc71dd02dd4a533c644fade0afe66",
     "pyproject.toml": "c8f1d0ef20c4aed366f91408c86552c85bc506881388a09e546e936d334ff55d"
   },
-  "github_tag": "github-v0.3.18",
-  "github_version": "0.3.18",
-  "notes_sha256": "37682f70dcd8edb2d3abd644f5b4865b9068b3afab43f46694c080aae3f25c5f",
+  "github_tag": "github-v0.3.19",
+  "github_version": "0.3.19",
+  "notes_sha256": "93a44c28f836eea7828b2724b1c372ba1d80a886359af3a49b83bbaaadd1446d",
   "release_date": "2026-10-25",
   "repository": "malsabbagh/review-sensei",
   "schema_version": "1.0",
