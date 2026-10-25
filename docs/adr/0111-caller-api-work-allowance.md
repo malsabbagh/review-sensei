@@ -43,6 +43,13 @@ or uncertain requests all occupy allowance. Dispatch/confirmation changes the
 category, without double-charging or refunding. Preserve pending request deadlines;
 new requests get separately bounded deadlines. Provider execution cannot reset
 caller accounting. Unknown prior consumption refuses instead of starting at zero.
+Retain completed request identities for the run lifetime and confirm the exact
+request/deadline, so delayed responses cannot settle a later request. Bind every
+ordinary block to its issuing owner. A crash successor retains its predecessor's
+charges but cannot consume the predecessor's undispatched remainder; explicit
+authenticated orderly transfer is a separate adapter action, never automatic.
+Conservative prior non-startup liability is separate from confirmed requests and
+excludes the already prefunded startup envelopes.
 
 All writers require the existing authoritative PR concurrency serialization.
 Comment PATCH is not CAS; generation/readback only detect conflicts. Unsupported

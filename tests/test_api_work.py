@@ -36,7 +36,7 @@ def accounting(*, limit=128, prior=0, attempt=1):
         FrozenApiConfiguration("a" * 40, "b" * 64, limit),
         ApiExecutionOwner(attempt, "analyze", 0),
         fixture_plan(),
-        prior_consumption_upper_bound=prior,
+        prior_nonstartup_liability_upper_bound=prior,
     )
 
 
@@ -104,7 +104,7 @@ class CallerAccountingTests(unittest.TestCase):
             (pending.reserved_undispatched, pending.uncertain, pending.confirmed),
             (4, 1, 0),
         )
-        confirmed = pending.confirm("github-1")
+        confirmed = pending.confirm(request)
         self.assertEqual(
             (confirmed.reserved_undispatched, confirmed.uncertain, confirmed.confirmed),
             (4, 0, 1),
@@ -113,7 +113,7 @@ class CallerAccountingTests(unittest.TestCase):
         self.assertEqual(pending.remaining, room)
         self.assertEqual(confirmed.remaining, room)
         with self.assertRaises(ReviewInputError):
-            confirmed.confirm("github-1")
+            confirmed.confirm(request)
 
     def test_unknown_response_survives_owner_handoff_with_original_deadline(self):
         pending = (
@@ -149,7 +149,10 @@ class CallerAccountingTests(unittest.TestCase):
         with self.assertRaises(ReviewInputError):
             replace(
                 state,
-                blocks=(CallerRequestBlock("same", 1), CallerRequestBlock("same", 2)),
+                blocks=(
+                    CallerRequestBlock("same", state.owner, 1),
+                    CallerRequestBlock("same", state.owner, 2),
+                ),
             )
         with self.assertRaises(ReviewInputError):
             StartupPlan((StartupSlot("job", 1, ("auth",)),))
@@ -177,3 +180,54 @@ class CallerAccountingTests(unittest.TestCase):
                 self.assertRaises(ReviewInputError),
             ):
                 state.require_binding(identity, configuration)
+
+    def test_settled_id_is_lifetime_unique_and_delayed_response_cannot_settle_new_work(
+        self,
+    ):
+        first = PendingApiRequest("same-id", 100)
+        state = accounting().reserve("work", 3).dispatch("work", first).confirm(first)
+        for proposed in (first, PendingApiRequest("same-id", 200)):
+            with (
+                self.subTest(proposed=proposed),
+                self.assertRaisesRegex(ReviewInputError, "used"),
+            ):
+                state.dispatch("work", proposed)
+        new_request = PendingApiRequest("new-id", 200)
+        state = state.dispatch("work", new_request)
+        with self.assertRaises(ReviewInputError):
+            state.confirm(first)
+        with self.assertRaises(ReviewInputError):
+            state.confirm(PendingApiRequest("new-id", 201))
+        self.assertEqual(state.confirmed, 1)
+        self.assertEqual(state.uncertain, 1)
+        confirmed = state.confirm(new_request)
+        self.assertEqual(confirmed.confirmed, 2)
+        self.assertEqual(confirmed.remaining, state.remaining)
+
+    def test_crashed_owner_remainder_stays_charged_but_is_unusable_by_successor(self):
+        request = PendingApiRequest("unknown-write", 100)
+        state = accounting().reserve("old", 4).dispatch("old", request)
+        resumed = state.claim_startup(ApiExecutionOwner(2, "analyze", 1))
+        with self.assertRaisesRegex(ReviewInputError, "issuing owner"):
+            resumed.dispatch("old", PendingApiRequest("new", 200))
+        self.assertEqual(resumed.remaining, state.remaining)
+        self.assertEqual(resumed.reserved_undispatched, 3)
+        self.assertEqual(resumed.uncertain, 1)
+        fresh = resumed.reserve("new-owner", 1)
+        self.assertEqual(fresh.remaining, resumed.remaining - 1)
+        self.assertEqual(fresh.blocks[-1].issued_by, resumed.owner)
+        fresh.dispatch("new-owner", PendingApiRequest("fresh", 200))
+
+    def test_prior_nonstartup_liability_is_neither_confirmed_nor_startup_double_charge(
+        self,
+    ):
+        state = accounting(prior=7)
+        self.assertEqual(state.confirmed, 0)
+        self.assertEqual(state.prior_nonstartup_liability, 7)
+        self.assertEqual(state.remaining, 128 - fixture_plan().liability - 7)
+        request = PendingApiRequest("new", 100)
+        confirmed = state.reserve("new", 1).dispatch("new", request).confirm(request)
+        resumed = confirmed.claim_startup(ApiExecutionOwner(2, "analyze", 1))
+        self.assertEqual(resumed.prior_nonstartup_liability, 7)
+        self.assertEqual(resumed.confirmed, 1)
+        self.assertEqual(resumed.remaining, state.remaining - 1)
