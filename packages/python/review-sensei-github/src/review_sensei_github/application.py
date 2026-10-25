@@ -3039,6 +3039,9 @@ class GitHubApplication:
         evidence_budget: EvidenceReadBudget | None = None,
         incomplete_coverage: Sequence[str] | None = None,
         policy_digest: str | None = None,
+        # Private cross-call reuse: None, or the exact review_publish token
+        # minted by this operation's broker exchange. Never a caller-supplied
+        # credential.
         _prepared_review_token: str | None = None,
     ) -> object:
         """Re-check approval after a hosted override. A failed check leaves the ledger write."""
@@ -3094,8 +3097,17 @@ class GitHubApplication:
 
         try:
             # Reuse only a review_publish capability minted by this operation.
-            # Any other capability, including a hosted session grant, is refused
-            # by construction because it never reaches this argument.
+            # Tokens are opaque strings, so this finalizer cannot verify a
+            # token's provenance; the parameter's only supported producer is
+            # GitHubApplication._refinalize_command, which passes None or the
+            # token this broker minted for the same repository, pull request
+            # and head. Any other capability, including a hosted session
+            # grant, never reaches this argument.
+            if _prepared_review_token is not None and (
+                not isinstance(_prepared_review_token, str)
+                or not _prepared_review_token.strip()
+            ):
+                raise GitHubPublicationError("prepared review capability is invalid")
             review_token = _prepared_review_token or self.broker.exchange(
                 oidc_token, capability="review_publish"
             )

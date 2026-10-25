@@ -145,6 +145,9 @@ class BrokerControlQualification(unittest.TestCase):
             padded=False,
         )
         state.resolved_threads.clear()
+        # Derive the completion target from the fixture's own index so this
+        # qualification tracks the invariant, not a fixed decided-thread count.
+        decided = sum(not entry.body_placed for entry in state.entries)
         state.record(self.temporary.name)
         self.bridge.call(
             "set_snapshot", snapshot={"repository": "owner/repo", "repositoryId": 1}
@@ -197,14 +200,16 @@ class BrokerControlQualification(unittest.TestCase):
             # without submitting a second native approval.
             if (
                 any(review["state"] == "APPROVED" for review in state.reviews)
-                and len(state.resolved_threads) == 21
+                and len(state.resolved_threads) >= decided
             ):
                 break
             if attempt:
                 self.assertGreater(
                     progress[-1], progress[-2], (progress, outcome.summary)
                 )
-        self.assertEqual(len(state.resolved_threads), 21, (progress, outcome.summary))
+        self.assertEqual(
+            len(state.resolved_threads), decided, (progress, outcome.summary)
+        )
         self.assertEqual(
             sum(review["state"] == "APPROVED" for review in state.reviews), 1
         )

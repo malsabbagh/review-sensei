@@ -138,11 +138,13 @@ MAX_REVIEW_THREAD_PAGES = 10
 RESERVED_RECONCILIATION_READS = 4
 ORDINARY_EVIDENCE_READ_LIMIT = MAX_PART_READS - RESERVED_RECONCILIATION_READS
 # A deferred command's cleanup cannot know whether it is the last phase. Hold
-# one whole capability exchange (ten internal dispatches plus its request),
-# the check publication write pair and the final approval reads so cleanup
-# cannot spend the room those following phases need in one request. The hold
-# spends nothing: cleanup resumes on the next supported verify.
-COMMAND_FINALIZATION_RESERVE = 18
+# the calls the following phases consume so cleanup cannot spend them in one
+# request: 1 request + 10 internal dispatches for the check_publish capability
+# exchange (the command broker's configured liability), 2 check-publication
+# calls (lookup plus create/update) and 5 approval reads (up to three pull
+# preflights, one review-thread scan and one persisted-reviews readback). The
+# hold spends nothing: cleanup resumes on the next supported verify.
+COMMAND_FINALIZATION_RESERVE = 1 + 10 + 2 + 5
 
 _REVIEW_THREADS_QUERY = """
 query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String, $first: Int!) {
@@ -3179,8 +3181,16 @@ class ReviewApprovalFinalizer:
             # The command path mints every following capability from this same
             # budget instance; its token provider rejects a foreign accounting
             # envelope, so the hold narrows the exact allowance broker
-            # admission reads.
-            budget.hold_ordinary(reserve)
+            # admission reads. A prepaid activation tail or an existing hold
+            # cannot coexist with cleanup; leave the threads unconfirmed so the
+            # reserved check/approval phases still run and cleanup resumes on a
+            # later verify.
+            try:
+                budget.hold_ordinary(reserve)
+            except ReviewInputError as exc:
+                if self._operation_observer is not None:
+                    self._operation_observer.exception(exc)
+                return ThreadResolutionResult(unconfirmed=tuple(sorted(instances)))
         try:
             try:
                 return FindingThreadResolver(self.http).resolve(

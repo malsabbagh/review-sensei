@@ -319,7 +319,12 @@ class EvidenceReadBudget:
                 "ordinary dispatch cannot use prepaid activation work"
             )
         remaining = self._remaining_seconds()
-        if self.calls >= MAX_PART_READS - (0 if fence else 4 + self._ordinary_hold):
+        # Fence dispatches draw on the fixed four-read reconciliation reserve;
+        # every other dispatch must fit the single ordinary ceiling.
+        exhausted = (
+            self.calls >= MAX_PART_READS if fence else self.ordinary_remaining() <= 0
+        )
+        if exhausted:
             raise ReviewInputError("partition shared request budget exhausted")
         self.calls += 1
         # Addition/subtraction near a float exponent boundary can round above
@@ -445,14 +450,16 @@ class EvidenceReadBudget:
     def ordinary_remaining(self) -> int:
         """Ordinary dispatches the current phase may still admit, after any hold.
 
-        This is the single authoritative ordinary ceiling. Admission callers
-        must use it rather than re-deriving the fence and hold offsets.
+        This is the single authoritative ordinary ceiling: ``consume``,
+        ``preflight`` and broker admission all read it rather than re-deriving
+        the fence and hold offsets. Fence dispatches draw on the separate
+        four-read reconciliation reserve instead.
         """
         return MAX_PART_READS - 4 - self._ordinary_hold - self.calls
 
     def preflight(self, calls: int) -> None:
         self.check()
-        if self.calls + calls > MAX_PART_READS - 4 - self._ordinary_hold:
+        if calls > self.ordinary_remaining():
             raise ReviewInputError(
                 "partition shared request budget cannot stage complete inventory"
             )

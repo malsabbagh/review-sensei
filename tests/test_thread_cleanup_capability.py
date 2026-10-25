@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from review_sensei_github.application import GitHubApplication, GitHubWriteOptions
 from review_sensei_github.broker_client import BrokerClient
@@ -11,7 +12,11 @@ from review_sensei_github.broker_control import BrokerDispatchAccounting
 from review_sensei_github.errors import GitHubBrokerClientError, GitHubPublicationError
 from review_sensei_github.http import GitHubHttp
 from review_sensei_github.operation_diagnostics import OperationObserver
-from review_sensei_github.publication import ReviewApprovalFinalizer, ReviewPublisher
+from review_sensei_github.publication import (
+    COMMAND_FINALIZATION_RESERVE,
+    ReviewApprovalFinalizer,
+    ReviewPublisher,
+)
 from review_sensei_github.publication_recovery import publication_http
 from review_sensei_github.thread_resolution import FindingThreadResolver
 
@@ -388,6 +393,51 @@ class CleanupCommandCompositionTests(unittest.TestCase):
         self.assertEqual(outcome.status, "skipped_stale_head")
         self.assertFalse(any(r["state"] == "APPROVED" for r in state.reviews))
 
+    def test_unavailable_reserve_hold_defers_cleanup_without_spending_approval(self):
+        # A prepaid activation tail refuses any ordinary hold. Cleanup must
+        # leave every decided thread unconfirmed instead of spending the room
+        # the following check/approval phases need; a later verify resumes it.
+        state = CommandCapacityState(
+            complete=True, schema="1", inline_range=(0, 1), human_count=1, padded=False
+        )
+        state.resolved_threads.clear()
+        budget = EvidenceReadBudget()
+        with tempfile.TemporaryDirectory() as directory:
+            dispositions = state.record(directory)
+            with patch.object(
+                budget,
+                "hold_ordinary",
+                side_effect=ReviewInputError("prepaid activation tail cannot hold"),
+            ) as hold:
+                finalizer = ReviewApprovalFinalizer(
+                    http=GitHubHttp(
+                        api_url="https://api.github.test", opener=state.open
+                    ),
+                    evidence_budget=budget,
+                )
+                outcome = finalizer.refinalize_with_dispositions(
+                    token="synthetic-review",
+                    check_token=None,
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha=HEAD,
+                    app_slug=APP,
+                    actor="alice",
+                    finding_ids=(),
+                    dispositions=dispositions,
+                    thread_cleanup_token_provider=lambda _budget: "synthetic-cleanup",
+                    check_token_provider=lambda _budget: "synthetic-check",
+                )
+        hold.assert_called_once_with(COMMAND_FINALIZATION_RESERVE)
+        self.assertEqual(state.resolved_threads, set())
+        self.assertEqual(outcome.thread_resolution, "unconfirmed")
+        self.assertEqual(
+            outcome.approval_progress.decided_thread_reconciliation, "unconfirmed"
+        )
+        self.assertEqual(outcome.status, "approved")
+        self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 1)
+
     def test_explicit_and_deferred_check_credentials_are_not_ambiguous(self):
         finalizer = ReviewApprovalFinalizer(http=GitHubHttp())
         with self.assertRaises(GitHubPublicationError):
@@ -484,6 +534,9 @@ class CleanupCommandCompositionTests(unittest.TestCase):
             padded=False,
         )
         state.resolved_threads.clear()
+        # The invariant is "every decided inline thread is resolved", not the
+        # fixture's current count: derive the target from the index itself.
+        decided = sum(not entry.body_placed for entry in state.entries)
         progress = []
         with tempfile.TemporaryDirectory() as directory:
             state.record(directory)
@@ -539,13 +592,15 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 # Approval no longer waits for the whole ledger: it is funded
                 # from the same original allowance, ahead of the remaining
                 # cleanup that resumes on the next supported verify.
-                if len(state.resolved_threads) == 21:
+                if len(state.resolved_threads) >= decided:
                     break
                 self.assertTrue(
                     attempt == 0 or progress[-1] > progress[-2],
                     (progress, result.summary),
                 )
-        self.assertEqual(len(state.resolved_threads), 21, (progress, result.summary))
+        self.assertEqual(
+            len(state.resolved_threads), decided, (progress, result.summary)
+        )
         self.assertEqual(
             sum(r["state"] == "APPROVED" for r in state.reviews),
             1,

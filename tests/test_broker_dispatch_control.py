@@ -201,13 +201,15 @@ class BrokerDispatchControlTests(unittest.TestCase):
 
     def test_held_allowance_admits_exactly_the_liability_and_request(self):
         budget = EvidenceReadBudget()
-        for _ in range(30):
+        for _ in range(31):
             budget.consume()
         budget.hold_ordinary(18)
-        control = BrokerDispatchAccounting(budget, "a" * 64, 11, 1)
-        self.assertEqual(budget.ordinary_remaining(), 12)
-        # The whole exchange (liability plus its request) fits exactly.
-        self.assertEqual(control.admit(verification=False)["max_dispatches"], 11)
+        # The command broker's check_publish exchange liability is 10 internal
+        # dispatches; the same client charges its request separately, so the
+        # whole exchange costs exactly the 11 calls still under the ceiling.
+        control = BrokerDispatchAccounting(budget, "a" * 64, 10, 1)
+        self.assertEqual(budget.ordinary_remaining(), 11)
+        self.assertEqual(control.admit(verification=False)["max_dispatches"], 10)
         self.assertEqual(budget.calls, 41)
         with self.assertRaises(ReviewInputError):
             control.admit(verification=True)

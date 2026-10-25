@@ -40,8 +40,12 @@ Command finalization performs cleanup before lazily acquiring the separate
 check token. Otherwise retained hosted-ledger reads plus eager check issuance
 can consume the entire allowance before the first cleanup token fits, making
 every retry repeat the same non-progress. Cleanup therefore runs under a fixed
-ordinary hold covering one whole check-capability exchange, the check
-publication write pair and the final approval reads. The hold spends nothing;
+ordinary hold of 18 calls: `1 + 10 + 2 + 5`, meaning one request plus the
+`check_publish` exchange's 10 internal dispatches, check publication's lookup
+and create/update, and finalization's five approval reads (up to three pull
+preflights, one review-thread scan and one persisted-reviews readback).
+`COMMAND_FINALIZATION_RESERVE` in `publication.py` records the same derivation.
+The hold spends nothing;
 it only narrows cleanup, which remains unconfirmed and can resume under a later
 supported request's own allowance. Keep the
 intended check conclusion independent of acquisition. An unfunded or failed
