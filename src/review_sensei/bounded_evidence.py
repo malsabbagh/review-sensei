@@ -448,6 +448,11 @@ class EvidenceReadBudget:
         is all-or-nothing and validates with the same strict ``int`` test as
         ``release_ordinary``, so a refused call leaves nothing reserved and a
         caller cannot hold a count it would be unable to release.
+
+        The hold is applied even when ``ordinary_remaining`` is already below
+        ``calls``: it narrows a ceiling that may be non-positive and cannot
+        rescue a phase that is already over budget. A successful hold is
+        therefore not proof that the reserved work is fundable.
         """
         if type(calls) is not int or not 0 < calls <= MAX_PART_READS - 4:
             raise ReviewInputError("ordinary dispatch hold is invalid")
@@ -479,6 +484,11 @@ class EvidenceReadBudget:
         ``calls`` past the ordinary ceiling and make this value negative; it
         is a remaining-room figure, not a licence, and every caller treats any
         value at or below zero as exhausted.
+
+        The figure is exactly ``MAX_PART_READS - 4 - hold - calls``. Both the
+        reconciliation reserve and every dispatch already spent through
+        ``consume`` are subtracted here, so a caller compares a remaining
+        liability against this value directly and adds nothing of its own.
         """
         return MAX_PART_READS - 4 - self._ordinary_hold - self.calls
 
