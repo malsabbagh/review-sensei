@@ -54,7 +54,10 @@ forwards that value cannot be under-reserved. Derivation does not depend on the
 accounting being bound to this request's budget: a foreign envelope cannot mint
 cleanup authority (the token provider refuses it), but the packaged default is
 never silently substituted for a broker whose control reports a larger
-liability. The hold spends nothing;
+liability. A liability too large to hold is passed through rather than
+replaced: the finalizer refuses an oversized reserve, so such a broker fails
+loudly with no cleanup attempted instead of quietly running under the smaller
+default. The hold spends nothing;
 it only narrows cleanup, which remains unconfirmed and can resume under a later
 supported request's own allowance. Broker admission reads the same narrowed
 ceiling while the hold is outstanding, so cleanup's own capability exchange

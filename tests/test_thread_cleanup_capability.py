@@ -24,7 +24,7 @@ from review_sensei_github.publication import (
 from review_sensei_github.publication_recovery import publication_http
 from review_sensei_github.thread_resolution import FindingThreadResolver
 
-from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.bounded_evidence import MAX_PART_READS, EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
 from review_sensei.session import LocalSessionLedger
 from tests.fake_github_http import json_response
@@ -1033,6 +1033,136 @@ class CleanupCommandCompositionTests(unittest.TestCase):
         )
         self.assertEqual(captured, [1 + configured_liability + 2 + 5])
         self.assertFalse(getattr(result, "evaluation_failed", False), result.summary)
+
+    def test_reserve_derives_from_the_packaged_accounting_type(self):
+        # The built-in control reports its own ``exchange_liability``; deriving
+        # through the same attribute a wrapper uses keeps the default broker
+        # from falling back to the packaged reserve if the field is renamed.
+        captured, result = self._reserve_passed_with_control(
+            BrokerDispatchAccounting(
+                budget=EvidenceReadBudget(),
+                operation_id="a" * 64,
+                exchange_liability=14,
+                verification_liability=1,
+            )
+        )
+        self.assertEqual(captured, [1 + 14 + 2 + 5])
+        self.assertFalse(getattr(result, "evaluation_failed", False), result.summary)
+
+    def test_reserve_keeps_the_packaged_default_without_a_reported_liability(self):
+        # A control that reports nothing usable is the only case that keeps the
+        # packaged default; the value is passed as None so the finalizer, not
+        # this derivation, decides what that default funds.
+        from types import SimpleNamespace
+
+        for control in (
+            None,
+            SimpleNamespace(budget=EvidenceReadBudget()),
+            SimpleNamespace(budget=EvidenceReadBudget(), exchange_liability=0),
+            SimpleNamespace(budget=EvidenceReadBudget(), exchange_liability=True),
+        ):
+            with self.subTest(control=control):
+                captured, result = self._reserve_passed_with_control(control)
+                self.assertEqual(captured, [None])
+                self.assertFalse(getattr(result, "evaluation_failed", False))
+
+    def test_oversized_liability_is_passed_through_not_replaced(self):
+        # A liability whose derived reserve cannot be held must not be silently
+        # swapped for the smaller packaged default, which would under-reserve.
+        from types import SimpleNamespace
+
+        oversized = MAX_PART_READS - 4 - 7 + 1
+        captured, _ = self._reserve_passed_with_control(
+            SimpleNamespace(budget=EvidenceReadBudget(), exchange_liability=oversized)
+        )
+        self.assertEqual(captured, [1 + oversized + 2 + 5])
+        self.assertGreater(captured[0], MAX_PART_READS - 4)
+
+    def test_unfundable_reserve_fails_loudly_instead_of_running_cleanup(self):
+        from types import SimpleNamespace
+
+        from review_sensei.disposition import MaintainerCommandResult
+
+        oversized = MAX_PART_READS - 4 - 7 + 1
+        budget = EvidenceReadBudget()
+        broker = SimpleNamespace(
+            control=SimpleNamespace(budget=budget, exchange_liability=oversized),
+            exchange=lambda _token, capability: f"synthetic-{capability}",
+        )
+        app = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=SimpleNamespace(
+                finalizer=ReviewApprovalFinalizer(
+                    http=GitHubHttp(api_url="https://api.github.test")
+                )
+            ),
+            learner=None,
+            replier=None,
+        )
+        result = app._refinalize_command(
+            MaintainerCommandResult(
+                action="verify",
+                applied=True,
+                operator_paused=False,
+                summary="decisions retained",
+            ),
+            oidc_token="synthetic",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD,
+            app_slug=APP,
+            actor="alice",
+            record=None,
+            evidence_budget=budget,
+        )
+        self.assertTrue(getattr(result, "evaluation_failed", False), result.summary)
+
+    def _reserve_passed_with_control(self, control):
+        from types import SimpleNamespace
+
+        from review_sensei.disposition import MaintainerCommandResult
+
+        captured = []
+
+        def refinalize(**kwargs):
+            captured.append(kwargs["command_finalization_reserve"])
+            return SimpleNamespace(
+                status="already_approved", thread_resolution=None, diagnostic=None
+            )
+
+        broker = SimpleNamespace(
+            control=control,
+            exchange=lambda _token, capability: f"synthetic-{capability}",
+        )
+        app = GitHubApplication(
+            broker=broker,
+            http=None,
+            reviewer=SimpleNamespace(
+                finalizer=SimpleNamespace(refinalize_with_dispositions=refinalize)
+            ),
+            learner=None,
+            replier=None,
+        )
+        result = app._refinalize_command(
+            MaintainerCommandResult(
+                action="verify",
+                applied=True,
+                operator_paused=False,
+                summary="decisions retained",
+            ),
+            oidc_token="synthetic",
+            repository="owner/repo",
+            repository_id=1,
+            pull_request=1,
+            head_sha=HEAD,
+            app_slug=APP,
+            actor="alice",
+            record=None,
+            evidence_budget=EvidenceReadBudget(),
+        )
+        return captured, result
 
     def test_larger_ledger_makes_bounded_progress_without_renewing_a_request(self):
         state = CommandCapacityState(

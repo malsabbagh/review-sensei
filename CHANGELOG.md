@@ -21,7 +21,8 @@
   hold from it regardless of control type or which budget the envelope is
   bound to. A foreign envelope cannot mint cleanup authority, but the packaged
   default is never silently substituted for a broker that reports a larger
-  liability.
+  liability, and a liability too large to hold fails loudly instead of running
+  under that default.
   Decided-thread cleanup can no longer spend the room that lets the gate
   publish; the hold stays in force when a request reaches cleanup below the
   reserve, is non-reentrant, is acquired all-or-nothing, and is released only

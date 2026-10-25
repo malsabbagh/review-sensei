@@ -10,7 +10,7 @@ from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
 
 from review_sensei.baseline import ReviewBaseline
-from review_sensei.bounded_evidence import MAX_PART_READS, EvidenceReadBudget
+from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.budgets import ReviewWorkBudgets
 from review_sensei.context import ReviewContextCacheKey, finding_lifecycle_for_comment
 from review_sensei.convergence import (
@@ -2194,6 +2194,11 @@ class GitHubApplication:
                     capability=capability,
                 )
                 if capability == "review_publish":
+                    # Both refinalization call sites require a truthy
+                    # ``oidc_token`` and pass that same value, so redemption
+                    # always sees the exact assertion this capability was
+                    # minted for. A capability minted from a refreshed
+                    # assertion is never redeemed and simply goes unused.
                     prepared_review_capability = _PreparedReviewCapability(
                         self.broker, exchange_input, token
                     )
@@ -3119,11 +3124,14 @@ class GitHubApplication:
         # identity: a broker bound to a different envelope cannot mint cleanup
         # authority (the token provider refuses it), and the larger hold still
         # protects this budget's approval reads. Only a broker whose control
-        # reports no usable liability keeps the packaged default.
+        # reports no usable liability keeps the packaged default. A liability
+        # too large to hold is passed through rather than replaced: the
+        # finalizer refuses an oversized reserve, so an unfundable broker fails
+        # loudly instead of silently inheriting the smaller default.
         command_finalization_reserve: int | None = None
         control = getattr(self.broker, "control", None)
         liability = getattr(control, "exchange_liability", None)
-        if type(liability) is int and 0 < liability <= MAX_PART_READS - 4:
+        if type(liability) is int and liability > 0:
             command_finalization_reserve = 1 + liability + 2 + 5
         failed = (
             command_result.summary
