@@ -439,7 +439,7 @@ class ProviderDeadlineContractTests(unittest.TestCase):
             self.assert_pending(run, "legacy", "deadline_exceeded")
 
     def cli_process(self, endpoint, root, *, timeout_seconds="10"):
-        (root / "input.patch").write_text(DIFF, encoding="utf-8")
+        (root / "input.patch").write_text(DIFF, encoding="utf-8", newline="\n")
         (root / "config.yml").write_text(
             "schema: 1\nadvanced:\n  review_work:\n    mode: unified\n  resources:\n    review_deadline_seconds: 1\n",
             encoding="utf-8",

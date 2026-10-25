@@ -4,8 +4,166 @@ from review_sensei.diff import analyze_diff, parse_changed_lines, parse_changed_
 from review_sensei.errors import ReviewInputError
 from review_sensei.validation import ReviewLimits
 
+SOURCE_SEPARATORS = (
+    "\r",
+    "\v",
+    "\f",
+    "\x1c",
+    "\x1d",
+    "\x1e",
+    "\x85",
+    "\u2028",
+    "\u2029",
+)
+
 
 class DiffParserTests(unittest.TestCase):
+    def test_embedded_source_separators_preserve_hunk_and_file_bytes(self):
+        for separator in SOURCE_SEPARATORS:
+            for git_header in ("", "diff --git a/src/app.py b/src/app.py\n"):
+                with self.subTest(separator=repr(separator), git=bool(git_header)):
+                    header = git_header + "--- a/src/app.py\n+++ b/src/app.py\n"
+                    hunk = (
+                        "@@ -1,2 +1,2 @@\n"
+                        f" context{separator}text\n"
+                        f"-old{separator}text\n"
+                        f"+new{separator}text\n"
+                    )
+                    diff = header + hunk
+                    analysis = analyze_diff(diff)
+                    self.assertEqual(analysis.changed_paths, ("src/app.py",))
+                    self.assertEqual(analysis.changed_lines, {"src/app.py": {2}})
+                    self.assertEqual(analysis.deleted_lines, {"src/app.py": {2}})
+                    self.assertEqual(analysis.diff_lines, 6 + bool(git_header))
+                    self.assertEqual(analysis.diff_bytes, len(diff.encode("utf-8")))
+                    self.assertTrue(analysis.enumeration_complete)
+                    self.assertEqual(
+                        analysis.hunk_records[0].text.encode("utf-8"),
+                        hunk.encode("utf-8"),
+                    )
+                    self.assertEqual(
+                        analysis.file_records[0].text.encode("utf-8"),
+                        diff.encode("utf-8"),
+                    )
+
+    def test_crlf_source_lines_preserve_carriage_returns(self):
+        header = (
+            "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n"
+        )
+        hunk = "@@ -1,2 +1,2 @@\n context\r\n-old\r\n+new\r\n"
+        analysis = analyze_diff(header + hunk)
+        self.assertEqual(analysis.diff_lines, 7)
+        self.assertEqual(analysis.hunk_records[0].text.encode(), hunk.encode())
+        self.assertEqual(
+            analysis.file_records[0].text.encode(), (header + hunk).encode()
+        )
+        self.assertEqual(analysis.changed_lines, {"src/app.py": {2}})
+
+    def test_final_lf_does_not_add_an_empty_diff_record(self):
+        header = "--- a/src/app.py\n+++ b/src/app.py\n"
+        hunk = "@@ -1 +1 @@\n-old\n+new"
+        for ending in ("", "\n"):
+            with self.subTest(ending=repr(ending)):
+                analysis = analyze_diff(
+                    header + hunk + ending, limits=ReviewLimits(max_diff_lines=5)
+                )
+                self.assertEqual(analysis.diff_lines, 5)
+                # Reconstruction retains the existing canonical final LF.
+                self.assertEqual(analysis.hunk_records[0].text, hunk + "\n")
+
+    def test_no_final_source_newline_markers_preserve_embedded_separators(self):
+        header = "--- a/src/app.py\n+++ b/src/app.py\n"
+        for separator in SOURCE_SEPARATORS:
+            hunk = (
+                "@@ -1 +1 @@\n"
+                f"-old{separator}text\n\\ No newline at end of file\n"
+                f"+new{separator}text\n\\ No newline at end of file"
+            )
+            for ending in ("", "\n"):
+                with self.subTest(separator=repr(separator), ending=repr(ending)):
+                    analysis = analyze_diff(header + hunk + ending)
+                    self.assertEqual(analysis.diff_lines, 7)
+                    self.assertEqual(analysis.hunk_records[0].text, hunk + "\n")
+                    self.assertEqual(analysis.changed_lines, {"src/app.py": {1}})
+                    self.assertEqual(analysis.deleted_lines, {"src/app.py": {1}})
+
+    def test_line_budget_counts_lf_records_including_real_trailing_blanks(self):
+        for separator in SOURCE_SEPARATORS:
+            diff = (
+                "--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n"
+                f"-old{separator}text\n+new{separator}text\n"
+            )
+            for ending, records in (("", 5), ("\n", 6), ("\n\n", 7)):
+                with self.subTest(separator=repr(separator), ending=repr(ending)):
+                    analysis = analyze_diff(
+                        diff + ending, limits=ReviewLimits(max_diff_lines=records)
+                    )
+                    self.assertEqual(analysis.diff_lines, records)
+                    with self.assertRaisesRegex(ReviewInputError, "line limit"):
+                        analyze_diff(
+                            diff + ending,
+                            limits=ReviewLimits(max_diff_lines=records - 1),
+                        )
+
+    def test_partial_line_budget_reports_all_physical_records(self):
+        for separator in SOURCE_SEPARATORS:
+            first = (
+                "diff --git a/src/app.py b/src/app.py\n"
+                "--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n"
+                f"-old{separator}text\n+new{separator}text\n"
+            )
+            second = first.replace("src/app.py", "src/other.py")
+            with self.subTest(separator=repr(separator)):
+                analysis = analyze_diff(
+                    first + second, allow_incomplete=True, max_lines=6
+                )
+                self.assertFalse(analysis.enumeration_complete)
+                self.assertEqual(analysis.diff_lines, 12)
+                self.assertEqual(analysis.changed_paths, ("src/app.py",))
+                self.assertEqual(len(analysis.hunk_records), 1)
+                self.assertEqual(analysis.file_records[0].text, first)
+                truncated = analyze_diff(
+                    first + second, allow_incomplete=True, max_lines=5
+                )
+                self.assertFalse(truncated.enumeration_complete)
+                self.assertEqual(truncated.diff_lines, 12)
+                self.assertEqual(truncated.hunk_records, ())
+                self.assertEqual(truncated.file_records, ())
+
+    def test_malformed_hunks_still_fail_with_embedded_source_separators(self):
+        header = "--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n"
+        for separator in SOURCE_SEPARATORS:
+            for body in (
+                f"-old{separator}text\n",
+                f"-old{separator}text\n+new\n+extra\n",
+                f"{separator}text\n+new\n",
+            ):
+                with self.subTest(separator=repr(separator), body=body):
+                    with self.assertRaises(ReviewInputError):
+                        analyze_diff(header + body)
+
+    def test_embedded_separators_preserve_byte_and_hunk_budget_boundaries(self):
+        for separator in SOURCE_SEPARATORS:
+            diff = (
+                "--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n"
+                f"-old{separator}text\n+new{separator}text\n"
+            )
+            with self.subTest(separator=repr(separator)):
+                size = len(diff.encode("utf-8"))
+                self.assertEqual(
+                    analyze_diff(
+                        diff, limits=ReviewLimits(max_diff_bytes=size)
+                    ).diff_bytes,
+                    size,
+                )
+                with self.assertRaisesRegex(ReviewInputError, "byte limit"):
+                    analyze_diff(diff, limits=ReviewLimits(max_diff_bytes=size - 1))
+                with self.assertRaisesRegex(ReviewInputError, "too many hunks"):
+                    analyze_diff(
+                        diff + "@@ -3 +3 @@\n-old\n+new\n",
+                        limits=ReviewLimits(max_diff_hunks=1),
+                    )
+
     def test_returns_added_lines_by_repository_relative_path(self):
         diff = """diff --git a/src/app.py b/src/app.py
 index 1111111..2222222 100644

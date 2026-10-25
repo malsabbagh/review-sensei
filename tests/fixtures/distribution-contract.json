@@ -45,6 +45,7 @@
       ],
       "helpers": [
         "tests/packaging_guard.py",
+        "tests/test_diff.py",
         "tests/fake_github_http.py",
         "tests/fixtures/distribution-contract.json",
         "tests/test_pr308_ledger_regression.py",

@@ -1315,7 +1315,7 @@ class Phase3LocalLifecycleAndReplayIdentityJourneyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             diff_path = tmp_path / "change.diff"
-            diff_path.write_text(diff_text, encoding="utf-8")
+            diff_path.write_text(diff_text, encoding="utf-8", newline="\n")
             cfg_path = tmp_path / ".reviewsensei.yml"
             cfg_path.write_text("review:\n  mode: enforced\n", encoding="utf-8")
             ctx_dir = tmp_path / "context"
@@ -1373,7 +1373,7 @@ class Phase3LocalLifecycleAndReplayIdentityJourneyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             diff_path = tmp_path / "change.diff"
-            diff_path.write_text(diff_text, encoding="utf-8")
+            diff_path.write_text(diff_text, encoding="utf-8", newline="\n")
             (tmp_path / ".reviewsensei.yml").write_text(
                 "review:\n  mode: enforced\n", encoding="utf-8"
             )

@@ -521,7 +521,7 @@ class DocumentSelectionTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
         self.write("docs/adr/zzz-app.md", "src/app.py changed behavior")
         self.write("AGENTS.md", "Full guidance")
         diff = self.root / "synthetic.patch"
-        diff.write_text(DIFF)
+        diff.write_text(DIFF, encoding="utf-8", newline="\n")
         output = self.root / "review.json"
         sidecar = self.root / "selection.json"
         provider = SymbolContextProvider()

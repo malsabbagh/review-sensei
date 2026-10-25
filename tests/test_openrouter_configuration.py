@@ -31,7 +31,7 @@ KEY = "synthetic-openrouter-routing-key"
 class OpenRouterConfigurationTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
     def setUp(self):
         super().setUp()
-        Path("change.patch").write_text(PATCH, encoding="utf-8")
+        Path("change.patch").write_text(PATCH, encoding="utf-8", newline="\n")
         self.requests = []
         self.adapters = []
 

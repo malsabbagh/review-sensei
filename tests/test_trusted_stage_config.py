@@ -399,7 +399,7 @@ class TrustedStageIntegrationTests(IsolatedWorkingDirectoryMixin, unittest.TestC
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             diff_path = root / "review.patch"
-            diff_path.write_text(DIFF, encoding="utf-8")
+            diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
 
             oversized = root / "oversized"
             oversized.mkdir()
