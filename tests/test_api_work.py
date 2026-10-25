@@ -265,3 +265,44 @@ class CallerAccountingTests(unittest.TestCase):
         self.assertEqual(restored.completed, (settled,))
         with self.assertRaisesRegex(ReviewInputError, "used"):
             restored.dispatch("work", PendingApiRequest("settled", 300))
+
+    def test_serialized_owner_change_must_be_exactly_a_supported_startup_claim(self):
+        original = accounting().reserve("owned", 3)
+        resumed = original.claim_startup(ApiExecutionOwner(2, "analyze", 1))
+        original.require_successor(
+            ApiRunAccounting.from_document(resumed.to_document())
+        )
+        for forged in (
+            replace(original, owner=ApiExecutionOwner(1, "analyze", 1)),
+            replace(
+                original,
+                owner=ApiExecutionOwner(2, "analyze", 2),
+                startup_used=original.startup_used + (("analyze", 2),),
+            ),
+            replace(resumed, owner=ApiExecutionOwner(1, "analyze", 2)),
+            replace(
+                resumed,
+                owner=ApiExecutionOwner(1, "publish", 2),
+                startup_used=resumed.startup_used + (("publish", 1),),
+            ),
+        ):
+            before = (
+                resumed
+                if forged.owner.generation == 2 and forged.owner.run_attempt == 1
+                else original
+            )
+            with self.subTest(owner=forged.owner), self.assertRaises(ReviewInputError):
+                before.require_successor(
+                    ApiRunAccounting.from_document(forged.to_document())
+                )
+
+    def test_unchanged_owner_cannot_consume_slots_but_can_advance_request_history(self):
+        before = accounting().reserve("work", 3)
+        forged = replace(before, startup_used=before.startup_used + (("publish", 1),))
+        with self.assertRaises(ReviewInputError):
+            before.require_successor(
+                ApiRunAccounting.from_document(forged.to_document())
+            )
+        request = PendingApiRequest("known", 100)
+        advanced = before.dispatch("work", request).confirm(request).reserve("next", 1)
+        before.require_successor(ApiRunAccounting.from_document(advanced.to_document()))

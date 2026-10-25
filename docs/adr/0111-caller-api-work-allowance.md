@@ -128,6 +128,17 @@ The successor cannot use the crashed owner's block; another conservative
 admission constraint, not proof of an unavoidable 140-request physical minimum.
 No limit is raised or reservation shrunk to make it pass.
 
+The next bounded control enforces every physical opener call before dispatch.
+Serialized owner changes must match exactly one supported startup claim. At128
+the fresh31 reservation still refuses. A test-only limit derived as78+31+31=140
+funds that reservation in the existing recovery mutation, confirms it, and then
+executes one native replacement from the new block. In the small-history control
+the physical counts are10+14+4; at the ten-page boundary they are28+50+31. The old31
+remains charged in both cases. Redirects cannot hide extra physical requests;
+failed/expired/unknown requests retain their charges. This does not recommend a
+shipping default or complete all-phase integration; full useful-workflow
+measurement remains pending.
+
 An unknown initial POST with a retained owned record can recover without a
 replacement POST. If the record cannot be established, recovery refuses instead
 of recreating it. Lost PATCH responses use the planned readback slot to observe

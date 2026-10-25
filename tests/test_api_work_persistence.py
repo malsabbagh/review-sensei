@@ -13,17 +13,26 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
+from urllib.request import Request, urlopen
 
 from review_sensei_github.api_run_owner import (
     ApiRunActionsEvidence,
-    claim_hosted_startup,
+)
+from review_sensei_github.api_run_requests import (
+    NATIVE_REPLACE_CALLER_REQUESTS,
+    ApiRunRequestTransport,
 )
 from review_sensei_github.broker_client import BrokerClient
 from review_sensei_github.broker_control import BrokerDispatchAccounting
 from review_sensei_github.errors import GitHubPublicationTransientError
-from review_sensei_github.http import MAX_PAGINATION_PAGES, GitHubHttp
+from review_sensei_github.http import (
+    MAX_GITHUB_RESPONSE_BYTES,
+    MAX_PAGINATION_PAGES,
+    GitHubHttp,
+)
 from review_sensei_github.session_ledger import (
     GitHubIssueCommentSessionLedger,
     parse_session_comment,
@@ -42,7 +51,7 @@ from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.configuration import parse_configuration_text
 from review_sensei.errors import ReviewInputError
 from review_sensei.session import SessionIdentity, SessionRecord
-from tests.fake_github_http import json_response
+from tests.fake_github_http import FakeHTTPResponse, json_response
 
 IDENTITY = SessionIdentity("owner/repo", 7, repository_id=123)
 RUN = ApiRunIdentity(123, 456)
@@ -75,11 +84,13 @@ PLAN = StartupPlan(
     )
 )
 # One later native replace: discovery, prewrite rediscovery, PATCH, readback.
-NEXT_REPLACE_LIABILITY = 3 * MAX_PAGINATION_PAGES + 1
+NEXT_REPLACE_LIABILITY = NATIVE_REPLACE_CALLER_REQUESTS
+# Qualification input only. This does not change DEFAULT_API_REQUEST_LIMIT.
+QUALIFICATION_LIMIT = PLAN.liability + 2 * NEXT_REPLACE_LIABILITY
 
 
 class StartupFixture:
-    def __init__(self, directory, *, fanout=30):
+    def __init__(self, directory, *, fanout=30, limit=128):
         self.directory = Path(directory)
         self.fanout = fanout
         self.attempt = 1
@@ -90,12 +101,24 @@ class StartupFixture:
         self.incomplete_jobs = False
         self.changed_old_job = False
         self.old_job_reads = 0
-        self.config_bytes = CONFIG
-        self.http = GitHubHttp(api_url="https://api.github.test", opener=self.open)
+        self.config_bytes = f"schema: 1\napi_request_limit: {limit}\n".encode()
+        self.http = None
+        self.accounted = None
+        self.ledger = None
+        self.transports = []
+        self.history_count = 0
+        self.oversized_first_page = False
+        self.list_requests = []
+        self.write_modes = []
 
-    def open(self, request, timeout):
+    def _external_open(self, request, timeout):
         target = urlsplit(request.full_url)
         path, method = target.path, request.method
+        # A real pre-dispatch debit must already exist before fake external I/O.
+        assert (
+            len(self.accounted.observations)
+            == sum(a == self.attempt for a, _, _ in self.trace) + 1
+        )
         self.trace.append((self.attempt, method, path))
         if target.hostname == "oidc.github.test":
             return json_response({"value": "synthetic-oidc"})
@@ -177,16 +200,39 @@ class StartupFixture:
                 }
             )
         if path.endswith("/issues/7/comments") and method == "GET":
-            return json_response(
-                [] if self.comment is None else [copy.deepcopy(self.comment)]
+            query = parse_qs(target.query)
+            size, page = (
+                int(query.get("per_page", ["100"])[0]),
+                int(query.get("page", ["1"])[0]),
             )
+            self.list_requests.append((self.attempt, size, page))
+            if self.oversized_first_page and size == 100:
+                return FakeHTTPResponse(b"x" * (MAX_GITHUB_RESPONSE_BYTES + 1))
+            rows = [
+                {
+                    "id": 1000 + i,
+                    "body": "history",
+                    "user": {"type": "User", "login": "human", "id": 42},
+                }
+                for i in range(self.history_count)
+            ]
+            if self.comment is not None:
+                rows.append(copy.deepcopy(self.comment))
+            return json_response(rows[(page - 1) * size : page * size])
         if method in {"POST", "PATCH"}:
+            self.write_modes.append(
+                (
+                    self.attempt,
+                    self.accounted.observations[-1]["phase"],
+                    self.accounted.usable,
+                )
+            )
             payload = json.loads(request.data)
             if self.fault == "unknown-absent":
                 self.fault = None
                 raise TimeoutError("synthetic lost write response")
             self.comment = {
-                "id": 77,
+                "id": 1_000_000,
                 "body": payload["body"],
                 "user": {"type": "Bot", "login": "reviewsensei[bot]", "id": 999},
             }
@@ -201,11 +247,21 @@ class StartupFixture:
     def prelude(self):
         # Local claim precedes every HTTP request. Third attempts are rejected
         # by the source-owned slot type before even this file can be created.
-        claim_hosted_startup(self.directory, RUN, self.attempt)
+        self.accounted = ApiRunRequestTransport(
+            directory=self.directory,
+            run=RUN,
+            plan=PLAN,
+            attempt=self.attempt,
+            opener=self._external_open,
+        )
+        self.transports.append(self.accounted)
+        self.http = GitHubHttp(
+            api_url="https://api.github.test", opener=self.accounted.open
+        )
         budget = EvidenceReadBudget()
         client = BrokerClient(
             broker_url="https://broker.github.test/api/github/token",
-            opener=self.open,
+            opener=self.accounted.open,
             control=BrokerDispatchAccounting(budget, "c" * 64, 30, 1),
         )
         with patch.dict(
@@ -248,6 +304,7 @@ class StartupFixture:
         ledger = GitHubIssueCommentSessionLedger(
             self.http, token=session.token, app_slug="reviewsensei[bot]"
         )
+        self.ledger = ledger
         return ledger, configuration, evidence, owner
 
     def initial(self):
@@ -260,7 +317,7 @@ class StartupFixture:
         )
         return ApiRunAccounting.from_document(record.api_run_accounting)
 
-    def recover(self):
+    def recover(self, *, reserve_successor=False):
         self.attempt = 2
         ledger, configuration, evidence, owner = self.prelude()
         loaded = ledger.load(IDENTITY)
@@ -284,10 +341,16 @@ class StartupFixture:
             ):
                 raise ReviewInputError("API owner handoff evidence changed")
             state = previous.claim_startup(owner)
+            if reserve_successor:
+                state = state.reserve("successor", NEXT_REPLACE_LIABILITY)
             return record.evolve(
                 generation=record.generation + 1, api_run_accounting=state.to_document()
             )
 
+        if reserve_successor:
+            return self.accounted.reserve_and_activate(
+                ledger, IDENTITY, mutate, block_id="successor"
+            )
         confirmed = ledger.replace(IDENTITY, mutate)
         return ApiRunAccounting.from_document(confirmed.api_run_accounting)
 
@@ -448,3 +511,259 @@ class ApiStartupPersistenceTests(unittest.TestCase):
                 record.evolve(
                     api_run_accounting=replace(state, blocks=()).to_document()
                 )
+
+
+class ApiPredispatchQualificationTests(unittest.TestCase):
+    def test_expired_response_remains_charged_and_cannot_be_read_as_fresh(self):
+        clock = [10.0]
+
+        class SlowResponse(FakeHTTPResponse):
+            def read(self, size):
+                clock[0] = 12.0
+                return super().read(size)
+
+        with tempfile.TemporaryDirectory() as directory:
+            transport = ApiRunRequestTransport(
+                directory=Path(directory),
+                run=RUN,
+                plan=PLAN,
+                attempt=1,
+                opener=lambda *a, **k: SlowResponse(b"{}"),
+                clock=lambda: clock[0],
+            )
+            response = transport.open(Request("https://fixture.test"), timeout=1)
+            for _ in range(2):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "original request deadline"
+                ):
+                    response.read(100)
+            self.assertEqual(transport.startup_dispatches, 1)
+            self.assertEqual(transport.observations[0]["outcome"], "expired")
+            self.assertEqual(transport.observations[0]["deadline_unix_ms"], 11000)
+
+    def test_standard_transport_refuses_hidden_redirect_after_one_debit(self):
+        seen = []
+
+        def builder(handler):
+            def physical(request, timeout):
+                seen.append("first-request")
+                handler.redirect_request(
+                    request,
+                    SimpleNamespace(close=lambda: seen.append("closed")),
+                    302,
+                    "redirect",
+                    {},
+                    "https://invalid.test/secret-sentinel",
+                )
+
+            return SimpleNamespace(open=physical)
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch(
+                "review_sensei_github.api_run_requests.build_opener",
+                side_effect=builder,
+            ),
+        ):
+            transport = ApiRunRequestTransport(
+                directory=Path(directory), run=RUN, plan=PLAN, attempt=1, opener=urlopen
+            )
+            with self.assertRaisesRegex(ReviewInputError, "redirects") as denied:
+                transport.open(Request("https://initial.test"), timeout=1)
+            self.assertEqual(seen, ["first-request", "closed"])
+            self.assertEqual(transport.startup_dispatches, 1)
+            self.assertEqual(len(transport.observations), 1)
+            self.assertNotIn("secret-sentinel", str(denied.exception))
+
+    def test_128_refuses_successor_reservation_without_refunding_predecessor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = StartupFixture(directory)
+            original = fixture.initial()
+            body = fixture.comment["body"]
+            with self.assertRaisesRegex(ReviewInputError, "exceeds"):
+                fixture.recover(reserve_successor=True)
+            self.assertEqual(original.remaining, 19)
+            self.assertEqual(NEXT_REPLACE_LIABILITY - original.remaining, 12)
+            self.assertEqual(fixture.comment["body"], body)
+            self.assertFalse(
+                any(a == 2 and method == "PATCH" for a, method, _ in fixture.trace)
+            )
+            self.assertEqual(fixture.accounted.usable, 0)
+            self.assertEqual(
+                sum(t.startup_dispatches for t in fixture.transports),
+                len(fixture.trace),
+            )
+            before = len(fixture.trace)
+            with self.assertRaisesRegex(ReviewInputError, "already attempted"):
+                fixture.accounted.reserve_and_activate(
+                    fixture.ledger, IDENTITY, lambda r: r, block_id="smaller"
+                )
+            self.assertEqual(len(fixture.trace), before)
+
+    def test_test_only_140_confirms_reservation_before_spending_and_executes_native_replace(
+        self,
+    ):
+        self.assertEqual(QUALIFICATION_LIMIT, 140)
+        self.assertEqual(parse_configuration_text("schema: 1\n").api_request_limit, 128)
+        for fanout in (9, 12, 30):
+            with (
+                self.subTest(fanout=fanout),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                fixture = StartupFixture(
+                    directory, limit=QUALIFICATION_LIMIT, fanout=fanout
+                )
+                first = fixture.initial()
+                activated = fixture.recover(reserve_successor=True)
+                self.assertEqual(len(fixture.trace), 24)
+                self.assertEqual(activated.remaining, 0)
+                self.assertEqual(fixture.accounted.usable, 31)
+                self.assertEqual(
+                    fixture.write_modes, [(1, "startup", 0), (2, "startup", 0)]
+                )
+                checkpoint = fixture.accounted.replace_checkpoint(
+                    fixture.ledger, IDENTITY
+                )
+                self.assertEqual(len(fixture.trace), 28)
+                live = fixture.accounted.accounting
+                self.assertEqual(live.confirmed, 4)
+                self.assertEqual(live.uncertain, 0)
+                self.assertEqual(live.remaining, 0)
+                self.assertEqual(fixture.accounted.usable, 27)
+                self.assertEqual(live.blocks[0], first.blocks[0])
+                persisted = ApiRunAccounting.from_document(
+                    checkpoint.api_run_accounting
+                )
+                persisted.require_successor(live)
+                # Persisted conservative remainder is never restored as new
+                # live capacity; two terminal HTTP effects occurred after the
+                # checkpoint bytes were sealed, within the prepaid block.
+                self.assertEqual(persisted.remaining, live.remaining)
+                self.assertEqual(
+                    sum(
+                        o["phase"] == "ordinary" for o in fixture.accounted.observations
+                    ),
+                    4,
+                )
+                before = len(fixture.trace)
+                with self.assertRaisesRegex(ReviewInputError, "unfunded"):
+                    fixture.accounted.replace_checkpoint(fixture.ledger, IDENTITY)
+                self.assertEqual(len(fixture.trace), before)
+                with self.assertRaises(ReviewInputError):
+                    fixture.accounted.reconcile_activation(fixture.ledger, IDENTITY)
+                self.assertEqual(len(fixture.trace), before)
+
+    def test_tenth_terminal_page_and_last_prepaid_request_complete_exactly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = StartupFixture(directory, limit=QUALIFICATION_LIMIT)
+            fixture.history_count = 998
+            first = fixture.initial()
+            self.assertEqual(len(fixture.trace), len(PLAN.slots[0].requests))
+            fixture.recover(reserve_successor=True)
+            self.assertEqual(len(fixture.trace), PLAN.liability)
+            fixture.accounted.replace_checkpoint(fixture.ledger, IDENTITY)
+            self.assertEqual(
+                len(fixture.trace), PLAN.liability + NEXT_REPLACE_LIABILITY
+            )
+            self.assertEqual(fixture.accounted.usable, 0)
+            self.assertEqual(fixture.accounted.accounting.confirmed, 31)
+            self.assertEqual(fixture.accounted.accounting.blocks[0], first.blocks[0])
+            before = len(fixture.trace)
+            with self.assertRaises(ReviewInputError):
+                fixture.http.request(
+                    "GET", "/repos/owner/repo/pulls/7", token="synthetic"
+                )
+            self.assertEqual(len(fixture.trace), before)
+
+    def test_full_tenth_page_refuses_and_startup_limit_blocks_any_eleventh_tail_request(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = StartupFixture(directory, limit=QUALIFICATION_LIMIT)
+            fixture.history_count = 999
+            with self.assertRaises(ReviewInputError):
+                fixture.initial()
+            self.assertEqual(len(fixture.trace), len(PLAN.slots[0].requests))
+            self.assertEqual(fixture.accounted.startup_dispatches, 28)
+            self.assertEqual(fixture.accounted.usable, 0)
+            before = len(fixture.trace)
+            with self.assertRaisesRegex(ReviewInputError, "startup caller allowance"):
+                fixture.http.request(
+                    "GET", "/repos/owner/repo/pulls/7", token="synthetic"
+                )
+            self.assertEqual(len(fixture.trace), before)
+            self.assertEqual(
+                sum(
+                    m == "POST" and p.endswith("/issues/7/comments")
+                    for _, m, p in fixture.trace
+                ),
+                1,
+            )
+
+    def test_oversized_response_fallback_is_debited_before_each_physical_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = StartupFixture(directory, limit=QUALIFICATION_LIMIT)
+            fixture.history_count = 98
+            fixture.oversized_first_page = True
+            fixture.initial()
+            self.assertEqual(len(fixture.trace), 14)
+            self.assertEqual(fixture.accounted.startup_dispatches, 14)
+            self.assertEqual(
+                fixture.list_requests[:3], [(1, 100, 1), (1, 50, 1), (1, 50, 2)]
+            )
+            fixture.recover(reserve_successor=True)
+            before = len(fixture.trace)
+            fixture.accounted.replace_checkpoint(fixture.ledger, IDENTITY)
+            self.assertEqual(len(fixture.trace) - before, 10)
+            self.assertEqual(fixture.accounted.accounting.confirmed, 10)
+            self.assertEqual(fixture.accounted.usable, 21)
+
+    def test_unknown_reservation_write_activates_only_matching_readback_once(self):
+        for fault in ("unknown-stored", "unknown-absent"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                fixture = StartupFixture(directory, limit=QUALIFICATION_LIMIT)
+                fixture.initial()
+                fixture.fault = fault
+                with self.assertRaises(GitHubPublicationTransientError):
+                    fixture.recover(reserve_successor=True)
+                self.assertEqual(fixture.accounted.usable, 0)
+                if fault == "unknown-stored":
+                    fixture.accounted.reconcile_activation(fixture.ledger, IDENTITY)
+                    self.assertEqual(fixture.accounted.usable, 31)
+                else:
+                    with self.assertRaisesRegex(ReviewInputError, "unconfirmed"):
+                        fixture.accounted.reconcile_activation(fixture.ledger, IDENTITY)
+                    self.assertEqual(fixture.accounted.usable, 0)
+                self.assertEqual(len(fixture.trace), 24)
+                with self.assertRaises(ReviewInputError):
+                    fixture.accounted.reconcile_activation(fixture.ledger, IDENTITY)
+                self.assertEqual(len(fixture.trace), 24)
+                self.assertEqual(sum(m == "PATCH" for _, m, _ in fixture.trace), 1)
+
+    def test_unknown_useful_checkpoint_retains_request_charge_and_never_reposts(self):
+        for fault in ("unknown-stored", "unknown-absent"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                fixture = StartupFixture(directory, limit=QUALIFICATION_LIMIT)
+                first = fixture.initial()
+                fixture.recover(reserve_successor=True)
+                fixture.fault = fault
+                with self.assertRaises(GitHubPublicationTransientError):
+                    fixture.accounted.replace_checkpoint(fixture.ledger, IDENTITY)
+                if fault == "unknown-stored":
+                    fixture.accounted.reconcile_checkpoint(fixture.ledger, IDENTITY)
+                else:
+                    with self.assertRaisesRegex(ReviewInputError, "unconfirmed"):
+                        fixture.accounted.reconcile_checkpoint(fixture.ledger, IDENTITY)
+                self.assertEqual(len(fixture.trace), 28)
+                live = fixture.accounted.accounting
+                self.assertEqual(live.confirmed, 3)
+                self.assertEqual(live.uncertain, 1)
+                self.assertEqual(live.blocks[0], first.blocks[0])
+                self.assertEqual(live.remaining, 0)
+                self.assertEqual(fixture.accounted.usable, 27)
+                with self.assertRaises(ReviewInputError):
+                    fixture.accounted.replace_checkpoint(fixture.ledger, IDENTITY)
+                with self.assertRaises(ReviewInputError):
+                    fixture.accounted.reconcile_checkpoint(fixture.ledger, IDENTITY)
+                self.assertEqual(len(fixture.trace), 28)
+                self.assertEqual(sum(m == "PATCH" for _, m, _ in fixture.trace), 2)

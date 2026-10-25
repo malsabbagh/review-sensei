@@ -350,6 +350,15 @@ class ApiRunAccounting:
         resetting counters or moving a crashed owner's remainder into new work.
         """
         self.require_binding(candidate.identity, candidate.configuration)
+        claimed = (
+            self
+            if candidate.owner == self.owner
+            else self.claim_startup(candidate.owner)
+        )
+        if candidate.startup_used != claimed.startup_used:
+            raise ReviewInputError(
+                "caller accounting owner transition does not match its startup claim"
+            )
         if (
             candidate.startup != self.startup
             or candidate.startup_used[: len(self.startup_used)] != self.startup_used
@@ -362,6 +371,12 @@ class ApiRunAccounting:
                 "caller accounting cannot discard prior charges or history"
             )
         current = {b.block_id: b for b in candidate.blocks}
+        previous_ids = {b.block_id for b in self.blocks}
+        if any(
+            b.block_id not in previous_ids and b.issued_by != candidate.owner
+            for b in candidate.blocks
+        ):
+            raise ReviewInputError("new caller reservations require the issuing owner")
         for previous in self.blocks:
             block = current.get(previous.block_id)
             if (
