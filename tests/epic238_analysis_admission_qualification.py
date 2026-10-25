@@ -56,9 +56,11 @@ class AnalysisAdmissionQualification(unittest.TestCase):
             self.assertLessEqual(profile["dispatched"], request["max_dispatches"])
             if profile.get("error"):
                 self.assertNotIn("session_state", profile)
-        # Admission prepays exactly the liability; the caller's own HTTP charge
-        # is a separate dispatch this oracle never makes.
-        self.assertEqual(budget.calls, liability)
+        # Admission prepays exactly the enumerated 30; the caller's own HTTP
+        # charge is a separate dispatch this oracle never makes. Assert the
+        # literal rather than echoing the value pinned above, so this total is
+        # evidence independent of the constant it just checked.
+        self.assertEqual(budget.calls, 30)
 
 
 if __name__ == "__main__":

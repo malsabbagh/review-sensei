@@ -81,11 +81,12 @@ arbitrary histories. The same factory reserves 12 for the witness-free rescan
 authorization exchange, which stops at the capability token. These are bounded
 reservations, not a promise that arbitrary paginated histories fit, and a
 witness that exhausts its own ten-request cap cannot produce a successful
-enrollment from an incomplete inventory. Funding only one complete page each, as the earlier
-12-dispatch reservation did, refused every history whose first page exceeded
-the byte cap and charged the retry ladder as an unfunded dispatch. Admission and completion own separate
-original budgets, so the larger reservation does not reduce the review's
-completion allowance. The 64 total / 60 ordinary call ceilings, original
+enrollment from an incomplete inventory. The earlier 12-dispatch reservation,
+which funded only one complete page each, refused every history whose first
+page exceeded the byte cap and charged the retry ladder as an unfunded
+dispatch. Admission and completion own separate original budgets, so the larger
+reservation does not reduce the review's completion allowance. The 64 total /
+60 ordinary call ceilings, original
 deadline, exact receipt binding, and no-refund rule are unchanged. This
 accounting correction applies when the containing hosted package is released;
 it does not authorize renewing a previously refused live attempt or attribute

@@ -135,11 +135,12 @@ for (const order of [["review_session", "check_publish"], ["check_publish", "rev
 //   node tests/media_broker_profile.mjs [analysis-liability]
 // The optional positional argument is the analysis-admission liability and must
 // be a decimal integer, so a shifted or non-numeric argument fails at parsing
-// rather than as an unexplained reservation error. Only documented reservations
-// are accepted: 12 was the earlier prefix-only value and 30 is the exact ceiling
-// in ADR 0088, pinned to the production constant by
-// test_analysis_admission_budget. Any other value is drift and must be made
-// deliberate here and in the ADR.
+// rather than as an unexplained reservation error. The only special arm is the
+// pre-ADR prefix-only 12; every other value must fund at least the current
+// 30-dispatch ceiling. The exact ceiling is not restated here as an upper bound:
+// it is pinned to the production constant by test_analysis_admission_budget and
+// by the qualification oracle, which pass that constant in, so a silent drift
+// fails there instead of being echoed back as this harness's own expectation.
 const analysisArgument = process.argv[2];
 const analysisMaximum = analysisArgument === undefined ? 30 : Number(analysisArgument);
 assert.ok(
@@ -147,8 +148,8 @@ assert.ok(
     (/^\d+$/.test(analysisArgument) && Number.isSafeInteger(analysisMaximum)),
   `analysis admission liability must be a decimal integer, got ${JSON.stringify(analysisArgument)}`,
 );
-assert.ok([12, 30].includes(analysisMaximum),
-  "analysis admission must use a documented reservation: 12 (earlier) or 30 (exact ceiling)");
+assert.ok(analysisMaximum === 12 || analysisMaximum >= 30,
+  "analysis admission must be the pre-ADR 12 or fund the 30-dispatch ceiling");
 for (const mode of ["git", "fallback-annotated"]) {
   for (const history of ["empty", "full-page"]) {
     for (const maximum of [10, analysisMaximum]) {
