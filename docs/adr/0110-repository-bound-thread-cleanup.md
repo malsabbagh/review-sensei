@@ -47,7 +47,10 @@ preflights, one review-thread scan and one persisted-reviews readback).
 `COMMAND_FINALIZATION_RESERVE` in `publication.py` records the same derivation.
 The hold spends nothing;
 it only narrows cleanup, which remains unconfirmed and can resume under a later
-supported request's own allowance. Keep the
+supported request's own allowance. The hold stays unconditional when less than
+the reserve remains: that allowance cannot reliably fund discovery plus the
+separate `thread_resolve` authority, while withholding it leaves the check and
+approval as much of their liability as the request can still provide. Keep the
 intended check conclusion independent of acquisition. An unfunded or failed
 deferred check retains cleanup progress and defers a new native approval; an
 exact-head approval already observed remains a truthful observation. The next

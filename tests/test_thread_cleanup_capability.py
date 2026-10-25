@@ -6,7 +6,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from review_sensei_github.application import GitHubApplication, GitHubWriteOptions
+from review_sensei_github.application import (
+    GitHubApplication,
+    GitHubWriteOptions,
+    _PreparedReviewCapability,
+)
 from review_sensei_github.broker_client import BrokerClient
 from review_sensei_github.broker_control import BrokerDispatchAccounting
 from review_sensei_github.errors import GitHubBrokerClientError, GitHubPublicationError
@@ -438,6 +442,111 @@ class CleanupCommandCompositionTests(unittest.TestCase):
         self.assertEqual(outcome.status, "approved")
         self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 1)
 
+    def test_low_allowance_holds_the_reserve_and_resumes_on_a_later_verify(self):
+        # A request can reach cleanup with less than the reserve left. The full
+        # hold must still apply: spending that remainder on discovery cannot
+        # fund the separate thread_resolve authority, while the check and
+        # approval can still observe the resolved prefix and report their
+        # outcome. A later verify under its own allowance finishes the work.
+        state = CommandCapacityState(
+            complete=True, schema="1", inline_range=(0, 3), human_count=3, padded=False
+        )
+        state.resolved_threads = {100}
+        decided = sum(
+            entry.needs_human and not entry.body_placed for entry in state.entries
+        )
+        self.assertEqual(decided, 3)
+
+        def exchange_for(budget):
+            def exchange(request, timeout):
+                payload = json.loads(request.data)
+                return FakeResponse(
+                    json.dumps(
+                        {
+                            "token": "synthetic-" + payload["capability"],
+                            "capability": payload["capability"],
+                            "control_receipt": {
+                                **payload["control_budget"],
+                                "dispatched": 6,
+                            },
+                        }
+                    ).encode()
+                )
+
+            return exchange
+
+        with tempfile.TemporaryDirectory() as directory:
+            state.record(directory)
+            http = GitHubHttp(api_url="https://api.github.test", opener=state.open)
+            app = GitHubApplication(
+                broker=BrokerClient(),
+                http=http,
+                reviewer=ReviewPublisher(http=http),
+                learner=None,
+                replier=None,
+            )
+            app.session_ledger = LocalSessionLedger(Path(directory) / "ledger")
+            app.reviewer.finalizer.human_inventory_reader_factory = None
+
+            def verify(budget, operation_id):
+                app.broker = BrokerClient(
+                    opener=exchange_for(budget),
+                    control=BrokerDispatchAccounting(budget, operation_id, 10, 1),
+                )
+                return app.apply_maintainer_command(
+                    options=GitHubWriteOptions(github_writes=True),
+                    oidc_token="synthetic",
+                    repository="owner/repo",
+                    repository_id=1,
+                    pull_request=1,
+                    head_sha=HEAD,
+                    app_slug=APP,
+                    actor_login="alice",
+                    association="OWNER",
+                    body="@reviewsensei verify",
+                    command_budget=budget,
+                )
+
+            budget = EvidenceReadBudget()
+            # The command's own setup consumes sixteen ordinary calls before
+            # cleanup; leaving thirty-two starts cleanup below the reserve.
+            for _ in range(28):
+                budget.consume()
+            observed_holds = []
+            original_hold = budget.hold_ordinary
+
+            def hold(calls):
+                observed_holds.append((calls, budget.ordinary_remaining()))
+                original_hold(calls)
+
+            budget.hold_ordinary = hold
+            first = verify(budget, "c" * 64)
+
+            self.assertEqual(len(observed_holds), 1)
+            self.assertEqual(observed_holds[0][0], COMMAND_FINALIZATION_RESERVE)
+            self.assertLess(
+                observed_holds[0][1],
+                COMMAND_FINALIZATION_RESERVE,
+                "the request must reach cleanup below the reserve",
+            )
+            self.assertEqual(state.resolved_threads, {100})
+            self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 0)
+            self.assertIn(
+                '"decided_thread_reconciliation":"unconfirmed"', first.summary
+            )
+            self.assertIn('"check_state":"confirmed"', first.summary)
+            self.assertIn('"approval_state":"not-observed"', first.summary)
+            self.assertLessEqual(budget.calls, 64)
+
+            budget = EvidenceReadBudget()
+            retry = verify(budget, "d" * 64)
+
+            self.assertEqual(state.resolved_threads, {100, 101, 102})
+            self.assertEqual(sum(r["state"] == "APPROVED" for r in state.reviews), 1)
+            self.assertIn('"approval_state":"submitted"', retry.summary)
+            self.assertFalse(retry.evaluation_failed)
+            self.assertLessEqual(budget.calls, 64)
+
     def test_explicit_and_deferred_check_credentials_are_not_ambiguous(self):
         finalizer = ReviewApprovalFinalizer(http=GitHubHttp())
         with self.assertRaises(GitHubPublicationError):
@@ -535,8 +644,11 @@ class CleanupCommandCompositionTests(unittest.TestCase):
         )
         state.resolved_threads.clear()
         # The invariant is "every decided inline thread is resolved", not the
-        # fixture's current count: derive the target from the index itself.
-        decided = sum(not entry.body_placed for entry in state.entries)
+        # fixture's current count: match the resolver's candidate predicate,
+        # which sees the honored (needs_human) entries recorded by the fixture.
+        decided = sum(
+            entry.needs_human and not entry.body_placed for entry in state.entries
+        )
         progress = []
         with tempfile.TemporaryDirectory() as directory:
             state.record(directory)
@@ -591,13 +703,17 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 self.assertLessEqual(budget.calls, 64)
                 # Approval no longer waits for the whole ledger: it is funded
                 # from the same original allowance, ahead of the remaining
-                # cleanup that resumes on the next supported verify.
-                if len(state.resolved_threads) >= decided:
-                    break
+                # cleanup that resumes on the next supported verify. An
+                # attempt may also reach the target without exceeding the
+                # previous count, so accept progress or completion.
                 self.assertTrue(
-                    attempt == 0 or progress[-1] > progress[-2],
+                    attempt == 0
+                    or progress[-1] > progress[-2]
+                    or progress[-1] == decided,
                     (progress, result.summary),
                 )
+                if len(state.resolved_threads) >= decided:
+                    break
         self.assertEqual(
             len(state.resolved_threads), decided, (progress, result.summary)
         )
@@ -722,3 +838,21 @@ class CleanupCommandCompositionTests(unittest.TestCase):
                 self.assertEqual(auth, "Bearer synthetic-thread_resolve")
             elif auth == "Bearer synthetic-thread_resolve":
                 self.fail("cleanup token leaked into ordinary publication/read path")
+
+
+class PreparedReviewCapabilityTests(unittest.TestCase):
+    def test_capability_is_one_shot_and_bound_to_broker_and_assertion(self):
+        broker = object()
+        capability = _PreparedReviewCapability(broker, "assertion", "synthetic-token")
+        self.assertEqual(capability.redeem(broker, "assertion"), "synthetic-token")
+        with self.assertRaisesRegex(GitHubPublicationError, "already used"):
+            capability.redeem(broker, "assertion")
+
+    def test_rejected_redemption_does_not_spend_the_capability(self):
+        broker = object()
+        capability = _PreparedReviewCapability(broker, "assertion", "synthetic-token")
+        with self.assertRaisesRegex(GitHubPublicationError, "broker mismatch"):
+            capability.redeem(object(), "assertion")
+        with self.assertRaisesRegex(GitHubPublicationError, "assertion mismatch"):
+            capability.redeem(broker, "different")
+        self.assertEqual(capability.redeem(broker, "assertion"), "synthetic-token")

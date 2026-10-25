@@ -308,6 +308,39 @@ def _command_from_bytes(payload: bytes) -> object:
     )
 
 
+class _PreparedReviewCapability:
+    """A one-shot review_publish token minted by this application's own exchange.
+
+    Tokens are opaque strings, so a finalizer cannot otherwise distinguish one
+    this operation minted from a caller-supplied value. Binding the token to the
+    broker instance and OIDC assertion it was exchanged for, and claiming it on
+    first use, closes that gap without making the credential reusable.
+    """
+
+    __slots__ = ("_broker", "_assertion_digest", "_token", "_redeemed")
+
+    def __init__(self, broker: object, assertion: str, token: str) -> None:
+        self._broker = broker
+        self._assertion_digest = sha256(assertion.encode("utf-8")).digest()
+        self._token = token
+        self._redeemed = False
+
+    def redeem(self, broker: object, assertion: str) -> str:
+        if self._redeemed:
+            raise GitHubPublicationError("prepared review capability was already used")
+        if broker is not self._broker:
+            raise GitHubPublicationError("prepared review capability broker mismatch")
+        if (
+            not isinstance(assertion, str)
+            or sha256(assertion.encode("utf-8")).digest() != self._assertion_digest
+        ):
+            raise GitHubPublicationError(
+                "prepared review capability assertion mismatch"
+            )
+        self._redeemed = True
+        return self._token
+
+
 class GitHubApplication:
     """Thin composition seam for workflow callers."""
 
@@ -2124,7 +2157,7 @@ class GitHubApplication:
         # its ledger mutation. Reacquiring the same capability for refinalization
         # would spend another whole internal-dispatch liability and can starve
         # the check and approval that follow thread cleanup.
-        review_capability_token: str | None = None
+        prepared_review_capability: _PreparedReviewCapability | None = None
         ledger = (
             self.session_ledger
             if command.action == "status" and not options.github_session_ledger
@@ -2162,7 +2195,9 @@ class GitHubApplication:
                     capability=capability,
                 )
                 if capability == "review_publish":
-                    review_capability_token = token
+                    prepared_review_capability = _PreparedReviewCapability(
+                        self.broker, exchange_input, token
+                    )
             ledger = self._session_ledger_for_token(
                 token,
                 options=options,
@@ -2351,7 +2386,7 @@ class GitHubApplication:
                     evidence_budget=command_budget,
                     incomplete_coverage=derived_incomplete_coverage,
                     policy_digest=command_policy_digest,
-                    _prepared_review_token=review_capability_token,
+                    _prepared_review_capability=prepared_review_capability,
                 )
                 if isinstance(refinalized, MaintainerCommandResult):
                     produced = refinalized
@@ -2395,7 +2430,7 @@ class GitHubApplication:
                 evidence_budget=command_budget,
                 incomplete_coverage=derived_incomplete_coverage,
                 policy_digest=command_policy_digest,
-                _prepared_review_token=review_capability_token,
+                _prepared_review_capability=prepared_review_capability,
             )
             if isinstance(refinalized, MaintainerCommandResult):
                 result = refinalized
@@ -3039,10 +3074,9 @@ class GitHubApplication:
         evidence_budget: EvidenceReadBudget | None = None,
         incomplete_coverage: Sequence[str] | None = None,
         policy_digest: str | None = None,
-        # Private cross-call reuse: None, or the exact review_publish token
-        # minted by this operation's broker exchange. Never a caller-supplied
-        # credential.
-        _prepared_review_token: str | None = None,
+        # Private cross-call reuse: None, or the one-shot capability this
+        # operation's broker exchange minted. Never a caller-supplied token.
+        _prepared_review_capability: _PreparedReviewCapability | None = None,
     ) -> object:
         """Re-check approval after a hosted override. A failed check leaves the ledger write."""
 
@@ -3097,20 +3131,23 @@ class GitHubApplication:
 
         try:
             # Reuse only a review_publish capability minted by this operation.
-            # Tokens are opaque strings, so this finalizer cannot verify a
-            # token's provenance; the parameter's only supported producer is
-            # GitHubApplication._refinalize_command, which passes None or the
-            # token this broker minted for the same repository, pull request
-            # and head. Any other capability, including a hosted session
-            # grant, never reaches this argument.
-            if _prepared_review_token is not None and (
-                not isinstance(_prepared_review_token, str)
-                or not _prepared_review_token.strip()
-            ):
-                raise GitHubPublicationError("prepared review capability is invalid")
-            review_token = _prepared_review_token or self.broker.exchange(
-                oidc_token, capability="review_publish"
-            )
+            # The one-shot object binds the token to the minting broker and the
+            # exact OIDC assertion, so another capability, a hosted session
+            # grant or a caller-supplied string cannot reach this finalizer.
+            if _prepared_review_capability is not None:
+                if not isinstance(
+                    _prepared_review_capability, _PreparedReviewCapability
+                ):
+                    raise GitHubPublicationError(
+                        "prepared review capability is invalid"
+                    )
+                review_token = _prepared_review_capability.redeem(
+                    self.broker, oidc_token
+                )
+            else:
+                review_token = self.broker.exchange(
+                    oidc_token, capability="review_publish"
+                )
             from review_sensei.session import SessionRecord
 
             dispositions = (

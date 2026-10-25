@@ -3185,6 +3185,13 @@ class ReviewApprovalFinalizer:
             # cannot coexist with cleanup; leave the threads unconfirmed so the
             # reserved check/approval phases still run and cleanup resumes on a
             # later verify.
+            #
+            # The hold stays unconditional when the remaining allowance is
+            # already below the reserve. Spending it on cleanup cannot reliably
+            # fund discovery plus the separate thread_resolve authority, while
+            # withholding it leaves the check and approval as much of their
+            # liability as the request can still provide. Cleanup remains
+            # unconfirmed and resumes under a later request's own allowance.
             try:
                 budget.hold_ordinary(reserve)
             except ReviewInputError as exc:

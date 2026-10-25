@@ -13,9 +13,11 @@
 - Reserve the 18 ordinary dispatches a deferred command needs for its check
   publication and native approval (1 request + 10 capability-exchange
   dispatches + 2 check-publication calls + 5 approval reads), and reuse the
-  operation's own review capability during refinalization. Decided-thread
-  cleanup can no longer spend the room that lets the gate publish; it remains
-  bounded and may resume under a later supported request's allowance.
+  operation's own review capability during refinalization, bound to the
+  minting broker and OIDC assertion and claimable once. Decided-thread cleanup
+  can no longer spend the room that lets the gate publish; the hold stays in
+  force when a request reaches cleanup below the reserve, and cleanup resumes
+  under a later supported request's allowance.
 
 ## review-sensei-github 0.3.17 - 2026-10-24
 

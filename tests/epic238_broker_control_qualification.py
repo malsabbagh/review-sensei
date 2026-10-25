@@ -145,9 +145,12 @@ class BrokerControlQualification(unittest.TestCase):
             padded=False,
         )
         state.resolved_threads.clear()
-        # Derive the completion target from the fixture's own index so this
-        # qualification tracks the invariant, not a fixed decided-thread count.
-        decided = sum(not entry.body_placed for entry in state.entries)
+        # Derive the completion target from the resolver's own candidate
+        # predicate so this qualification tracks the invariant, not a fixed
+        # decided-thread count.
+        decided = sum(
+            entry.needs_human and not entry.body_placed for entry in state.entries
+        )
         state.record(self.temporary.name)
         self.bridge.call(
             "set_snapshot", snapshot={"repository": "owner/repo", "repositoryId": 1}
@@ -204,8 +207,12 @@ class BrokerControlQualification(unittest.TestCase):
             ):
                 break
             if attempt:
-                self.assertGreater(
-                    progress[-1], progress[-2], (progress, outcome.summary)
+                # Approval can lag cleanup, so a later attempt may revisit the
+                # completed cleanup set. Accept either strict progress or
+                # reaching the completion target.
+                self.assertTrue(
+                    progress[-1] > progress[-2] or progress[-1] == decided,
+                    (progress, outcome.summary),
                 )
         self.assertEqual(
             len(state.resolved_threads), decided, (progress, outcome.summary)
