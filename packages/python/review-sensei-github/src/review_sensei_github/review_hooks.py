@@ -22,7 +22,7 @@ from review_sensei_github.http import GitHubHttp
 # cost the full 10; funding less refuses histories the reader is built to read.
 # This is the exact enumerated ceiling with no spare dispatch, because no path
 # in the exchange retries; a new dispatch here must raise this number with it.
-_ANALYSIS_SESSION_INTERNAL_DISPATCHES = 30
+ANALYSIS_SESSION_INTERNAL_DISPATCHES = 30
 
 # The rescan authorization exchange stops at the capability token and reads no
 # witness, so it keeps the prefix-only reservation.
@@ -38,7 +38,7 @@ class GitHubReviewHooks:
         budget = EvidenceReadBudget()
         return resolve_hosted_session_ledger(
             broker=self._admission_broker(
-                args, budget, _ANALYSIS_SESSION_INTERNAL_DISPATCHES
+                args, budget, ANALYSIS_SESSION_INTERNAL_DISPATCHES
             ),
             http=GitHubHttp(),
             oidc_token=getattr(args, "oidc_token", None),

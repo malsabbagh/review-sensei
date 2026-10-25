@@ -131,11 +131,22 @@ for (const order of [["review_session", "check_publish"], ["check_publish", "rev
 // Unattended analysis does not carry a command attestation. Exercise the actual
 // Git and annotated-tag fallback with the caller's admitted liability: the old
 // underfunded prefix-only value, and the funded value that reaches the reader's
-// own per-witness 10-request page ladder. Only documented reservations are
-// accepted: 12 was the earlier prefix-only value and 30 is the exact ceiling in
-// ADR 0088, pinned to the production constant by test_analysis_admission_budget.
-// Any other value is drift and must be made deliberate here and in the ADR.
-const analysisMaximum = Number(process.argv[2] ?? 30);
+// own per-witness 10-request page ladder. Usage:
+//   node tests/media_broker_profile.mjs [analysis-liability]
+// The optional positional argument is the analysis-admission liability and must
+// be a decimal integer, so a shifted or non-numeric argument fails at parsing
+// rather than as an unexplained reservation error. Only documented reservations
+// are accepted: 12 was the earlier prefix-only value and 30 is the exact ceiling
+// in ADR 0088, pinned to the production constant by
+// test_analysis_admission_budget. Any other value is drift and must be made
+// deliberate here and in the ADR.
+const analysisArgument = process.argv[2];
+const analysisMaximum = analysisArgument === undefined ? 30 : Number(analysisArgument);
+assert.ok(
+  analysisArgument === undefined ||
+    (/^\d+$/.test(analysisArgument) && Number.isSafeInteger(analysisMaximum)),
+  `analysis admission liability must be a decimal integer, got ${JSON.stringify(analysisArgument)}`,
+);
 assert.ok([12, 30].includes(analysisMaximum),
   "analysis admission must use a documented reservation: 12 (earlier) or 30 (exact ceiling)");
 for (const mode of ["git", "fallback-annotated"]) {

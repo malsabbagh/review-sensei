@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from review_sensei_github.errors import GitHubBrokerClientError
 from review_sensei_github.review_hooks import (
-    _ANALYSIS_SESSION_INTERNAL_DISPATCHES,
+    ANALYSIS_SESSION_INTERNAL_DISPATCHES,
     GitHubReviewHooks,
 )
 
@@ -30,15 +30,13 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
             app_slug="reviewsensei[bot]",
         )
 
-    def client(
-        self, budget, transport, liability=_ANALYSIS_SESSION_INTERNAL_DISPATCHES
-    ):
+    def client(self, budget, transport, liability=ANALYSIS_SESSION_INTERNAL_DISPATCHES):
         client = GitHubReviewHooks._admission_broker(self.args, budget, liability)
         client.opener = transport
         return client
 
     def response(
-        self, request, *, dispatched=_ANALYSIS_SESSION_INTERNAL_DISPATCHES, fault=None
+        self, request, *, dispatched=ANALYSIS_SESSION_INTERNAL_DISPATCHES, fault=None
     ):
         payload = json.loads(request.data)
         control = payload["control_budget"]
@@ -68,8 +66,8 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
         # 30 is the exact enumerated cold ceiling in ADR 0088, not an estimate.
         # Pin the production constant to that literal so a dispatch added to the
         # exchange fails here together with the ADR instead of drifting quietly.
-        self.assertEqual(_ANALYSIS_SESSION_INTERNAL_DISPATCHES, 30)
-        liability = _ANALYSIS_SESSION_INTERNAL_DISPATCHES
+        self.assertEqual(ANALYSIS_SESSION_INTERNAL_DISPATCHES, 30)
+        liability = ANALYSIS_SESSION_INTERNAL_DISPATCHES
         budget = EvidenceReadBudget()
         deadline = budget.wall_deadline_ms
         requests = []
@@ -115,7 +113,7 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
         )
 
     def test_full_reservation_is_kept_for_a_warm_shorter_exchange(self):
-        for dispatched in (9, _ANALYSIS_SESSION_INTERNAL_DISPATCHES):
+        for dispatched in (9, ANALYSIS_SESSION_INTERNAL_DISPATCHES):
             with self.subTest(dispatched=dispatched):
                 budget = EvidenceReadBudget()
                 client = self.client(
@@ -128,7 +126,7 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
                 self.assertEqual(budget.calls, 31)
 
     def test_last_funded_request_and_atomic_unfunded_refusal(self):
-        liability = _ANALYSIS_SESSION_INTERNAL_DISPATCHES
+        liability = ANALYSIS_SESSION_INTERNAL_DISPATCHES
         ceiling = EvidenceReadBudget().ordinary_remaining()
         # Four of the 64 calls stay reserved for finalization; pin that ceiling
         # so a change to either offset fails here rather than moving the
@@ -208,7 +206,7 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
                 return client
 
             client = original_factory(
-                args, budget, _ANALYSIS_SESSION_INTERNAL_DISPATCHES
+                args, budget, ANALYSIS_SESSION_INTERNAL_DISPATCHES
             )
             client.opener = transport
             client.open_session(
@@ -239,7 +237,7 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
             self.assertEqual(len({item["request_id"] for item in controls}), 2)
             self.assertEqual(
                 [item["max_dispatches"] for item in controls],
-                [_ANALYSIS_SESSION_INTERNAL_DISPATCHES, 12],
+                [ANALYSIS_SESSION_INTERNAL_DISPATCHES, 12],
             )
 
 
