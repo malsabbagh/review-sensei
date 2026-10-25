@@ -165,7 +165,7 @@ class RetainedFullRescanTests(unittest.TestCase):
             )
 
     def test_changed_receipt_digest_or_producer_cannot_authorize_full_rescan(self):
-        for fault in ("receipt", "review-id", "producer", "part"):
+        for fault in ("receipt", "review-id", "producer", "root-producer", "part"):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
                 state, ledger, env, args, _source = self.prepare(directory)
                 if fault in {"receipt", "review-id"}:
@@ -177,6 +177,8 @@ class RetainedFullRescanTests(unittest.TestCase):
                     ledger.replace(IDENTITY, lambda r: r.evolve(rescan_state=changed))
                 elif fault == "producer":
                     state.app_user["id"] += 1
+                elif fault == "root-producer":
+                    state.reviews[-1]["user"]["id"] += 1
                 else:
                     from tests.default_human_inventory_contract import (
                         human_inventory_parts,
@@ -195,6 +197,22 @@ class RetainedFullRescanTests(unittest.TestCase):
                 IDENTITY,
                 lambda r: r.evolve(reservation_id="a" * 64, reserved_slot="initial"),
             )
+            before = ledger.load(IDENTITY).record.to_dict()
+            with self.assertRaises(ReviewInputError):
+                self.run_rescan(ledger, env, args)
+            self.assertEqual(ledger.load(IDENTITY).record.to_dict(), before)
+
+    def test_exact_receipt_review_must_retain_its_own_visible_explanation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, ledger, env, args, _source = self.prepare(directory)
+            receipt_review = state.reviews[-1]
+            earlier = copy.deepcopy(receipt_review)
+            earlier["id"] -= 1
+            state.reviews.insert(0, earlier)
+            earlier_inline = copy.deepcopy(state.inline)
+            for item in earlier_inline:
+                item["pull_request_review_id"] = earlier["id"]
+            state.inline[:] = earlier_inline
             before = ledger.load(IDENTITY).record.to_dict()
             with self.assertRaises(ReviewInputError):
                 self.run_rescan(ledger, env, args)
@@ -234,6 +252,11 @@ class RetainedFullRescanTests(unittest.TestCase):
                 head_sha=HEAD,
                 app_slug=APP,
                 budget=EvidenceReadBudget(),
+            )
+            self.assertIsNone(
+                approval_eligibility_from_body(
+                    state.reviews[-1]["body"], human_inventory_reader=reader
+                )
             )
             with self.assertRaisesRegex(
                 ReviewInputError, "independent checkpoint unavailable"

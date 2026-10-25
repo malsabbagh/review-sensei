@@ -342,13 +342,21 @@ class DefaultHumanInventoryReader:
                 originals.append(item)
         if not originals:
             raise ReviewInputError("default human inventory original root unavailable")
-        if self._retained_source is not None and not any(
-            item["id"] == self._retained_source.review_id for item in originals
-        ):
+        if self._retained_source is None:
+            return expected, originals[0]
+        original = next(
+            (
+                item
+                for item in originals
+                if item["id"] == self._retained_source.review_id
+            ),
+            None,
+        )
+        if original is None:
             raise ReviewInputError(
                 "retained inventory published receipt root unavailable"
             )
-        return expected, originals[0]
+        return expected, original
 
     def validate_root(self, review: object, reviews: list[Any]) -> None:
         """A decision cannot replace its original complete visible explanation."""
