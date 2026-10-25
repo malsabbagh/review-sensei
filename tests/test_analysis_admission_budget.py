@@ -85,18 +85,23 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
         self.assertEqual(budget.calls, 31)
 
     def test_rescan_exchange_keeps_the_prefix_only_reservation(self):
+        liability = 12
         budget = EvidenceReadBudget()
         controls = []
 
         def transport(request, timeout):
             controls.append(json.loads(request.data)["control_budget"])
-            return self.response(request, dispatched=12)
+            return self.response(request, dispatched=liability)
 
-        client = self.client(budget, transport, liability=12)
+        client = self.client(budget, transport, liability=liability)
         for _ in range(2):
+            before = budget.calls
             self.open_session(client)
-        self.assertEqual(budget.calls, 26)
-        self.assertEqual([item["max_dispatches"] for item in controls], [12, 12])
+            self.assertEqual(budget.calls - before, liability + 1)
+        self.assertEqual(budget.calls, 2 * (liability + 1))
+        self.assertEqual(
+            [item["max_dispatches"] for item in controls], [liability, liability]
+        )
 
     def test_full_reservation_is_kept_for_a_warm_shorter_exchange(self):
         for dispatched in (9, 30):
