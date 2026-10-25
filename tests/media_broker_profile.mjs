@@ -188,10 +188,15 @@ for (const mode of ["git", "fallback-annotated"]) {
             // review-witness reads prove the ladder ran to that cap; the
             // operation record is never read because the first witness fails.
             assert.equal(error, "github_session_witness_failed");
-            assert.equal(dispatched, prefix + 10);
             const reads = witnessReads(attempts.slice(start));
             assert.equal(reads.review, 10);
             assert.equal(reads.comment, 0);
+            // Every dispatch beyond the deterministic prefix is a witness read,
+            // which proves the witness paths are the only place the funded arm
+            // spends past the prefix; the message points at the prefix if a
+            // future exchange adds a dispatch outside those paths.
+            assert.equal(dispatched, prefix + reads.review + reads.comment,
+              "funded full-page dispatches must be the prefix plus witness reads");
             assert.equal(result, undefined);
           } else if (mode === "fallback-annotated" && maximum === 10) {
             // The ten-dispatch cap is the whole prefix, so refusing its next

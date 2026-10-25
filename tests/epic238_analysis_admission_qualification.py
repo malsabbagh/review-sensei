@@ -21,6 +21,10 @@ from review_sensei.bounded_evidence import EvidenceReadBudget
 class AnalysisAdmissionQualification(unittest.TestCase):
     def test_actual_broker_cold_warm_fallback_and_pretransport_refusal(self):
         liability = _ANALYSIS_SESSION_INTERNAL_DISPATCHES
+        # Pin the ADR's documented ceiling here too, independently of the unit
+        # suite, so a silent constant change cannot pass this oracle by echoing
+        # whatever value production happens to use.
+        self.assertEqual(liability, 30)
         budget = EvidenceReadBudget()
         client = GitHubReviewHooks._admission_broker(
             SimpleNamespace(repository_id=987654321, pull_request=7, head_sha="a" * 40),
