@@ -10,20 +10,25 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from review_sensei_github.review_hooks import GitHubReviewHooks
+from review_sensei_github.review_hooks import (
+    _ANALYSIS_SESSION_INTERNAL_DISPATCHES,
+    GitHubReviewHooks,
+)
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
 
 
 class AnalysisAdmissionQualification(unittest.TestCase):
     def test_actual_broker_cold_warm_fallback_and_pretransport_refusal(self):
+        liability = _ANALYSIS_SESSION_INTERNAL_DISPATCHES
         budget = EvidenceReadBudget()
         client = GitHubReviewHooks._admission_broker(
             SimpleNamespace(repository_id=987654321, pull_request=7, head_sha="a" * 40),
             budget,
-            30,
+            liability,
         )
         request = client.control.admit(verification=False)
+        self.assertEqual(request["max_dispatches"], liability)
         root = Path(__file__).resolve().parents[1]
         result = subprocess.run(
             [
@@ -47,8 +52,9 @@ class AnalysisAdmissionQualification(unittest.TestCase):
             self.assertLessEqual(profile["dispatched"], request["max_dispatches"])
             if profile.get("error"):
                 self.assertNotIn("session_state", profile)
-        # Reservation is prepaid, never reconstructed/refunded from the receipt.
-        self.assertEqual(budget.calls, 30)
+        # Admission prepays exactly the liability; the caller's own HTTP charge
+        # is a separate dispatch this oracle never makes.
+        self.assertEqual(budget.calls, liability)
 
 
 if __name__ == "__main__":

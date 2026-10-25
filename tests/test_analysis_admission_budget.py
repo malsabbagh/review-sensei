@@ -14,7 +14,7 @@ from review_sensei_github.review_hooks import (
     GitHubReviewHooks,
 )
 
-from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.bounded_evidence import MAX_PART_READS, EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
 from tests.test_github_broker_client import FakeResponse
 
@@ -119,9 +119,13 @@ class AnalysisAdmissionBudgetTests(unittest.TestCase):
     def test_last_funded_request_and_atomic_unfunded_refusal(self):
         liability = _ANALYSIS_SESSION_INTERNAL_DISPATCHES
         ceiling = EvidenceReadBudget().ordinary_remaining()
-        # One admission needs its whole prepaid liability plus the caller HTTP
-        # request, so the boundary sits at the ceiling minus both, not at the
-        # liability itself; deriving it keeps the pair tracking the constant.
+        # Four of the 64 calls stay reserved for finalization; pin that ceiling
+        # so a change to either offset fails here rather than moving the
+        # boundary silently. One admission needs its whole prepaid liability plus
+        # the caller HTTP request, so the boundary sits at the ceiling minus
+        # both, not at the liability itself.
+        self.assertEqual(ceiling, MAX_PART_READS - 4)
+        self.assertGreaterEqual(ceiling - liability - 1, 0)
         for prior in (ceiling - liability - 1, ceiling - liability):
             with self.subTest(prior=prior):
                 budget = EvidenceReadBudget()

@@ -30,6 +30,12 @@ const { GitHubApi } = await import("../deploy/cloudflare/src/github-api.ts");
 const { resetOidcJwksCacheForTesting } = await import("../deploy/cloudflare/src/oidc.ts");
 
 function pktLine(value) { return (Buffer.byteLength(value) + 4).toString(16).padStart(4, "0") + value; }
+function witnessReads(attempts) {
+  return {
+    review: attempts.filter(item => item.path === "/repos/acme/widgets/pulls/7/reviews").length,
+    comment: attempts.filter(item => item.path === "/repos/acme/widgets/issues/7/comments").length,
+  };
+}
 const advertisement = pktLine("# service=git-upload-pack\n") + "0000" + pktLine(`${SHA} refs/tags/v5\0multi_ack\n`) + "0000";
 const output = [];
 for (const capability of ["review_session", "check_publish"]) {
@@ -127,7 +133,8 @@ for (const order of [["review_session", "check_publish"], ["check_publish", "rev
 // underfunded prefix-only value, and the funded value that reaches the reader's
 // own per-witness 10-request page ladder.
 const analysisMaximum = Number(process.argv[2] ?? 30);
-assert.equal(analysisMaximum, 30);
+assert.ok(Number.isSafeInteger(analysisMaximum) && analysisMaximum >= 30,
+  "analysis admission must fund at least the documented 30-dispatch ceiling");
 for (const mode of ["git", "fallback-annotated"]) {
   for (const history of ["empty", "full-page"]) {
     for (const maximum of [10, analysisMaximum]) {
@@ -168,18 +175,30 @@ for (const mode of ["git", "fallback-annotated"]) {
             // witness page the ladder asked for once its slots run out.
             assert.equal(error, "broker_control_budget_exhausted");
             assert.equal(dispatched, maximum);
-            const witnessReads = attempts.slice(start).filter(item => item.path === "/repos/acme/widgets/pulls/7/reviews").length;
-            assert.equal(witnessReads, Math.max(0, maximum - prefix));
+            const reads = witnessReads(attempts.slice(start));
+            assert.equal(reads.review, Math.max(0, maximum - prefix));
+            assert.equal(reads.comment, 0);
             assert.equal(result, undefined);
           } else if (history === "full-page") {
             // The funded liability covers the whole ladder, so the refusal is now
-            // the reader's closed page cap rather than an unfunded dispatch.
+            // the reader's closed page cap rather than an unfunded dispatch. Ten
+            // review-witness reads prove the ladder ran to that cap; the
+            // operation record is never read because the first witness fails.
             assert.equal(error, "github_session_witness_failed");
             assert.equal(dispatched, prefix + 10);
+            const reads = witnessReads(attempts.slice(start));
+            assert.equal(reads.review, 10);
+            assert.equal(reads.comment, 0);
             assert.equal(result, undefined);
           } else if (mode === "fallback-annotated" && maximum === 10) {
+            // The ten-dispatch cap is the whole prefix, so refusing its next
+            // dispatch is refusing the operation record's first page, not a
+            // witness page that was ever charged.
             assert.equal(error, "broker_control_budget_exhausted");
             assert.equal(dispatched, maximum);
+            const reads = witnessReads(attempts.slice(start));
+            assert.equal(reads.review, 0);
+            assert.equal(reads.comment, 0);
             assert.equal(result, undefined);
           } else {
             assert.equal(error, undefined);
@@ -188,8 +207,9 @@ for (const mode of ["git", "fallback-annotated"]) {
             // read once, the operation record because the review witness finds
             // no match. A witness ladder stops early only on a partial page, so
             // multi-page funding is observable solely in the full-page arm.
-            const witnessReads = attempts.slice(start).filter(item => item.path === "/repos/acme/widgets/pulls/7/reviews" || item.path === "/repos/acme/widgets/issues/7/comments").length;
-            assert.equal(witnessReads, 2);
+            const reads = witnessReads(attempts.slice(start));
+            assert.equal(reads.review, 1);
+            assert.equal(reads.comment, 1);
             assert.equal(result.session_state, "enrolled");
             assert.deepEqual(result.control_receipt, { ...control, dispatched });
           }
