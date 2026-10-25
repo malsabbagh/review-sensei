@@ -123,10 +123,11 @@ for (const order of [["review_session", "check_publish"], ["check_publish", "rev
   output.push({ mode: "git", history: "owned-review", sequence, internal_dispatches: attempts.length, caller_posts: 2, combined_liability: 17, attempts });
 }
 // Unattended analysis does not carry a command attestation. Exercise the actual
-// Git and annotated-tag fallback with the caller's admitted liability, including
-// the old underfunded value and a history that needs an unfunded thirteenth IO.
-const analysisMaximum = Number(process.argv[2] ?? 12);
-assert.equal(analysisMaximum, 12);
+// Git and annotated-tag fallback with the caller's admitted liability: the old
+// underfunded prefix-only value, and the funded value that reaches the reader's
+// own per-witness 10-request page ladder.
+const analysisMaximum = Number(process.argv[2] ?? 30);
+assert.equal(analysisMaximum, 30);
 for (const mode of ["git", "fallback-annotated"]) {
   for (const history of ["empty", "full-page"]) {
     for (const maximum of [10, analysisMaximum]) {
@@ -156,13 +157,27 @@ for (const mode of ["git", "fallback-annotated"]) {
             result = await broker.exchange({ oidc_token: await fixture.oidcToken(), capability: "review_session", session: { repository_id: 987654321, pull_request: 7, head_sha: SHA }, control_budget: control });
           } catch (caught) { error = caught.message; }
           const dispatched = attempts.length - start;
-          if (history === "full-page" || (mode === "fallback-annotated" && maximum === 10)) {
+          // JWKS, the Git advertisement or annotated-tag fallback, and the four
+          // installation/repository/capability reads, then head, App identity and
+          // up to the reader's own 10-request ladder per enrollment witness.
+          const prefix = 8 + (mode === "fallback-annotated" ? 2 : 0);
+          if (history === "full-page" && maximum < prefix + 10) {
+            assert.equal(error, "broker_control_budget_exhausted");
+            assert.equal(dispatched, maximum);
+            assert.equal(result, undefined);
+          } else if (history === "full-page") {
+            // The funded liability covers the whole ladder, so the refusal is now
+            // the reader's closed page cap rather than an unfunded dispatch.
+            assert.equal(error, "github_session_witness_failed");
+            assert.equal(dispatched, prefix + 10);
+            assert.equal(result, undefined);
+          } else if (mode === "fallback-annotated" && maximum === 10) {
             assert.equal(error, "broker_control_budget_exhausted");
             assert.equal(dispatched, maximum);
             assert.equal(result, undefined);
           } else {
             assert.equal(error, undefined);
-            assert.equal(dispatched, 10 + (mode === "fallback-annotated" ? 2 : 0) - (temperature === "warm" ? 1 : 0));
+            assert.equal(dispatched, prefix + 2 - (temperature === "warm" ? 1 : 0));
             assert.equal(result.session_state, "enrolled");
             assert.deepEqual(result.control_receipt, { ...control, dispatched });
           }

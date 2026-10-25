@@ -59,20 +59,28 @@ before any transport or partial debit.
 
 ## Consequences and alternatives
 
-Unattended analysis admission prepays 12 internal dispatches plus its caller
+Unattended analysis admission prepays 30 internal dispatches plus its caller
 HTTP request from the original metadata budget. This covers the cold JWKS path,
 failed Git advertisement followed by an annotated-tag REST lookup, installation
-and repository checks, session capability, current head, App identity, and one
-complete page each of review and operation-comment witnesses. The same factory
-conservatively reserves 12 for the rescan authorization exchange. These are
-bounded reservations, not a promise that arbitrary paginated histories fit.
-Additional witness pages remain charged and refuse before an unfunded dispatch;
-they cannot produce a successful enrollment from an incomplete inventory.
-The 64 total / 60 ordinary call ceilings, original deadline, exact receipt
-binding, and no-refund rule are unchanged. This accounting correction applies
-when the containing hosted package is released; it does not authorize renewing
-a previously refused live attempt or attribute any historical failure to this
-fallback without its original dispatch evidence.
+and repository checks, session capability, current head, App identity, and both
+enrollment witnesses at the reader's own 10-request page ladder. A witness
+restarts that ladder at a smaller page size when a page exceeds the response
+byte cap, so one complete inventory can legally cost ten dispatches; the
+reservation funds both in full, and the byte cap alone can no longer exhaust
+admission. The same factory reserves 12 for the witness-free rescan
+authorization exchange, which stops at the capability token. These are bounded
+reservations, not a promise that arbitrary paginated histories fit. A witness
+that exhausts its own 10-request cap still refuses with its closed inventory
+code; it cannot produce a successful enrollment from an incomplete inventory.
+Funding only one complete page each, as the earlier 12-dispatch reservation
+did, refused every history whose first page exceeded the byte cap and charged
+the retry ladder as an unfunded dispatch. Admission and completion own separate
+original budgets, so the larger reservation does not reduce the review's
+completion allowance. The 64 total / 60 ordinary call ceilings, original
+deadline, exact receipt binding, and no-refund rule are unchanged. This
+accounting correction applies when the containing hosted package is released;
+it does not authorize renewing a previously refused live attempt or attribute
+any historical failure to this fallback without its original dispatch evidence.
 
 This deliberately charges a conservative admitted liability when a cached or
 failed request uses fewer internal calls. Its returned count is evidence, not a

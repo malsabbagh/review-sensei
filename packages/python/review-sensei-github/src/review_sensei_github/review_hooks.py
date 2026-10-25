@@ -14,11 +14,17 @@ from review_sensei_github.broker_control import BrokerDispatchAccounting
 from review_sensei_github.commands import report_broker_failure, run_hosted_provider
 from review_sensei_github.http import GitHubHttp
 
-# Cold unattended admission: JWKS (1), failed Git plus annotated-tag REST
-# fallback (3), installation/repository/capability (4), head/App identity and
-# single-page review/comment witnesses (4). Longer histories remain bounded by
-# the same reservation and must refuse if they cannot complete within it.
-_ANALYSIS_ADMISSION_INTERNAL_DISPATCHES = 12
+# Cold unattended admission funds the whole session exchange: JWKS (1), failed
+# Git plus annotated-tag REST fallback (3), installation/repository/capability
+# (4), current head (1), App identity (1), and both enrollment witnesses at the
+# reader's own 10-request page ladder (20). A witness restarts that ladder when
+# a page exceeds the response byte cap, so one complete inventory can legally
+# cost the full 10; funding less refuses histories the reader is built to read.
+_ANALYSIS_SESSION_INTERNAL_DISPATCHES = 30
+
+# The rescan authorization exchange stops at the capability token and reads no
+# witness, so it keeps the prefix-only reservation.
+_ANALYSIS_ACTION_INTERNAL_DISPATCHES = 12
 
 
 class GitHubReviewHooks:
@@ -29,7 +35,9 @@ class GitHubReviewHooks:
     ) -> SessionLedger:
         budget = EvidenceReadBudget()
         return resolve_hosted_session_ledger(
-            broker=self._admission_broker(args, budget),
+            broker=self._admission_broker(
+                args, budget, _ANALYSIS_SESSION_INTERNAL_DISPATCHES
+            ),
             http=GitHubHttp(),
             oidc_token=getattr(args, "oidc_token", None),
             repository=args.repository,
@@ -57,21 +65,21 @@ class GitHubReviewHooks:
         budget = getattr(ledger, "evidence_budget", None)
         if not isinstance(budget, EvidenceReadBudget):
             raise ReviewInputError("analysis admission has no original metadata budget")
-        broker = self._admission_broker(args, budget)
+        broker = self._admission_broker(
+            args, budget, _ANALYSIS_ACTION_INTERNAL_DISPATCHES
+        )
         actions_token = broker.exchange(
             args.oidc_token or broker.request_oidc_token(), capability="review_actions"
         )
         return resolve_rescan(args, ledger, actions_token=actions_token)
 
     @staticmethod
-    def _admission_broker(args, budget):
+    def _admission_broker(args, budget, internal_dispatches):
         operation = hashlib.sha256(
             f"analysis-admission:{args.repository_id}:{args.pull_request}:{args.head_sha}".encode()
         ).hexdigest()
         return BrokerClient(
-            control=BrokerDispatchAccounting(
-                budget, operation, _ANALYSIS_ADMISSION_INTERNAL_DISPATCHES, 1
-            )
+            control=BrokerDispatchAccounting(budget, operation, internal_dispatches, 1)
         )
 
     def run_provider(

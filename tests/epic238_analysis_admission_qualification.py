@@ -21,6 +21,7 @@ class AnalysisAdmissionQualification(unittest.TestCase):
         client = GitHubReviewHooks._admission_broker(
             SimpleNamespace(repository_id=987654321, pull_request=7, head_sha="a" * 40),
             budget,
+            30,
         )
         request = client.control.admit(verification=False)
         root = Path(__file__).resolve().parents[1]
@@ -47,7 +48,7 @@ class AnalysisAdmissionQualification(unittest.TestCase):
             if profile.get("error"):
                 self.assertNotIn("session_state", profile)
         # Reservation is prepaid, never reconstructed/refunded from the receipt.
-        self.assertEqual(budget.calls, 12)
+        self.assertEqual(budget.calls, 30)
 
 
 if __name__ == "__main__":
