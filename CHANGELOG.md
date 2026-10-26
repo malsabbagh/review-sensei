@@ -11,11 +11,17 @@
   requests, and exercise one offline startup/recovery without resetting capacity
   or repeating uncertain writes. Full workflow and release qualification remain
   pending.
+
+## review-sensei-github 0.3.19 - 2026-10-25
+
 - Authenticate retained published inventory for explicit full rescans after a
   failed continuation leaves no current transaction. Keep the receipt and ledger
   unchanged, fence the same root on reads, and forbid inventory writes through
   this read-only authority. Ordinary decision and finalization readers still
   require their current transaction; coverage and approval gates are unchanged.
+- Pin `review-sensei==0.8.13`.
+
+## 0.8.13 - 2026-10-25
 
 - Distinguish unavailable check capabilities, observed access denials, temporary
   failures and other check publication failures. Retain neutral legacy diagnostic
@@ -25,14 +31,19 @@
   preserving embedded source separators and CRLF source bytes in reconstructed
   hunks instead of rejecting valid patches or stripping their carriage returns.
   Preserve the same physical lines and exact byte ranges during subdivision.
-- Reserve the ordinary caller requests a deferred command needs for its check
-  publication and native approval (1 broker POST + 2 check-publication calls +
-  5 approval reads), and reuse the
+- Reserve the ordinary dispatches a deferred command needs for its check
+  publication and native approval (1 request + the broker's capability-exchange
+  liability + 2 check-publication calls + 5 approval reads), and reuse the
   operation's own review capability during refinalization, bound to the
   minting broker and OIDC assertion and idempotent for that same pair so an
-  in-operation retry cannot be refused for a token it never sent. The caller
-  reserve is 8 regardless of Worker internal fanout or control wrapper type.
-  A foreign envelope still cannot mint cleanup authority.
+  in-operation retry cannot be refused for a token it never sent. The packaged
+  default is 18 (exchange liability 10); a caller-provided broker reports its
+  configured liability on its control object, so the application derives the
+  hold from it regardless of control type or which budget the envelope is
+  bound to. A foreign envelope cannot mint cleanup authority, but the packaged
+  default is never silently substituted for a broker that reports a larger
+  liability, and a liability too large to hold fails loudly instead of running
+  under that default.
   Decided-thread cleanup can no longer spend the room that lets the gate
   publish; the hold stays in force when a request reaches cleanup below the
   reserve, is non-reentrant, is acquired all-or-nothing, and is released only
@@ -42,6 +53,10 @@
   the reservation without spending allowance, records the distinct
   `cleanup.hold` stage with reason `hold-conflict`, and leaves cleanup
   unconfirmed to resume under a later supported request's allowance.
+
+## review-sensei-github 0.3.18 - 2026-10-25
+
+- Pin `review-sensei==0.8.13`.
 
 ## review-sensei-github 0.3.17 - 2026-10-24
 

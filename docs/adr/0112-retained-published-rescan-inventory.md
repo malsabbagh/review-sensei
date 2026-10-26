@@ -4,7 +4,7 @@
 - Date: 2026-10-25
 - Decision owner/reviewers: repository owner; Astra High
 - Related issue: [TaskAlong PR29](https://github.com/malsabbagh/taskalong/pull/29)
-- Pull request: pending source review
+- Pull request: [ReviewSensei PR377](https://github.com/malsabbagh/review-sensei/pull/377)
 
 ## Context
 
@@ -29,8 +29,10 @@ Only the authenticated explicit-rescan resolver opts the reader into this path.
 Both full and remaining intent keep their existing permission, event, current PR,
 publication and incomplete-coverage gates. Inventory scope still binds repository,
 PR, base/head, result, policy, configuration, evidence and numeric Bot producer.
-The receipt's source review must occur among the independently verified original
-publication roots. Existing complete explanation validation remains in force.
+The receipt's exact source review must be an independently verified original
+publication root and retain its own complete explanation. An earlier review with
+the same digest cannot substitute its visible prose. Existing complete explanation
+validation remains in force.
 
 Retained inventory contexts cannot stage writes, including reconciliation through
 the staging API. An ordinary reader cannot attach their authenticated store.
@@ -69,7 +71,23 @@ latest-per-head selection, ordinary reader refusal and retained write refusal.
 The installed-distribution lane includes the same regression.
 
 Source, installed package, CI and independent review results must be recorded
-before publication. The existing four held socket tests remain excluded.
+before publication.
+
+## Accounting-path preservation
+
+The retained reference supplies source selection only. Reads still pass through
+the existing publication HTTP and session-ledger wrappers with the original
+`EvidenceReadBudget`, including fresh authority fences and cached-read checks.
+Authentication adds no grant, refund or replacement budget. The generation,
+dispositions, receipts, failed-attempt counts and completed-round counts stay
+unchanged during admission. The ordinary downstream admission, consumption and
+publication paths still account for any newly authorized analysis.
+
+The later API-work redesign can retain this selector and route these same read
+interfaces through its authenticated cumulative counter. It must cover retained
+admission in combined resolver/reader/accounting tests, debit every actual read
+and preserve refusal when capacity is exhausted. The retained reference must
+never become owner, reservation or write authority, or a path around accounting.
 
 ## Rollout and rollback
 
