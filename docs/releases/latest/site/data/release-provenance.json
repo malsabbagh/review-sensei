@@ -1,13 +1,13 @@
 {
   "schema_version": "1.0",
   "repository": "malsabbagh/review-sensei",
-  "tag": "v0.8.13",
-  "version": "0.8.13",
-  "source_sha": "1bc874f473b93467e7c08324b497d6525d200153",
-  "tag_object_sha": "83fe60830bf458ed07192c0ccdacfda4651abebf",
-  "release_run_id": 40233210835,
+  "tag": "v0.8.14",
+  "version": "0.8.14",
+  "source_sha": "52b5ca47ba3508a526312ce8424ff0c7fa1bb347",
+  "tag_object_sha": "568aed045a18ab5fa218360fb5c83907aef33908",
+  "release_run_id": 40358164113,
   "build_run_attempt": 1,
-  "source_docs": "https://github.com/malsabbagh/review-sensei/tree/1bc874f473b93467e7c08324b497d6525d200153/docs",
-  "source_examples": "https://github.com/malsabbagh/review-sensei/tree/1bc874f473b93467e7c08324b497d6525d200153/examples",
+  "source_docs": "https://github.com/malsabbagh/review-sensei/tree/52b5ca47ba3508a526312ce8424ff0c7fa1bb347/docs",
+  "source_examples": "https://github.com/malsabbagh/review-sensei/tree/52b5ca47ba3508a526312ce8424ff0c7fa1bb347/examples",
   "workflow_channel": "v5"
 }
