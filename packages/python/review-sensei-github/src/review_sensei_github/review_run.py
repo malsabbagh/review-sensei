@@ -202,7 +202,11 @@ class ReviewRun:
             ):
                 raise ReviewInputError("planned local model is unavailable")
         hooks = ReviewRunHooks(
-            self.ledger, self.identity, base_sha=self.base_sha, head_sha=self.head_sha
+            self.ledger,
+            self.identity,
+            base_sha=self.base_sha,
+            head_sha=self.head_sha,
+            oidc_token=self.oidc,
         )
         code = engine_main(argv, hosted_hooks=hooks)
         if code != 0:
@@ -493,7 +497,9 @@ def bootstrap(
     operation_id = hashlib.sha256(
         f"review-run:{args.repository_id}:{run_id}".encode()
     ).hexdigest()
-    http = GitHubHttp(opener=caller.open)
+    from .publication_recovery import _PaginationObservationHttp
+
+    http = _PaginationObservationHttp(GitHubHttp(opener=caller.open), budget)
     frozen = _configuration(
         http,
         args.repository,

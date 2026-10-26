@@ -126,7 +126,7 @@ class ApiRunRequestTransport:
         self._checkpoint_readback_attempted = False
         self._producer: str | None = None
         self._reservation_started = False
-        self._abort_source = None
+        self._abort_source: dict[str, Any] | None = None
         self._analysis_boundary: AnalysisAbortBoundary | None = None
         self._operation_entry_started = False
         self._provider_effect_unresolved = False

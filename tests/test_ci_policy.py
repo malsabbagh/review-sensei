@@ -970,17 +970,15 @@ class ActionPinPolicyTests(unittest.TestCase):
         )
         for job_id in ("hosted", "local"):
             job = _job_section(workflow, job_id)
-            # Four review/publication steps plus the always-run reservation
-            # release cleanup step carry the pull-request env in each job.
-            self.assertEqual(job.count(pull_request_env), 5)
-            self.assertIn("Release this run's session reservation", job)
-            self.assertIn("release-reservation", job)
-            # The cleanup step must run even after cancellation or a
-            # review-step timeout, in both provider jobs.
-            self.assertEqual(
-                job.count("if: always() && inputs.operation == 'review'"), 1
+            # The review process owns cleanup and ordinary publication. The
+            # remaining publication and head-check shell steps are recovery-only.
+            self.assertEqual(job.count(pull_request_env), 4)
+            self.assertNotIn("release-reservation", job)
+            review = _step_block(
+                job, "Run hosted review" if job_id == "hosted" else "Run local review"
             )
-            self.assertIn("reservation release skipped", job)
+            self.assertIn('" review-run ', review)
+            self.assertIn('kill -TERM "$review_pid"', review)
         for job_id in ("hosted", "local"):
             job = _job_section(workflow, job_id)
             self.assertIn(expected_permissions, job)
@@ -1179,7 +1177,7 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertEqual(text.count(gate), 2)
         # Recovery regenerates its exact diff but cannot enter either inference
         # step. Normal review/reply operation gates stay explicit.
-        self.assertEqual(text.count("if: inputs.operation == 'review'\n"), 1)
+        self.assertEqual(text.count("if: inputs.operation == 'review'\n"), 0)
         self.assertEqual(
             text.count(
                 "if: inputs.operation == 'review' && !inputs.recover_publication\n"
@@ -1190,7 +1188,7 @@ class ActionPinPolicyTests(unittest.TestCase):
             text.count(
                 "if: inputs.operation == 'review' && inputs.recover_publication\n"
             ),
-            1,
+            2,
         )
         self.assertEqual(text.count("if: inputs.operation == 'reply'\n"), 2)
         # Command operations are never selected by the plan's review policy:
@@ -2189,7 +2187,7 @@ class ReusablePublishGuardTests(unittest.TestCase):
         admission_if = "if: success() && !cancelled() && inputs.operation == 'review'"
         publish_if = (
             admission_if + " && steps.publish-admission.outputs.status == 'current'"
-            " && (steps.provider-review.outputs.result_ready == 'true' || inputs.recover_publication)"
+            " && inputs.recover_publication"
         )
         upload_if = (
             "if: always() && !cancelled() && inputs.operation == 'review' && needs.bootstrap.outputs.artifacts"

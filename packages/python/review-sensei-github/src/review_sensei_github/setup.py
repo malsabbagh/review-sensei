@@ -1414,6 +1414,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RECOVER_PUBLICATION: ${{ inputs.recover_publication }}
           REPOSITORY: ${{ github.repository }}
           PULL_REQUEST: ${{ github.event_name == 'workflow_dispatch' && inputs.pull_request_number || github.event_name == 'issue_comment' && github.event.issue.number || github.event.pull_request.number }}
           PULL_REQUEST_URL: ${{ github.event.comment.pull_request_url }}
@@ -1434,6 +1436,26 @@ jobs:
           if [[ ! "${REPOSITORY}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
             echo "::error::repository identity is invalid"
             exit 1
+          fi
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && "${RECOVER_PUBLICATION:-false}" != "true" ]]; then
+            # Routing only. Live PR/base/head are authenticated by review-run.
+            printf 'operation=review\npull_request_number=%s\nbase_ref=%s\nhead_ref=HEAD\n' "$PULL_REQUEST" "$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$EVENT_NAME" == "issue_comment" ]]; then
+            # Select review intent from the event only; review-run authenticates
+            # the live comment, actor, requested commit and PR before inference.
+            intent=$(python - <<'PYROUTE'
+          import os, re
+          body = os.environ.get("COMMENT_BODY", "")
+          pattern = r"\A@(?:(?ai:reviewsensei)|sensei)[ \t]+(?:(?ai:re(?:[ \t]|-)?scan)|(?ai:review)[ \t]+(?ai:remaining))(?:[ \t]+(?ai:commit)[ \t]+[a-fA-F0-9]{7,40})?[ \t\r\n]*\Z"
+          print("review" if len(body.encode()) <= 4096 and re.fullmatch(pattern, body) else "")
+          PYROUTE
+            )
+            if [[ "$intent" == "review" ]]; then
+              printf 'operation=review\npull_request_number=%s\nbase_ref=%s\nhead_ref=HEAD\n' "$PULL_REQUEST" "$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           fi
           pull_json="$RUNNER_TEMP/review-sensei-pull.json"
           if [[ "$EVENT_NAME" == "pull_request" ]]; then

@@ -230,7 +230,7 @@ class ApiRunAccounting:
                 }
                 or any(
                     not isinstance(aborted[k], str)
-                    or _HEX64.fullmatch(aborted[k]) is None
+                    or _HEX64.fullmatch(cast(str, aborted[k])) is None
                     for k in ("source_root", "cleanup_root")
                 )
                 or not isinstance(aborted["transaction"], dict)

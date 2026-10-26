@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
@@ -38,11 +39,13 @@ class GitHubReviewHooks:
         self, args: argparse.Namespace, *, resolved_head_sha: str
     ) -> SessionLedger:
         budget = EvidenceReadBudget()
+        from .publication_recovery import _PaginationObservationHttp
+
         return resolve_hosted_session_ledger(
             broker=self._admission_broker(
                 args, budget, liability=ANALYSIS_SESSION_INTERNAL_DISPATCHES
             ),
-            http=GitHubHttp(),
+            http=_PaginationObservationHttp(GitHubHttp(), budget),
             oidc_token=getattr(args, "oidc_token", None),
             repository=args.repository,
             repository_id=args.repository_id,
@@ -69,12 +72,17 @@ class GitHubReviewHooks:
         budget = getattr(ledger, "evidence_budget", None)
         if not isinstance(budget, EvidenceReadBudget):
             raise ReviewInputError("analysis admission has no original metadata budget")
-        broker = self._admission_broker(
-            args, budget, liability=ANALYSIS_ACTION_INTERNAL_DISPATCHES
-        )
-        actions_token = broker.exchange(
-            args.oidc_token or broker.request_oidc_token(), capability="review_actions"
-        )
+        # Issue comments authenticate their live author and source using the
+        # session token. Only dispatch authentication reads an Actions run.
+        actions_token = ""
+        if os.environ.get("GITHUB_EVENT_NAME") != "issue_comment":
+            broker = self._admission_broker(
+                args, budget, liability=ANALYSIS_ACTION_INTERNAL_DISPATCHES
+            )
+            actions_token = broker.exchange(
+                args.oidc_token or broker.request_oidc_token(),
+                capability="review_actions",
+            )
         return resolve_rescan(args, ledger, actions_token=actions_token)
 
     @staticmethod

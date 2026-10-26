@@ -23,7 +23,7 @@ from review_sensei.convergence import (
 )
 from review_sensei.coverage import CoverageManifest, coverage_approval_state
 from review_sensei.diff import DiffAnalysis, analyze_diff
-from review_sensei.errors import ReviewInputError
+from review_sensei.errors import EvidenceBudgetExhausted, ReviewInputError
 from review_sensei.human_assessment import (
     PendingHumanReview,
     finding_instance_fingerprint,
@@ -1263,6 +1263,8 @@ def approval_eligibility_from_body(
             expected_context=expected_context,
             visible_reader=visible_reader,
         )
+    except EvidenceBudgetExhausted:
+        raise
     except ReviewInputError:
         return None
 

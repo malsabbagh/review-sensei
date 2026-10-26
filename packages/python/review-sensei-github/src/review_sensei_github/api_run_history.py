@@ -8,7 +8,7 @@ owned readback once, never another POST. History pointers never confer authority
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Mapping, cast
 
 from review_sensei.api_work import ApiRunAccounting
 from review_sensei.bounded_evidence import (
@@ -34,7 +34,9 @@ def retained_binding(record: SessionRecord, producer: str) -> dict[str, object]:
     if transaction is None and state.analysis_abort is not None:
         from review_sensei.models import ReviewTransaction
 
-        transaction = ReviewTransaction.from_dict(state.analysis_abort["transaction"])
+        transaction = ReviewTransaction.from_dict(
+            cast(Mapping[str, object], state.analysis_abort["transaction"])
+        )
     if transaction is None:
         raise ReviewInputError("previous run has no terminal review transaction")
     return {

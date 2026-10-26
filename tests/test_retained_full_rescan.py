@@ -39,6 +39,33 @@ from tests.default_human_inventory_contract import APP, HEAD, IDENTITY
 
 
 class RetainedFullRescanTests(unittest.TestCase):
+    def test_operational_budget_failure_is_not_malformed_eligibility(self):
+        from review_sensei.errors import EvidenceBudgetExhausted
+
+        with tempfile.TemporaryDirectory() as directory:
+            state, _ledger, _env, _args, _source = self.prepare(directory)
+            body = state.reviews[-1]["body"]
+            for message in (
+                "partition shared request budget exhausted",
+                "partition read deadline exhausted",
+            ):
+                with self.subTest(message=message):
+                    with self.assertRaisesRegex(EvidenceBudgetExhausted, message):
+                        approval_eligibility_from_body(
+                            body,
+                            human_inventory_reader=lambda _ref: (_ for _ in ()).throw(
+                                EvidenceBudgetExhausted(message)
+                            ),
+                        )
+            self.assertIsNone(
+                approval_eligibility_from_body(
+                    body,
+                    human_inventory_reader=lambda _ref: (_ for _ in ()).throw(
+                        ReviewInputError("malformed inventory")
+                    ),
+                )
+            )
+
     def prepare(self, directory):
         state, ledger, env, args = rescan_fixture.DefaultHumanRescanTests().prepare(
             directory, count=20, detail=1

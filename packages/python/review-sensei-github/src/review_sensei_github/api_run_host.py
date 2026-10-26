@@ -92,6 +92,7 @@ class ApiRunReviewHooks:
         *,
         base_sha: str,
         head_sha: str,
+        oidc_token: str | None = None,
     ):
         if not isinstance(
             ledger, ApiRunSessionLedger
@@ -101,6 +102,7 @@ class ApiRunReviewHooks:
             )
         self.ledger, self.identity = ledger, identity
         self.base_sha, self.head_sha = base_sha, head_sha
+        self.oidc_token = oidc_token
         self.configuration = ledger.caller.accounting.configuration
         self._provider_started = self._completion_started = False
 
@@ -150,6 +152,35 @@ class ApiRunReviewHooks:
         self._provider_started = True
         self.ledger.caller.label_phase("provider")
         return self.ledger
+
+    def resolve_rescan(self, args, ledger):
+        import os
+
+        from .broker_client import BrokerClient
+        from .broker_control import BrokerDispatchAccounting
+        from .rescan import resolve_rescan
+        from .review_hooks import ANALYSIS_ACTION_INTERNAL_DISPATCHES
+
+        if ledger is not self.ledger:
+            raise ReviewInputError("rescan does not own the admitted caller ledger")
+        actions_token = ""
+        if os.environ.get("GITHUB_EVENT_NAME") != "issue_comment":
+            broker = BrokerClient(
+                opener=self.ledger.caller.open,
+                control=BrokerDispatchAccounting(
+                    self.ledger.caller.budget_view,
+                    hashlib.sha256(
+                        f"rescan:{self.identity}:{self.head_sha}".encode()
+                    ).hexdigest(),
+                    ANALYSIS_ACTION_INTERNAL_DISPATCHES,
+                    1,
+                ),
+            )
+            actions_token = broker.exchange(
+                self.oidc_token or broker.request_oidc_token(),
+                capability="review_actions",
+            )
+        return resolve_rescan(args, ledger, actions_token=actions_token)
 
     def begin_completion_phase(self, ledger):
         if ledger is not self.ledger or not self._provider_started:

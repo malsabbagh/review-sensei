@@ -98,7 +98,7 @@ class TrustedRecoveryWorkflowTests(unittest.TestCase):
                 self.assertIn("--recover-retained --reconstruct-contexts", job)
                 self.assertIn('--trusted-context-root "$PWD/recovery-policy"', job)
                 self.assertIn(
-                    "steps.provider-review.outputs.result_ready == 'true' || inputs.recover_publication",
+                    "steps.publish-admission.outputs.status == 'current' && inputs.recover_publication",
                     job,
                 )
                 self.assertIn("git merge-base --is-ancestor", job)

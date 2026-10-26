@@ -18,6 +18,10 @@ class ChunkPreflightError(ReviewInputError):
     """Raised when a chunked sub-run diff fails bounded planning preflight."""
 
 
+class EvidenceBudgetExhausted(ReviewInputError):
+    """A bounded read could not finish within its original calls or deadline."""
+
+
 class ReviewModeRetiredError(ReviewInputError):
     """Raised when configuration still selects the retired `legacy` engine.
 

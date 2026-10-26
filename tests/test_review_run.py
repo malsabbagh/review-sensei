@@ -514,7 +514,7 @@ class ReviewRunEntryTests(unittest.TestCase):
                 )
                 self.assertEqual(f.accounted._terminal_reason, "publication-completion")
                 self.assertEqual(f.provider_calls, 1)
-                self.assertEqual(len(f.trace), 85 if human else 89)
+                self.assertEqual(len(f.trace), 84 if human else 88)
                 self.assertEqual(caller_measurement(f)["startup_reservation"], 130)
 
     def test_diagnostic_files_cannot_replace_in_memory_publication(self):
@@ -666,18 +666,18 @@ class ReviewRunEntryTests(unittest.TestCase):
             self.assertEqual(f.invoke(), 0, f.error)
             self.assertEqual(f.accounted.accounting.owner.job, "local")
             self.assertEqual(len(f.transports), 1)
-            self.assertEqual(len(f.trace), 90)
+            self.assertEqual(len(f.trace), 89)
             self.assertEqual(sum(p == "/api/tags" for _, _, p in f.trace), 1)
             self.assertTrue(any(r["state"] == "APPROVED" for r in f.reviews))
 
     def test_unfunded_publication_stops_without_new_allowance(self):
         with tempfile.TemporaryDirectory() as directory:
-            f = EntryFixture(directory, limit=QUALIFICATION_LIMIT - 2)
+            f = EntryFixture(directory, limit=QUALIFICATION_LIMIT - 4)
             self.assertEqual(f.invoke(), 1)
             self.assertEqual(len(f.transports), 1)
             self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
             self.assertEqual(
-                f.accounted.accounting.configuration.limit, QUALIFICATION_LIMIT - 2
+                f.accounted.accounting.configuration.limit, QUALIFICATION_LIMIT - 4
             )
             self.assertEqual(f.accounted._terminal_reason, "publication-completion")
 

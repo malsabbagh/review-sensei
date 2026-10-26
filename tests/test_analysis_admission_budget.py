@@ -21,6 +21,40 @@ from tests.test_github_broker_client import FakeResponse
 
 
 class AnalysisAdmissionBudgetTests(unittest.TestCase):
+    def test_issue_comment_rescan_needs_no_actions_exchange_but_dispatch_does(self):
+        from unittest.mock import Mock
+
+        args = SimpleNamespace(oidc_token="synthetic")
+        ledger = SimpleNamespace(evidence_budget=EvidenceReadBudget())
+        for event in ("issue_comment", "workflow_dispatch"):
+            with (
+                self.subTest(event=event),
+                patch.dict(os.environ, {"GITHUB_EVENT_NAME": event}),
+                patch(
+                    "review_sensei_github.rescan.resolve_rescan",
+                    return_value="authorized",
+                ) as resolve,
+            ):
+                broker = Mock()
+                broker.exchange.return_value = "actions-token"
+                with patch.object(
+                    GitHubReviewHooks, "_admission_broker", return_value=broker
+                ) as factory:
+                    self.assertEqual(
+                        GitHubReviewHooks().resolve_rescan(args, ledger), "authorized"
+                    )
+                if event == "issue_comment":
+                    factory.assert_not_called()
+                    broker.exchange.assert_not_called()
+                    token = ""
+                else:
+                    factory.assert_called_once()
+                    broker.exchange.assert_called_once_with(
+                        "synthetic", capability="review_actions"
+                    )
+                    token = "actions-token"
+                resolve.assert_called_once_with(args, ledger, actions_token=token)
+
     def setUp(self):
         self.args = SimpleNamespace(
             repository="acme/widgets",

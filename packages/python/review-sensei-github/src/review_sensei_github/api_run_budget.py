@@ -6,7 +6,7 @@ import time
 from typing import Any
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
-from review_sensei.errors import ReviewInputError
+from review_sensei.errors import EvidenceBudgetExhausted, ReviewInputError
 
 
 class CallerRunBudget(EvidenceReadBudget):
@@ -68,7 +68,9 @@ class CallerRunBudget(EvidenceReadBudget):
     def preflight(self, calls: int) -> None:
         self.check()
         if type(calls) is not int or calls < 0 or calls > self.ordinary_remaining():
-            raise ReviewInputError("caller run cannot fund the complete operation")
+            raise EvidenceBudgetExhausted(
+                "caller run cannot fund the complete operation"
+            )
 
     def snapshot(self) -> dict[str, object]:
         raise ReviewInputError("caller accounting uses the authenticated run record")

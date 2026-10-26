@@ -7,7 +7,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
-from review_sensei.errors import ReviewInputError
+from review_sensei.errors import EvidenceBudgetExhausted, ReviewInputError
 
 
 @dataclass
@@ -26,19 +26,23 @@ class CallerOperation:
 
     def consume(self, *, mutation: bool) -> None:
         if self.remaining <= 0:
-            raise ReviewInputError("caller operation allocation exhausted")
+            raise EvidenceBudgetExhausted("caller operation allocation exhausted")
         if mutation:
             if not self.write_tail or self.write_attempted:
                 raise ReviewInputError("caller operation cannot repeat a mutation")
             if self.remaining < self.write_tail:
-                raise ReviewInputError("caller mutation confirmation tail is unfunded")
+                raise EvidenceBudgetExhausted(
+                    "caller mutation confirmation tail is unfunded"
+                )
             self.write_attempted = True
         elif self.write_attempted:
             if self.confirmation_used >= self.write_tail - 1:
-                raise ReviewInputError("caller write confirmation allocation exhausted")
+                raise EvidenceBudgetExhausted(
+                    "caller write confirmation allocation exhausted"
+                )
             self.confirmation_used += 1
         elif self.write_tail and self.remaining <= self.write_tail:
-            raise ReviewInputError(
+            raise EvidenceBudgetExhausted(
                 "caller enumeration cannot preserve write confirmation"
             )
         self.used += 1

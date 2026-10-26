@@ -265,8 +265,8 @@ jobs:
                 echo '::error::head ref input is invalid' >&2
                 exit 1
               fi
-              if [[ ! "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]; then
-                echo '::error::head sha is required for review operations' >&2
+              if [[ -n "$HEAD_SHA" && ! "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+                echo '::error::head sha is invalid for review operations' >&2
                 exit 1
               fi
               ;;
@@ -543,6 +543,7 @@ jobs:
           BASE_SHA: ${{ inputs.base_sha }}
           HEAD_REPOSITORY: ${{ inputs.head_repository }}
           OPERATION: ${{ inputs.operation }}
+          RECOVER_PUBLICATION: ${{ inputs.recover_publication }}
         run: |
           set -euo pipefail
           # Command mutations reuse the live head/branch checks below, so a
@@ -555,6 +556,11 @@ jobs:
           [[ "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]] || { echo '::error::pull request identity is invalid' >&2; exit 1; }
           [[ "$REPOSITORY" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo '::error::repository identity is invalid' >&2; exit 1; }
           [[ "$REPOSITORY_ID" =~ ^[1-9][0-9]*$ ]] || { echo '::error::repository id must be a positive decimal integer' >&2; exit 1; }
+          if [[ "$OPERATION" == "review" && "$RECOVER_PUBLICATION" != "true" ]]; then
+            echo "pull_request_number=$PULL_REQUEST" >> "$GITHUB_OUTPUT"
+            echo 'Live review preflight belongs to the metered lifecycle.'
+            exit 0
+          fi
           [[ -n "$BASE_REF" && "$BASE_REF" != -* && "$BASE_REF" != *--* && "$BASE_REF" != *- && "$BASE_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo '::error::base ref identity is invalid' >&2; exit 1; }
           [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo '::error::head sha identity is invalid' >&2; exit 1; }
           if [[ -n "$BASE_SHA" && ! "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]; then
@@ -943,7 +949,7 @@ jobs:
           if base_sha and not re.fullmatch(r"[a-f0-9]{40}", base_sha):
               raise SystemExit("BASE_SHA input is invalid")
           head_sha = os.environ.get("HEAD_SHA", "")
-          if os.environ.get("OPERATION") == "review" and not re.fullmatch(r"[a-f0-9]{40}", head_sha):
+          if head_sha and not re.fullmatch(r"[a-f0-9]{40}", head_sha):
               raise SystemExit("HEAD_SHA input is invalid")
           head_repository = os.environ.get("HEAD_REPOSITORY", "")
           if head_repository and not repository_pattern.fullmatch(head_repository):
@@ -1070,7 +1076,7 @@ jobs:
           echo "materialized secret $CREDENTIAL_ENV for the selected backend"
 
       - name: Prepare bounded trusted-base diff
-        if: inputs.operation == 'review'
+        if: inputs.operation == 'review' && inputs.recover_publication
         env:
           BASE_REF: ${{ steps.trusted-base.outputs.sha }}
           HEAD_REF: ${{ inputs.head_sha }}
@@ -1090,6 +1096,8 @@ jobs:
         id: provider-review
         if: inputs.operation == 'review' && !inputs.recover_publication
         env:
+          GITHUB_TOKEN: ${{ github.token }}
+          POLICY_COMMIT: ${{ needs.bootstrap.outputs.policy_commit }}
           RUNNER_KIND: ${{ needs.bootstrap.outputs.runner_kind }}
           BACKEND: ${{ needs.bootstrap.outputs.backend }}
           BASE_URL: ${{ needs.bootstrap.outputs.base_url }}
@@ -1105,7 +1113,7 @@ jobs:
           REVIEWSENSEI_APP_ID: ${{ github.event.installation.app_id }}
           TITLE_B64: ${{ needs.authoritative-preflight.outputs.pull_request_title_b64 }}
           HEAD_SHA: ${{ inputs.head_sha }}
-          BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
         run: |
           # The runner the plan selected is verified before inference: a
           # backend-aware plan that lands on the wrong runner fails here rather
@@ -1120,7 +1128,7 @@ jobs:
             echo '::error::authoritative pull-request title output could not be decoded' >&2
             exit 1
           fi
-          review_args=(--diff pr.patch --repository "$REPOSITORY" --pull-request "$PULL_REQUEST")
+          review_args=(--repository "$REPOSITORY" --pull-request "$PULL_REQUEST")
           if [[ -n "$TITLE" ]]; then review_args+=(--title "$TITLE"); fi
           if [[ "$LEARNING" == "disabled" ]]; then review_args+=(--no-learning-proposals); fi
           if [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]; then review_args+=(--head-sha "$HEAD_SHA"); fi
@@ -1175,7 +1183,9 @@ jobs:
           # landing in the launch window still reaches the child.
           review_pid=""
           trap 'if [[ -n "$review_pid" ]]; then kill -TERM "$review_pid" 2>/dev/null || true; fi' TERM INT
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" review "${review_args[@]}" \
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" review-run \
+            --policy-commit "$POLICY_COMMIT" --run-directory "$RUNNER_TEMP" \
+            --publication-outcome publication-outcome.json -- "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --output review.json --outcome outcome.json &
           review_pid=$!
@@ -1192,30 +1202,9 @@ jobs:
       # Runs even after cancellation or a review-step timeout: release this
       # run's own reservation if the killed Python process could not. The
       # command is owner-only and never touches saved publication work.
-      - name: Release this run's session reservation
-        if: always() && inputs.operation == 'review' && !inputs.recover_publication
-        env:
-          REPOSITORY: ${{ inputs.repository }}
-          REPOSITORY_ID: ${{ inputs.repository_id }}
-          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          if [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ && "$RUN_ID" =~ ^[1-9][0-9]*$ && "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]; then
-            "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" release-reservation \
-              --repository "$REPOSITORY" --repository-id "$REPOSITORY_ID" \
-              --pull-request "$PULL_REQUEST" --head-sha "$HEAD_SHA" \
-              --run-id "$RUN_ID" || echo '::warning::reservation release cleanup did not complete'
-          else
-            echo '::warning::reservation release skipped: pull request, head, or run identity unavailable'
-          fi
-
-      # success() && !cancelled() skips a pointless API call after a failed
-      # provider step or cancelled run. Publish still has its own cancellation
-      # guard and requires status=current from this head check.
       - name: Confirm live pull-request head is still current
         id: publish-admission
-        if: success() && !cancelled() && inputs.operation == 'review'
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.recover_publication
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
@@ -1267,7 +1256,7 @@ jobs:
           echo 'status=current' >> "$GITHUB_OUTPUT"
 
       - name: Publish or promote validated review through the broker
-        if: success() && !cancelled() && inputs.operation == 'review' && steps.publish-admission.outputs.status == 'current' && (steps.provider-review.outputs.result_ready == 'true' || inputs.recover_publication)
+        if: success() && !cancelled() && inputs.operation == 'review' && steps.publish-admission.outputs.status == 'current' && inputs.recover_publication
         env:
           # Read trusted operation receipts with the existing metadata token.
           GITHUB_TOKEN: ${{ github.token }}
@@ -1523,7 +1512,7 @@ jobs:
           if base_sha and not re.fullmatch(r"[a-f0-9]{40}", base_sha):
               raise SystemExit("BASE_SHA input is invalid")
           head_sha = os.environ.get("HEAD_SHA", "")
-          if os.environ.get("OPERATION") == "review" and not re.fullmatch(r"[a-f0-9]{40}", head_sha):
+          if head_sha and not re.fullmatch(r"[a-f0-9]{40}", head_sha):
               raise SystemExit("HEAD_SHA input is invalid")
           head_repository = os.environ.get("HEAD_REPOSITORY", "")
           if head_repository and not repository_pattern.fullmatch(head_repository):
@@ -1666,6 +1655,8 @@ jobs:
         id: provider-review
         if: inputs.operation == 'review' && !inputs.recover_publication
         env:
+          GITHUB_TOKEN: ${{ github.token }}
+          POLICY_COMMIT: ${{ needs.bootstrap.outputs.policy_commit }}
           RUNNER_KIND: ${{ needs.bootstrap.outputs.runner_kind }}
           BACKEND: ${{ needs.bootstrap.outputs.backend }}
           BASE_URL: ${{ needs.bootstrap.outputs.base_url }}
@@ -1683,21 +1674,12 @@ jobs:
           PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
           TITLE_B64: ${{ needs.authoritative-preflight.outputs.pull_request_title_b64 }}
           HEAD_SHA: ${{ inputs.head_sha }}
-          BASE_SHA: ${{ inputs.base_sha || steps.trusted-base.outputs.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
         run: |
           [[ "$RUNNER_KIND" == "local" ]] || { echo '::error::local review requires the local runner plan' >&2; exit 1; }
           # The local prerequisite is verified against the planned endpoint and
           # model: an unreachable server or a missing model fails before
           # inference instead of failing mid-review.
-          curl --fail --silent --show-error --max-time 10 "$BASE_URL/tags" >/dev/null
-          ollama show "$MODEL" >/dev/null
-          args=()
-          if [[ -n "$HEAD_REPOSITORY" ]]; then args+=(--head-repository "$HEAD_REPOSITORY"); fi
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei" prepare-diff \
-            --repository "$PWD/trusted-base" --base-ref "$BASE_REF" \
-            --head-ref "$HEAD_REF" \
-            "${args[@]}" --output pr.patch --max-diff-bytes 1048576 \
-            --max-diff-lines 50000 --max-diff-files 500 --max-diff-hunks 5000
           if [[ -n "$TITLE_B64" && ( ${#TITLE_B64} -gt 8192 || ! "$TITLE_B64" =~ ^[A-Za-z0-9+/=]+$ ) ]]; then
             echo '::error::authoritative pull-request title output is invalid' >&2
             exit 1
@@ -1707,7 +1689,7 @@ jobs:
             echo '::error::authoritative pull-request title output could not be decoded' >&2
             exit 1
           fi
-          review_args=(--diff pr.patch --repository "$REPOSITORY" --pull-request "$PULL_REQUEST")
+          review_args=(--repository "$REPOSITORY" --pull-request "$PULL_REQUEST")
           if [[ -n "$TITLE" ]]; then review_args+=(--title "$TITLE"); fi
           if [[ "$LEARNING" == "disabled" ]]; then review_args+=(--no-learning-proposals); fi
           if [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]; then review_args+=(--head-sha "$HEAD_SHA"); fi
@@ -1756,7 +1738,9 @@ jobs:
           # landing in the launch window still reaches the child.
           review_pid=""
           trap 'if [[ -n "$review_pid" ]]; then kill -TERM "$review_pid" 2>/dev/null || true; fi' TERM INT
-          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" review "${review_args[@]}" \
+          "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" review-run \
+            --policy-commit "$POLICY_COMMIT" --run-directory "$RUNNER_TEMP" \
+            --publication-outcome publication-outcome.json -- "${review_args[@]}" \
             --learning-root . --learning-directory .github/review-sensei/learnings \
             --output review.json --outcome outcome.json &
           review_pid=$!
@@ -1773,30 +1757,9 @@ jobs:
       # Runs even after cancellation or a review-step timeout: release this
       # run's own reservation if the killed Python process could not. The
       # command is owner-only and never touches saved publication work.
-      - name: Release this run's session reservation
-        if: always() && inputs.operation == 'review' && !inputs.recover_publication
-        env:
-          REPOSITORY: ${{ inputs.repository }}
-          REPOSITORY_ID: ${{ inputs.repository_id }}
-          PULL_REQUEST: ${{ inputs.pull_request_number || github.event.pull_request.number || github.event.issue.number }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          if [[ "$HEAD_SHA" =~ ^[a-f0-9]{40}$ && "$RUN_ID" =~ ^[1-9][0-9]*$ && "$PULL_REQUEST" =~ ^[1-9][0-9]*$ ]]; then
-            "$RUNNER_TEMP/review-sensei-venv/bin/review-sensei-github" release-reservation \
-              --repository "$REPOSITORY" --repository-id "$REPOSITORY_ID" \
-              --pull-request "$PULL_REQUEST" --head-sha "$HEAD_SHA" \
-              --run-id "$RUN_ID" || echo '::warning::reservation release cleanup did not complete'
-          else
-            echo '::warning::reservation release skipped: pull request, head, or run identity unavailable'
-          fi
-
-      # success() && !cancelled() skips a pointless API call after a failed
-      # provider step or cancelled run. Publish still has its own cancellation
-      # guard and requires status=current from this head check.
       - name: Confirm live pull-request head is still current
         id: publish-admission
-        if: success() && !cancelled() && inputs.operation == 'review'
+        if: success() && !cancelled() && inputs.operation == 'review' && inputs.recover_publication
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ inputs.repository }}
@@ -1848,7 +1811,7 @@ jobs:
           echo 'status=current' >> "$GITHUB_OUTPUT"
 
       - name: Publish or promote validated local review and learnings
-        if: success() && !cancelled() && inputs.operation == 'review' && steps.publish-admission.outputs.status == 'current' && (steps.provider-review.outputs.result_ready == 'true' || inputs.recover_publication)
+        if: success() && !cancelled() && inputs.operation == 'review' && steps.publish-admission.outputs.status == 'current' && inputs.recover_publication
         env:
           # Read trusted operation receipts with the existing metadata token.
           GITHUB_TOKEN: ${{ github.token }}
