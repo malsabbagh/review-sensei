@@ -116,7 +116,9 @@ class EntryFixture(LifecycleFixture):
             stderr=subprocess.PIPE,
         ).strip()
         self.policy_ref = self.policy
-        (self.root / "review.patch").write_text(tx.HostedAnalysisCliTests.ANALYSIS_DIFF)
+        (self.root / "review.patch").write_text(
+            tx.HostedAnalysisCliTests.ANALYSIS_DIFF, encoding="utf-8", newline="\n"
+        )
         self.live_head = HEAD
         self.requested_head = HEAD
         self.before_provider = None

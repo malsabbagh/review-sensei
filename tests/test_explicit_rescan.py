@@ -1860,7 +1860,9 @@ class CurrentDispatchRescanEntryTests(unittest.TestCase):
                     f"index 0000000..1111111\n--- /dev/null\n+++ b/src/mod_{i}.py\n"
                     f"@@ -0,0 +1,2 @@\n+value_{i}=1\n+other_{i}=2\n"
                     for i in range(9)
-                )
+                ),
+                encoding="utf-8",
+                newline="\n",
             )
             original = fixture.external
 

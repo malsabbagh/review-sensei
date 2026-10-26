@@ -44,7 +44,9 @@ def partial_fixture(directory, *, limit=512):
     patch = f.root / "review.patch"
     patch.write_text(
         patch.read_text()
-        + "\ndiff --git a/image.bin b/image.bin\nnew file mode 100644\nindex 0000000..1111111\nBinary files /dev/null and b/image.bin differ\n"
+        + "\ndiff --git a/image.bin b/image.bin\nnew file mode 100644\nindex 0000000..1111111\nBinary files /dev/null and b/image.bin differ\n",
+        encoding="utf-8",
+        newline="\n",
     )
     if f.invoke() != 0:
         raise AssertionError(f.error)

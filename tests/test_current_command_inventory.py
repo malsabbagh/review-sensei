@@ -156,7 +156,9 @@ class CurrentMetadataFixture(CommandEntryFixture):
         patch.write_text(
             patch.read_text() + "\ndiff --git a/image.bin b/image.bin\n"
             "new file mode 100644\nindex 0000000..1111111\n"
-            "Binary files /dev/null and b/image.bin differ\n"
+            "Binary files /dev/null and b/image.bin differ\n",
+            encoding="utf-8",
+            newline="\n",
         )
         if self.invoke() != 0:
             raise AssertionError(self.error)
