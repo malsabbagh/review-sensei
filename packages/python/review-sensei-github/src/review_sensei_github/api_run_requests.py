@@ -1,7 +1,7 @@
-"""Pre-dispatch enforcement for the bounded startup/recovery experiment.
+"""Physical caller enforcement across authenticated Actions run lifecycles.
 
-This is not a public workflow entry or a Worker allowance. Startup slots are
-source-selected, prefunded, nonrefundable and one-use. Ordinary capacity can be
+Startup slots are source-selected, prefunded, nonrefundable and one-use.
+The Worker allowance remains independent. Ordinary capacity can be
 enabled only by this adapter's actual native mutation and authenticated readback,
 never by loading a caller-supplied accounting document into a transport.
 """
@@ -37,6 +37,7 @@ from review_sensei.session import SessionIdentity, SessionRecord
 
 from .api_run_owner import claim_review_startup
 from .caller_operation import CallerOperation
+from .errors import GitHubPublicationTransientError
 from .http import Opener
 from .session_ledger import GitHubIssueCommentSessionLedger
 
@@ -166,6 +167,7 @@ class ApiRunRequestTransport:
         self._logical_phase = "startup"
         self.native_walks: dict[str, int] = {}
         self._active_operation: CallerOperation | None = None
+        self._staged_part_operation: CallerOperation | None = None
         self._checkpoint_operation: CallerOperation | None = None
         self._failed_operations: set[tuple[str | None, str]] = set()
         self._issued_operations: list[tuple[CallerOperation, str | None]] = []
@@ -306,6 +308,44 @@ class ApiRunRequestTransport:
             key, WRITE_CONFIRMATION_TAIL, write_tail=WRITE_CONFIRMATION_TAIL
         )
 
+    @contextmanager
+    def staged_part_operation(self, key: str) -> Iterator[CallerOperation]:
+        """A bounded immutable write inside the existing root allocation.
+
+        Every child request also spends the parent's enumeration capacity.
+        Its write/echo proof cannot spend or replace the root's protected tail.
+        Unknown child effects stop the root mutation and cannot be replayed.
+        """
+        from .api_run_plan import WRITE_CONFIRMATION_TAIL
+
+        parent = self._active_operation
+        identity = (self._root, "part:" + key)
+        if (
+            parent is None
+            or parent.write_attempted
+            or not parent.write_tail
+            or self._staged_part_operation is not None
+            or identity in self._failed_operations
+        ):
+            raise ReviewInputError("immutable part operation is unavailable")
+        if min(parent.remaining, self.usable) < (
+            parent.write_tail + WRITE_CONFIRMATION_TAIL
+        ):
+            raise EvidenceBudgetExhausted("immutable part and root tails are unfunded")
+        operation = CallerOperation(
+            WRITE_CONFIRMATION_TAIL, WRITE_CONFIRMATION_TAIL, identity[1]
+        )
+        self._staged_part_operation = operation
+        try:
+            yield operation
+        except BaseException:
+            self._failed_operations.add(identity)
+            raise
+        finally:
+            if operation.write_attempted and not operation.confirmed:
+                self._failed_operations.add(identity)
+            self._staged_part_operation = None
+
     def open(self, request: Request, *, timeout: float) -> _AccountedResponse:
         from .api_run_plan import WRITE_CONFIRMATION_TAIL
 
@@ -339,9 +379,13 @@ class ApiRunRequestTransport:
             request_id = f"startup-{self.run.repository_id}-{self.run.run_id}-{self.attempt}-{self._sequence}"
         else:
             if self._active_operation is not None:
-                self._active_operation.consume(
-                    mutation=request.get_method() in {"POST", "PUT", "PATCH", "DELETE"}
-                )
+                mutation = request.get_method() in {"POST", "PUT", "PATCH", "DELETE"}
+                if self._staged_part_operation is not None:
+                    self._staged_part_operation.consume(mutation=mutation)
+                    # The root allocation is not replenished by a child write.
+                    self._active_operation.consume(mutation=False)
+                else:
+                    self._active_operation.consume(mutation=mutation)
             if (
                 request.get_method() == "PATCH"
                 and self._checkpoint is not None
@@ -1211,6 +1255,67 @@ class ApiRunSessionLedger(GitHubIssueCommentSessionLedger):
         self.caller = caller
         self.evidence_budget = caller.budget_view
         self._terminal_claimed = False
+        self._part_staging_identity: SessionIdentity | None = None
+
+    def stage_evidence(
+        self,
+        identity: SessionIdentity,
+        *,
+        binding: dict[str, object],
+        document: object,
+        item_count: int,
+        max_manifest_bytes: int,
+    ) -> dict[str, object]:
+        if self._part_staging_identity is not None:
+            raise ReviewInputError("immutable part staging cannot nest")
+        self._part_staging_identity = identity
+        try:
+            return super().stage_evidence(
+                identity,
+                binding=binding,
+                document=document,
+                item_count=item_count,
+                max_manifest_bytes=max_manifest_bytes,
+            )
+        finally:
+            self._part_staging_identity = None
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: dict[str, object] | None = None,
+    ) -> tuple[int, dict[str, Any] | list[Any] | None]:
+        identity = self._part_staging_identity
+        if identity is None or method == "GET":
+            return super()._request(method, path, body=body)
+        content = body.get("body") if body is not None else None
+        if (
+            not self._mutation_active
+            or method != "POST"
+            or path != self._comments_path(identity)
+            or not isinstance(content, str)
+            or not content.startswith("ReviewSensei immutable evidence part v1\n")
+            or not content.endswith("<!-- reviewsensei:evidence-part:v1 -->")
+        ):
+            raise ReviewInputError("immutable part mutation is invalid")
+        key = hashlib.sha256(content.encode()).hexdigest()
+        with self.caller.staged_part_operation(key) as operation:
+            status, payload = super()._request(method, path, body=body)
+            if (
+                status != 201
+                or not isinstance(payload, dict)
+                or type(payload.get("id")) is not int
+                or payload["id"] < 1
+                or payload.get("body") != content
+            ):
+                raise GitHubPublicationTransientError(
+                    "immutable part create was not confirmed"
+                )
+            self._part_owner(payload, identity)
+            operation.confirmed = True
+            return status, payload
 
     def load(self, identity: SessionIdentity, **kwargs: Any) -> Any:
         with self.caller.read_operation("native-load"):

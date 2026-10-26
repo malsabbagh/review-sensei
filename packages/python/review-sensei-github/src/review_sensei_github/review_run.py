@@ -61,6 +61,39 @@ _REPOSITORY = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\Z")
 physical_opener = urlopen
 
 
+class StartupRunLedger(GitHubIssueCommentSessionLedger):
+    """Read retained parts through the original prefunded startup transport.
+
+    Initial comment discovery keeps its existing ten-request pagination bound;
+    retained part reads share the same finite source-owned startup slot.
+    """
+
+    def __init__(
+        self,
+        http: GitHubHttp,
+        *,
+        caller: ApiRunRequestTransport,
+        token: str,
+        app_slug: str,
+        reservation_owner: Mapping[str, object],
+    ):
+        super().__init__(
+            http, token=token, app_slug=app_slug, reservation_owner=reservation_owner
+        )
+        self._startup_caller = caller
+        self.evidence_budget = caller.budget_view
+
+    def _fetch_pages(
+        self, identity: SessionIdentity, *, since: str | None
+    ) -> list[Any]:
+        if self._startup_caller._state is not None:
+            return super()._fetch_pages(identity, since=since)
+        path = self._comments_path(identity)
+        if since is not None:
+            path += "?since=" + quote(since, safe="")
+        return self.http.paginate(path=path, token=self.token)
+
+
 @dataclass(frozen=True)
 class CompletedAnalysis:
     result: ReviewResult = field(repr=False)
@@ -168,6 +201,18 @@ class ActionRunLedger(ApiRunSessionLedger):
     """Current action mutations require their fresh source and head fence."""
 
     business_guard: Any = None
+
+    def __init__(
+        self,
+        native: GitHubIssueCommentSessionLedger,
+        caller: ApiRunRequestTransport,
+        identity: SessionIdentity,
+    ):
+        super().__init__(native, caller, identity)
+        # The application receives this already authenticated caller-owned
+        # ledger. Snapshot staging uses its existing conditional mutation and
+        # physical caller budget, just as a newly constructed action ledger.
+        self.enable_disposition_snapshot_writes = True
 
     def replace(self, identity, mutate, *, now=None):
         if self.business_guard is not None:
@@ -751,8 +796,9 @@ def bootstrap(
     )
     if session.reservation_owner != {"run_id": run_id, "head_sha": args.head_sha}:
         raise ReviewInputError("broker review owner scope conflicts")
-    native = GitHubIssueCommentSessionLedger(
+    native = StartupRunLedger(
         http,
+        caller=caller,
         token=session.token,
         app_slug="reviewsensei[bot]",
         reservation_owner=session.reservation_owner,

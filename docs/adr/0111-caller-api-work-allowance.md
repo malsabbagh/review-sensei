@@ -48,6 +48,15 @@ Unknown or abandoned allocations are never refunded. An uncertain HTTP outcome
 remains charged even if exact readback later establishes its business effect.
 Uncertain writes are never replayed merely because their response was lost.
 
+An immutable part staged during a conditional root mutation has a finite child
+write/echo allocation. Every child request also spends the original root
+operation's enumeration capacity; the root's protected confirmation tail remains
+separate. An unknown part response stops root activation without reposting.
+Startup authenticates retained parts through its original prefunded caller slot
+while preserving the existing ten-request comment-discovery bound. Current
+25-decision command journeys exercise partition staging, later startup reads,
+native approval and uncertain-part/root controls at the default 512 allowance.
+
 A run attempt, job and owner generation identify an execution owner, not another
 allowance. Both startup slots remain occupied after crashes and when unused.
 Same-slot process restart and a third attempt refuse. Supported attempt 2 can
