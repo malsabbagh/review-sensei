@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.14 - 2026-10-26
+
 - Add the root `api_request_limit` setting, defaulting to 512 physical caller
   HTTP attempts per authenticated Actions run. Review, command and reply each
   execute in one owning process across startup, publication and cleanup. Count
@@ -15,6 +17,10 @@
 - Qualify current lifecycle fixtures in the installed-wheel lane, including
   interruption, successor, retained rescan, commands and replies. Operational
   hold activation and release cutover require separate approval and verification.
+
+## review-sensei-github 0.3.20 - 2026-10-26
+
+- Pin `review-sensei==0.8.14`.
 
 ## review-sensei-github 0.3.19 - 2026-10-25
 
