@@ -2188,7 +2188,10 @@ def _run_review_provider(
         encode=analysis_payload,
     )
     if isinstance(admitted, OperationRefusal):
-        raise ReviewInputError(f"operation entry refused: {admitted.reason}")
+        raise ReviewInputError(
+            f"operation entry refused: {admitted.reason}",
+            diagnostic="operation_entry_refused",
+        )
     if not isinstance(admitted, HostedProviderResult):
         raise ReviewInputError("operation entry refused: invalid")
     if admitted.fresh is not None:

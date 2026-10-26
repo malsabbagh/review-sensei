@@ -209,6 +209,48 @@
           "pattern": "^[a-f0-9]{64}$"
         }
       ]
+    },
+    "analysis_abort": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_root",
+            "cleanup_root",
+            "transaction",
+            "entry_state",
+            "run_id",
+            "owner"
+          ],
+          "properties": {
+            "source_root": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "cleanup_root": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "transaction": {
+              "$ref": "review-transaction.schema.json"
+            },
+            "entry_state": {
+              "const": "not_started"
+            },
+            "run_id": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "owner": {
+              "$ref": "#/$defs/owner"
+            }
+          }
+        }
+      ]
     }
   },
   "$defs": {

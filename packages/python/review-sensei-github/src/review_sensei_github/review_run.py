@@ -150,7 +150,7 @@ class ReviewRunLedger(ApiRunSessionLedger):
 
     def replace(self, identity, mutate, *, now=None):
         try:
-            return super().replace(identity, mutate, now=now)
+            confirmed = super().replace(identity, mutate, now=now)
         except GitHubPublicationTransientError:
             operation = self.caller._checkpoint_operation
             if (
@@ -159,7 +159,8 @@ class ReviewRunLedger(ApiRunSessionLedger):
                 or not operation.write_attempted
             ):
                 raise
-            return self.caller.reconcile_checkpoint(self, identity)
+            confirmed = self.caller.reconcile_checkpoint(self, identity)
+        return self.caller.close_analysis_abort(self, identity, confirmed)
 
 
 @dataclass(frozen=True)

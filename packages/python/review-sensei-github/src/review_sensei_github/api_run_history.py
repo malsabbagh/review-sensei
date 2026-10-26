@@ -31,6 +31,10 @@ from .session_ledger import GitHubIssueCommentSessionLedger
 def retained_binding(record: SessionRecord, producer: str) -> dict[str, object]:
     state = ApiRunAccounting.from_document(record.api_run_accounting)
     transaction = record.transaction
+    if transaction is None and state.analysis_abort is not None:
+        from review_sensei.models import ReviewTransaction
+
+        transaction = ReviewTransaction.from_dict(state.analysis_abort["transaction"])
     if transaction is None:
         raise ReviewInputError("previous run has no terminal review transaction")
     return {

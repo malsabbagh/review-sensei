@@ -161,7 +161,23 @@ class ApiRunReviewHooks:
     def run_provider(
         self, service: object, request: object, **kwargs: object
     ) -> object:
-        return GitHubReviewHooks().run_provider(service, request, **kwargs)
+        from review_sensei.errors import ProviderError
+
+        # This is earlier than run_actions_analysis admission. Every exception
+        # from here onward lacks a supported settlement witness, regardless of
+        # its class or diagnostic. Absence of an error is never abort authority.
+        self.ledger.caller._operation_entry_started = True
+        try:
+            return GitHubReviewHooks().run_provider(service, request, **kwargs)
+        except ReviewInputError as error:
+            if error.diagnostic == "operation_entry_refused":
+                self.ledger.caller._provider_effect_unresolved = True
+            raise
+        except (ProviderError, KeyboardInterrupt):
+            # Neither exception proves a remote inference has settled. Keep
+            # cleanup possible, but do not mint terminal rollover authority.
+            self.ledger.caller._provider_effect_unresolved = True
+            raise
 
     def retain_checkpoint_result(self, *args: Any, **kwargs: Any) -> None:
         GitHubReviewHooks().retain_checkpoint_result(*args, **kwargs)

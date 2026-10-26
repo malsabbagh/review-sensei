@@ -88,6 +88,7 @@ class EntryFixture(LifecycleFixture):
         self.live_head = HEAD
         self.requested_head = HEAD
         self.before_provider = None
+        self.before_entry = None
         self.after_engine = None
         self.before_publication = None
         self.selected = None
@@ -101,6 +102,7 @@ class EntryFixture(LifecycleFixture):
         self.rollover_fault = None
         self.change_root = False
         self.archive_bad = None
+        self.abort_fault = None
 
     def external(self, request, timeout):
         import base64
@@ -208,6 +210,32 @@ class EntryFixture(LifecycleFixture):
                 }
             )
         payload = json.loads(request.data) if request.data else {}
+        if self.abort_fault and request.get_method() == "PATCH":
+            from review_sensei_github.session_ledger import parse_session_comment
+
+            candidate = parse_session_comment(payload["body"], identity=IDENTITY)
+            closing = candidate.api_run_accounting["analysis_abort"] is not None
+            cleaning = (
+                not closing
+                and candidate.transaction is None
+                and self.comment is not None
+                and parse_session_comment(
+                    self.comment["body"], identity=IDENTITY
+                ).transaction
+                is not None
+            )
+            if (
+                closing
+                and self.abort_fault.startswith("closure")
+                or cleaning
+                and self.abort_fault.startswith("cleanup")
+            ):
+                fault, self.abort_fault = self.abort_fault, None
+                if fault.endswith("stored"):
+                    self._external_open(request, timeout)
+                else:
+                    self.trace.append((self.attempt, request.get_method(), path))
+                raise TimeoutError("synthetic lost abort response")
         archive = request.get_method() == "POST" and payload.get("body", "").startswith(
             "ReviewSensei immutable evidence part v1"
         )
@@ -355,6 +383,7 @@ class EntryFixture(LifecycleFixture):
         original_engine = review_run.engine_main
         original_execute = review_run.ReviewRun.execute
         original_publish = review_run.ReviewRunHooks.publish_review
+        original_begin = review_run.ReviewRunHooks.begin_provider_phase
 
         def engine(*args, **kwargs):
             result = original_engine(*args, **kwargs)
@@ -370,6 +399,12 @@ class EntryFixture(LifecycleFixture):
             if fixture.before_publication:
                 fixture.before_publication()
             return original_publish(hooks, *args, **kwargs)
+
+        def begin(hooks, *args, **kwargs):
+            result = original_begin(hooks, *args, **kwargs)
+            if fixture.before_entry:
+                fixture.before_entry()
+            return result
 
         old = Path.cwd()
         errors = io.StringIO()
@@ -402,6 +437,9 @@ class EntryFixture(LifecycleFixture):
                     patch.object(review_run, "engine_main", side_effect=engine),
                     patch.object(review_run.ReviewRun, "execute", execute),
                     patch.object(review_run.ReviewRunHooks, "publish_review", publish),
+                    patch.object(
+                        review_run.ReviewRunHooks, "begin_provider_phase", begin
+                    ),
                     patch(
                         "review_sensei.cli.default_registry",
                         return_value=tx.HostedAnalysisCliTests._Registry(Provider()),
@@ -1034,3 +1072,129 @@ os._exit(92)
                 self.assertEqual(f.comment, previous)
                 self.assertEqual(f.provider_calls, 1)
                 self.assertFalse(any(method == "PATCH" for _, method, _ in f.trace))
+
+    def test_known_analysis_abort_closes_and_third_run_retains_chain(self):
+        from review_sensei_github.api_run_history import read_previous_run
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from review_sensei.errors import ReviewInputError
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+
+            def failed():
+                raise ReviewInputError("known fixture input refusal")
+
+            f.before_entry = failed
+            self.assertEqual(f.invoke(), 1)
+            aborted = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertIsNone(aborted.transaction)
+            self.assertIsNotNone(aborted.api_run_accounting["analysis_abort"])
+            f.before_entry = None
+            f.next_run()
+            self.assertEqual(f.invoke(), 0, f.error)
+            second = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            f.next_run()
+            f.requested_head = f.live_head = "e" * 40
+            self.assertEqual(f.invoke(), 0, f.error)
+            retained = read_previous_run(
+                f.selected.ledger, IDENTITY, f.accounted.accounting.previous_record
+            )
+            self.assertEqual(retained.to_dict(), second.to_dict())
+            self.assertEqual(
+                retained.api_run_accounting["previous_record"]["root_sha256"],
+                aborted.record_sha256,
+            )
+
+    def test_uncertain_provider_failure_does_not_authorize_rollover(self):
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from review_sensei.errors import ProviderError
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = EntryFixture(directory)
+
+            def failed():
+                raise ProviderError(
+                    "synthetic provider outcome unknown", transient=True
+                )
+
+            f.before_provider = failed
+            self.assertEqual(f.invoke(), 1)
+            record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+            self.assertIsNone(record.api_run_accounting["analysis_abort"])
+            f.before_provider = None
+            f.next_run()
+            self.assertEqual(f.invoke(), 1)
+
+    def test_only_confirmed_pre_entry_abort_can_close(self):
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from review_sensei.errors import ReviewInputError
+
+        cases = (
+            ("pre-entry", ReviewInputError("local validation refusal"), None, True, 1),
+            ("pre-entry", KeyboardInterrupt(), None, True, 130),
+            ("provider", ReviewInputError("inside Provider.complete"), None, False, 1),
+            ("provider", KeyboardInterrupt(), None, False, 130),
+            ("provider", TimeoutError("provider timed out"), None, False, 1),
+            (
+                "pre-entry",
+                ReviewInputError("local validation refusal"),
+                "cleanup-absent",
+                False,
+                1,
+            ),
+            (
+                "pre-entry",
+                ReviewInputError("local validation refusal"),
+                "closure-stored",
+                True,
+                1,
+            ),
+            (
+                "pre-entry",
+                ReviewInputError("local validation refusal"),
+                "closure-absent",
+                False,
+                1,
+            ),
+        )
+        for phase, error, fault, closes, code in cases:
+            with (
+                self.subTest(phase=phase, error=type(error).__name__, fault=fault),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f = EntryFixture(directory)
+
+                def refuse():
+                    raise error
+
+                if phase == "pre-entry":
+                    f.before_entry = refuse
+                else:
+                    f.before_provider = refuse
+                f.abort_fault = fault
+                self.assertEqual(f.invoke(), code, f.error)
+                record = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertEqual(
+                    record.api_run_accounting["analysis_abort"] is not None, closes
+                )
+                old = f.accounted.accounting
+                if closes:
+                    closure = old.analysis_abort
+                    self.assertEqual(closure["run_id"], f.run_id)
+                    self.assertEqual(closure["owner"]["run_attempt"], 1)
+                    self.assertEqual(closure["entry_state"], "not_started")
+                f.before_entry = f.before_provider = None
+                f.next_run()
+                self.assertEqual(f.invoke(), 0 if closes else 1, f.error)
+                if closes:
+                    from review_sensei_github.api_run_history import read_previous_run
+
+                    archived = read_previous_run(
+                        f.selected.ledger,
+                        IDENTITY,
+                        f.accounted.accounting.previous_record,
+                    )
+                    self.assertEqual(archived.to_dict(), record.to_dict())

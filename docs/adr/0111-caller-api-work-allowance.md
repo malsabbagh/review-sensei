@@ -438,3 +438,22 @@ select it. Workflow consolidation, full multi-page/multi-part entry controls,
 real Worker authentication/service-ceiling composition and the later shipping,
 platform, installed-distribution and obsolete-authority gates remain open.
 No default or repository setting is activated.
+
+### Confirmed pre-entry abort closure
+
+A confirmed native analysis cleanup alone does not settle provider or operation
+entry obligations. The lifecycle records a trusted in-process boundary only
+after confirming the original owned analysis transaction and reservation. It
+marks operation entry started before invoking the hosted provider path. A local
+failure or cancellation before that boundary is crossed may close accounting
+only after exact cleanup confirmation and when no unresolved mutation remains.
+The closed marker binds the original run ID, execution owner, source and cleanup
+roots and analysis transaction. It does not fabricate a published transaction,
+refund charges, change convergence counters or override operation-store refusal.
+
+Any error after operation entry starts, including a local-looking exception from
+`Provider.complete`, timeout, interruption or an unknown reservation, conservatively
+prevents automatic rollover. A diagnostic is not proof of settlement. A future
+supported post-dispatch terminal-rejection path requires an executor-owned typed
+settlement contract; it is outside this correction. Lost cleanup/closure responses
+receive only the original funded exact readback, with no mutation replay.

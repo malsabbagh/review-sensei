@@ -187,6 +187,7 @@ class ApiRunAccounting:
     version: str = ACCOUNTING_VERSION
     previous_record: Mapping[str, object] | None = None
     terminal_transaction: str | None = None
+    analysis_abort: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -212,6 +213,42 @@ class ApiRunAccounting:
             )
         ):
             raise ReviewInputError("caller accounting record is invalid or obsolete")
+        if self.analysis_abort is not None:
+            from .models import ReviewTransaction
+
+            aborted = self.analysis_abort
+            if (
+                not isinstance(aborted, Mapping)
+                or set(aborted)
+                != {
+                    "source_root",
+                    "cleanup_root",
+                    "transaction",
+                    "entry_state",
+                    "run_id",
+                    "owner",
+                }
+                or any(
+                    not isinstance(aborted[k], str)
+                    or _HEX64.fullmatch(aborted[k]) is None
+                    for k in ("source_root", "cleanup_root")
+                )
+                or not isinstance(aborted["transaction"], dict)
+                or aborted["entry_state"] != "not_started"
+                or type(aborted["run_id"]) is not int
+                or aborted["run_id"] != self.identity.run_id
+                or not isinstance(aborted["owner"], dict)
+                or set(aborted["owner"]) != {"run_attempt", "job", "generation"}
+            ):
+                raise ReviewInputError("analysis abort closure is malformed")
+            original_owner = ApiExecutionOwner(**aborted["owner"])
+            if original_owner != self.owner:
+                raise ReviewInputError("analysis abort closure owner conflicts")
+            transaction = ReviewTransaction.from_dict(aborted["transaction"])
+            if transaction.phase != "analysis" or self.terminal_transaction is not None:
+                raise ReviewInputError(
+                    "analysis abort closure is not an owned analysis"
+                )
         if self.terminal_transaction is not None and (
             not isinstance(self.terminal_transaction, str)
             or _HEX64.fullmatch(self.terminal_transaction) is None
@@ -382,6 +419,11 @@ class ApiRunAccounting:
             and self.terminal_transaction != candidate.terminal_transaction
         ):
             raise ReviewInputError("caller terminal transaction cannot be replaced")
+        if (
+            self.analysis_abort is not None
+            and self.analysis_abort != candidate.analysis_abort
+        ):
+            raise ReviewInputError("analysis abort closure cannot be replaced")
         if self.previous_record != candidate.previous_record:
             raise ReviewInputError("retained caller history cannot change within a run")
         claimed = (
@@ -459,6 +501,7 @@ class ApiRunAccounting:
             version=document["version"],
             previous_record=document.get("previous_record"),
             terminal_transaction=document.get("terminal_transaction"),
+            analysis_abort=document.get("analysis_abort"),
         )
 
 

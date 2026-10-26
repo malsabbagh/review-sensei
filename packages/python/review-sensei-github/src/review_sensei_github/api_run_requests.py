@@ -12,6 +12,7 @@ import math
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from review_sensei.api_work import (
     initial_accounting,
 )
 from review_sensei.errors import ReviewInputError
+from review_sensei.models import ReviewTransaction
 from review_sensei.session import SessionIdentity, SessionRecord
 
 from .api_run_owner import claim_review_startup
@@ -66,6 +68,15 @@ class _AccountedResponse:
             self._confirmed()
             self._read = True
         return value
+
+
+@dataclass(frozen=True)
+class AnalysisAbortBoundary:
+    """Trusted process observation after admission, before operation entry."""
+
+    run: ApiRunIdentity
+    owner: ApiExecutionOwner
+    transaction: ReviewTransaction
 
 
 class ApiRunRequestTransport:
@@ -115,6 +126,11 @@ class ApiRunRequestTransport:
         self._checkpoint_readback_attempted = False
         self._producer: str | None = None
         self._reservation_started = False
+        self._abort_source = None
+        self._analysis_boundary: AnalysisAbortBoundary | None = None
+        self._operation_entry_started = False
+        self._provider_effect_unresolved = False
+        self._abort_close_attempted = False
         self._reconciled_mutations: set[str] = set()
         self._checkpoint_write_request_id: str | None = None
         self._activation_write_request_id: str | None = None
@@ -555,10 +571,16 @@ class ApiRunRequestTransport:
             if (
                 record.reservation_id is not None
                 or record.reserved_slot is not None
-                or record.transaction is None
-                or record.transaction.phase
-                not in {"publication_succeeded", "publication_suppressed"}
-                or old.terminal_transaction != record.transaction.transaction_id
+                or (
+                    old.analysis_abort is None
+                    and (
+                        record.transaction is None
+                        or record.transaction.phase
+                        not in {"publication_succeeded", "publication_suppressed"}
+                        or old.terminal_transaction != record.transaction.transaction_id
+                    )
+                )
+                or (old.analysis_abort is not None and record.transaction is not None)
             ):
                 raise ReviewInputError("previous caller run is not terminal")
             before_archive = len(self.observations)
@@ -624,6 +646,45 @@ class ApiRunRequestTransport:
         if self._activation_write_request_id is not None:
             self._reconciled_mutations.add(self._activation_write_request_id)
         return result
+
+    def close_analysis_abort(self, ledger, identity, confirmed):
+        from dataclasses import replace
+
+        source = self._abort_source
+        if source is None or self._abort_close_attempted:
+            return confirmed
+        self._abort_close_attempted = True
+        boundary = self._analysis_boundary
+        if (
+            boundary is None
+            or self._operation_entry_started
+            or boundary.run != self.accounting.identity
+            or boundary.owner != self.accounting.owner
+            or boundary.transaction.to_dict() != source["transaction"]
+            or self._provider_effect_unresolved
+            or self._checkpoint is not None
+            or self._root != source["cleanup_root"]
+            or confirmed.record_sha256 != self._root
+            or any(
+                (o["outcome"] in {"unknown", "expired"} or o.get("uncertain_effect"))
+                and o.get("mutation")
+                and o["request_id"] not in self._reconciled_mutations
+                for o in self.observations
+            )
+        ):
+            raise ReviewInputError("analysis abort cleanup is not confirmed")
+
+        def close(record):
+            if (
+                record.record_sha256 != source["cleanup_root"]
+                or record.reservation_id is not None
+                or record.transaction is not None
+            ):
+                raise ReviewInputError("analysis abort cleanup root changed")
+            self._state = replace(self.accounting, analysis_abort=source)
+            return record.evolve(generation=record.generation + 1)
+
+        return ledger.replace(identity, close)
 
     def finish_review_run(self, ledger, identity, transaction):
         """Confirm one close marker after normal publication and its full tail.
@@ -693,6 +754,22 @@ class ApiRunRequestTransport:
             ).evolve(
                 api_run_accounting=self.accounting.to_document(),
             )
+            if (
+                self._terminal_reason == "analysis-abort"
+                and record.transaction is not None
+                and record.transaction.phase == "analysis"
+                and record.reservation_id == record.transaction.reservation_id
+                and updated.reservation_id is None
+                and updated.transaction is None
+            ):
+                self._abort_source = {
+                    "source_root": record.record_sha256,
+                    "cleanup_root": updated.record_sha256,
+                    "transaction": record.transaction.to_dict(),
+                    "entry_state": "not_started",
+                    "run_id": self.run.run_id,
+                    "owner": asdict(self.accounting.owner),
+                }
             self._checkpoint = updated
             return updated
 
@@ -733,6 +810,16 @@ class ApiRunRequestTransport:
         persisted = ApiRunAccounting.from_document(record.api_run_accounting)
         persisted.require_successor(self.accounting)
         self._root, self._checkpoint = record.record_sha256, None
+        if (
+            self._analysis_boundary is None
+            and not self._operation_entry_started
+            and record.transaction is not None
+            and record.transaction.phase == "analysis"
+            and record.reservation_id == record.transaction.reservation_id
+        ):
+            self._analysis_boundary = AnalysisAbortBoundary(
+                self.accounting.identity, self.accounting.owner, record.transaction
+            )
         if self._checkpoint_write_request_id is not None:
             self._reconciled_mutations.add(self._checkpoint_write_request_id)
 

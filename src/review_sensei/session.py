@@ -1559,10 +1559,16 @@ class SessionRecord:
             or ref["root_sha256"] != self.record_sha256
             or self.reservation_id is not None
             or self.reserved_slot is not None
-            or self.transaction is None
-            or self.transaction.phase
-            not in {"publication_succeeded", "publication_suppressed"}
-            or previous.terminal_transaction != self.transaction.transaction_id
+            or (
+                previous.analysis_abort is None
+                and (
+                    self.transaction is None
+                    or self.transaction.phase
+                    not in {"publication_succeeded", "publication_suppressed"}
+                    or previous.terminal_transaction != self.transaction.transaction_id
+                )
+            )
+            or (previous.analysis_abort is not None and self.transaction is not None)
         ):
             raise ReviewInputError(
                 "caller run rollover is not terminal or correctly retained"
