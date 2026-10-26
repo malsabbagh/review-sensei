@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import parse_qs, urlparse
 
+from fake_github_http import json_response
 from review_sensei_github import GitHubApplication, GitHubWriteOptions, ReviewPublisher
 from review_sensei_github.errors import GitHubPublicationError
 from review_sensei_github.operation_host import (
@@ -30,6 +31,8 @@ from review_sensei_github.publication import (
     parse_finding_index,
 )
 from review_sensei_github.publication_recovery import PublicationBudgetHttp
+from test_human_assessment import APP, BASE, DIFF, HEAD, State
+from test_review_transaction import CONFIGURATION, EVIDENCE, _Broker, _Noop
 
 from review_sensei.baseline import ReviewBaseline, baseline_finding_from_comment
 from review_sensei.bounded_evidence import EvidenceReadBudget
@@ -44,9 +47,6 @@ from review_sensei.session import (
     checkpoint_review_analysis,
     prepare_review_transaction,
 )
-from tests.fake_github_http import json_response
-from tests.test_human_assessment import APP, BASE, DIFF, HEAD, State
-from tests.test_review_transaction import CONFIGURATION, EVIDENCE, _Broker, _Noop
 
 IDENTITY = SessionIdentity("owner/repo", 1, repository_id=1)
 POLICY = ReviewConvergencePolicy(mode="merge-focused")
@@ -1884,7 +1884,20 @@ class PublicationRecoveryTests(unittest.TestCase):
             GitHubIssueCommentSessionLedger,
             render_session_comment,
         )
+        from test_github_broker_client import current_authority, session_response
 
+        authority = {
+            **current_authority(repository_id=1, head_sha=HEAD),
+            "repository": "owner/repo",
+            "pull_request": 1,
+            "source": {
+                "kind": "pull_request",
+                "id": 1,
+                "updated_at": None,
+                "body_sha256": None,
+            },
+        }
+        response = session_response(authority, app_id=99)
         for exhausted in (False, True):
             with (
                 self.subTest(exhausted=exhausted),
@@ -1910,17 +1923,14 @@ class PublicationRecoveryTests(unittest.TestCase):
                     broker_calls.append(request)
                     body = json.loads(request.data)
                     if body.get("capability") == "review_session":
-                        return json_response(
-                            {
-                                "token": "session-token",
-                                "capability": "review_session",
-                                "session_state": "known",
-                            }
-                        )
+                        raw, status = response(body)
+                        return json_response(json.loads(raw), status)
                     return json_response({"token": "capability-token"})
 
                 broker = BrokerClient(
-                    broker_url="https://broker.github.test/token", opener=broker_open
+                    broker_url="https://broker.github.test/token",
+                    opener=broker_open,
+                    authority=authority,
                 )
                 app = GitHubApplication(
                     broker=broker,

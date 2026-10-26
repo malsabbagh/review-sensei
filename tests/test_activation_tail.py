@@ -6,6 +6,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import test_review_transaction as fixture
+from test_assessment_queue_storage import active_summary, queue_root
+from test_authenticated_partitions import binding
+
 from review_sensei.bounded_evidence import (
     ActivationTailPlan,
     EvidenceReadBudget,
@@ -18,9 +22,6 @@ from review_sensei.session import (
     assessment_queue_manifest_capacity,
     read_session_assessment_queue,
 )
-from tests import test_review_transaction as fixture
-from tests.test_assessment_queue_storage import active_summary, queue_root
-from tests.test_authenticated_partitions import binding
 
 RESERVATION = "9" * 64
 OPERATION = {
@@ -393,32 +394,30 @@ class LocalTailTests(unittest.TestCase):
 
 
 class ConsumingBroker:
-    """Real client parsing, with an in-memory one-attempt HTTP service fixture."""
+    """Synthetic current-v3 service, never an activation grant authority.
+
+    Kept as a shared fixture import for parser/refusal tests. Callers needing
+    hosted mutation must use CurrentHostedFixture's real run-owned ledger.
+    """
 
     def __init__(self):
         import json
 
+        from fake_github_http import json_response
         from review_sensei_github.broker_client import BrokerClient
-
-        from tests.fake_github_http import json_response
+        from test_run_authority import authority, granted
 
         self.calls = []
         self.issued = {}
         self.used = set()
-        self.request = {
-            "version": 1,
-            "repository": fixture.IDENTITY.repository,
-            "repository_id": fixture.IDENTITY.repository_id,
-            "pull_request": fixture.IDENTITY.pull_request,
-            "head_sha": fixture.HEAD_SHA,
-            "operation": "command",
-            "source_comment_id": 123,
-            "run_id": "10000000001",
-            "issued_at": 1700000000,
-            "concurrency_group": "reviewsensei-session-test",
-            "job_workflow_ref": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
-            "job_workflow_sha": "a" * 40,
-        }
+        self.request = authority("reply")
+        self.request.update(
+            repository=fixture.IDENTITY.repository,
+            repository_id=fixture.IDENTITY.repository_id,
+            pull_request=fixture.IDENTITY.pull_request,
+            head_sha=fixture.HEAD_SHA,
+        )
+        self.request["source"]["id"] = 123
 
         def opener(request, timeout):
             payload = json.loads(request.data)
@@ -432,34 +431,31 @@ class ConsumingBroker:
                     return json_response({"message": "spent or mismatched"}, 403)
                 self.used.add(grant)
                 return json_response({"session_attestation": self.issued[grant]})
-            attestation = {
-                **payload["session_attestation"],
-                "actor": "maintainer",
-                "actor_type": "User",
-                "association": "OWNER",
-            }
-            if attestation["version"] == 2:
-                attestation["actor_id"] = 42
-            else:
-                attestation.update(command_id=123, command_digest="b" * 64)
+            attestation = granted(payload["session_attestation"])
             grant = f"sg1.1780000000000.{len(self.issued) + 1:043d}"
             self.issued[grant] = attestation
             return json_response(
                 {
                     "token": "synthetic-token",
+                    "capability": "review_session",
                     "session_state": "known",
+                    "app_id": 999,
+                    "reservation_owner": None,
                     "session_grant": grant,
                     "session_attestation": attestation,
                 }
             )
 
         self.client = BrokerClient(
-            broker_url="https://broker.test/token", opener=opener, timeout=1
+            broker_url="https://broker.test/token",
+            opener=opener,
+            timeout=1,
+            authority=self.request,
         )
 
     def issue(self, budget):
         if self.client.before_request is None:
-            budget.consume()  # external composition work, not free authority
+            budget.consume()
         return self.client.authorize_session_mutation(
             "synthetic-oidc",
             repository_id=fixture.IDENTITY.repository_id,
@@ -470,500 +466,405 @@ class ConsumingBroker:
 
 
 def feedback_request(record, budget, *, reason="admission"):
-    from review_sensei.evidence import evidence_digest
-
-    trigger = {"kind": "issue", "comment_id": 123, "updated_at": "2026-10-10T00:00:00Z"}
-    selection = {
-        "interface": "feedback-v1",
-        "repository": fixture.IDENTITY.repository,
-        "pull_request": fixture.IDENTITY.pull_request,
-        "base_sha": fixture.BASE_SHA,
-        "head_sha": fixture.HEAD_SHA,
-        "trigger": trigger,
-        "target_ids": ["d" * 64],
-        "total_bytes": 10,
-        "sources": [
-            {
-                **trigger,
-                "author": "maintainer",
-                "author_id": 42,
-                "association": "OWNER",
-                "root_comment_id": None,
-                "body_bytes": 10,
-                "body_sha256": "c" * 64,
-            }
-        ],
-        "selection_digest": "e" * 64,
-        "event_key": evidence_digest(
-            {
-                "domain": "reviewsensei:feedback-event:v1",
-                "repository": fixture.IDENTITY.repository,
-                "pull_request": fixture.IDENTITY.pull_request,
-                "trigger": {"kind": "issue", "comment_id": 123},
-            }
-        ),
-    }
-    request = ConsumingBroker().request
-    request.update(
-        version=2,
-        operation="feedback",
-        feedback=selection,
-        concurrency_group=f"reviewsensei-session-{fixture.IDENTITY.repository_id}-{fixture.IDENTITY.pull_request}",
-        mutation={
-            **OPERATION,
-            "reservation_id": RESERVATION,
-            "root_digest": record.record_sha256,
-            "root_generation": record.generation,
-            "reason": reason,
-            "request_digest": None,
-            "dispatch_digest": None,
-            "read_accounting": budget.snapshot(),
-        },
+    """Refuse retired feedback-phase construction; no incoming body is upgraded."""
+    raise ReviewInputError(
+        "feedback phase request fixture is retired; construct current source authority"
     )
-    return request
+
+
+class CurrentHostedFixture:
+    """Real native ledger/caller accounting; synthetic HTTP and no provider."""
+
+    def __init__(self, directory, *, limit=512):
+        from review_sensei_github.api_run_requests import ApiRunSessionLedger
+        from test_api_work_lifecycle import LifecycleFixture
+        from test_api_work_persistence import IDENTITY
+
+        self.identity = IDENTITY
+        self.service = LifecycleFixture(directory, limit=limit)
+        native, config, _, owner = self.service.prelude()
+        self.caller = self.service.accounted
+        self.caller.initialize_and_activate(native, IDENTITY, config, owner)
+        self.native = native
+        self.ledger = ApiRunSessionLedger(native, self.caller, IDENTITY)
+        self.original = self.caller.accounting
+
+    def checkpoint(self, phase=0):
+        def prepare(record):
+            return record.evolve(
+                generation=record.generation + 1, operator_paused=bool(phase % 2)
+            )
+
+        return self.ledger.replace(self.identity, prepare)
+
+    def assert_physical_accounting(self, case):
+        state = self.caller.accounting
+        ordinary = [o for o in self.caller.observations if o["phase"] == "ordinary"]
+        case.assertEqual(state.confirmed + state.uncertain, len(ordinary))
+        case.assertEqual(len(self.caller.observations), len(self.service.trace))
+        case.assertEqual(state.configuration, self.original.configuration)
+        case.assertEqual(state.owner, self.original.owner)
+        case.assertEqual(state.startup, self.original.startup)
+        case.assertEqual(state.remaining, self.original.remaining)
+        case.assertEqual(
+            state.configuration.limit,
+            state.startup.liability
+            + state.prior_nonstartup_liability
+            + state.confirmed
+            + state.uncertain
+            + state.reserved_undispatched
+            + state.remaining,
+        )
 
 
 class HostedTailTests(unittest.TestCase):
-    def setup_host(
-        self, *, clock=None, feedback=False, callback=False, before_issue=None
-    ):
-        from review_sensei_github import GitHubHttp
-        from review_sensei_github.session_ledger import (
-            GitHubIssueCommentSessionLedger,
-        )
+    def setup_host(self, **kwargs):
+        """Current fixture; old feedback/callback selectors have no authority."""
+        if kwargs:
+            raise ReviewInputError(
+                "phase-grant fixture selectors are retired; use CurrentHostedFixture"
+            )
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        current = CurrentHostedFixture(directory.name)
+        return current.service, current.caller, current.ledger
 
-        from tests.fake_github_http import json_response
-        from tests.test_authenticated_partitions import GitHubState
+    def test_current_checkpoints_share_one_owner_and_count_each_physical_attempt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = CurrentHostedFixture(directory)
+            before = len(f.service.trace)
+            first = f.checkpoint()
+            middle = len(f.service.trace)
+            second = f.checkpoint(1)
+            self.assertEqual(middle - before, 4)
+            self.assertEqual(len(f.service.trace) - middle, 4)
+            self.assertNotEqual(first.record_sha256, second.record_sha256)
+            self.assertTrue(second.operator_paused)
+            self.assertEqual(f.caller.accounting.confirmed, 8)
+            self.assertEqual(
+                sum("broker" in p for _, _, p in f.service.trace[before:]), 0
+            )
+            f.assert_physical_accounting(self)
 
-        state = GitHubState()
-        original_open = state.open
-        state.live_head = fixture.HEAD_SHA
-        state.head_hook = None
-
-        def opener(request, timeout):
-            if request.full_url.endswith(f"/pulls/{fixture.IDENTITY.pull_request}"):
-                state.calls.append((request.method, request.full_url))
-                if state.head_hook:
-                    state.head_hook()
-                return json_response({"head": {"sha": state.live_head}})
-            return original_open(request, timeout)
-
-        state.http = GitHubHttp(api_url="https://api.github.test", opener=opener)
-        initial = state.ledger().initialize(fixture.IDENTITY, now=fixture.NOW)
-        state.calls.clear()  # enrollment preceded this new operation
-        broker = ConsumingBroker()
-        budget = EvidenceReadBudget(**({"clock": clock} if clock else {}))
-        if callback:
-            broker.client.before_request = budget.consume
-        if feedback:
-            broker.request = feedback_request(initial, budget)
-        if before_issue is not None:
-            before_issue(initial, budget, broker)
-        first = broker.issue(budget)
-        ledger = GitHubIssueCommentSessionLedger(
-            state.http,
-            token=first.token,
-            app_slug="sensei[bot]",
-            broker=broker.client,
-            session_grant=first.grant,
-            session_attestation=first.attestation,
-            head_sha=fixture.HEAD_SHA,
-            evidence_budget=budget,
-            enable_partition_writes=True,
-        )
-        return state, broker, ledger
-
-    def reserve(self, ledger):
-        return ledger.reserve_for_tail(
-            fixture.IDENTITY,
-            operation_binding=OPERATION,
-            slot="verification",
-            reservation_id=RESERVATION,
-            expected_generation=0,
-            max_scan_pages=1,
-            head_sha=fixture.HEAD_SHA,
-            now=fixture.NOW,
-        )
-
-    def fresh(self, broker, ledger, *, pages=1):
-        grant = broker.issue(ledger.evidence_budget)
-        ledger.bind_tail_grant(
-            fixture.IDENTITY,
-            grant,
-            operation_binding=OPERATION,
-            attempt_reservation_id=RESERVATION,
-            max_scan_pages=pages,
-            now=fixture.NOW,
-        )
-        return grant
-
-    def activate(self, ledger, *, phase=0, pages=1):
-        return ledger.replace_with_tail(
-            fixture.IDENTITY,
-            prepare_queue(ledger, phase=phase),
-            operation_binding=OPERATION,
-            attempt_reservation_id=RESERVATION,
-            seal_accounting=seal_accounting,
-            max_scan_pages=pages,
-            now=fixture.NOW,
-        )
-
-    def test_real_consuming_grants_rebind_same_ledger_and_account_exact_tail(self):
-        state, broker, ledger = self.setup_host()
-        self.reserve(ledger)
-        self.fresh(broker, ledger)
-        tickets = []
-        reserve = ledger.evidence_budget.reserve_tail
-
-        def capture(plan):
-            ticket = reserve(plan)
-            tickets.append(ticket)
-            return ticket
-
-        with patch.object(ledger.evidence_budget, "reserve_tail", side_effect=capture):
-            first = self.activate(ledger)
-            self.fresh(broker, ledger)
-            second = self.activate(ledger, phase=1)
-        self.assertEqual(len(broker.used), 3)
-        self.assertEqual([len(ticket.plan.steps) for ticket in tickets], [4, 4])
-        self.assertEqual([ticket.dispatched for ticket in tickets], [4, 4])
-        self.assertEqual(
-            ledger.evidence_budget.calls, len(state.calls) + len(broker.calls)
-        )
-        self.assertEqual(
-            second.assessment_queue["active_operation"]["read_accounting"]["calls"],
-            ledger.evidence_budget.calls,
-        )
-        self.assertNotEqual(first.record_sha256, second.record_sha256)
-
-    def test_v2_checkpoint_claims_evolve_on_original_live_ledger_without_double_charge(
-        self,
-    ):
-        state, broker, ledger = self.setup_host(feedback=True, callback=True)
-        current = self.reserve(ledger)
-        for phase, reason in ((0, "admission"), (1, "accepted")):
-            request = feedback_request(current, ledger.evidence_budget, reason=reason)
-            request["issued_at"] += phase + 1
-            request["mutation"]["request_digest"] = "f" * 64 if phase else None
-            request["mutation"]["dispatch_digest"] = "d" * 64 if phase else None
-            broker.request = request
-            self.fresh(broker, ledger)
-            current = self.activate(ledger, phase=phase)
-        self.assertEqual(ledger.evidence_budget.calls, 25)
-        self.assertEqual(
-            ledger.evidence_budget.calls, len(state.calls) + len(broker.calls)
-        )
-        self.assertEqual(
-            current.assessment_queue["active_operation"]["read_accounting"]["calls"], 25
-        )
-        self.assertEqual(len(broker.used), 3)
-
-    def test_v2_wrong_root_binding_original_accounting_and_source_refuse_rebind(self):
-        for fault in (
-            "root_digest",
-            "root_generation",
-            "operation_id",
-            "source_digest",
-            "authority_digest",
-            "execution_identity",
-            "inventory_digest",
-            "inventory_generation",
-            "reservation_id",
-            "deadline",
-            "calls",
-            "future_calls",
-            "actor",
-            "feedback",
-        ):
-            with self.subTest(fault=fault):
-                state, broker, ledger = self.setup_host(feedback=True)
-                current = self.reserve(ledger)
-                broker.request = feedback_request(current, ledger.evidence_budget)
-                mutation = broker.request["mutation"]
-                if fault == "deadline":
-                    mutation["read_accounting"]["deadline_unix_ms"] += 1
-                elif fault == "calls":
-                    # Previous attestation accounting alone can be behind all
-                    # dispatches: retained completed-root liability is the floor.
-                    self.fresh(broker, ledger)
-                    current = self.activate(ledger)
-                    broker.request = feedback_request(current, ledger.evidence_budget)
-                    broker.request["mutation"]["read_accounting"]["calls"] = 0
-                elif fault == "future_calls":
-                    mutation["read_accounting"]["calls"] = 64
-                elif fault in ("root_generation", "inventory_generation"):
-                    mutation[fault] += 1
-                elif fault == "feedback":
-                    broker.request["feedback"]["selection_digest"] = "a" * 64
-                elif fault == "actor":
-                    broker.request["feedback"]["sources"][0]["author_id"] = 43
-                else:
-                    mutation[fault] = "7" * (
-                        32 if fault == "execution_identity" else 64
-                    )
-                # Parser itself refuses a changed source actor inconsistent with
-                # returned broker actor_id; other references parse then bind refuses.
-                from review_sensei_github.errors import GitHubBrokerClientError
-
-                with self.assertRaises(
-                    ReviewInputError if fault != "actor" else GitHubBrokerClientError
-                ):
-                    self.fresh(broker, ledger)
+    def test_checkpoint_evolution_keeps_original_policy_and_terminal_reservation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = CurrentHostedFixture(directory)
+            terminal = next(
+                b for b in f.original.blocks if b.block_id == f.caller._terminal_block
+            )
+            for phase in range(7):
+                record = f.checkpoint(phase)
+                self.assertEqual(record.operator_paused, bool(phase % 2))
                 self.assertEqual(
-                    state.ledger().load(fixture.IDENTITY, now=fixture.NOW).record,
-                    current,
+                    next(
+                        b
+                        for b in f.caller.accounting.blocks
+                        if b.block_id == terminal.block_id
+                    ),
+                    terminal,
                 )
+                self.assertEqual(f.caller.accounting.confirmed, (phase + 1) * 4)
+            self.assertGreater(f.caller.usable, 0)
+            f.assert_physical_accounting(self)
 
-    def test_v2_fractional_trigger_identity_refuses_before_authority_issue(self):
+    def test_current_source_operation_and_scope_changes_cannot_rebind_action(self):
+        from test_api_work_actions import SOURCE
+        from test_api_work_persistence import HEAD
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = CurrentHostedFixture(directory)
+            args = dict(
+                purpose="reply", source=SOURCE, head_sha=HEAD, operation_key="d" * 64
+            )
+            intent = f.caller.admit_action(f.ledger, f.identity, **args)
+            for changed in (
+                {"source": {**SOURCE, "id": 99}},
+                {"source": {**SOURCE, "body_sha256": "e" * 64}},
+                {"source": {**SOURCE, "updated_at": "2026-10-26T00:00:00Z"}},
+                {"operation_key": "e" * 64},
+                {"head_sha": "f" * 40},
+                {"purpose": "command"},
+            ):
+                before = len(f.service.trace)
+                with (
+                    self.subTest(changed=changed),
+                    self.assertRaisesRegex(
+                        ReviewInputError, "source or operation conflicts"
+                    ),
+                ):
+                    f.caller.admit_action(f.ledger, f.identity, **{**args, **changed})
+                self.assertEqual(len(f.service.trace), before)
+            self.assertEqual(f.caller.accounting.action["intent"], intent)
+            f.assert_physical_accounting(self)
+
+    def test_fractional_current_source_identity_refuses_before_authority_http(self):
+        from review_sensei_github.broker_client import BrokerClient
         from review_sensei_github.errors import GitHubBrokerClientError
+        from test_run_authority import authority
 
-        state, broker, ledger = self.setup_host(feedback=True, callback=True)
-        broker.request["feedback"]["trigger"]["comment_id"] = 123.0
-        calls = len(broker.calls)
+        calls = []
+        request = authority("reply")
+        request["source"]["id"] = 123.0
         with self.assertRaises(GitHubBrokerClientError):
-            broker.issue(ledger.evidence_budget)
-        self.assertEqual(len(broker.calls), calls)
-        self.assertEqual(
-            state.ledger().load(fixture.IDENTITY, now=fixture.NOW).record.generation, 0
+            BrokerClient(authority=request, opener=lambda *a, **k: calls.append(a))
+        self.assertFalse(calls)
+
+    def test_foreign_native_budget_cannot_replace_original_caller(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = CurrentHostedFixture(directory)
+            f.ledger.evidence_budget = EvidenceReadBudget()
+            before = len(f.service.trace)
+            with self.assertRaisesRegex(ReviewInputError, "owning native ledger"):
+                f.checkpoint()
+            self.assertEqual(len(f.service.trace), before)
+            f.assert_physical_accounting(self)
+
+    def test_configured_exhaustion_refuses_checkpoint_without_new_allocation(self):
+        from urllib.request import Request
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = CurrentHostedFixture(directory)
+            saved = f.checkpoint()
+            while f.caller.usable:
+                with f.caller.open(
+                    Request(
+                        "https://api.github.test/repos/owner/repo/pulls/7", method="GET"
+                    ),
+                    timeout=30,
+                ) as response:
+                    response.read(524288)
+            before = len(f.service.trace)
+            blocks = f.caller.accounting.blocks
+            with self.assertRaisesRegex(ReviewInputError, "unfunded"):
+                f.checkpoint(1)
+            self.assertEqual(len(f.service.trace), before)
+            self.assertEqual(f.caller.accounting.blocks, blocks)
+            from review_sensei_github.session_ledger import parse_session_comment
+
+            self.assertEqual(
+                parse_session_comment(f.service.comment["body"], identity=f.identity),
+                saved,
+            )
+            f.assert_physical_accounting(self)
+
+    def test_action_entry_is_one_use_instead_of_reusable_phase_grants(self):
+        from test_api_work_actions import SOURCE
+        from test_api_work_persistence import HEAD
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = CurrentHostedFixture(directory)
+            intent = f.caller.admit_action(
+                f.ledger,
+                f.identity,
+                purpose="reply",
+                source=SOURCE,
+                head_sha=HEAD,
+                operation_key="d" * 64,
+            )
+            f.caller.begin_action_effect(f.ledger, f.identity, intent)
+            before = len(f.service.trace)
+            with self.assertRaisesRegex(ReviewInputError, "may have started"):
+                f.caller.begin_action_effect(f.ledger, f.identity, intent)
+            self.assertEqual(len(f.service.trace), before)
+            self.assertTrue(f.caller.accounting.action["execution_started"])
+            f.assert_physical_accounting(self)
+
+    def test_changed_root_or_numeric_owner_cannot_publish_checkpoint(self):
+        from review_sensei_github.session_ledger import (
+            parse_session_comment,
+            render_session_comment,
         )
 
-    def test_broker_hook_requires_same_original_budget_not_a_new_allowance(self):
-        state, broker, ledger = self.setup_host(callback=True)
-        broker.client.before_request = EvidenceReadBudget().consume
-        count = len(broker.calls)
-        with self.assertRaisesRegex(ReviewInputError, "original budget"):
-            self.reserve(ledger)
-        self.assertEqual(len(broker.calls), count)
-        self.assertEqual(
-            state.ledger().load(fixture.IDENTITY, now=fixture.NOW).record.generation, 0
-        )
-
-    def test_checkpoint_past_the_original_cap_refuses_before_ack(self):
-        state, broker, ledger = self.setup_host()
-        self.reserve(ledger)
-        self.assertEqual(ledger.evidence_budget.calls, 7)
-        for phase, expected in (
-            (0, 16),
-            (1, 25),
-            (2, 34),
-            (3, 43),
-            (4, 52),
-            (5, 61),
-        ):
-            self.fresh(broker, ledger)
-            saved = self.activate(ledger, phase=phase)
-            self.assertEqual(ledger.evidence_budget.calls, expected)
-        with self.assertRaisesRegex(ReviewInputError, "budget"):
-            self.fresh(broker, ledger)
-        # The next checkpoint refuses before a grant is installed. The root stays.
-        self.assertEqual(ledger.evidence_budget.calls, 61)
-        self.assertEqual(len(state.calls), 47)
-        self.assertEqual(len(broker.calls), 14)
-        reader = state.ledger()
-        self.assertEqual(reader.load(fixture.IDENTITY, now=fixture.NOW).record, saved)
-        calls = ledger.evidence_budget.calls
-        with self.assertRaisesRegex(ReviewInputError, "budget"):
-            self.activate(ledger, phase=6)
-        self.assertEqual(ledger.evidence_budget.calls, calls)
-
-    def test_reused_grant_cannot_supply_second_checkpoint(self):
-        state, broker, ledger = self.setup_host()
-        before = self.reserve(ledger)
-        self.assertEqual(len(broker.used), 1)
-        with self.assertRaisesRegex(ReviewInputError, "verification"):
-            self.activate(ledger)
-        self.assertEqual(
-            state.ledger().load(fixture.IDENTITY, now=fixture.NOW).record, before
-        )
-        calls = ledger.evidence_budget.calls
-        with self.assertRaises(NonResumableActivationError):
-            self.activate(ledger)
-        self.assertEqual(ledger.evidence_budget.calls, calls)
-
-    def test_rebind_stale_head_scope_and_numeric_root_owner_refuse_before_install(self):
-        from dataclasses import replace
-
-        for fault in ("head", "scope", "owner", "association"):
-            with self.subTest(fault=fault):
-                state, broker, ledger = self.setup_host()
-                self.reserve(ledger)
-                grant = broker.issue(ledger.evidence_budget)
-                old_grant = ledger._session_grant
-                if fault == "head":
-                    state.live_head = "c" * 40
-                elif fault == "scope":
-                    grant = replace(
-                        grant, attestation={**grant.attestation, "run_id": "99"}
+        for fault in ("root", "owner"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                f = CurrentHostedFixture(directory)
+                item = f.service.comment
+                if fault == "root":
+                    record = parse_session_comment(item["body"], identity=f.identity)
+                    item["body"] = render_session_comment(
+                        repository_id=f.identity.repository_id,
+                        pull_request=f.identity.pull_request,
+                        record=record.evolve(generation=record.generation + 1),
                     )
                 elif fault == "owner":
-                    next(iter(state.comments.values()))["user"]["id"] = 56
+                    item["user"]["id"] = 12345
                 else:
-                    next(iter(state.comments.values()))["issue_url"] = (
-                        "https://api.github.test/repos/other/repo/issues/1"
+                    item["issue_url"] = (
+                        "https://api.github.test/repos/other/repo/issues/7"
                     )
+                before = len(f.service.trace)
                 with self.assertRaises(ReviewInputError):
-                    ledger.bind_tail_grant(
-                        fixture.IDENTITY,
-                        grant,
-                        operation_binding=OPERATION,
-                        attempt_reservation_id=RESERVATION,
-                        max_scan_pages=1,
-                        now=fixture.NOW,
-                    )
-                self.assertEqual(ledger._session_grant, old_grant)
-                with self.assertRaises(NonResumableActivationError):
-                    self.activate(ledger)
+                    f.checkpoint()
+                self.assertTrue(all(m == "GET" for _, m, _ in f.service.trace[before:]))
+                f.assert_physical_accounting(self)
 
-    def test_new_ledger_same_budget_cannot_rebind_original_live_proof(self):
-        from review_sensei_github.session_ledger import (
-            GitHubIssueCommentSessionLedger,
-        )
+    def test_foreign_or_reconstructed_operation_cannot_supply_confirmation_tail(self):
+        from review_sensei_github.caller_operation import CallerOperation
 
-        state, broker, ledger = self.setup_host()
-        self.reserve(ledger)
-        grant = broker.issue(ledger.evidence_budget)
-        other = GitHubIssueCommentSessionLedger(
-            state.http,
-            token=grant.token,
-            app_slug="sensei[bot]",
-            broker=broker.client,
-            session_grant=grant.grant,
-            session_attestation=grant.attestation,
-            head_sha=fixture.HEAD_SHA,
-            evidence_budget=ledger.evidence_budget,
-            enable_partition_writes=True,
-        )
-        calls = ledger.evidence_budget.calls
-        with self.assertRaises(NonResumableActivationError):
-            other.bind_tail_grant(
-                fixture.IDENTITY,
-                grant,
-                operation_binding=OPERATION,
-                attempt_reservation_id=RESERVATION,
-                max_scan_pages=1,
-                now=fixture.NOW,
-            )
-        with self.assertRaises(NonResumableActivationError):
-            self.activate(other)
-        self.assertEqual(ledger.evidence_budget.calls, calls)
-
-    def test_patch_ambiguity_and_expiry_burn_prepaid_tail_without_refund(self):
-        for fault in ("patch", "expiry"):
-            with self.subTest(fault=fault):
-                now = [0.0]
-                state, broker, ledger = self.setup_host(clock=lambda: now[0])
-                before = self.reserve(ledger)
-                self.fresh(broker, ledger)
-                tickets = []
-                reserve = ledger.evidence_budget.reserve_tail
-
-                def capture(plan):
-                    ticket = reserve(plan)
-                    tickets.append(ticket)
-                    return ticket
-
-                if fault == "patch":
-                    state.fail_root_patch = True
-                else:
-                    state.head_hook = lambda: (
-                        now.__setitem__(0, ledger.evidence_budget.deadline)
-                        if ledger._activation_ticket is not None
-                        else None
-                    )
-                with patch.object(
-                    ledger.evidence_budget, "reserve_tail", side_effect=capture
+        with tempfile.TemporaryDirectory() as directory:
+            f = CurrentHostedFixture(directory)
+            for retained in (CallerOperation(10), copy.copy(CallerOperation(10))):
+                before = len(f.service.trace)
+                with self.assertRaisesRegex(
+                    ReviewInputError, "foreign, settled or reconstructed"
                 ):
-                    from review_sensei_github.errors import (
-                        GitHubPublicationTransientError,
-                    )
+                    with f.caller.read_operation("foreign", retained=retained):
+                        self.fail("foreign operation accepted")
+                self.assertEqual(len(f.service.trace), before)
+            f.assert_physical_accounting(self)
 
-                    with self.assertRaises(
-                        (ReviewInputError, GitHubPublicationTransientError)
-                    ):
-                        self.activate(ledger)
-                self.assertEqual(
-                    ledger.evidence_budget.calls,
-                    len(state.calls)
-                    + len(broker.calls)
-                    + len(tickets[0].plan.steps)
-                    - tickets[0].dispatched,
-                )
-                self.assertEqual(
-                    state.ledger().load(fixture.IDENTITY, now=fixture.NOW).record,
-                    before,
-                )
-                with self.assertRaises(NonResumableActivationError):
-                    self.activate(ledger)
-
-    def test_committed_but_lost_patch_response_keeps_readable_prepaid_root(self):
+    def test_unknown_patch_keeps_charge_and_original_readback_without_replay(self):
         from review_sensei_github.errors import GitHubPublicationTransientError
 
-        from tests.fake_github_http import json_response
+        for fault in ("unknown-stored", "unknown-absent"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                f = CurrentHostedFixture(directory)
+                before = len(f.service.trace)
+                f.service.fault = fault
+                with self.assertRaises(GitHubPublicationTransientError):
+                    f.checkpoint(1)
+                if fault == "unknown-stored":
+                    retained = f.caller.reconcile_checkpoint(f.ledger, f.identity)
+                    self.assertTrue(retained.operator_paused)
+                else:
+                    with self.assertRaises(ReviewInputError):
+                        f.caller.reconcile_checkpoint(f.ledger, f.identity)
+                used = len(f.service.trace)
+                with self.assertRaises(ReviewInputError):
+                    f.caller.reconcile_checkpoint(f.ledger, f.identity)
+                self.assertEqual(len(f.service.trace), used)
+                self.assertEqual(
+                    sum(m == "PATCH" for _, m, _ in f.service.trace[before:]), 1
+                )
+                self.assertEqual(f.caller.accounting.uncertain, 1)
+                f.assert_physical_accounting(self)
 
-        state, broker, ledger = self.setup_host(feedback=True, callback=True)
-        reserved = self.reserve(ledger)
-        broker.request = feedback_request(reserved, ledger.evidence_budget)
-        self.fresh(broker, ledger)
-        original = state.http.opener
+    def test_committed_checkpoint_stays_readable_after_accounted_postprocessing_failure(
+        self,
+    ):
+        from fake_github_http import json_response
+        from review_sensei_github.errors import GitHubPublicationTransientError
+        from review_sensei_github.session_ledger import parse_session_comment
 
-        def commit_then_ambiguous(request, timeout):
-            response = original(request, timeout)
-            if request.method == "PATCH":
-                return json_response({}, 503)
-            return response
+        with tempfile.TemporaryDirectory() as directory:
+            f = CurrentHostedFixture(directory)
+            original = f.caller._opener
 
-        with patch.object(state.http, "opener", side_effect=commit_then_ambiguous):
+            def committed_then_unavailable(request, timeout):
+                result = original(request, timeout)
+                return json_response({}, 503) if request.method == "PATCH" else result
+
+            f.caller._opener = committed_then_unavailable
             with self.assertRaises(GitHubPublicationTransientError):
-                self.activate(ledger)
-        reader = state.ledger()
-        saved = reader.load(fixture.IDENTITY, now=fixture.NOW).record
-        self.assertNotEqual(saved.record_sha256, reserved.record_sha256)
-        self.assertEqual(
-            saved.assessment_queue["active_operation"]["read_accounting"]["calls"],
-            ledger.evidence_budget.calls,
+                f.checkpoint(1)
+            f.caller._opener = original
+            retained = f.caller.reconcile_checkpoint(f.ledger, f.identity)
+            self.assertTrue(retained.operator_paused)
+            self.assertEqual(
+                parse_session_comment(f.service.comment["body"], identity=f.identity),
+                retained,
+            )
+            f.assert_physical_accounting(self)
+
+    def test_finite_scan_stops_before_mutation_and_cannot_replenish(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = CurrentHostedFixture(directory)
+            before = len(f.service.trace)
+            f.service.extra_comments.update(
+                {
+                    2000 + i: {"id": 2000 + i, "body": "human comment"}
+                    for i in range(600)
+                }
+            )
+            with self.assertRaisesRegex(
+                ReviewInputError, "preserve write confirmation"
+            ):
+                f.checkpoint()
+            used = len(f.service.trace)
+            self.assertEqual(used - before, 7)
+            self.assertTrue(all(m == "GET" for _, m, _ in f.service.trace[before:]))
+            with self.assertRaisesRegex(ReviewInputError, "cannot be replenished"):
+                f.checkpoint()
+            self.assertEqual(len(f.service.trace), used)
+            f.assert_physical_accounting(self)
+
+    def test_broker_bound_ledger_and_tail_rebind_remain_retired_before_http(self):
+        from review_sensei_github.session_ledger import GitHubIssueCommentSessionLedger
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = CurrentHostedFixture(directory)
+            before = len(f.service.trace)
+            for key, value in (
+                ("broker", ConsumingBroker().client),
+                ("session_grant", "synthetic"),
+                ("session_attestation", ConsumingBroker().request),
+                ("head_sha", fixture.HEAD_SHA),
+            ):
+                with (
+                    self.subTest(key=key),
+                    self.assertRaisesRegex(
+                        ReviewInputError, "broker-bound phase ledgers are retired"
+                    ),
+                ):
+                    GitHubIssueCommentSessionLedger(
+                        f.service.http,
+                        token="synthetic",
+                        app_slug="reviewsensei[bot]",
+                        **{key: value},
+                    )
+            with self.assertRaisesRegex(
+                ReviewInputError, "phase activation grants are retired"
+            ):
+                f.ledger.bind_tail_grant(
+                    f.identity,
+                    None,
+                    operation_binding=OPERATION,
+                    attempt_reservation_id=RESERVATION,
+                    max_scan_pages=1,
+                )
+            self.assertEqual(len(f.service.trace), before)
+
+    def test_history_association_checks_native_root_repository_and_pr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = CurrentHostedFixture(directory)
+            f.service.comment["issue_url"] = (
+                "https://api.github.test/repos/other/repo/issues/7"
+            )
+            before = len(f.service.trace)
+            with self.assertRaisesRegex(ReviewInputError, "association does not match"):
+                f.ledger._history_load(f.identity, max_scan_pages=1, now=None)
+            self.assertTrue(all(m == "GET" for _, m, _ in f.service.trace[before:]))
+            f.assert_physical_accounting(self)
+
+    def test_obsolete_versions_and_phase_documents_refuse_before_broker_http(self):
+        from review_sensei_github.broker_client import BrokerClient
+        from review_sensei_github.errors import GitHubBrokerClientError
+        from test_run_authority import authority
+
+        calls = []
+        budget = EvidenceReadBudget()
+        current = authority("reply")
+        client = BrokerClient(
+            authority=current,
+            before_request=budget.consume,
+            opener=lambda *args, **kwargs: calls.append(args),
         )
-        self.assertEqual(read_session_assessment_queue(reader, saved)["phase"], 0)
-        calls = ledger.evidence_budget.calls
-        with self.assertRaises(NonResumableActivationError):
-            self.activate(ledger, phase=1)
-        self.assertEqual(ledger.evidence_budget.calls, calls)
-
-    def test_scan_liability_is_prepaid_and_over_bound_refuses_before_post(self):
-        state, broker, ledger = self.setup_host()
-        self.reserve(ledger)
-        self.fresh(broker, ledger, pages=2)
-        captured = []
-        reserve = ledger.evidence_budget.reserve_tail
-
-        def capture(plan):
-            ticket = reserve(plan)
-            captured.append(ticket)
-            return ticket
-
-        with patch.object(ledger.evidence_budget, "reserve_tail", side_effect=capture):
-            saved = self.activate(ledger, pages=2)
-        ticket = captured[0]
-        self.assertEqual(len(ticket.plan.steps), 6)
-        self.assertEqual(ticket.dispatched, 4)
-        self.assertEqual(
-            ledger.evidence_budget.calls, len(state.calls) + len(broker.calls) + 2
-        )
-        self.assertEqual(
-            saved.assessment_queue["active_operation"]["read_accounting"]["calls"],
-            ledger.evidence_budget.calls,
-        )
-        self.fresh(broker, ledger, pages=2)
-        # More comments than one inventory read can prove. The next checkpoint
-        # refuses while listing them, before it posts another part.
-        for index in range(1000):
-            state.comments[2000 + index] = {"id": 2000 + index, "body": "human comment"}
-        posts = len([call for call in state.calls if call[0] == "POST"])
-        with self.assertRaises(ReviewInputError):
-            self.activate(ledger, phase=1, pages=1)
-        self.assertEqual(
-            len([call for call in state.calls if call[0] == "POST"]), posts
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()
+        for document in (
+            {**current, "version": 1},
+            {**current, "version": 2},
+            {**current, "mutation": {"root_digest": "a" * 64}},
+            {**current, "feedback": {"interface": "feedback-v1"}},
+        ):
+            with (
+                self.subTest(document=document),
+                self.assertRaises(GitHubBrokerClientError),
+            ):
+                client.authorize_session_mutation(
+                    "synthetic-oidc",
+                    repository_id=current["repository_id"],
+                    pull_request=current["pull_request"],
+                    head_sha=current["head_sha"],
+                    session_attestation=document,
+                )
+            self.assertFalse(calls)
+            self.assertEqual(budget.calls, 0)

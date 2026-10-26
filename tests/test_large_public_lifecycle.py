@@ -12,17 +12,13 @@ from copy import deepcopy
 from dataclasses import replace
 from urllib.parse import parse_qs, urlparse
 
+from fake_github_http import json_response
 from review_sensei_github.application import GitHubApplication, GitHubWriteOptions
 from review_sensei_github.conversation import ConversationPublisher
 from review_sensei_github.operation_comments import ResultPartStore
 from review_sensei_github.operation_host import GitHubCommentOperationStore
 from review_sensei_github.publication import approval_eligibility_from_body
-
-from review_sensei.budgets import ReviewWorkBudgets
-from review_sensei.errors import ReviewInputError
-from review_sensei.human_assessment import HumanReviewFinding, PendingHumanReview
-from tests.fake_github_http import json_response
-from tests.test_human_assessment import (
+from test_human_assessment import (
     APP,
     BASE,
     DIFF,
@@ -32,8 +28,12 @@ from tests.test_human_assessment import (
     State,
     prior,
 )
-from tests.test_operation_entry import MemoryComments
-from tests.test_review_work import AssessingProvider
+from test_operation_entry import MemoryComments
+from test_review_work import AssessingProvider
+
+from review_sensei.budgets import ReviewWorkBudgets
+from review_sensei.errors import ReviewInputError
+from review_sensei.human_assessment import HumanReviewFinding, PendingHumanReview
 
 
 class PagedState(State):

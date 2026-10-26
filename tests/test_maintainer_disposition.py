@@ -37,6 +37,7 @@ from review_sensei.session import (
     SessionRecord,
     prepare_session_round,
 )
+from tests.test_current_command_inventory import CurrentMetadataFixture
 
 FIXED_NOW = datetime(2026, 9, 19, 12, 0, tzinfo=timezone.utc)
 IDENTITY = SessionIdentity("owner/repo", 136, repository_id=99)
@@ -49,6 +50,56 @@ def _pull() -> dict[str, object]:
         "head": {"sha": "b" * 40, "ref": "feature"},
         "base": {"sha": "c" * 40, "ref": "main"},
     }
+
+
+class CurrentReceiptFixture(CurrentMetadataFixture):
+    """Only fake external receipt HTTP; production action/authority stay real."""
+
+    def __init__(self, directory):
+        super().__init__(directory)
+        self.receipt_attempts = []
+        self.receipt_fault = None
+
+    def external(self, request, timeout):
+        from urllib.parse import urlsplit
+
+        from tests.fake_github_http import json_response
+
+        path, method = urlsplit(request.full_url).path, request.get_method()
+        body = json.loads(request.data).get("body", "") if request.data else ""
+        receipt = (
+            method in {"POST", "PATCH"} and "reviewsensei:command-receipt:v1" in body
+        )
+        if (
+            self.receipt_fault == "readback-lost"
+            and self.receipt_attempts
+            and method == "GET"
+            and path.endswith("/issues/7/comments")
+        ):
+            self._meter(request)
+            raise TimeoutError("synthetic lost receipt readback")
+        if not receipt:
+            return super().external(request, timeout)
+        self.receipt_attempts.append((method, path, body))
+        fault = self.receipt_fault
+        if fault == "absent":
+            self._meter(request)
+            raise TimeoutError("synthetic receipt dispatch without known outcome")
+        response = super().external(request, timeout)
+        if fault in {"stored", "readback-lost"}:
+            raise TimeoutError("synthetic lost receipt response")
+        if fault in {"foreign-owner", "wrong-body", "missing-echo-owner"}:
+            item = json.loads(response.read(524288))
+            if fault == "foreign-owner":
+                item["user"]["id"] = 998
+                self.extra_comments[item["id"]]["user"]["id"] = 998
+            elif fault == "wrong-body":
+                item["body"] = "Substituted outcome\n" + body
+                self.extra_comments[item["id"]]["body"] = item["body"]
+            else:
+                item.pop("user")
+            return json_response(item)
+        return response
 
 
 class MaintainerCommandParseTests(unittest.TestCase):
@@ -680,43 +731,55 @@ class DisabledWriteTests(unittest.TestCase):
         self.assertEqual(result.summary, "writes_disabled")
         self.assertEqual(application.broker.exchanges, [])
 
-    def test_hosted_disabled_mutation_does_not_authorize_a_session_grant(self):
-        class Broker:
-            def __init__(self):
-                self.calls = []
+    def test_current_action_disabled_mutation_stops_before_authority_or_http(self):
+        from review_sensei_github import action_run
+        from review_sensei_github.run_authority import VerifiedRunAction
 
-            def request_oidc_token(self):
-                self.calls.append("request_oidc_token")
-                raise AssertionError("writes-disabled mutation must not request OIDC")
+        from tests.test_action_run import CommandEntryFixture
 
-            def authorize_session_mutation(self, *args, **kwargs):
-                self.calls.append((args, kwargs))
-                raise AssertionError(
-                    "writes-disabled mutation must not authorize a session grant"
-                )
+        with tempfile.TemporaryDirectory() as directory:
+            f = CommandEntryFixture(directory)
+            checked = []
 
-        broker = Broker()
-        application = GitHubApplication(
-            broker=broker,
-            http=None,
-            reviewer=object(),
-            learner=object(),
-            replier=object(),
-        )
-        result = application.apply_maintainer_command(
-            options=GitHubWriteOptions(github_writes=False, github_session_ledger=True),
-            oidc_token="oidc",
-            repository="owner/repo",
-            repository_id=99,
-            pull_request=136,
-            head_sha="b" * 40,
-            body="@sensei review pause",
-            actor_login="alice",
-            association="MEMBER",
-            app_slug="reviewsensei[bot]",
-        )
-        self.assertEqual(result.summary, "writes_disabled")
-        self.assertEqual(broker.calls, [])
+            def disabled_command(run, args):
+                # Obtain actual process-owned authority first. Opt-out must not
+                # revalidate source, allocate a business action or touch the ledger.
+                authority = VerifiedRunAction(run)
+                before = (len(f.trace), f.comment["body"])
+                with patch.object(
+                    VerifiedRunAction, "require", side_effect=AssertionError("disabled")
+                ):
+                    result = action_run.application(run).apply_maintainer_command(
+                        options=GitHubWriteOptions(
+                            github_writes=False, github_session_ledger=True
+                        ),
+                        oidc_token=run.oidc,
+                        repository=run.identity.repository,
+                        repository_id=run.identity.repository_id,
+                        pull_request=run.identity.pull_request,
+                        head_sha=run.head_sha,
+                        body=args.comment_body,
+                        actor_login="untrusted-hint",
+                        association="NONE",
+                        app_slug=args.app_slug,
+                        source_comment_id=args.source_comment_id,
+                        current_action=authority,
+                    )
+                self.assertEqual(result.summary, "writes_disabled")
+                self.assertFalse(result.applied)
+                self.assertEqual((len(f.trace), f.comment["body"]), before)
+                self.assertIsNone(run.caller.accounting.action)
+                checked.append(result)
+                return 0
+
+            with patch.object(
+                action_run, "execute_command", side_effect=disabled_command
+            ):
+                self.assertEqual(f.invoke_command(), 0, (f.error, f.exception))
+            self.assertEqual(len(checked), 1)
+            self.assertEqual(f.business_writes, 0)
+            self.assertEqual(f.closure_writes, 0)
+            self.assertFalse(f.reviews)
 
     def test_local_status_does_not_exchange_write_capability(self):
         class Broker:
@@ -873,259 +936,94 @@ class DisabledWriteTests(unittest.TestCase):
         self.assertEqual(broker.exchanges, [])
         self.assertEqual(broker.oidc_requests, 0)
 
-    def test_hosted_mutation_requires_broker_attested_command_grant(self):
-        body = "@sensei review pause"
-        request_attestation = {
-            "version": 1,
-            "repository": "owner/repo",
-            "repository_id": 99,
-            "pull_request": 136,
-            "head_sha": "b" * 40,
-            "operation": "command",
-            "source_comment_id": 501,
-            "run_id": "42",
-            "issued_at": 1,
-            "concurrency_group": "reviewsensei-session-99-136",
-            "job_workflow_ref": "owner/repo/.github/workflows/review.yml@main",
-            "job_workflow_sha": "c" * 40,
-        }
+    def test_hosted_mutation_requires_current_verified_command_and_native_ledger(self):
+        from review_sensei_github.session_ledger import parse_session_comment
 
-        class Broker:
-            def __init__(self):
-                self.authorizations = []
+        from tests.test_action_run import CommandEntryFixture
+        from tests.test_api_work_persistence import IDENTITY as current_identity
 
-            def authorize_session_mutation(self, token, **kwargs):
-                self.authorizations.append((token, kwargs))
-                return type(
-                    "SessionGrant",
-                    (),
-                    {
-                        "token": "capability-token",
-                        "grant": "opaque-grant",
-                        "attestation": {
-                            "repository": "owner/repo",
-                            "repository_id": 99,
-                            "pull_request": 136,
-                            "head_sha": "b" * 40,
-                            "operation": "command",
-                            "source_comment_id": 501,
-                            "actor": "alice",
-                            "actor_type": "User",
-                            "association": "MEMBER",
-                            "command_id": 501,
-                            "command_digest": sha256(body.encode("utf-8")).hexdigest(),
-                        },
-                    },
-                )()
-
-        broker = Broker()
-        application = GitHubApplication(
-            broker=broker,
-            http=None,
-            reviewer=object(),
-            learner=object(),
-            replier=object(),
-        )
-        with patch.object(
-            application,
-            "_session_ledger_for_token",
-            return_value=InMemorySessionLedger(),
-        ):
-            result = application.apply_maintainer_command(
-                options=GitHubWriteOptions(
-                    github_writes=True, github_session_ledger=True
-                ),
-                oidc_token="caller-oidc",
-                repository="owner/repo",
-                repository_id=99,
-                pull_request=136,
-                head_sha="b" * 40,
-                body=body,
-                actor_login="alice",
-                association="MEMBER",
-                app_slug="reviewsensei[bot]",
-                source_comment_id=501,
-                session_attestation=request_attestation,
+        with tempfile.TemporaryDirectory() as directory:
+            f = CommandEntryFixture(directory)
+            self.assertEqual(f.invoke_command(), 0, (f.error, f.exception))
+            record = parse_session_comment(f.comment["body"], identity=current_identity)
+            self.assertTrue(record.operator_paused)
+            self.assertEqual(f.business_writes, 1)
+            self.assertEqual(f.closure_writes, 1)
+            self.assertEqual(record.api_run_accounting["action"]["phase"], "terminal")
+            self.assertEqual(f.selected.session_authority["actor"]["login"], "alice")
+            self.assertEqual(f.selected.session_authority["purpose"], "command")
+            self.assertTrue(f.broker_requests)
+            self.assertTrue(
+                all(
+                    item["session_attestation"]["version"] == 3
+                    for item in f.broker_requests
+                )
             )
-        self.assertTrue(result.applied)
-        self.assertEqual(
-            broker.authorizations,
-            [
-                (
-                    "caller-oidc",
-                    {
-                        "repository_id": 99,
-                        "pull_request": 136,
-                        "head_sha": "b" * 40,
-                        "session_attestation": request_attestation,
-                    },
-                )
-            ],
-        )
+            self.assertEqual(len(f.accounted.observations), len(f.trace))
 
-    def test_hosted_mutation_rejects_a_non_atomic_grant_ledger(self):
-        body = "@sensei review pause"
-        request_attestation = {
-            "version": 1,
-            "repository": "owner/repo",
-            "repository_id": 99,
-            "pull_request": 136,
-            "head_sha": "b" * 40,
-            "operation": "command",
-            "source_comment_id": 501,
-            "run_id": "42",
-            "issued_at": 1,
-            "concurrency_group": "reviewsensei-session-99-136",
-            "job_workflow_ref": "owner/repo/.github/workflows/review.yml@main",
-            "job_workflow_sha": "c" * 40,
-        }
+    def test_hosted_mutation_rejects_a_non_native_ledger_before_business_effects(self):
+        from review_sensei_github import action_run
 
-        class Broker:
-            def authorize_session_mutation(self, token, **kwargs):
-                del token, kwargs
-                return type(
-                    "SessionGrant",
-                    (),
-                    {
-                        "token": "capability-token",
-                        "grant": "opaque-grant",
-                        "attestation": {
-                            "repository": "owner/repo",
-                            "repository_id": 99,
-                            "pull_request": 136,
-                            "head_sha": "b" * 40,
-                            "operation": "command",
-                            "source_comment_id": 501,
-                            "actor": "alice",
-                            "actor_type": "User",
-                            "association": "MEMBER",
-                            "command_id": 501,
-                            "command_digest": sha256(body.encode("utf-8")).hexdigest(),
-                        },
-                    },
-                )()
+        from tests.test_action_run import CommandEntryFixture
 
-        class NonAtomicGrantLedger(InMemorySessionLedger):
-            _broker = object()
+        with tempfile.TemporaryDirectory() as directory:
+            f = CommandEntryFixture(directory)
+            original = action_run.bootstrap
+            foreign = InMemorySessionLedger()
 
-        application = GitHubApplication(
-            broker=Broker(),
-            http=None,
-            reviewer=object(),
-            learner=object(),
-            replier=object(),
-        )
-        with patch.object(
-            application,
-            "_session_ledger_for_token",
-            return_value=NonAtomicGrantLedger(),
-        ):
-            with self.assertRaisesRegex(GitHubPublicationError, "atomic session"):
-                application.apply_maintainer_command(
-                    options=GitHubWriteOptions(
-                        github_writes=True, github_session_ledger=True
-                    ),
-                    oidc_token="caller-oidc",
-                    repository="owner/repo",
-                    repository_id=99,
-                    pull_request=136,
-                    head_sha="b" * 40,
-                    body=body,
-                    actor_login="mallory",
-                    association="CONTRIBUTOR",
-                    app_slug="reviewsensei[bot]",
-                    source_comment_id=501,
-                    session_attestation=request_attestation,
-                )
+            def foreign_ledger(*args, **kwargs):
+                run = original(*args, **kwargs)
+                from dataclasses import replace
 
-    def test_hosted_mutation_rejects_a_broker_attestation_that_binds_another_command(
-        self,
-    ):
-        body = "@sensei review pause"
-        request_attestation = {
-            "version": 1,
-            "repository": "owner/repo",
-            "repository_id": 99,
-            "pull_request": 136,
-            "head_sha": "b" * 40,
-            "operation": "command",
-            "source_comment_id": 501,
-            "run_id": "42",
-            "issued_at": 1,
-            "concurrency_group": "reviewsensei-session-99-136",
-            "job_workflow_ref": "owner/repo/.github/workflows/review.yml@main",
-            "job_workflow_sha": "c" * 40,
-        }
-        attestation = {
-            "repository": "owner/repo",
-            "repository_id": 99,
-            "pull_request": 136,
-            "head_sha": "b" * 40,
-            "operation": "command",
-            "source_comment_id": 501,
-            "actor": "alice",
-            "actor_type": "User",
-            "association": "MEMBER",
-            "command_id": 501,
-            "command_digest": sha256(body.encode("utf-8")).hexdigest(),
-        }
+                return replace(run, ledger=foreign)
 
-        def broker_with(**overrides):
-            def authorize_session_mutation(self, token, **kwargs):
-                del self, token, kwargs
-                return type(
-                    "SessionGrant",
-                    (),
-                    {
-                        "token": "capability-token",
-                        "grant": "opaque-grant",
-                        "attestation": {**attestation, **overrides},
-                    },
-                )()
+            with patch.object(action_run, "bootstrap", side_effect=foreign_ledger):
+                self.assertNotEqual(f.invoke_command(), 0)
+            self.assertIn("Current action ledger is unavailable", f.error)
+            self.assertEqual(f.business_writes, 0)
+            self.assertEqual(f.closure_writes, 0)
+            self.assertFalse(f.reviews)
+            self.assertEqual(foreign._records, {})
 
-            return type(
-                "Broker", (), {"authorize_session_mutation": authorize_session_mutation}
-            )()
+    def test_hosted_mutation_rejects_foreign_current_grant_or_edited_source(self):
+        from tests.test_action_run import CommandEntryFixture
 
-        # The first override is an attestation for another head, the second the
-        # digest a broker records when the comment no longer holds this body.
-        for message, overrides in (
-            ("scope was invalid", {"head_sha": "d" * 40}),
-            (
-                "command was stale",
-                {"command_digest": sha256(b"@sensei review continue").hexdigest()},
-            ),
-        ):
-            with self.subTest(message=message):
-                application = GitHubApplication(
-                    broker=broker_with(**overrides),
-                    http=None,
-                    reviewer=object(),
-                    learner=object(),
-                    replier=object(),
-                )
-                with patch.object(
-                    application,
-                    "_session_ledger_for_token",
-                    return_value=InMemorySessionLedger(),
-                ):
-                    with self.assertRaisesRegex(GitHubPublicationError, message):
-                        application.apply_maintainer_command(
-                            options=GitHubWriteOptions(
-                                github_writes=True, github_session_ledger=True
-                            ),
-                            oidc_token="caller-oidc",
-                            repository="owner/repo",
-                            repository_id=99,
-                            pull_request=136,
-                            head_sha="b" * 40,
-                            body=body,
-                            actor_login="alice",
-                            association="MEMBER",
-                            app_slug="reviewsensei[bot]",
-                            source_comment_id=501,
-                            session_attestation=request_attestation,
-                        )
+        for fault in ("head", "source", "edited-source"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                f = CommandEntryFixture(directory)
+                if fault == "edited-source":
+
+                    def edit_source(fixture):
+                        fixture.source["body"] = "@reviewsensei review continue"
+
+                    f.before_source_read = edit_source
+                else:
+                    f.grant_fault = fault
+                self.assertNotEqual(f.invoke_command(), 0)
+                self.assertEqual(f.business_writes, 0)
+                self.assertEqual(f.closure_writes, 0)
+                self.assertFalse(f.reviews)
+                if fault == "edited-source":
+                    from review_sensei_github.session_ledger import (
+                        parse_session_comment,
+                    )
+
+                    from tests.test_api_work_persistence import (
+                        IDENTITY as current_identity,
+                    )
+
+                    record = parse_session_comment(
+                        f.comment["body"], identity=current_identity
+                    )
+                    self.assertFalse(record.operator_paused)
+                    self.assertEqual(
+                        record.api_run_accounting["action"]["phase"], "pending"
+                    )
+                    self.assertFalse(
+                        record.api_run_accounting["action"]["execution_started"]
+                    )
+                else:
+                    self.assertIsNone(f.comment)
 
 
 class SummaryTests(unittest.TestCase):
@@ -1478,140 +1376,165 @@ class FindingOverrideTests(unittest.TestCase):
         self.assertEqual(trail["resolution_kind"], "coverage_uncertainty_accepted")
         self.assertEqual(trail["invalidation_behavior"], "invalidated_on_new_push")
 
-    def test_post_command_receipt_requires_app_ownership_and_reconciles_stale_outcome(
-        self,
-    ):
-        from review_sensei_github.command_bodies import _post_command_receipt
-
+    def test_current_command_receipt_uses_numeric_app_ownership_and_exact_outcome(self):
         from review_sensei.disposition import OverrideReceipt
         from review_sensei.presentation import render_command_receipt
 
-        comment_body = "@reviewsensei override RS-ABCD1234 --reason accepted"
-        digest = sha256(comment_body.encode("utf-8")).hexdigest()
-        receipts = (OverrideReceipt("RS-ABCD1234", "a" * 64, "recorded"),)
-        failed_text = render_command_receipt(
-            actor="alice",
-            source_comment_id=55,
-            command_digest=digest,
-            receipts=receipts,
-            ledger_written=False,
+        cases = (
+            ("human-spoof", 666, "User", True, "POST"),
+            ("foreign-bot", 998, "Bot", True, "POST"),
+            ("wrong-type", 999, "User", True, "POST"),
+            ("stale-outcome", 999, "Bot", False, "PATCH"),
+            ("exact-owned", 999, "Bot", True, None),
         )
-        succeeded_text = render_command_receipt(
-            actor="alice",
-            source_comment_id=55,
-            command_digest=digest,
-            receipts=receipts,
-            ledger_written=True,
-        )
-
-        class FakeBroker:
-            def request_oidc_token(self):
-                return "oidc"
-
-            def exchange(self, token, *, capability=None):
-                return "ghs_reply_token"
-
-        class FakeHttp:
-            def __init__(self, comments):
-                self.comments = list(comments)
-                self.requests = []
-
-            def repository_path(self, repo, suffix):
-                return f"/repos/{repo}{suffix}"
-
-            def paginate(self, *, path, token, max_requests, timeout_seconds):
-                return list(self.comments)
-
-            def request(self, method, path, *, token, body):
-                self.requests.append((method, path, body["body"]))
-                return 200, {
-                    "id": 999,
-                    "body": body["body"],
-                    "user": {"login": "reviewsensei[bot]", "type": "Bot", "id": 777},
+        for case, producer, kind, written, expected_method in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                f = CurrentReceiptFixture(directory).seed_partial()
+                receipts = (
+                    OverrideReceipt(
+                        "RS-" + f.fingerprint[:6].upper(), f.fingerprint, "recorded"
+                    ),
+                )
+                text = render_command_receipt(
+                    actor="alice",
+                    source_comment_id=f.SOURCE_ID,
+                    command_digest=sha256(f.command_body.encode()).hexdigest(),
+                    receipts=receipts,
+                    ledger_written=written,
+                )
+                expected = render_command_receipt(
+                    actor="alice",
+                    source_comment_id=f.SOURCE_ID,
+                    command_digest=sha256(f.command_body.encode()).hexdigest(),
+                    receipts=receipts,
+                    ledger_written=True,
+                )
+                f.extra_comments[9_000_001] = {
+                    "id": 9_000_001,
+                    "body": text,
+                    "user": {
+                        "id": producer,
+                        "type": kind,
+                        # A login spelling cannot authorize the foreign rows,
+                        # nor invalidate the exact numeric App-owned receipt.
+                        "login": "old-slug[bot]"
+                        if case == "exact-owned"
+                        else "reviewsensei[bot]",
+                    },
+                    "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
                 }
+                self.assertEqual(f.invoke_command(), 0, (f.error, f.exception))
+                self.assertEqual(
+                    [a[0] for a in f.receipt_attempts],
+                    [] if expected_method is None else [expected_method],
+                )
+                if expected_method is not None:
+                    self.assertEqual(f.receipt_attempts[0][2], expected)
+                if expected_method == "POST":
+                    self.assertEqual(f.extra_comments[9_000_001]["body"], text)
+                    self.assertEqual(
+                        f.extra_comments[9_000_001]["user"]["id"], producer
+                    )
+                if expected_method == "PATCH":
+                    self.assertEqual(
+                        f.receipt_attempts[0][1],
+                        "/repos/owner/repo/issues/comments/9000001",
+                    )
+                    self.assertNotEqual(f.receipt_attempts[0][2], text)
+                    self.assertNotIn(
+                        "The ledger was not written.", f.receipt_attempts[0][2]
+                    )
+                self.assertEqual(len(f.record().dispositions), 1)
+                self.assertEqual(
+                    f.record().api_run_accounting["action"]["phase"], "terminal"
+                )
+                self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+                self.assertEqual(len(f.accounted.observations), len(f.trace))
 
-        # 1. Spoofed human comment with matching marker is ignored -> POSTs fresh receipt
-        http_spoof = FakeHttp(
-            [
-                {
-                    "id": 101,
-                    "body": succeeded_text,
-                    "user": {"login": "attacker", "type": "User", "id": 666},
-                }
-            ]
-        )
-        _post_command_receipt(
-            http_spoof,
-            FakeBroker(),
-            oidc_token="oidc",
-            repository="owner/repo",
-            pull_request=12,
-            source_comment_id=55,
-            comment_body=comment_body,
-            actor="alice",
-            receipts=receipts,
-            ledger_written=True,
-            app_slug="reviewsensei[bot]",
-        )
-        self.assertEqual(len(http_spoof.requests), 1)
-        self.assertEqual(http_spoof.requests[0][0], "POST")
+    def test_current_command_receipt_lost_response_requires_exact_owned_readback(self):
+        for fault, succeeds in (
+            ("stored", True),
+            ("missing-echo-owner", True),
+            ("absent", False),
+            ("readback-lost", False),
+            ("foreign-owner", False),
+            ("wrong-body", False),
+        ):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                f = CurrentReceiptFixture(directory).seed_partial()
+                f.receipt_fault = fault
+                status = f.invoke_command()
+                self.assertEqual(status == 0, succeeds, (f.error, f.exception))
+                self.assertEqual(len(f.receipt_attempts), 1)
+                self.assertEqual(f.receipt_attempts[0][0], "POST")
+                self.assertEqual(len(f.record().dispositions), 1)
+                self.assertEqual(f.closure_writes, int(succeeds))
+                self.assertEqual(
+                    f.record().api_run_accounting["action"]["phase"],
+                    "terminal" if succeeds else "pending",
+                )
+                self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+                self.assertEqual(len(f.accounted.observations), len(f.trace))
+                if fault in {"stored", "absent", "readback-lost"}:
+                    unknown = [
+                        o
+                        for o in f.accounted.observations
+                        if o["outcome"] == "unknown" and o.get("mutation")
+                    ]
+                    self.assertEqual(len(unknown), 1)
+                    self.assertGreater(f.accounted.accounting.uncertain, 0)
+                    self.assertEqual(
+                        f.accounted.accounting.configuration.limit,
+                        f.accounted.accounting.startup.liability
+                        + f.accounted.accounting.prior_nonstartup_liability
+                        + f.accounted.accounting.confirmed
+                        + f.accounted.accounting.uncertain
+                        + f.accounted.accounting.reserved_undispatched
+                        + f.accounted.accounting.remaining,
+                    )
 
-        # 2. Prior failed App receipt (ledger_written=False) is reconciled via PATCH when ledger_written=True
-        http_reconcile = FakeHttp(
-            [
-                {
-                    "id": 202,
-                    "body": failed_text,
-                    "user": {"login": "reviewsensei[bot]", "type": "Bot", "id": 777},
-                }
-            ]
-        )
-        _post_command_receipt(
-            http_reconcile,
-            FakeBroker(),
-            oidc_token="oidc",
-            repository="owner/repo",
-            pull_request=12,
-            source_comment_id=55,
-            comment_body=comment_body,
-            actor="alice",
-            receipts=receipts,
-            ledger_written=True,
-            app_slug="reviewsensei[bot]",
-            expected_app_user_id=777,
-        )
-        self.assertEqual(len(http_reconcile.requests), 1)
-        self.assertEqual(http_reconcile.requests[0][0], "PATCH")
-        self.assertEqual(
-            http_reconcile.requests[0][1], "/repos/owner/repo/issues/comments/202"
-        )
-        self.assertEqual(http_reconcile.requests[0][2], succeeded_text)
+    def test_current_command_receipt_duplicate_or_stale_source_cannot_publish(self):
+        for fault in ("duplicate", "source-edit"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                f = CurrentReceiptFixture(directory).seed_partial()
+                if fault == "duplicate":
+                    marker = (
+                        "<!-- reviewsensei:command-receipt:v1 source="
+                        + str(f.SOURCE_ID)
+                        + " digest="
+                        + sha256(f.command_body.encode()).hexdigest()
+                        + " -->"
+                    )
+                    for identifier in (9_000_001, 9_000_002):
+                        f.extra_comments[identifier] = {
+                            "id": identifier,
+                            "body": "Unconfirmed prior outcome\n" + marker,
+                            "user": {
+                                "id": 999,
+                                "type": "Bot",
+                                "login": "reviewsensei[bot]",
+                            },
+                            "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
+                        }
+                else:
 
-        # 3. Exact matching App receipt causes zero additional writes
-        http_exact = FakeHttp(
-            [
-                {
-                    "id": 202,
-                    "body": succeeded_text,
-                    "user": {"login": "reviewsensei[bot]", "type": "Bot", "id": 777},
-                }
-            ]
-        )
-        _post_command_receipt(
-            http_exact,
-            FakeBroker(),
-            oidc_token="oidc",
-            repository="owner/repo",
-            pull_request=12,
-            source_comment_id=55,
-            comment_body=comment_body,
-            actor="alice",
-            receipts=receipts,
-            ledger_written=True,
-            app_slug="reviewsensei[bot]",
-            expected_app_user_id=777,
-        )
-        self.assertEqual(http_exact.requests, [])
+                    def edit_before_receipt(current):
+                        if current.business_writes:
+                            current.source["body"] += " edited"
+
+                    f.before_source_read = edit_before_receipt
+                self.assertNotEqual(f.invoke_command(), 0)
+                self.assertFalse(f.receipt_attempts)
+                self.assertEqual(f.business_writes, 1)
+                self.assertEqual(f.closure_writes, 0)
+                self.assertEqual(len(f.record().dispositions), 1)
+                self.assertEqual(
+                    f.record().api_run_accounting["action"]["phase"], "pending"
+                )
+                self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+                if fault == "duplicate":
+                    self.assertIn("receipt is duplicated", f.error)
+                self.assertEqual(len(f.accounted.observations), len(f.trace))
 
     def test_hosted_continue_reenroll_policy_binding_and_risk_acceptance_audit_context(
         self,
@@ -2541,7 +2464,6 @@ class FindingOverrideTests(unittest.TestCase):
             )
             status = github_main(
                 [
-                    "github",
                     "command",
                     "--comment-body",
                     "@reviewsensei review continue",
@@ -2599,7 +2521,6 @@ class FindingOverrideTests(unittest.TestCase):
             )
             status = github_main(
                 [
-                    "github",
                     "command",
                     "--comment-body",
                     "@reviewsensei review reenroll",
@@ -2630,119 +2551,71 @@ class FindingOverrideTests(unittest.TestCase):
             )
             self.assertTrue(admitted.decision.admit)
 
-            # Hosted CLI entrypoint (--github-session-ledger) with non-default config policy
-            hosted_ledger = InMemorySessionLedger()
-            hosted_ledger.initialize(IDENTITY)
-            hosted_ledger.replace(
-                IDENTITY,
-                lambda cur: cur.evolve(
-                    generation=6,
-                    operator_paused=False,
+        # Exercise the replacement hosted route with a real current grant and
+        # native persistence. A trusted advisory policy must bind continuation
+        # exactly as the supported local command above does.
+        import subprocess
+
+        from review_sensei_github.session_ledger import parse_session_comment
+
+        from review_sensei.session import has_unconsumed_successor_grant
+        from tests.test_action_run import CommandEntryFixture
+        from tests.test_api_work_persistence import IDENTITY as current_identity
+
+        with tempfile.TemporaryDirectory() as directory:
+            f = CommandEntryFixture(directory)
+            f.config_bytes = f.config_bytes.replace(
+                b"github:\n", b"github:\n  reviews: advisory\n"
+            )
+            (f.root / ".reviewsensei.yml").write_bytes(f.config_bytes)
+            subprocess.run(
+                ["git", "-C", str(f.root), "add", ".reviewsensei.yml"],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(f.root),
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "-m",
+                    "advisory",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            f.policy = subprocess.check_output(
+                ["git", "-C", str(f.root), "rev-parse", "HEAD"], text=True
+            ).strip()
+            f.policy_ref = f.policy
+            self.assertEqual(f.invoke(), 0, (f.error, f.exception))
+            f.rewrite_record(
+                mutate=lambda record: record.evolve(
+                    generation=record.generation + 1,
                     failed_attempts=6,
                     failed_attempts_head_sha=head,
-                ),
-            )
-            comment_body = "@reviewsensei review continue"
-            attestation = {
-                "version": 1,
-                "repository": IDENTITY.repository,
-                "repository_id": IDENTITY.repository_id,
-                "pull_request": IDENTITY.pull_request,
-                "head_sha": head,
-                "operation": "command",
-                "source_comment_id": 501,
-                "run_id": "42",
-                "issued_at": 1,
-                "concurrency_group": "reviewsensei-session-99-136",
-                "job_workflow_ref": "owner/repo/.github/workflows/review.yml@main",
-                "job_workflow_sha": "c" * 40,
-            }
-            attestation_file = root / "attestation.json"
-            attestation_file.write_text(json.dumps(attestation))
-            from types import SimpleNamespace
-            from unittest.mock import Mock
-
-            from review_sensei_github import GitHubApplication, GitHubHttp
-
-            broker = Mock()
-            broker.authorize_session_mutation.return_value = SimpleNamespace(
-                token="synthetic-session-capability",
-                grant="synthetic-one-use-grant",
-                attestation={
-                    **attestation,
-                    "actor": "alice",
-                    "actor_type": "User",
-                    "association": "OWNER",
-                    "command_id": 501,
-                    "command_digest": sha256(comment_body.encode()).hexdigest(),
-                },
-            )
-            http = GitHubHttp()
-            with (
-                patch.object(
-                    http,
-                    "request",
-                    return_value=(200, {"permission": "admin"}),
-                ),
-                patch("review_sensei_github.GitHubHttp", return_value=http),
-                patch("review_sensei_github.BrokerClient", return_value=broker),
-                patch.object(
-                    GitHubApplication,
-                    "_session_ledger_for_token",
-                    return_value=hosted_ledger,
-                ),
-            ):
-                hosted_status = github_main(
-                    [
-                        "github",
-                        "command",
-                        "--comment-body",
-                        comment_body,
-                        "--actor",
-                        "alice",
-                        "--actor-type",
-                        "User",
-                        "--association",
-                        "OWNER",
-                        "--app-slug",
-                        "reviewsensei[bot]",
-                        "--repository",
-                        IDENTITY.repository,
-                        "--repository-id",
-                        str(IDENTITY.repository_id),
-                        "--pull-request",
-                        str(IDENTITY.pull_request),
-                        "--head-sha",
-                        head,
-                        "--source-comment-id",
-                        "501",
-                        "--session-attestation",
-                        str(attestation_file),
-                        "--github-session-ledger",
-                        "--oidc-token",
-                        "synthetic-oidc",
-                        "--allow-write",
-                        "--config",
-                        str(cfg_path),
-                    ]
                 )
-            self.assertEqual(hosted_status, 0)
-            hosted_mismatch = prepare_session_round(
-                hosted_ledger,
-                IDENTITY,
-                default_policy,
-                reservation_id="4" * 64,
-                head_sha=head,
             )
-            self.assertFalse(hosted_mismatch.decision.admit)
-            hosted_admitted = prepare_session_round(
-                hosted_ledger,
-                IDENTITY,
-                advisory_policy,
-                reservation_id="5" * 64,
-                head_sha=head,
+            f.select_command("@reviewsensei review continue", new_run=True)
+            self.assertEqual(f.invoke_command(), 0, (f.error, f.exception))
+            record = parse_session_comment(f.comment["body"], identity=current_identity)
+            self.assertIsNone(
+                has_unconsumed_successor_grant(
+                    record, head, policy_digest=default_policy.digest()
+                )
             )
-            self.assertTrue(hosted_admitted.decision.admit)
+            self.assertIsNotNone(
+                has_unconsumed_successor_grant(
+                    record, head, policy_digest=advisory_policy.digest()
+                )
+            )
+            self.assertEqual(record.api_run_accounting["action"]["phase"], "terminal")
+            self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
 
 
 if __name__ == "__main__":

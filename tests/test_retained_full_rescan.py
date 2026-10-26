@@ -10,6 +10,8 @@ from dataclasses import replace
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
+import test_default_human_rescan as rescan_fixture
+from default_human_inventory_contract import APP, HEAD, IDENTITY
 from review_sensei_github.default_human_inventory import (
     HumanInventoryReference,
     HumanInventoryStore,
@@ -34,11 +36,36 @@ from review_sensei.human_assessment import finding_instance_fingerprint
 from review_sensei.human_inventory import inventory_from_result_document
 from review_sensei.rescan import AuthorizedRescan, consume_rescan_request, rescan_source
 from review_sensei.session import SessionLoadResult
-from tests import test_default_human_rescan as rescan_fixture
-from tests.default_human_inventory_contract import APP, HEAD, IDENTITY
 
 
 class RetainedFullRescanTests(unittest.TestCase):
+    def test_operational_budget_failure_is_not_malformed_eligibility(self):
+        from review_sensei.errors import EvidenceBudgetExhausted
+
+        with tempfile.TemporaryDirectory() as directory:
+            state, _ledger, _env, _args, _source = self.prepare(directory)
+            body = state.reviews[-1]["body"]
+            for message in (
+                "partition shared request budget exhausted",
+                "partition read deadline exhausted",
+            ):
+                with self.subTest(message=message):
+                    with self.assertRaisesRegex(EvidenceBudgetExhausted, message):
+                        approval_eligibility_from_body(
+                            body,
+                            human_inventory_reader=lambda _ref: (_ for _ in ()).throw(
+                                EvidenceBudgetExhausted(message)
+                            ),
+                        )
+            self.assertIsNone(
+                approval_eligibility_from_body(
+                    body,
+                    human_inventory_reader=lambda _ref: (_ for _ in ()).throw(
+                        ReviewInputError("malformed inventory")
+                    ),
+                )
+            )
+
     def prepare(self, directory):
         state, ledger, env, args = rescan_fixture.DefaultHumanRescanTests().prepare(
             directory, count=20, detail=1
@@ -180,7 +207,7 @@ class RetainedFullRescanTests(unittest.TestCase):
                 elif fault == "root-producer":
                     state.reviews[-1]["user"]["id"] += 1
                 else:
-                    from tests.default_human_inventory_contract import (
+                    from default_human_inventory_contract import (
                         human_inventory_parts,
                     )
 

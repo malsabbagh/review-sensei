@@ -8,6 +8,8 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+from test_review_work import HUMAN, AssessingProvider, large_patch
+
 from review_sensei.assessment_queue import (
     AssessmentCheckpoint,
     AssessmentJournal,
@@ -27,7 +29,6 @@ from review_sensei.human_assessment import (
 from review_sensei.models import ProviderResponse
 from review_sensei.outcomes import ResourceBudget, ResourceBudgetTracker
 from review_sensei.reassessment_work import reassess, validate_work
-from tests.test_review_work import HUMAN, AssessingProvider, large_patch
 
 
 def fixture(count=50):

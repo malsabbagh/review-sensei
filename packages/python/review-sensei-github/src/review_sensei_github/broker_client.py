@@ -14,12 +14,16 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
-from review_sensei.broker_diagnostics import parse_broker_diagnostic
 from review_sensei.errors import ReviewInputError
 
+from .broker_admission import inspect_broker_http_error
 from .broker_control import BrokerDispatchAccounting
-from .errors import GitHubBrokerClientError, GitHubHTTPTransientError
-from .feedback_attestation import parse_feedback_attestation
+from .errors import (
+    GitHubBrokerAdmissionHeldError,
+    GitHubBrokerClientError,
+    GitHubHTTPTransientError,
+)
+from .run_authority import CAPABILITIES, REQUEST_KEYS, parse_authority
 
 MAX_BROKER_BODY_BYTES = 256 * 1024
 DEFAULT_BROKER_URL = "https://github.reviewsensei.dev/github/token"
@@ -37,6 +41,9 @@ class BrokerSession:
     token: str = field(repr=False)
     state: str
     reservation_owner: Mapping[str, object] | None = None
+    grant: str | None = field(default=None, repr=False)
+    attestation: Mapping[str, object] | None = None
+    app_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -51,27 +58,7 @@ class BrokerSessionGrant:
     state: str
     grant: str = field(repr=False)
     attestation: dict[str, object]
-
-
-_SESSION_ATTESTATION_REQUEST_KEYS = frozenset(
-    {
-        "version",
-        "repository",
-        "repository_id",
-        "pull_request",
-        "head_sha",
-        "operation",
-        "source_comment_id",
-        "run_id",
-        "issued_at",
-        "concurrency_group",
-        "job_workflow_ref",
-        "job_workflow_sha",
-    }
-)
-_SESSION_ATTESTATION_GRANT_KEYS = _SESSION_ATTESTATION_REQUEST_KEYS | frozenset(
-    {"actor", "actor_type", "association", "command_id", "command_digest"}
-)
+    app_id: int | None = None
 
 
 class _ResponseTooLarge(ValueError):
@@ -162,6 +149,7 @@ class BrokerClient:
         timeout: int = 30,
         before_request: Callable[[], float] | None = None,
         control: BrokerDispatchAccounting | None = None,
+        authority: Mapping[str, object] | None = None,
     ) -> None:
         if (
             not isinstance(broker_url, str)
@@ -194,6 +182,31 @@ class BrokerClient:
                 self.opener = build_opener(_RefuseRedirects()).open
         self.before_request = before_request
         self.control = control
+        self.authority = None if authority is None else parse_authority(authority)
+        # Copies share this authentication cache; it owns no allowance and
+        # never replaces the Worker's independent verification of new claims.
+        self._oidc_cache: dict[str, Any] = {}
+
+    def _current_oidc(self, token: str) -> str:
+        from .oidc_refresh import expiry_hint
+
+        now = time.time()
+        cached = self._oidc_cache
+        if cached.get("original") == token and cached.get("expires", 0) > now + 60:
+            return cached["token"]
+        expires = expiry_hint(token)
+        if expires is None or expires > now + 60:
+            # Malformed or opaque assertions receive no local authority. The
+            # Worker still authenticates them or refuses their first POST.
+            return token
+        # Refresh before the first capability POST, never replay a failed POST.
+        # This physical OIDC GET spends the same original caller-run allowance.
+        fresh = self.request_oidc_token()
+        deadline = expiry_hint(fresh)
+        if deadline is None or deadline <= time.time() + 60:
+            raise GitHubBrokerClientError("Fresh Actions OIDC assertion is unavailable")
+        cached.update(original=token, token=fresh, expires=deadline)
+        return fresh
 
     def _request_timeout(self) -> float:
         if self.before_request is None:
@@ -347,7 +360,7 @@ class BrokerClient:
             raise GitHubBrokerClientError("OIDC token is empty")
         payload: dict[str, str] = {"oidc_token": oidc_token}
         if capability is not None:
-            if capability not in {
+            if not isinstance(capability, str) or capability not in {
                 "review_publish",
                 "thread_resolve",
                 "review_status",
@@ -410,7 +423,7 @@ class BrokerClient:
         if parsed.get("capability") != "review_session":
             raise GitHubBrokerClientError("Broker session response was invalid")
         state = parsed.get("session_state")
-        if state not in {"enrolled", "known"}:
+        if not isinstance(state, str) or state not in {"enrolled", "known"}:
             raise GitHubBrokerClientError("Broker session response was invalid")
         from review_sensei.errors import ReviewInputError
         from review_sensei.session import _stored_reservation_owner
@@ -421,7 +434,26 @@ class BrokerClient:
             raise GitHubBrokerClientError("Broker session owner was invalid") from exc
         if owner is not None and owner["head_sha"] != head_sha:
             raise GitHubBrokerClientError("Broker session owner head was stale")
-        return BrokerSession(token=token, state=state, reservation_owner=owner)
+        attestation = self._validated_attestation_grant(
+            parsed.get("session_attestation")
+        )
+        requested = self.authority
+        grant = parsed.get("session_grant")
+        if (
+            requested is None
+            or any(attestation[key] != requested[key] for key in REQUEST_KEYS)
+            or not isinstance(grant, str)
+            or SESSION_GRANT_PATTERN.fullmatch(grant) is None
+        ):
+            raise GitHubBrokerClientError("Broker current run grant conflicts")
+        return BrokerSession(
+            token=token,
+            state=state,
+            reservation_owner=owner,
+            grant=grant,
+            attestation=attestation,
+            app_id=self._validated_app_id(parsed.get("app_id")),
+        )
 
     def open_session_release(
         self,
@@ -473,7 +505,12 @@ class BrokerClient:
             raise GitHubBrokerClientError("Broker session owner was invalid") from exc
         if owner is None or owner["head_sha"] != head_sha:
             raise GitHubBrokerClientError("Broker session owner head was stale")
-        return BrokerSession(token=token, state="release", reservation_owner=owner)
+        return BrokerSession(
+            token=token,
+            state="release",
+            reservation_owner=owner,
+            app_id=self._validated_app_id(parsed.get("app_id")),
+        )
 
     def authorize_session_mutation(
         self,
@@ -516,14 +553,21 @@ class BrokerClient:
             or not token.strip()
             or not isinstance(grant, str)
             or SESSION_GRANT_PATTERN.fullmatch(grant) is None
+            or not isinstance(state, str)
             or state not in {"enrolled", "known"}
         ):
             raise GitHubBrokerClientError("Broker session response was invalid")
         returned = self._validated_attestation_grant(returned_attestation)
-        if any(returned[key] != value for key, value in attestation.items()):
+        if self.authority is None or any(
+            returned[key] != value for key, value in self.authority.items()
+        ):
             raise GitHubBrokerClientError("Broker session response was invalid")
         return BrokerSessionGrant(
-            token=token, state=state, grant=grant, attestation=returned
+            token=token,
+            state=state,
+            grant=grant,
+            attestation=returned,
+            app_id=self._validated_app_id(parsed.get("app_id")),
         )
 
     def verify_session_grant(
@@ -546,6 +590,14 @@ class BrokerClient:
         return returned
 
     @staticmethod
+    def _validated_app_id(value: object) -> int:
+        if type(value) is not int or not 0 < value <= 9_007_199_254_740_991:
+            raise GitHubBrokerClientError(
+                "Broker authenticated App identity is invalid"
+            )
+        return value
+
+    @staticmethod
     def _validate_session_scope(
         repository_id: int, pull_request: int, head_sha: str
     ) -> None:
@@ -563,94 +615,33 @@ class BrokerClient:
 
     @staticmethod
     def _validated_attestation_request(value: object) -> dict[str, object]:
-        if isinstance(value, Mapping) and value.get("version") == 2:
-            return parse_feedback_attestation(value)
-        if (
-            not isinstance(value, Mapping)
-            or set(value) != _SESSION_ATTESTATION_REQUEST_KEYS
-        ):
-            raise GitHubBrokerClientError("Broker session attestation is invalid")
-        result = dict(value)
-        if (
-            result["version"] != 1
-            or not isinstance(result["repository"], str)
-            or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", result["repository"])
-            is None
-            or isinstance(result["repository_id"], bool)
-            or not isinstance(result["repository_id"], int)
-            or result["repository_id"] <= 0
-            or isinstance(result["pull_request"], bool)
-            or not isinstance(result["pull_request"], int)
-            or result["pull_request"] <= 0
-            or not isinstance(result["head_sha"], str)
-            or re.fullmatch(r"[a-f0-9]{40}", result["head_sha"]) is None
-            or result["operation"] not in {"review", "command"}
-            or (
-                result["source_comment_id"] is not None
-                and (
-                    isinstance(result["source_comment_id"], bool)
-                    or not isinstance(result["source_comment_id"], int)
-                    or result["source_comment_id"] <= 0
-                )
-            )
-            or (
-                result["operation"] == "command" and result["source_comment_id"] is None
-            )
-            or not isinstance(result["run_id"], str)
-            or re.fullmatch(r"[1-9][0-9]{0,18}", result["run_id"]) is None
-            or isinstance(result["issued_at"], bool)
-            or not isinstance(result["issued_at"], int)
-            or not isinstance(result["concurrency_group"], str)
-            or not isinstance(result["job_workflow_ref"], str)
-            or not isinstance(result["job_workflow_sha"], str)
-            or re.fullmatch(r"[a-f0-9]{40}", result["job_workflow_sha"]) is None
-        ):
-            raise GitHubBrokerClientError("Broker session attestation is invalid")
-        return result
+        return parse_authority(value)
 
-    @classmethod
-    def _validated_attestation_grant(cls, value: object) -> dict[str, object]:
-        if isinstance(value, Mapping) and value.get("version") == 2:
-            return parse_feedback_attestation(value, grant=True)
-        if (
-            not isinstance(value, Mapping)
-            or set(value) != _SESSION_ATTESTATION_GRANT_KEYS
-        ):
-            raise GitHubBrokerClientError("Broker session attestation is invalid")
-        result = dict(value)
-        request = {key: result[key] for key in _SESSION_ATTESTATION_REQUEST_KEYS}
-        cls._validated_attestation_request(request)
-        if result["operation"] == "review":
-            if any(
-                result[key] is not None
-                for key in (
-                    "actor",
-                    "actor_type",
-                    "association",
-                    "command_id",
-                    "command_digest",
-                )
-            ):
-                raise GitHubBrokerClientError("Broker session attestation is invalid")
-        elif (
-            not isinstance(result["actor"], str)
-            or not result["actor"].strip()
-            or not isinstance(result["actor_type"], str)
-            or result["actor_type"].lower() != "user"
-            or result["association"] not in {"OWNER", "MEMBER", "COLLABORATOR"}
-            or isinstance(result["command_id"], bool)
-            or not isinstance(result["command_id"], int)
-            or result["command_id"] <= 0
-            or not isinstance(result["command_digest"], str)
-            or re.fullmatch(r"[a-f0-9]{64}", result["command_digest"]) is None
-        ):
-            raise GitHubBrokerClientError("Broker session attestation is invalid")
-        return result
+    @staticmethod
+    def _validated_attestation_grant(value: object) -> dict[str, object]:
+        return parse_authority(value, grant=True)
 
     def _post(
         self, payload: dict[str, Any], *, url: str | None = None
     ) -> dict[str, Any]:
         """Post one bounded capability request and return a validated object."""
+
+        if url is None:
+            supplied = payload.get("session_attestation", self.authority)
+            authority = self._validated_attestation_request(supplied)
+            # A new exchange authenticates the same purpose/source afresh.
+            # Refresh only its bounded request age, never its identity or a
+            # previously issued mutation grant.
+            now = int(time.time())
+            authority = {**authority, "issued_at": now, "expires_at": now + 600}
+            self.authority = authority
+            requested_capability = payload.get("capability", "review_publish")
+            if requested_capability not in CAPABILITIES[str(authority["purpose"])]:
+                raise GitHubBrokerClientError(
+                    "Broker capability conflicts with run purpose"
+                )
+            payload = {**payload, "session_attestation": authority}
+            payload["oidc_token"] = self._current_oidc(payload["oidc_token"])
 
         control_request = None
         if self.control is not None:
@@ -692,7 +683,13 @@ class BrokerClient:
                 phase = "response_decode"
                 parsed = json.loads(bytes(raw).decode("utf-8", errors="strict"))
         except HTTPError as exc:
-            diagnostic = parse_broker_diagnostic(exc)
+            inspection = inspect_broker_http_error(exc)
+            if inspection.admission_held:
+                raise GitHubBrokerAdmissionHeldError(
+                    "Broker admission is temporarily held by the operator; "
+                    "no automatic retry was attempted."
+                ) from exc
+            diagnostic = inspection.diagnostic
             if exc.code == 429 or exc.code >= 500:
                 raise GitHubHTTPTransientError(
                     "Broker token request failed temporarily; " + diagnostic.message(),

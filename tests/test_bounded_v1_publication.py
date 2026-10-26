@@ -8,6 +8,7 @@ from hashlib import sha256
 from urllib.error import URLError
 from urllib.parse import parse_qs, urlparse
 
+from fake_github_http import json_response
 from review_sensei_github import (
     GitHubHttp,
     GitHubHTTPPaginationLimitError,
@@ -26,6 +27,7 @@ from review_sensei_github.publication import (
     parse_finding_index,
     review_result_digest,
 )
+from test_human_assessment import APP, BASE, DIFF, HEAD, State
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.context import finding_lifecycle_for_comment
@@ -33,8 +35,6 @@ from review_sensei.convergence import BlockerCandidate, ReviewConvergencePolicy
 from review_sensei.errors import ReviewInputError
 from review_sensei.human_assessment import finding_instance_fingerprint
 from review_sensei.models import ReviewComment, ReviewResult, ReviewTransaction
-from tests.fake_github_http import json_response
-from tests.test_human_assessment import APP, BASE, DIFF, HEAD, State
 
 
 def comments(count, *, body_placed=False, detail=0):

@@ -180,7 +180,8 @@ def fixtures():
         "session": record.to_dict(),
         "session_body": body,
         "expanded_session": "x" * (17 * 1024) + "\n" + body,
-        "oversized_session": "x" * (41 * 1024) + "\n" + body,
+        "previous_boundary_session": "x" * (41 * 1024) + "\n" + body,
+        "oversized_session": "x" * (65 * 1024) + "\n" + body,
         "configuration": configuration,
         "unified_configuration": unified,
     }
@@ -227,7 +228,7 @@ def worker(source: Path, fixture: Path, legacy: bool):
         MAX_CONVERGENCE_HISTORY_BYTES,
         MAX_SESSION_RECORD_BYTES,
         MAX_SESSION_COMMENT_BYTES,
-    ) == ((32, 4096, 8192, 16384) if legacy else (64, 12288, 20480, 40960))
+    ) == ((32, 4096, 8192, 16384) if legacy else (64, 12288, 32768, 65536))
     assert ReviewApprovalEligibility.from_dict(data["v1"]).to_dict() == data["v1"]
     if legacy:
         try:
@@ -340,9 +341,9 @@ def worker(source: Path, fixture: Path, legacy: bool):
     )
     identity = SessionIdentity("owner/repo", 1, 99)
     now = datetime(2026, 10, 7, tzinfo=timezone.utc)
-    for key in ("session_body", "expanded_session"):
+    for key in ("session_body", "expanded_session", "previous_boundary_session"):
         items[0]["body"] = data[key]
-        expected = "missing" if legacy and key == "expanded_session" else "ok"
+        expected = "missing" if legacy and key != "session_body" else "ok"
         assert ledger.load(identity, now=now).status == expected
     items[0]["body"] = data["oversized_session"]
     status = ledger.load(identity, now=now).status

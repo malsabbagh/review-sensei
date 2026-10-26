@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Add the root `api_request_limit` setting, defaulting to 512 physical caller
+  HTTP attempts per authenticated Actions run. Review, command and reply each
+  execute in one owning process across startup, publication and cleanup. Count
+  each Worker POST once; its internal request and deadline ceilings stay separate.
+- Bind current authority to purpose, source, run, workflow and head. Reject old
+  executable authority and separate hosted publication/recovery entry points.
+  Retain historical review evidence through an explicitly read-only rescan reader.
+- Preserve charged uncertainty and abandoned allocations across a proven stopped
+  successor. Archive terminal predecessor accounting before a distinct new run;
+  never replay unknown writes or infer terminal completion from missing fields.
+- Qualify current lifecycle fixtures in the installed-wheel lane, including
+  interruption, successor, retained rescan, commands and replies. Operational
+  hold activation and release cutover require separate approval and verification.
+
 ## review-sensei-github 0.3.19 - 2026-10-25
 
 - Authenticate retained published inventory for explicit full rescans after a

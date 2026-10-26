@@ -7,6 +7,9 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+import test_review_work
+from test_review_work import HUMAN, AssessingProvider
+
 from review_sensei.budgets import ReviewWorkBudgets
 from review_sensei.human_assessment import PendingHumanReview
 from review_sensei.models import ProviderResponse, ReviewRequest
@@ -15,8 +18,6 @@ from review_sensei.reassessment_work import reassess, validate_work
 from review_sensei.service import ReviewService
 from review_sensei.stages import Stage
 from review_sensei.work_recovery import WorkRecoveryStore
-from tests import test_review_work
-from tests.test_review_work import HUMAN, AssessingProvider
 
 
 class ContextProvider(AssessingProvider):
@@ -475,10 +476,10 @@ class WorkContinuationTests(unittest.TestCase):
                 )
 
     def test_normal_full_replay_cannot_drop_retained_human_obligations(self):
+        import test_human_assessment
         from review_sensei_github.publication import ReviewPublisher
 
         from review_sensei.models import ReviewResult
-        from tests import test_human_assessment
 
         state = test_human_assessment.State()
         publisher = ReviewPublisher(http=state.http)
@@ -549,6 +550,7 @@ class WorkContinuationTests(unittest.TestCase):
             self.assertEqual(restarted.outcome.provider_calls, 1)
 
     def test_hosted_broader_discovery_publishes_new_result_with_prior_identity(self):
+        import test_human_assessment
         from review_sensei_github import GitHubApplication, GitHubWriteOptions
         from review_sensei_github.conversation import ConversationPublisher
         from review_sensei_github.errors import GitHubBrokerClientError
@@ -556,8 +558,6 @@ class WorkContinuationTests(unittest.TestCase):
             ReviewPublisher,
             approval_eligibility_from_body,
         )
-
-        from tests import test_human_assessment
 
         state = test_human_assessment.State()
         state.files = [
@@ -647,13 +647,13 @@ class WorkContinuationTests(unittest.TestCase):
         self.assertEqual(state.reply_count, 1)
 
     def test_broader_result_retains_exact_prior_authority_and_replays_once(self):
+        import test_human_assessment
         from review_sensei_github.publication import (
             ReviewPublisher,
             approval_eligibility_from_body,
         )
 
         from review_sensei.models import ReviewResult
-        from tests import test_human_assessment
 
         state = test_human_assessment.State(
             test_human_assessment.prior(blocking=True, qualification="missing")
@@ -695,10 +695,10 @@ class WorkContinuationTests(unittest.TestCase):
         self.assertEqual(state.events(), ["REQUEST_CHANGES"])
 
     def test_broader_result_with_changed_source_cannot_publish(self):
+        import test_human_assessment
         from review_sensei_github.publication import ReviewPublisher
 
         from review_sensei.models import ReviewResult
-        from tests import test_human_assessment
 
         state = test_human_assessment.State()
         outcome = ReviewPublisher(http=state.http).publish(
@@ -812,11 +812,10 @@ class WorkContinuationTests(unittest.TestCase):
             self.test_hosted_scope_writes_richer_pending_authority_and_never_approves()
 
     def test_hosted_scope_writes_richer_pending_authority_and_never_approves(self):
+        import test_human_assessment
         from review_sensei_github.publication import (
             approval_eligibility_from_body,
         )
-
-        from tests import test_human_assessment
 
         state = test_human_assessment.State()
         state.files = [

@@ -87,8 +87,8 @@ describe("Epic238 actual consuming broker composition", () => {
   it("refuses altered source or target without consuming the exact original grant", async () => {
     const fixture = await open();
     const issued = await issue(fixture);
-    for (const change of [{ head_sha: "b".repeat(40) }, { command_digest: "f".repeat(64) }, { source_comment_id: 24680 }]) {
-      await expect(fixture.broker.verifySessionGrant(issued.session_grant, { ...issued.session_attestation, ...change })).rejects.toThrow("broker_session_grant_invalid");
+    for (const change of [{ head_sha: "b".repeat(40) }, { source: { ...issued.session_attestation!.source, body_sha256: "f".repeat(64) } }, { source: { ...issued.session_attestation!.source, id: 24680 } }]) {
+      await expect(fixture.broker.verifySessionGrant(issued.session_grant, { ...issued.session_attestation, ...change })).rejects.toThrow(/broker_session_(?:grant|attestation)_invalid/);
       expect(fixture.grantCount()).toBe(0);
     }
     await fixture.broker.verifySessionGrant(issued.session_grant, issued.session_attestation);

@@ -2590,8 +2590,6 @@ def _delegate_moved_command(args_list: list[str]) -> int:
     forwarded = list(args_list)
     if forwarded and forwarded[0] == "github":
         forwarded = forwarded[1:]
-        if forwarded and forwarded[0] == "review":
-            forwarded = ["publish", *forwarded[1:]]
     if not forwarded:
         forwarded = ["--help"]
     # Always a subprocess. An in-process call would depend on whether some
@@ -2967,6 +2965,8 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
         transaction_configuration_context: dict[str, object] | None = None
         transaction_evidence_digest: str | None = None
 
+        analysis_cleanup_started = False
+
         def cleanup_analysis_reservation(*, charge_failed_attempt: bool) -> None:
             """Clean up only while this invocation still owns the reservation.
 
@@ -2985,6 +2985,13 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 or held_reservation is None
                 or policy.mode not in OPERATOR_REVIEW_MODES
             ):
+                return
+            nonlocal analysis_cleanup_started
+            if analysis_cleanup_started:
+                return
+            analysis_cleanup_started = True
+            claim = getattr(ledger, "claim_analysis_cleanup", None)
+            if callable(claim) and not claim(identity, held_reservation):
                 return
             loaded = ledger.load(identity)
             if loaded.status not in {"ok", "migrated"} or loaded.record is None:
@@ -3091,6 +3098,9 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 # The later atomic reservation repeats these fences after
                 # context construction; refusal never constructs a provider.
                 if should_skip_automation(preflight_decision, inference=True):
+                    skipped = getattr(hosted_hooks, "skip_completed_analysis", None)
+                    if callable(skipped):
+                        skipped(ledger, preflight.record, preflight_decision)
                     outcome = RunOutcome(
                         "action_required"
                         if preflight_decision.handoff
@@ -3427,6 +3437,9 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                 prepared_round.reservation_id if prepared_round.decision.admit else None
             )
             if should_skip_automation(prepared_round.decision, inference=True):
+                skipped = getattr(hosted_hooks, "skip_completed_analysis", None)
+                if callable(skipped):
+                    skipped(ledger, prepared_round.record, prepared_round.decision)
                 from .rescan import (
                     PUBLICATION_RECOVERY_PHASES,
                     rescan_publication_recovery,
@@ -4006,6 +4019,25 @@ def _main(argv: list[str] | None = None, *, hosted_hooks: object | None = None) 
                             else None
                         ),
                     )
+                    completed = getattr(hosted_hooks, "complete_analysis", None)
+                    if callable(completed):
+                        completed(
+                            ledger=ledger,
+                            identity=identity,
+                            result=result,
+                            baseline=admission_baseline,
+                            current_key=current_key
+                            if current_key is not None
+                            else cache_key,
+                            configuration_context=transaction_configuration_context,
+                            evidence_context={
+                                "evidence_policy": "legacy",
+                                "snapshot_sha256": None,
+                            },
+                            policy=policy,
+                            diff=diff,
+                            changed_paths=changed_paths,
+                        )
                 except BaseException as checkpoint_error:
                     if held_reservation is not None:
                         try:

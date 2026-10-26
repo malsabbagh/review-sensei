@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, cast
 
 from review_sensei.baseline import ReviewBaseline
 from review_sensei.cli import (
@@ -172,6 +173,18 @@ def reconstruct_publication_contexts(
         + ":"
         + evidence_digest,
     )
+    if record.rescan_state is not None and transaction is not None:
+        # The consumed request derives a distinct transaction reservation from
+        # this independently reconstructed ordinary context. A successor may
+        # recover that exact recorded binding, never infer a new rescan grant.
+        receipts = [
+            item
+            for item in cast(list[dict[str, Any]], record.rescan_state["receipts"])
+            if item["ordinary_reservation"] == reservation
+            and item["reservation"] == transaction.reservation_id
+        ]
+        if len(receipts) == 1:
+            reservation = transaction.reservation_id
     if (
         record.repository_id not in {None, identity.repository_id}
         or transaction is None

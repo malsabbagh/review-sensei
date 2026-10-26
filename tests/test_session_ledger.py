@@ -7,6 +7,7 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from review_sensei_github import (
@@ -16,7 +17,6 @@ from review_sensei_github import (
     GitHubHTTPPaginationLimitError,
     GitHubWriteOptions,
 )
-from review_sensei_github.errors import GitHubPublicationTransientError
 from review_sensei_github.session_ledger import (
     SESSION_MARKER_PREFIX,
     GitHubIssueCommentSessionLedger,
@@ -1662,47 +1662,13 @@ class GitHubSessionLedgerTests(unittest.TestCase):
             head_sha="a" * 40,
         )
 
-    def test_grant_bound_mutation_verifies_before_remote_discovery(self):
-        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
-        body = render_session_comment(repository_id=99, pull_request=136, record=record)
-        reserved = record.evolve(
-            now=FIXED_NOW,
-            generation=1,
-            reservation_id="abcd1234",
-            reserved_slot="initial",
-        )
-        reserved_body = render_session_comment(
-            repository_id=99, pull_request=136, record=reserved
-        )
-        http, calls = make_http(
-            [
-                json_response([{"id": 7, "body": body}]),
-                json_response([{"id": 7, "body": body}]),
-                json_response({"head": {"sha": "a" * 40}}),
-                json_response({"id": 7, "body": reserved_body}),
-                json_response([{"id": 7, "body": reserved_body}]),
-            ]
-        )
-        attestation = self._grant_attestation()
-        verifier = self._GrantVerifier(returned=attestation)
-        ledger = self._grant_bound_ledger(http, verifier, attestation)
-
-        updated = ledger.reserve(
-            IDENTITY,
-            slot="initial",
-            reservation_id="abcd1234",
-            expected_generation=0,
-            now=FIXED_NOW,
-        )
-
-        self.assertEqual(updated, reserved)
-        self.assertEqual(
-            verifier.calls, [("sg1.1780000000000." + "a" * 43, attestation)]
-        )
-        self.assertEqual(
-            [method for method, _url, _data in calls],
-            ["GET", "GET", "GET", "PATCH", "GET"],
-        )
+    def test_retired_grant_constructor_cannot_start_remote_mutation(self):
+        http, calls = make_http([])
+        verifier = self._GrantVerifier(returned=self._grant_attestation())
+        with self.assertRaisesRegex(ReviewInputError, "phase ledgers are retired"):
+            self._grant_bound_ledger(http, verifier)
+        self.assertEqual(verifier.calls, [])
+        self.assertEqual(calls, [])
 
     def test_unreadable_candidate_is_not_patched(self):
         record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
@@ -1711,12 +1677,9 @@ class GitHubSessionLedgerTests(unittest.TestCase):
             [
                 json_response([{"id": 7, "body": body}]),
                 json_response([{"id": 7, "body": body}]),
-                json_response({"head": {"sha": "a" * 40}}),
             ]
         )
-        attestation = self._grant_attestation()
-        verifier = self._GrantVerifier(returned=attestation)
-        ledger = self._grant_bound_ledger(http, verifier, attestation)
+        ledger = GitHubIssueCommentSessionLedger(http, token="token")
 
         def broken(**kwargs):
             text = render_session_comment(**kwargs)
@@ -1745,12 +1708,9 @@ class GitHubSessionLedgerTests(unittest.TestCase):
             [
                 json_response([{"id": 7, "body": body}]),
                 json_response([{"id": 7, "body": body}]),
-                json_response({"head": {"sha": "a" * 40}}),
             ]
         )
-        attestation = self._grant_attestation()
-        verifier = self._GrantVerifier(returned=attestation)
-        ledger = self._grant_bound_ledger(http, verifier, attestation)
+        ledger = GitHubIssueCommentSessionLedger(http, token="token")
 
         def other_record(**kwargs):
             rendered = kwargs["record"].evolve(
@@ -1780,7 +1740,7 @@ class GitHubSessionLedgerTests(unittest.TestCase):
                 )
         self.assertNotIn("PATCH", [method for method, _url, _data in calls])
 
-    def test_missing_grant_bound_session_applies_command_in_one_remote_create(self):
+    def test_missing_unbound_native_session_applies_command_in_one_remote_create(self):
         initial = SessionRecord.create(IDENTITY, now=FIXED_NOW)
         paused = initial.evolve(
             now=FIXED_NOW,
@@ -1794,14 +1754,11 @@ class GitHubSessionLedgerTests(unittest.TestCase):
             [
                 json_response([]),
                 json_response([]),
-                json_response({"head": {"sha": "a" * 40}}),
                 json_response({"id": 7, "body": paused_body}, status=201),
                 json_response([{"id": 7, "body": paused_body}]),
             ]
         )
-        attestation = self._grant_attestation()
-        verifier = self._GrantVerifier(returned=attestation)
-        ledger = self._grant_bound_ledger(http, verifier, attestation)
+        ledger = GitHubIssueCommentSessionLedger(http, token="token")
         command = parse_maintainer_command("@sensei review pause", actor="octocat")
         self.assertIsNotNone(command)
 
@@ -1810,14 +1767,11 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         self.assertEqual(record, paused)
         self.assertTrue(result.applied)
         self.assertEqual(
-            verifier.calls, [("sg1.1780000000000." + "a" * 43, attestation)]
-        )
-        self.assertEqual(
             [method for method, _url, _data in calls],
-            ["GET", "GET", "GET", "POST", "GET"],
+            ["GET", "GET", "POST", "GET"],
         )
 
-    def test_missing_grant_bound_session_persists_disposition_in_one_remote_create(
+    def test_missing_unbound_native_session_persists_disposition_in_one_remote_create(
         self,
     ):
         initial = SessionRecord.create(IDENTITY, now=FIXED_NOW)
@@ -1841,14 +1795,11 @@ class GitHubSessionLedgerTests(unittest.TestCase):
             [
                 json_response([]),
                 json_response([]),
-                json_response({"head": {"sha": "a" * 40}}),
                 json_response({"id": 7, "body": persisted_body}, status=201),
                 json_response([{"id": 7, "body": persisted_body}]),
             ]
         )
-        attestation = self._grant_attestation()
-        verifier = self._GrantVerifier(returned=attestation)
-        ledger = self._grant_bound_ledger(http, verifier, attestation)
+        ledger = GitHubIssueCommentSessionLedger(http, token="token")
         command = parse_maintainer_command(
             "@sensei dismiss abcd1234abcd1234 --reason accepted",
             actor="octocat",
@@ -1861,98 +1812,62 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         self.assertTrue(result.applied)
         self.assertEqual(result.disposition.action, "dismiss")
         self.assertEqual(
-            verifier.calls, [("sg1.1780000000000." + "a" * 43, attestation)]
-        )
-        self.assertEqual(
-            [method for method, _url, _data in calls],
-            ["GET", "GET", "GET", "POST", "GET"],
-        )
-
-    def test_grant_bound_status_read_does_not_consume_mutation_authority(self):
-        http, calls = make_http([json_response([])])
-        attestation = self._grant_attestation()
-        verifier = self._GrantVerifier(returned=attestation)
-        ledger = self._grant_bound_ledger(http, verifier, attestation)
-
-        self.assertEqual(ledger.load(IDENTITY, now=FIXED_NOW).status, "missing")
-        self.assertEqual(verifier.calls, [])
-        self.assertEqual([method for method, _url, _data in calls], ["GET"])
-
-    def test_grant_bound_initialize_failure_consumes_one_attempt(self):
-        http, calls = make_http(
-            [
-                json_response([]),
-                json_response({"head": {"sha": "a" * 40}}),
-                json_response({"error": "upstream"}, status=500),
-                json_response([]),
-            ]
-        )
-        attestation = self._grant_attestation()
-        verifier = self._GrantVerifier(returned=attestation)
-        ledger = self._grant_bound_ledger(http, verifier, attestation)
-
-        with self.assertRaisesRegex(
-            GitHubPublicationTransientError, "could not be verified"
-        ):
-            ledger.initialize(IDENTITY, now=FIXED_NOW)
-        verifier.error = GitHubBrokerClientError("grant already consumed")
-        with self.assertRaisesRegex(ReviewInputError, "session grant"):
-            ledger.initialize(IDENTITY, now=FIXED_NOW)
-
-        self.assertEqual(len(verifier.calls), 2)
-        self.assertEqual(
             [method for method, _url, _data in calls],
             ["GET", "GET", "POST", "GET"],
         )
 
-    def test_grant_bound_initialize_rejects_a_stale_live_head_before_post(self):
-        http, calls = make_http(
-            [
-                json_response([]),
-                json_response({"head": {"sha": "d" * 40}}),
-            ]
+    def test_unbound_status_reads_historical_consumed_grants_without_an_issuer(self):
+        history = SessionRecordTests._history()
+        record = SessionRecord.create(
+            IDENTITY, now=FIXED_NOW, convergence_history=history
         )
-        attestation = self._grant_attestation()
-        verifier = self._GrantVerifier(returned=attestation)
-        ledger = self._grant_bound_ledger(http, verifier, attestation)
-
-        with self.assertRaisesRegex(ReviewInputError, "head is stale"):
-            ledger.initialize(IDENTITY, now=FIXED_NOW)
-
-        self.assertEqual(
-            verifier.calls, [("sg1.1780000000000." + "a" * 43, attestation)]
+        body = render_session_comment(
+            repository_id=99,
+            pull_request=136,
+            record=record,
+            consumed_grants=("a" * 64,),
         )
-        self.assertEqual([method for method, _url, _data in calls], ["GET", "GET"])
+        http, calls = make_http([json_response([{"id": 7, "body": body}])])
+        ledger = GitHubIssueCommentSessionLedger(http, token="token")
+        loaded = ledger.load(IDENTITY, now=FIXED_NOW)
+        self.assertEqual(loaded.status, "ok")
+        self.assertEqual(loaded.record, record)
+        self.assertEqual(loaded.record.convergence_history, history)
+        self.assertEqual(ledger._observed_consumed_grants, {"a" * 64})
+        self.assertIsNone(ledger._broker)
+        self.assertEqual([method for method, _url, _data in calls], ["GET"])
 
-    def test_grant_bound_replace_rejects_a_stale_live_head_before_patch(self):
-        record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
-        body = render_session_comment(repository_id=99, pull_request=136, record=record)
-        http, calls = make_http(
-            [
-                json_response([{"id": 7, "body": body}]),
-                json_response([{"id": 7, "body": body}]),
-                json_response({"head": {"sha": "d" * 40}}),
-            ]
-        )
-        attestation = self._grant_attestation()
-        verifier = self._GrantVerifier(returned=attestation)
-        ledger = self._grant_bound_ledger(http, verifier, attestation)
+    def test_retired_grant_cannot_initialize_or_retry_after_failure(self):
+        http, calls = make_http([])
+        verifier = self._GrantVerifier(error=GitHubBrokerClientError("grant consumed"))
+        for attempt in (1, 2):
+            with self.subTest(attempt=attempt):
+                with self.assertRaisesRegex(
+                    ReviewInputError, "phase ledgers are retired"
+                ):
+                    self._grant_bound_ledger(http, verifier)
+                self.assertEqual(verifier.calls, [])
+                self.assertEqual(calls, [])
 
-        with self.assertRaisesRegex(ReviewInputError, "head is stale"):
-            ledger.reserve(
-                IDENTITY,
-                slot="initial",
-                reservation_id="abcd1234",
-                expected_generation=0,
-                now=FIXED_NOW,
-            )
+    def test_retired_grant_initialize_refuses_before_live_head_lookup(self):
+        http, calls = make_http([])
+        verifier = self._GrantVerifier(
+            returned=self._grant_attestation(head_sha="d" * 40)
+        )
+        with self.assertRaisesRegex(ReviewInputError, "phase ledgers are retired"):
+            self._grant_bound_ledger(http, verifier)
+        self.assertEqual(verifier.calls, [])
+        self.assertEqual(calls, [])
 
-        self.assertEqual(
-            verifier.calls, [("sg1.1780000000000." + "a" * 43, attestation)]
+    def test_retired_grant_replace_refuses_before_live_head_lookup(self):
+        http, calls = make_http([])
+        verifier = self._GrantVerifier(
+            returned=self._grant_attestation(head_sha="d" * 40)
         )
-        self.assertEqual(
-            [method for method, _url, _data in calls], ["GET", "GET", "GET"]
-        )
+        with self.assertRaisesRegex(ReviewInputError, "phase ledgers are retired"):
+            self._grant_bound_ledger(http, verifier, self._grant_attestation())
+        self.assertEqual(verifier.calls, [])
+        self.assertEqual(calls, [])
 
     def _reserved_record_with_owner(self, owner_run_id: str):
         record = SessionRecord.create(IDENTITY, now=FIXED_NOW)
@@ -1965,79 +1880,84 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         )
 
     def test_owner_abort_releases_own_reservation_after_head_moves(self):
-        # Reproduction for the cancelled-run leak: run 10000000001 reserved
-        # the round, a push moved the head to d*40, then the run was
-        # cancelled. Releasing its own reservation must still succeed;
-        # releasing never publishes anything.
-        from review_sensei.session import mutate_abort
+        from tests.test_api_work_persistence import IDENTITY as current_identity
+        from tests.test_review_run import EntryFixture
 
-        reserved = self._reserved_record_with_owner("10000000001")
-        aborted = mutate_abort(
-            reserved,
-            reservation_id="abcd1234",
-            expected_generation=1,
-            now=FIXED_NOW,
-        )
-        reserved_body = render_session_comment(
-            repository_id=99, pull_request=136, record=reserved
-        )
-        aborted_body = render_session_comment(
-            repository_id=99, pull_request=136, record=aborted
-        )
-        http, calls = make_http(
-            [
-                json_response([{"id": 7, "body": reserved_body}]),
-                json_response([{"id": 7, "body": reserved_body}]),
-                json_response({"id": 7, "body": aborted_body}),
-                json_response([{"id": 7, "body": aborted_body}]),
-            ]
-        )
-        attestation = self._grant_attestation()
-        verifier = self._GrantVerifier(returned=attestation)
-        ledger = self._grant_bound_ledger(http, verifier, attestation)
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = EntryFixture(directory, limit=512)
+            held = []
 
-        released = ledger.abort(
-            IDENTITY,
-            reservation_id="abcd1234",
-            expected_generation=1,
-            now=FIXED_NOW,
-        )
+            def stop_before_entry():
+                record = parse_session_comment(
+                    fixture.comment["body"], identity=current_identity
+                )
+                self.assertIsNotNone(record.reservation_id)
+                self.assertEqual(
+                    record.reservation_owner["run_id"],
+                    str(fixture.accounted.run.run_id),
+                )
+                held.append(record)
+                fixture.live_head = "d" * 40
+                raise ReviewInputError(
+                    "known local validation refusal before operation entry"
+                )
 
-        self.assertIsNone(released.reservation_id)
-        self.assertIsNone(released.reservation_owner)
-        self.assertEqual(
-            [method for method, _url, _data in calls],
-            ["GET", "GET", "PATCH", "GET"],
-        )
+            fixture.before_entry = stop_before_entry
+            self.assertEqual(fixture.invoke(), 1, fixture.error)
+            self.assertEqual(len(held), 1)
+            released = parse_session_comment(
+                fixture.comment["body"], identity=current_identity
+            )
+            self.assertIsNone(released.reservation_id)
+            self.assertIsNone(released.reservation_owner)
+            self.assertIsNone(released.transaction)
+            self.assertIsNotNone(released.api_run_accounting["analysis_abort"])
+            self.assertEqual(fixture.provider_calls, 0)
+            self.assertFalse(any(r["state"] == "APPROVED" for r in fixture.reviews))
 
     def test_non_owner_abort_still_rejected_after_head_moves(self):
-        reserved = self._reserved_record_with_owner("99999999999")
-        reserved_body = render_session_comment(
-            repository_id=99, pull_request=136, record=reserved
-        )
-        http, calls = make_http(
-            [
-                json_response([{"id": 7, "body": reserved_body}]),
-                json_response([{"id": 7, "body": reserved_body}]),
-                json_response({"head": {"sha": "d" * 40}}),
-            ]
-        )
-        attestation = self._grant_attestation()
-        verifier = self._GrantVerifier(returned=attestation)
-        ledger = self._grant_bound_ledger(http, verifier, attestation)
+        from tests.test_api_work_persistence import IDENTITY as current_identity
+        from tests.test_review_run import EntryFixture
 
-        with self.assertRaisesRegex(ReviewInputError, "head is stale"):
-            ledger.abort(
-                IDENTITY,
-                reservation_id="abcd1234",
-                expected_generation=1,
-                now=FIXED_NOW,
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = EntryFixture(directory, limit=512)
+            foreign = []
+
+            def replace_owner_before_refusal():
+                fixture.live_head = "d" * 40
+                fixture.rewrite_record(
+                    mutate=lambda record: record.evolve(
+                        generation=record.generation + 1,
+                        reservation_owner={
+                            **record.reservation_owner,
+                            "run_id": "99999999999",
+                        },
+                    )
+                )
+                foreign.append((fixture.comment["body"], len(fixture.trace)))
+                raise ReviewInputError(
+                    "known local validation refusal before operation entry"
+                )
+
+            fixture.before_entry = replace_owner_before_refusal
+            self.assertEqual(fixture.invoke(), 1, fixture.error)
+            self.assertEqual(len(foreign), 1)
+            self.assertEqual(fixture.comment["body"], foreign[0][0])
+            retained = parse_session_comment(
+                fixture.comment["body"], identity=current_identity
             )
-        self.assertEqual(
-            [method for method, _url, _data in calls], ["GET", "GET", "GET"]
-        )
+            self.assertIsNotNone(retained.reservation_id)
+            self.assertEqual(retained.reservation_owner["run_id"], "99999999999")
+            self.assertIsNone(retained.api_run_accounting["analysis_abort"])
+            self.assertFalse(
+                any(
+                    method in {"POST", "PATCH"}
+                    for _, method, _ in fixture.trace[foreign[0][1] :]
+                )
+            )
+            self.assertEqual(fixture.provider_calls, 0)
 
-    def test_grant_bound_mutation_rejects_invalid_or_mismatched_grants_before_io(self):
+    def test_retired_grants_refuse_without_consulting_verifiers_or_http(self):
         cases = (
             ("replayed", self._GrantVerifier(error=GitHubBrokerClientError("invalid"))),
             (
@@ -2056,22 +1976,26 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         for name, verifier in cases:
             with self.subTest(name=name):
                 http, calls = make_http([])
-                ledger = self._grant_bound_ledger(http, verifier)
-                with self.assertRaisesRegex(ReviewInputError, "session grant"):
-                    ledger.initialize(IDENTITY, now=FIXED_NOW)
-                self.assertEqual(len(verifier.calls), 1)
+                with self.assertRaisesRegex(
+                    ReviewInputError, "phase ledgers are retired"
+                ):
+                    self._grant_bound_ledger(http, verifier)
+                self.assertEqual(verifier.calls, [])
                 self.assertEqual(calls, [])
 
-    def test_grant_bound_ledger_rejects_absent_grant_configuration(self):
-        http, _calls = make_http([])
-        with self.assertRaisesRegex(ReviewInputError, "grant configuration"):
+    def test_retired_grant_ledger_rejects_partial_configuration_before_http(self):
+        http, calls = make_http([])
+        verifier = self._GrantVerifier()
+        with self.assertRaisesRegex(ReviewInputError, "phase ledgers are retired"):
             GitHubIssueCommentSessionLedger(
                 http,
                 token="token",
-                broker=self._GrantVerifier(),
+                broker=verifier,
                 session_attestation=self._grant_attestation(),
                 head_sha="a" * 40,
             )
+        self.assertEqual(verifier.calls, [])
+        self.assertEqual(calls, [])
 
     def test_restart_loads_integrity_checked_convergence_history(self):
         history = SessionRecordTests._history()
@@ -2422,7 +2346,7 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         )
         self.assertEqual(ledger.load(IDENTITY, now=FIXED_NOW).status, "ok")
 
-    def test_grant_bound_reenroll_verifies_once_before_rewriting_expired_marker(self):
+    def test_unbound_native_reenroll_rewrites_expired_marker_once(self):
         expired = SessionRecord.create(IDENTITY, now=FIXED_NOW - timedelta(days=31))
         replacement = SessionRecord.create(IDENTITY, now=FIXED_NOW)
         expired_body = render_session_comment(
@@ -2436,14 +2360,11 @@ class GitHubSessionLedgerTests(unittest.TestCase):
                 json_response([{"id": 7, "body": expired_body}]),
                 json_response([{"id": 7, "body": expired_body}]),
                 json_response([{"id": 7, "body": expired_body}]),
-                json_response({"head": {"sha": "a" * 40}}),
                 json_response({"id": 7, "body": replacement_body}),
                 json_response([{"id": 7, "body": replacement_body}]),
             ]
         )
-        attestation = self._grant_attestation()
-        verifier = self._GrantVerifier(returned=attestation)
-        ledger = self._grant_bound_ledger(http, verifier, attestation)
+        ledger = GitHubIssueCommentSessionLedger(http, token="token")
         command = parse_maintainer_command("@sensei review reenroll", actor="octocat")
 
         record, result = apply_session_command(ledger, IDENTITY, command, now=FIXED_NOW)
@@ -2451,11 +2372,8 @@ class GitHubSessionLedgerTests(unittest.TestCase):
         self.assertEqual(record, replacement)
         self.assertTrue(result.applied)
         self.assertEqual(
-            verifier.calls, [("sg1.1780000000000." + "a" * 43, attestation)]
-        )
-        self.assertEqual(
             [method for method, _url, _data in calls],
-            ["GET", "GET", "GET", "GET", "PATCH", "GET"],
+            ["GET", "GET", "GET", "PATCH", "GET"],
         )
 
     def test_hosted_reenroll_recreates_a_deleted_marker(self):
@@ -3298,171 +3216,71 @@ class AdmissionContextDocumentTests(unittest.TestCase):
 
 
 class HostedSessionLedgerResolutionTests(SessionFixtureClockMixin, unittest.TestCase):
-    """Analysis-side construction of the broker-attested hosted ledger."""
+    """The separate hosted phase resolver cannot re-enter the run-owned runtime."""
 
-    class _Broker:
-        def __init__(self, *, token: str = "session-token", state: str = "known"):
-            self.token = token
-            self.state = state
-            self.oidc_tokens: list[str] = []
-            self.scopes: list[dict[str, object]] = []
+    def _assert_retired(
+        self,
+        *,
+        oidc_token="oidc",
+        analysis_metadata_phases=False,
+        state="known",
+        token="session-token",
+    ):
+        from review_sensei_github.application import resolve_hosted_session_ledger
 
-        def request_oidc_token(self) -> str:
-            return "requested-oidc-token"
+        effects = []
 
-        def open_session(self, oidc_token, **kwargs):
-            self.oidc_tokens.append(oidc_token)
-            self.scopes.append(dict(kwargs))
-            return type("Session", (), {"token": self.token, "state": self.state})()
+        def forbidden(*args, **kwargs):
+            effects.append(True)
+            raise AssertionError("retired resolver reached metadata or authority")
 
-    class _Transport:
-        """Recording opener that serves a fixed comment list."""
-
-        def __init__(self, comments: list[dict[str, object]]):
-            self.comments = comments
-            self.calls: list[tuple[str, str, str]] = []
-
-        def __call__(self, request, timeout):
-            del timeout
-            self.calls.append(
-                (request.method, request.full_url, request.headers["Authorization"])
-            )
-            return FakeHTTPResponse(
-                json.dumps(self.comments).encode("utf-8"), status=200
-            )
-
-    def _http(self, comments: list[dict[str, object]]) -> tuple[GitHubHttp, _Transport]:
-        transport = self._Transport(comments)
-        return (
-            GitHubHttp(api_url="https://api.github.test", opener=transport),
-            transport,
+        broker = SimpleNamespace(
+            request_oidc_token=forbidden,
+            open_session=forbidden,
+            state=state,
+            token=token,
         )
-
-    def _marker_comment(self, *, head_sha: str, now: datetime = FIXED_NOW):
-        record = SessionRecord.create(IDENTITY, now=now)
-        return {
-            "id": 4242,
-            "body": render_session_comment(
-                repository_id=99, pull_request=IDENTITY.pull_request, record=record
-            ),
-            "user": {"login": "reviewsensei[bot]", "type": "Bot"},
-        }
-
-    def test_opens_a_broker_session_and_returns_an_attested_ledger(self):
-        from review_sensei_github.application import (
-            resolve_hosted_session_ledger,
-        )
-
-        broker = self._Broker()
-        http, transport = self._http([self._marker_comment(head_sha="a" * 40)])
-        ledger = resolve_hosted_session_ledger(
-            broker=broker,
-            http=http,
-            oidc_token="oidc",
-            repository=IDENTITY.repository,
-            repository_id=IDENTITY.repository_id,
-            pull_request=IDENTITY.pull_request,
-            head_sha="a" * 40,
-            app_slug="reviewsensei[bot]",
-        )
-        self.assertIsInstance(ledger, GitHubIssueCommentSessionLedger)
-        self.assertEqual(
-            broker.scopes,
-            [
-                {
-                    "repository_id": IDENTITY.repository_id,
-                    "pull_request": IDENTITY.pull_request,
-                    "head_sha": "a" * 40,
-                }
-            ],
-        )
-        # The returned ledger is bound to the broker session token, so its
-        # writes carry the session capability rather than a caller credential.
-        self.assertTrue(transport.calls)
-        self.assertEqual(
-            {authorization for _method, _url, authorization in transport.calls},
-            {"Bearer session-token"},
-        )
-        self.assertEqual(
-            transport.calls[0][1],
-            "https://api.github.test/repos/owner/repo/issues/136/comments"
-            "?per_page=100&page=1",
-        )
-        self.assertEqual(ledger.load(IDENTITY).status, "ok")
-
-    def test_requests_an_oidc_token_when_the_caller_has_none(self):
-        from review_sensei_github.application import (
-            resolve_hosted_session_ledger,
-        )
-
-        broker = self._Broker()
-        http, _transport = self._http([self._marker_comment(head_sha="a" * 40)])
-        resolve_hosted_session_ledger(
-            broker=broker,
-            http=http,
-            oidc_token=None,
-            repository=IDENTITY.repository,
-            repository_id=IDENTITY.repository_id,
-            pull_request=IDENTITY.pull_request,
-            head_sha="a" * 40,
-        )
-        self.assertEqual(broker.oidc_tokens, ["requested-oidc-token"])
-
-    def test_fails_closed_when_a_known_session_marker_is_missing(self):
-        from review_sensei_github.application import (
-            resolve_hosted_session_ledger,
-        )
-        from review_sensei_github.errors import GitHubPublicationError
-
-        http, _transport = self._http([])
-        with self.assertRaisesRegex(GitHubPublicationError, "reenroll"):
+        http = GitHubHttp(api_url="https://api.github.test", opener=forbidden)
+        with self.assertRaisesRegex(
+            ReviewInputError, "hosted phase ledger resolution is retired"
+        ):
             resolve_hosted_session_ledger(
-                broker=self._Broker(state="known"),
+                broker=broker,
                 http=http,
-                oidc_token="oidc",
+                oidc_token=oidc_token,
                 repository=IDENTITY.repository,
                 repository_id=IDENTITY.repository_id,
                 pull_request=IDENTITY.pull_request,
                 head_sha="a" * 40,
+                app_slug="reviewsensei[bot]",
+                analysis_metadata_phases=analysis_metadata_phases,
             )
+        self.assertEqual(effects, [])
 
-    def test_first_enrollment_is_not_blocked_by_a_missing_marker(self):
-        from review_sensei_github.application import (
-            resolve_hosted_session_ledger,
-        )
+    def test_old_resolver_refuses_before_broker_session_or_github_discovery(self):
+        self._assert_retired()
 
-        http, _transport = self._http([])
-        ledger = resolve_hosted_session_ledger(
-            broker=self._Broker(state="enrolled"),
-            http=http,
-            oidc_token="oidc",
-            repository=IDENTITY.repository,
-            repository_id=IDENTITY.repository_id,
-            pull_request=IDENTITY.pull_request,
-            head_sha="a" * 40,
-        )
-        # Enrollment is the analysis lane creating the durable record, so a
-        # missing marker is expected rather than an authenticated recovery.
-        self.assertEqual(ledger.load(IDENTITY).status, "missing")
+    def test_old_resolver_refuses_before_requesting_missing_oidc(self):
+        self._assert_retired(oidc_token=None)
 
-    def test_rejects_a_blank_or_missing_session_token(self):
-        from review_sensei_github.application import (
-            resolve_hosted_session_ledger,
-        )
-        from review_sensei_github.errors import GitHubPublicationError
+    def test_known_and_enrolled_markers_cannot_reenter_old_phase_writer(self):
+        for state in ("known", "enrolled"):
+            with self.subTest(state=state):
+                self._assert_retired(state=state)
 
+    def test_old_resolver_cannot_allocate_separate_provider_or_completion_phases(self):
+        with patch(
+            "review_sensei.session_phases.AnalysisSessionPhases",
+            side_effect=AssertionError("new phase allowance"),
+        ):
+            for enabled in (False, True):
+                with self.subTest(analysis_metadata_phases=enabled):
+                    self._assert_retired(analysis_metadata_phases=enabled)
+
+    def test_blank_session_token_cannot_reach_old_authority_fallback(self):
         for token in ("", "   "):
-            http, _transport = self._http([])
-            with self.assertRaisesRegex(GitHubPublicationError, "session token"):
-                resolve_hosted_session_ledger(
-                    broker=self._Broker(token=token),
-                    http=http,
-                    oidc_token="oidc",
-                    repository=IDENTITY.repository,
-                    repository_id=IDENTITY.repository_id,
-                    pull_request=IDENTITY.pull_request,
-                    head_sha="a" * 40,
-                )
+            with self.subTest(token=token):
+                self._assert_retired(token=token)
 
 
 if __name__ == "__main__":

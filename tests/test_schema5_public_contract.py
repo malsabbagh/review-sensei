@@ -6,10 +6,10 @@ import unittest
 from copy import deepcopy
 
 from review_sensei_github.approval import ReviewApprovalEligibility
+from test_default_human_consumers import document, rich_inventory
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.schemas import load_schema, validate_public_document
-from tests.test_default_human_consumers import document, rich_inventory
 
 
 class Schema5PublicContractTests(unittest.TestCase):

@@ -91,9 +91,9 @@ def inline_command_prefilter_paths(root: Path) -> set[str]:
     found: set[str] = set()
     for directory, subdirectories, files in os.walk(root):
         subdirectories[:] = [name for name in subdirectories if name not in pruned]
-        # Parallel candidate tests create and remove files under these root
-        # build destinations. Nested source directories stay in the inventory.
-        if Path(directory) == root:
+        # Both Python package roots have generated build destinations. Keep
+        # arbitrary source directories named build/dist in the inventory.
+        if Path(directory) in {root, root / "packages/python/review-sensei-github"}:
             subdirectories[:] = [
                 name for name in subdirectories if name not in {"build", "dist"}
             ]
@@ -763,18 +763,21 @@ class InlineCallerResolverTests(unittest.TestCase):
                 "src/unexpected.py",
                 "src/build/unexpected.py",
                 "src/dist/unexpected.py",
+                "packages/python/review-sensei-github/src/build/unexpected.py",
+                "packages/python/review-sensei-github/src/dist/unexpected.py",
             }
             for relative in sources:
                 source = root / relative
                 source.parent.mkdir(parents=True, exist_ok=True)
                 source.write_bytes(INLINE_COMMAND_PREFILTER_START.encode("utf-8"))
             generated = []
-            for directory in ("build", "dist"):
-                cache = root / directory / "npm-tmp" / "node-compile-cache"
-                cache.mkdir(parents=True)
-                output = cache / "vanishing-cache"
-                output.write_bytes(b"temporary build data")
-                generated.append(output)
+            for package_root in (root, root / "packages/python/review-sensei-github"):
+                for directory in ("build", "dist"):
+                    cache = package_root / directory / "npm-tmp" / "node-compile-cache"
+                    cache.mkdir(parents=True)
+                    output = cache / "vanishing-cache"
+                    output.write_bytes(b"temporary build data")
+                    generated.append(output)
             read_bytes = Path.read_bytes
 
             def read_source(path):

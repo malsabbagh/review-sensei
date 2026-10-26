@@ -19,6 +19,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 import review_sensei_github as github
+from fake_github_http import json_response
 from review_sensei_github.cli import main as github_main
 from review_sensei_github.operation_comments import (
     GitHubIssueCommentOperationPort,
@@ -37,18 +38,9 @@ from review_sensei_github.publication import (
     parse_finding_index,
 )
 from review_sensei_github.session_ledger import (
-    GitHubIssueCommentSessionLedger,
     render_session_comment,
 )
-
-import review_sensei.cli as engine_cli
-from review_sensei.baseline import admission_context_document
-from review_sensei.context import finding_lifecycle_for_comment
-from review_sensei.human_assessment import finding_instance_fingerprint
-from review_sensei.service import ReviewService
-from review_sensei.session import LocalSessionLedger
-from tests.fake_github_http import json_response
-from tests.test_publication_recovery import (
+from test_publication_recovery import (
     APP,
     BASE,
     CONFIGURATION,
@@ -60,6 +52,55 @@ from tests.test_publication_recovery import (
     _Broker,
     checkpoint,
 )
+
+import review_sensei.cli as engine_cli
+from review_sensei.baseline import admission_context_document
+from review_sensei.context import finding_lifecycle_for_comment
+from review_sensei.human_assessment import finding_instance_fingerprint
+from review_sensei.service import ReviewService
+from review_sensei.session import LocalSessionLedger
+
+
+def current_paged_entry(directory, *, limit=512):
+    """Real current lifecycle with GitHub's comment pagination/since semantics."""
+    from test_review_run import EntryFixture
+
+    class PagedEntry(EntryFixture):
+        def __init__(self):
+            super().__init__(directory, limit=limit)
+            self.comment_page_reads = []
+
+        def external(self, request, timeout):
+            target = urlparse(request.full_url)
+            if request.method == "GET" and target.path.endswith("/issues/7/comments"):
+                assert (
+                    len(self.accounted.observations)
+                    == sum(attempt == self.attempt for attempt, _, _ in self.trace) + 1
+                )
+                self.trace.append((self.attempt, request.method, target.path))
+                query = parse_qs(target.query)
+                size = int(query.get("per_page", [100])[0])
+                page = int(query.get("page", [1])[0])
+                self.comment_page_reads.append((size, page))
+                rows = ([self.comment] if self.comment else []) + list(
+                    self.extra_comments.values()
+                )
+                since = query.get("since", [None])[0]
+                if since:
+                    rows = [
+                        item
+                        for item in rows
+                        if not isinstance(item.get("updated_at"), str)
+                        or item["updated_at"] >= since
+                    ]
+                return json_response(rows[(page - 1) * size : page * size])
+            response = super().external(request, timeout)
+            if self.comment is not None:
+                self.comment["updated_at"] = "2026-10-26T00:00:00Z"
+            return response
+
+    return PagedEntry()
+
 
 PR342_COMMENT_SIZES = (
     6932,
@@ -413,79 +454,116 @@ class DefaultPublicationCliJourneyTests(unittest.TestCase):
         )
         self.assertIsInstance(outcome, HostedProviderResult)
 
-    def test_retained_recovery_obeys_actual_accepted_analysis_guard_under_actions(self):
+    def test_actions_separate_publication_refuses_before_accepted_result_reads(self):
         for changed in (False, True):
             with (
                 self.subTest(changed=changed),
                 tempfile.TemporaryDirectory() as directory,
             ):
                 root, state = Path(directory), JourneyState()
-                result, before = self.fail_legacy(root, state)
+                result, _ = self.fail_legacy(root, state)
                 self.accept_analysis(state, result, changed=changed)
                 (root / "result.json").unlink()
                 self.configuration(root, "complete")
+                before = LocalSessionLedger(root / "ledger").load(IDENTITY).record
+                retained = [dict(item) for item in state.parts]
+                state.calls.clear()
                 code, output, error = self.invoke(
                     root, state, recover=True, actions=True
                 )
-                if changed:
-                    self.assertNotEqual(code, 0, (output, error))
-                    self.assertIn("does not match the accepted operation", error)
-                    self.assertFalse(
-                        any(
-                            method == "POST" and path.endswith("/reviews")
-                            for method, path, _ in state.calls
-                        )
-                    )
-                    after = LocalSessionLedger(root / "ledger").load(IDENTITY).record
-                    self.assertEqual(
-                        after.completed_initial_reviews,
-                        before.completed_initial_reviews,
-                    )
-                else:
-                    self.assertEqual(code, 0, (output, error))
-                    self.assert_complete_publication(state, result)
+                self.assertEqual(code, 1, (output, error))
+                self.assertIn("Actions phase entry is retired", error)
+                self.assertEqual(state.calls, [])
+                self.assertEqual(state.parts, retained)
+                self.assertEqual(
+                    LocalSessionLedger(root / "ledger").load(IDENTITY).record, before
+                )
 
-    def test_hosted_session_ledger_pr342_comment_shape_stages_and_publishes_within_budget(
+    def test_current_run_pr342_history_recovers_complete_inventory_without_reinference(
         self,
     ):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            result, before = self.setup_files(root)
-            state = PR342JourneyState(before)
-            self.accept_analysis(state, result)
-            for item in state.parts:
-                item.setdefault("updated_at", "2026-10-20T00:00:30Z")
-            self.configuration(root, "legacy")
-            before_legacy_calls = len(state.calls)
-            code, output, error = self.invoke(
-                root, state, actions=True, github_session_ledger=True
-            )
-            legacy_calls = len(state.calls) - before_legacy_calls
-            self.assertNotEqual(code, 0, (output, error))
-            self.assertNotIn("cannot stage complete inventory", error)
-            self.assertIn("finding index", error)
-            self.assertLessEqual(legacy_calls, 60)
+        from review_sensei_github.operation_host import RESULT_COMMENT_MARKER
+        from review_sensei_github.session_ledger import parse_session_comment
+        from test_api_work_persistence import IDENTITY as CURRENT_IDENTITY
 
-            (root / "result.json").unlink()
-            self.configuration(root, "complete")
-            before_recover_calls = len(state.calls)
-            code, output, error = self.invoke(
-                root,
-                state,
-                recover=True,
-                actions=True,
-                github_session_ledger=True,
-            )
-            recover_calls = len(state.calls) - before_recover_calls
-            self.assertEqual(code, 0, (output, error))
-            self.assertLessEqual(recover_calls, 60)
-            self.assert_complete_publication(state, result)
-            remote_after = (
-                GitHubIssueCommentSessionLedger(
-                    state.http, token="synthetic-read", app_slug=APP
+        from review_sensei.api_work import ApiRunAccounting
+
+        with tempfile.TemporaryDirectory() as directory:
+            current = current_paged_entry(directory, limit=1024)
+            current.provider_comments = [
+                dict(
+                    path="src/app.py",
+                    line=None,
+                    side="FILE",
+                    body=f"Optional observation {number}: "
+                    + "Retain the complete original explanation. " * 8,
+                    severity="low",
+                    blocking=False,
+                    needs_human=False,
                 )
-                .load(IDENTITY)
-                .record
+                for number in range(77)
+            ]
+            for number, size in enumerate(PR342_COMMENT_SIZES[1:]):
+                identifier = 600 + number
+                current.extra_comments[identifier] = dict(
+                    id=identifier,
+                    body="x" * size,
+                    user=dict(id=999, type="Bot", login="reviewsensei[bot]"),
+                    updated_at="2019-01-01T00:00:00Z",
+                    issue_url="https://api.github.test/repos/owner/repo/issues/7",
+                )
+
+            def interrupted():
+                raise KeyboardInterrupt()
+
+            current.before_publication = interrupted
+            self.assertEqual(current.invoke(), 130, current.error)
+            pending = parse_session_comment(
+                current.comment["body"], identity=CURRENT_IDENTITY
             )
-            self.assertIsNotNone(remote_after)
-            self.assertEqual(remote_after.transaction.phase, "publication_succeeded")
+            old = ApiRunAccounting.from_document(pending.api_run_accounting)
+            retained = {
+                key: dict(item)
+                for key, item in current.extra_comments.items()
+                if RESULT_COMMENT_MARKER in item["body"]
+            }
+            self.assertTrue(retained)
+            (current.root / "review.json").unlink()
+            current.before_publication = None
+            current.attempt = 2
+            self.assertEqual(current.invoke(), 0, current.error)
+            self.assertEqual(current.provider_calls, 1)
+            final = parse_session_comment(
+                current.comment["body"], identity=CURRENT_IDENTITY
+            )
+            self.assertEqual(
+                final.transaction.transaction_id, pending.transaction.transaction_id
+            )
+            self.assertEqual(
+                final.transaction.result_sha256, pending.transaction.result_sha256
+            )
+            self.assertEqual(final.transaction.phase, "publication_succeeded")
+            self.assertEqual(
+                current.accounted.accounting.blocks[: len(old.blocks)], old.blocks
+            )
+            for key, item in retained.items():
+                self.assertEqual(current.extra_comments[key], item)
+            roots = [item for item in current.reviews if item["state"] == "COMMENTED"]
+            self.assertEqual(len(roots), 1)
+            index = parse_finding_index(
+                roots[0]["body"],
+                repository_id=123,
+                pull_request=7,
+                head_sha=current.requested_head,
+            )
+            self.assertEqual(len(index.entries), 77)
+            complete_text = roots[0]["body"] + "\n".join(
+                item["body"] for item in current.inline
+            )
+            for comment in current.provider_comments:
+                self.assertIn(comment["body"], complete_text)
+            self.assertNotIn("omitted for size", complete_text)
+            self.assertEqual(
+                sum(item["state"] == "APPROVED" for item in current.reviews), 1
+            )
+            self.assertLessEqual(len(current.trace), 1024)

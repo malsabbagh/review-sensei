@@ -79,7 +79,7 @@ from review_sensei.session import (
     read_session_dispositions,
 )
 
-from .broker_client import SESSION_GRANT_PATTERN, BrokerClient, BrokerSessionGrant
+from .broker_client import BrokerClient, BrokerSessionGrant
 from .errors import (
     GitHubBrokerClientError,
     GitHubHTTPError,
@@ -293,32 +293,18 @@ class GitHubIssueCommentSessionLedger:
             not isinstance(app_slug, str) or not app_slug.strip()
         ):
             raise ReviewInputError("GitHub session ledger app slug is invalid")
-        grant_arguments = (broker, session_grant, session_attestation, head_sha)
-        if any(argument is not None for argument in grant_arguments) and not all(
-            argument is not None for argument in grant_arguments
+        if any(
+            value is not None
+            for value in (broker, session_grant, session_attestation, head_sha)
         ):
             raise ReviewInputError(
-                "GitHub session ledger grant configuration is incomplete"
+                "broker-bound phase ledgers are retired; use the current run-owned ledger"
             )
-        if broker is not None:
-            if not callable(getattr(broker, "verify_session_grant", None)):
-                raise ReviewInputError(
-                    "GitHub session ledger grant verifier is invalid"
-                )
-            if (
-                not isinstance(session_grant, str)
-                or SESSION_GRANT_PATTERN.fullmatch(session_grant) is None
-            ):
-                raise ReviewInputError("GitHub session ledger grant is invalid")
-            if not isinstance(session_attestation, Mapping):
-                raise ReviewInputError("GitHub session ledger attestation is invalid")
-            if (
-                not isinstance(head_sha, str)
-                or re.fullmatch(r"[a-f0-9]{40}", head_sha) is None
-            ):
-                raise ReviewInputError("GitHub session ledger head SHA is invalid")
         self.http = http
         self.token = token
+        # Populated only by the current authenticated broker startup. The
+        # Actions event/env is never the operation journal's App authority.
+        self.authenticated_app_id: int | None = None
         self.app_slug = app_slug
         self._broker = broker
         self._session_grant = session_grant
@@ -1641,126 +1627,9 @@ class GitHubIssueCommentSessionLedger:
         now: datetime | None = None,
         witness: object = None,
     ) -> None:
-        """Install a fresh one-attempt grant on the original live ledger only.
-
-        This does not issue authority or verify/consume the grant. The next
-        mutation verifies it through the actual consuming BrokerClient. Current
-        v1 grant claims bind hosted command scope; they do not prove durable
-        original operation accounting or permit crash/restart continuation.
-        An OperationHandle whose binding is the attempt reservation satisfies
-        a restored budget or a missing in-memory owner. A snapshot does not.
-        """
-        budget = self.evidence_budget
-        if not self.enable_partition_writes or budget is None:
-            raise ReviewInputError(
-                "prepaid activation writers or budget are unavailable"
-            )
-        self._validate_tail_scan_pages(max_scan_pages)
-        operation = _tail_operation_binding(operation_binding)
-        scope = _tail_attempt_scope(identity, attempt_reservation_id, operation)
-        witnessed = _operation_witness_matches(witness, attempt_reservation_id)
-        if scope in budget._failed_attempts or (
-            not witnessed
-            and (budget.restored or budget._live_attempt_owners.get(scope) is not self)
-        ):
-            raise NonResumableActivationError(
-                "original live ledger proof is unavailable"
-            )
-        if self._activation_ticket is not None or budget._tail_ticket is not None:
-            raise ReviewInputError("cannot rebind a pending activation tail")
-        try:
-            if not isinstance(self._broker, BrokerClient) or not isinstance(
-                grant, BrokerSessionGrant
-            ):
-                raise ReviewInputError(
-                    "activation requires a broker-parsed session grant"
-                )
-            attestation = self._broker._validated_attestation_grant(grant.attestation)
-            original = self._broker._validated_attestation_grant(
-                self._session_attestation
-            )
-            # Feedback mutation fields change between checkpoints; complete
-            # source/actor/workflow identity remains immutable. V1 preserves
-            # its original same-command claim equality.
-            excluded = {"issued_at"}
-            if attestation.get("version") == original.get("version") == 2:
-                excluded.add("mutation")
-            if (
-                {
-                    key: value
-                    for key, value in attestation.items()
-                    if key not in excluded
-                }
-                != {
-                    key: value for key, value in original.items() if key not in excluded
-                }
-                or attestation["repository"] != identity.repository
-                or attestation["repository_id"] != identity.repository_id
-                or attestation["pull_request"] != identity.pull_request
-                or attestation["head_sha"] != self._head_sha
-                or grant.state not in {"enrolled", "known"}
-                or not isinstance(grant.token, str)
-                or not grant.token.strip()
-                or not isinstance(grant.grant, str)
-                or SESSION_GRANT_PATTERN.fullmatch(grant.grant) is None
-            ):
-                raise ReviewInputError("fresh activation grant scope differs")
-            digest = hashlib.sha256(grant.grant.encode()).hexdigest()
-            if digest in self._bound_tail_grants or len(self._bound_tail_grants) >= 64:
-                raise ReviewInputError(
-                    "activation grant was reused or registry exhausted"
-                )
-            self._tail_authorizing, self._tail_scan_pages = True, max_scan_pages
-            self._list_refresh = True
-            self._reuse_listed_parts = True
-            self._verified_parts = {}
-            self._part_digests = {}
-            comment_id, current = self._discover(identity, now=now)
-            if (
-                comment_id is None
-                or current is None
-                or current.expired(now=now)
-                or current.reservation_id != attempt_reservation_id
-            ):
-                raise ReviewInputError("current activation reservation is unavailable")
-            budget._require_live_attempt(
-                scope,
-                current.record_sha256,
-                owner=self,
-                witness=witness,
-                reservation_id=attempt_reservation_id,
-            )
-            self._validate_feedback_tail_attestation(
-                attestation,
-                current,
-                operation=operation,
-                reservation_id=attempt_reservation_id,
-            )
-            if current.assessment_queue is not None:
-                _validate_tail_draft(
-                    current,
-                    current.evolve(generation=current.generation + 1, now=now),
-                    operation=operation,
-                    reservation_id=attempt_reservation_id,
-                    budget=budget,
-                )
-            self._verify_live_head(identity)
-            budget.check()
-            self.token = grant.token
-            self._session_grant = grant.grant
-            self._session_attestation = attestation
-            self._bound_tail_grants.add(digest)
-        except GitHubBrokerClientError as exc:
-            budget._burn_live_attempt(scope)
-            raise ReviewInputError(
-                "fresh activation grant attestation is invalid"
-            ) from exc
-        except BaseException:
-            budget._burn_live_attempt(scope)
-            raise
-        finally:
-            self._tail_authorizing, self._tail_scan_pages = False, None
-            self._reuse_listed_parts = False
+        raise ReviewInputError(
+            "phase activation grants are retired; current actions use run-owned accounting"
+        )
 
     def admit_with_tail(
         self,

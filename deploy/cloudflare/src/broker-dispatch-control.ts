@@ -1,6 +1,6 @@
 /** Request-owned, downward-only physical broker subrequest admission.
- * The caller prepays the whole liability; successful or uncertain work never
- * refunds it. A receipt reports observations, not a fresh allowance or authority.
+ * The service ceiling is independent of the caller's one HTTP attempt. A
+ * receipt reports internal observations, never caller debits or authority.
  */
 export interface BrokerControlRequest {
   schema_version: "1.0";

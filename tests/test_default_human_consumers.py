@@ -217,8 +217,7 @@ class DefaultHumanEligibilityTests(unittest.TestCase):
 class DefaultHumanConsumerTests(unittest.TestCase):
     def state(self, *, extra_human=True, **fact_changes):
         from review_sensei_github.default_human_inventory import HumanInventoryReference
-
-        from tests.test_human_assessment import State, prior
+        from test_human_assessment import State, prior
 
         original = prior(extra_human=extra_human, **fact_changes)
         reference = HumanInventoryReference.from_dict(reference_document())
@@ -235,9 +234,9 @@ class DefaultHumanConsumerTests(unittest.TestCase):
 
     def assessment(self, state, reader, *, target_path="src/app.py"):
         from review_sensei_github.human_assessment import HumanAssessmentPublisher
+        from test_human_assessment import APP, HUMAN, Provider, response_for
 
         from review_sensei.human_assessment import HumanAssessmentService
-        from tests.test_human_assessment import APP, HUMAN, Provider, response_for
 
         publisher = HumanAssessmentPublisher(
             http=state.http, human_inventory_reader=reader
@@ -274,7 +273,7 @@ class DefaultHumanConsumerTests(unittest.TestCase):
         ), publisher
 
     def test_public_assessment_preserves_reference_across_partial_and_fresh_owner(self):
-        from tests.test_human_assessment import APP, HEAD
+        from test_human_assessment import APP, HEAD
 
         state, reader, seen = self.state()
         first, publisher = self.assessment(state, reader)
@@ -315,9 +314,9 @@ class DefaultHumanConsumerTests(unittest.TestCase):
 
     def test_public_current_reply_uses_reader_on_every_pending_fence(self):
         from review_sensei_github.conversation import ConversationPublisher
+        from test_human_assessment import APP, HEAD
 
         from review_sensei.models import ConversationReply
-        from tests.test_human_assessment import APP, HEAD
 
         state, reader, seen = self.state()
         publisher = ConversationPublisher(
@@ -347,8 +346,7 @@ class DefaultHumanConsumerTests(unittest.TestCase):
     def test_unavailable_reader_stops_public_prepare_before_writes(self):
         from review_sensei_github.errors import GitHubPublicationError
         from review_sensei_github.human_assessment import HumanAssessmentPublisher
-
-        from tests.test_human_assessment import APP
+        from test_human_assessment import APP
 
         state, _, _ = self.state()
 
@@ -371,9 +369,9 @@ class DefaultHumanConsumerTests(unittest.TestCase):
 
     def test_scope_factory_is_lazy_for_legacy_and_shares_original_budget(self):
         from review_sensei_github.publication import ReviewApprovalFinalizer
+        from test_human_assessment import APP, HEAD, State, prior
 
         from review_sensei.bounded_evidence import EvidenceReadBudget
-        from tests.test_human_assessment import APP, HEAD, State, prior
 
         legacy = State(prior())
         calls = []
@@ -484,8 +482,9 @@ class DefaultHumanConsumerTests(unittest.TestCase):
     def test_scope_factory_uses_current_credential_without_refilling_shared_budget(
         self,
     ):
+        from test_human_assessment import APP, HEAD
+
         from review_sensei.bounded_evidence import EvidenceReadBudget
-        from tests.test_human_assessment import APP, HEAD
 
         budget = EvidenceReadBudget()
         deadline = budget.deadline
@@ -531,8 +530,9 @@ class DefaultHumanConsumerTests(unittest.TestCase):
     ):
         from urllib.parse import urlparse
 
+        from test_human_assessment import APP, HEAD
+
         from review_sensei.bounded_evidence import EvidenceReadBudget
-        from tests.test_human_assessment import APP, HEAD
 
         budget = EvidenceReadBudget()
         deadline = budget.deadline
@@ -573,9 +573,9 @@ class DefaultHumanConsumerTests(unittest.TestCase):
 
     def test_changed_credential_cannot_recreate_expired_reader_allowance(self):
         from review_sensei_github.errors import GitHubPublicationError
+        from test_human_assessment import APP, HEAD
 
         from review_sensei.bounded_evidence import EvidenceReadBudget
-        from tests.test_human_assessment import APP, HEAD
 
         clock = [0.0]
         budget = EvidenceReadBudget(clock=lambda: clock[0])
@@ -610,9 +610,9 @@ class DefaultHumanConsumerTests(unittest.TestCase):
     def test_scope_factory_root_validation_and_latest_malformed_fail_closed(self):
         from review_sensei_github.errors import GitHubPublicationError
         from review_sensei_github.publication import ReviewApprovalFinalizer
+        from test_human_assessment import APP, HEAD
 
         from review_sensei.bounded_evidence import EvidenceReadBudget
-        from tests.test_human_assessment import APP, HEAD
 
         state, reader, seen = self.state()
 
@@ -669,8 +669,7 @@ class DefaultHumanConsumerTests(unittest.TestCase):
 
     def test_detached_reference_finalization_requires_persisted_readback(self):
         from review_sensei_github.publication import ReviewApprovalFinalizer
-
-        from tests.test_human_assessment import APP, HEAD
+        from test_human_assessment import APP, HEAD
 
         state, _, _ = self.state(extra_human=False)
         complete = replace(

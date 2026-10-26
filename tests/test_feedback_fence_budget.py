@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import unittest
 from copy import deepcopy
 
+from fake_github_http import json_response
 from review_sensei_github import (
     BrokerClient,
     GitHubApplication,
@@ -15,13 +17,13 @@ from review_sensei_github import (
 from review_sensei_github.conversation import ConversationPublisher
 from review_sensei_github.human_assessment import HumanAssessmentPublisher
 from review_sensei_github.publication_recovery import publication_http
+from test_human_assessment import APP, HEAD, Provider, State, response_for
+from test_run_authority import authority
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
 from review_sensei.human_assessment import HumanAssessmentService
 from review_sensei.models import ConversationReply
-from tests.fake_github_http import json_response
-from tests.test_human_assessment import APP, HEAD, Provider, State, response_for
 
 
 class FeedbackFenceBudgetTests(unittest.TestCase):
@@ -184,10 +186,19 @@ class ReplyBrokerBudgetTests(unittest.TestCase):
             self.broker_calls.append((capability, timeout))
             if expire_after_review and capability == "review_publish":
                 self.clock[0] = 60.0
-            return json_response({"token": "synthetic"})
+            return json_response({"token": "synthetic", "capability": capability})
 
+        # This is the direct, non-Actions application seam: its local evidence
+        # deadline remains independent from current hosted caller-run policy.
+        current = authority("reply")
+        current.update(repository_id=1, pull_request=1, head_sha=HEAD)
+        self.state.source["updated_at"] = current["source"]["updated_at"]
+        current["source"].update(
+            id=10,
+            body_sha256=hashlib.sha256(self.state.source["body"].encode()).hexdigest(),
+        )
         application = GitHubApplication(
-            broker=BrokerClient(opener=exchange),
+            broker=BrokerClient(opener=exchange, authority=current),
             http=self.state.http,
             reviewer=ReviewPublisher(http=self.state.http),
             learner=None,
@@ -200,7 +211,7 @@ class ReplyBrokerBudgetTests(unittest.TestCase):
             repository="owner/repo",
             pull_request=1,
             source_comment_id=10,
-            source_updated_at="updated",
+            source_updated_at=self.state.source["updated_at"],
             expected_head_sha=HEAD,
             reply_provider=Provider(response_for(self.state.eligibility)),
             model="fixture",

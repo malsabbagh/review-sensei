@@ -53,6 +53,8 @@ def snapshot():
 
 class DispositionSnapshotReaderTests(unittest.TestCase):
     def test_audited_25_decisions_finish_bounded_threads_and_one_native_approval(self):
+        from test_command_capacity_recovery import CommandCapacityState
+
         from review_sensei.disposition import (
             FindingIdentity,
             apply_session_command,
@@ -60,7 +62,6 @@ class DispositionSnapshotReaderTests(unittest.TestCase):
             session_dispositions,
         )
         from review_sensei.models import ReviewTransaction
-        from tests.test_command_capacity_recovery import CommandCapacityState
 
         state = CommandCapacityState(
             complete=True, human_count=25, inline_range=(0, 25), padded=False

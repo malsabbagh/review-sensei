@@ -9,17 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from review_sensei_github.errors import GitHubPublicationError
-
-from review_sensei.bounded_evidence import EvidenceReadBudget
-from review_sensei.context import finding_lifecycle_for_comment
-from review_sensei.errors import ReviewInputError
-from review_sensei.human_assessment import (
-    PendingHumanReview,
-    finding_instance_fingerprint,
-)
-from review_sensei.session import LocalSessionLedger
-from tests.default_human_inventory_contract import (
+from default_human_inventory_contract import (
     APP,
     BASE,
     DEFAULT_INVENTORY_INTENT_MARKER,
@@ -33,8 +23,18 @@ from tests.default_human_inventory_contract import (
     publish_human,
     reply_human,
 )
-from tests.test_publication_recovery import recover
-from tests.test_review_work import AssessingProvider
+from review_sensei_github.errors import GitHubPublicationError
+from test_publication_recovery import recover
+from test_review_work import AssessingProvider
+
+from review_sensei.bounded_evidence import EvidenceReadBudget
+from review_sensei.context import finding_lifecycle_for_comment
+from review_sensei.errors import ReviewInputError
+from review_sensei.human_assessment import (
+    PendingHumanReview,
+    finding_instance_fingerprint,
+)
+from review_sensei.session import LocalSessionLedger
 
 
 class DefaultHumanInventoryTests(unittest.TestCase):
@@ -714,14 +714,14 @@ class DefaultHumanInventoryTests(unittest.TestCase):
 
         from unittest.mock import MagicMock
 
-        from review_sensei_github.publication_recovery import retain_review_result
-
-        from review_sensei.session import InMemorySessionLedger
-        from tests.default_human_inventory_contract import (
+        from default_human_inventory_contract import (
             EVIDENCE,
             POLICY,
             trusted_configuration,
         )
+        from review_sensei_github.publication_recovery import retain_review_result
+
+        from review_sensei.session import InMemorySessionLedger
 
         ledger = InMemorySessionLedger()
         checkpoint, _ = human_checkpoint(ledger, count=1)

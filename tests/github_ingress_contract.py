@@ -1,7 +1,10 @@
-"""Captured external ports for real installed GitHub CLI reply journeys.
+"""Captured ports for canonical local CLI / library reply composition.
 
-The application, publishers, operation comment store, registry and adapters run
-unchanged. Only broker authorization and external HTTP are synthetic.
+The actual registry/adapters, application, publishers and operation journal run
+unchanged. Broker ports and external HTTP are synthetic. Explicit library
+operation identity is supplied at that API seam, never through fake Actions
+environment or a retired hosted phase entry. This is not reply-run authority or
+run-wide allowance qualification; those have separate current entry tests.
 """
 
 import io
@@ -134,6 +137,49 @@ class CapturedGitHub:
     def invoke(self, case, transport, config, environment, *, enabled=True):
         import review_sensei_github as github_module
 
+        # A local composition must never claim an authenticated Actions owner.
+        assert not any(
+            name in environment
+            for name in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "REVIEWSENSEI_APP_ID")
+        )
+        actual_application = github_module.GitHubApplication
+        host = self
+
+        class LocalJournalApplication(actual_application):
+            def generate_and_publish_reply(self, **kwargs):
+                from review_sensei_github.operation_comments import (
+                    GitHubIssueCommentOperationPort,
+                    ResultPartStore,
+                )
+                from review_sensei_github.operation_host import (
+                    GitHubCommentOperationStore,
+                )
+
+                assert kwargs.get("run_id") is None
+                assert kwargs.get("app_id") is None
+                if kwargs["operation_entry"] == "enabled":
+                    port = GitHubIssueCommentOperationPort(
+                        host.http,
+                        token="synthetic-local-journal",
+                        repository="owner/repo",
+                        pull_request=1,
+                        app_user_id=APP["id"],
+                        strict_association=True,
+                    )
+                    kwargs.update(
+                        operation_store=GitHubCommentOperationStore(
+                            port, app_user_id=APP["id"]
+                        ),
+                        operation_parts=ResultPartStore(port, app_user_id=APP["id"]),
+                        # Source-owned synthetic library identity, not Actions
+                        # evidence or a broker grant/current caller checkpoint.
+                        repository_id=1,
+                        app_id=7,
+                        run_id="123",
+                        run_attempt="1",
+                    )
+                return super().generate_and_publish_reply(**kwargs)
+
         stdout, stderr = io.StringIO(), io.StringIO()
         argv = [
             "reply",
@@ -164,7 +210,10 @@ class CapturedGitHub:
             case.transport_scope(transport),
             patch.dict("os.environ", environment, clear=True),
             patch.multiple(
-                github_module, BrokerClient=lambda: self, GitHubHttp=lambda: self.http
+                github_module,
+                BrokerClient=lambda: self,
+                GitHubHttp=lambda: self.http,
+                GitHubApplication=LocalJournalApplication,
             ),
             redirect_stdout(stdout),
             redirect_stderr(stderr),

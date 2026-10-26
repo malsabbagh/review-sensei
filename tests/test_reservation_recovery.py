@@ -1,38 +1,47 @@
+"""Known-owner Actions evidence and current run recovery; no age inference."""
+
 from __future__ import annotations
 
+import copy
 import io
 import json
+import re
 import tempfile
 import unittest
+from argparse import Namespace
 from contextlib import redirect_stderr
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from urllib.parse import urlsplit
 
+from review_sensei_github.api_run_owner import ApiRunActionsEvidence
+from review_sensei_github.application import resolve_hosted_session_ledger
+from review_sensei_github.reservation_recovery import ActionsReservationEvidence
+from review_sensei_github.review_hooks import GitHubReviewHooks
 from review_sensei_github.session_ledger import (
     GitHubIssueCommentSessionLedger,
     parse_session_comment,
     render_session_comment,
 )
 
+from review_sensei.api_work import ApiExecutionOwner, ApiRunAccounting
 from review_sensei.cli import main
 from review_sensei.convergence import ReviewConvergencePolicy
 from review_sensei.disposition import MaintainerCommand, apply_session_command
-from review_sensei.errors import ReviewInputError
+from review_sensei.errors import ProviderError, ReviewInputError
 from review_sensei.session import (
     InMemorySessionLedger,
     LocalSessionLedger,
     SessionIdentity,
     SessionRecord,
     prepare_review_transaction,
+    record_session_failed_attempt,
 )
-
-try:
-    from fake_github_http import json_response, make_http
-    from isolated_working_directory import IsolatedWorkingDirectoryMixin
-except ImportError:
-    from tests.fake_github_http import json_response, make_http
-    from tests.isolated_working_directory import IsolatedWorkingDirectoryMixin
+from tests.fake_github_http import json_response, make_http
+from tests.isolated_working_directory import IsolatedWorkingDirectoryMixin
+from tests.test_api_work_persistence import IDENTITY as CURRENT_IDENTITY
+from tests.test_review_run import EntryFixture
 
 NOW = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
 IDENTITY = SessionIdentity("owner/repo", 7, 99)
@@ -42,9 +51,9 @@ OWNER = {"run_id": "123", "head_sha": HEAD}
 
 
 def analysis_record(*, owner=True):
-    ledger = InMemorySessionLedger()
+    memory = InMemorySessionLedger()
     prepared = prepare_review_transaction(
-        ledger,
+        memory,
         IDENTITY,
         ReviewConvergencePolicy(mode="merge-focused"),
         reservation_id="d" * 64,
@@ -55,28 +64,14 @@ def analysis_record(*, owner=True):
         now=NOW,
     )
     return prepared.record.evolve(
-        reservation_owner=OWNER if owner else None,
-        operator_paused=True,
-        now=NOW,
+        reservation_owner=OWNER if owner else None, operator_paused=True, now=NOW
     )
 
 
-class Harness:
-    def __init__(self, record=None):
-        self.record = record or analysis_record()
-        self.attestation = {
-            "repository": IDENTITY.repository,
-            "repository_id": IDENTITY.repository_id,
-            "pull_request": IDENTITY.pull_request,
-            "head_sha": LIVE_HEAD,
-            "run_id": "456",
-            "operation": "command",
-        }
-        self.grants = 0
-        self.patches = 0
-        self.reads = 0
-        self.active = []
-        self.live_head = LIVE_HEAD
+class ActionsHarness:
+    """Independent fake Actions metadata; no grant or mutable authority seam."""
+
+    def __init__(self):
         self.run = {
             "id": 123,
             "repository": {"id": 99, "full_name": "owner/repo"},
@@ -85,326 +80,228 @@ class Harness:
             "run_attempt": 1,
             "event": "pull_request",
             "head_sha": HEAD,
-            "path": ".github/workflows/review-sensei-review.yml",
-            "pull_requests": [{"number": 7}],
             "run_started_at": "2026-10-06T11:59:00Z",
             "updated_at": "2026-10-06T12:01:00Z",
         }
         self.jobs = [
             {
+                "id": 901,
                 "run_id": 123,
                 "run_attempt": 1,
                 "head_sha": HEAD,
-                "name": "review-or-reply / hosted",
+                "name": "ReviewSensei / hosted",
                 "status": "completed",
                 "conclusion": "failure",
-                "started_at": "2026-10-06T11:59:30Z",
-                "completed_at": "2026-10-06T12:00:30Z",
+                "completed_at": "2026-10-06T12:01:00Z",
             }
         ]
-        self.candidates = [self.run]
+        self.total = None
+        self.reads = 0
         self.on_run_read = lambda: None
-        self.on_comments_read = lambda: None
-        http, self.calls = make_http([], routes=[(lambda request: True, self.respond)])
-        self.http = http
-        self.ledger = GitHubIssueCommentSessionLedger(
-            http,
-            token="session-token",
-            app_slug="sensei[bot]",
-            broker=self,
-            session_grant="sg1.1780000000000." + "a" * 43,
-            session_attestation=self.attestation,
-            head_sha=LIVE_HEAD,
-            actions_read_token="actions-read-token",
+        self.http, self.calls = make_http(
+            [], routes=[(lambda _request: True, self.respond)]
         )
-
-    def verify_session_grant(self, grant, attestation):
-        self.grants += 1
-        return dict(attestation)
-
-    def comment(self):
-        return {
-            "id": 42,
-            "user": {"type": "Bot", "login": "sensei[bot]"},
-            "body": render_session_comment(
-                repository_id=99, pull_request=7, record=self.record
-            ),
-        }
 
     def respond(self, request):
-        url = request.full_url
-        if request.method == "PATCH":
-            self.patches += 1
-            self.record = parse_session_comment(
-                json.loads(request.data)["body"], identity=IDENTITY
-            )
-            return json_response(self.comment())
-        if "/issues/7/comments" in url:
-            self.on_comments_read()
-            return json_response([self.comment()])
-        if "/pulls/7" in url:
-            return json_response({"head": {"sha": self.live_head}})
-        if "/actions/runs?status=" in url:
+        if request.method != "GET":
+            raise AssertionError("Actions completion evidence is read only")
+        path = urlsplit(request.full_url).path
+        if path.endswith("/jobs"):
             return json_response(
-                {"workflow_runs": self.active, "total_count": len(self.active)}
+                {
+                    "jobs": copy.deepcopy(self.jobs),
+                    "total_count": len(self.jobs) if self.total is None else self.total,
+                }
             )
-        if "/actions/runs?head_sha=" in url:
-            return json_response(
-                {"workflow_runs": self.candidates, "total_count": len(self.candidates)}
-            )
-        if "/jobs?" in url:
-            return json_response({"jobs": self.jobs, "total_count": len(self.jobs)})
-        if "/actions/runs/123" in url:
+        if re.fullmatch(r"/repos/owner/repo/actions/runs/[1-9][0-9]*", path):
             self.reads += 1
             self.on_run_read()
-            return json_response(self.run)
-        raise AssertionError(url)
+            return json_response(copy.deepcopy(self.run))
+        raise AssertionError(path)
 
-    def continue_review(self):
-        return apply_session_command(
-            self.ledger,
-            IDENTITY,
-            MaintainerCommand("continue", actor="maintainer", head_sha=LIVE_HEAD),
-            now=NOW,
-        )
+    def verify(self, record=None, *, command_run_id="456"):
+        return ActionsReservationEvidence(
+            self.http, token="actions-read", command_run_id=command_run_id
+        ).verify(IDENTITY, record if record is not None else analysis_record())
+
+    def ceased(self, *, owner=None):
+        return ApiRunActionsEvidence(
+            self.http, token="actions-read", command_run_id="456"
+        ).ceased_run_owner(IDENTITY, 123, owner or ApiExecutionOwner(1, "hosted", 0))
 
 
 class ReservationRecoveryTests(unittest.TestCase):
-    def test_authenticated_completed_owner_is_recovered_once_atomically(self):
-        h = Harness()
-        before = h.record
-        record, result = h.continue_review()
-        self.assertTrue(result.applied)
-        self.assertIsNone(record.reservation_id)
-        self.assertIsNone(record.reservation_owner)
-        self.assertIsNone(record.transaction)
-        self.assertEqual(record.generation, before.generation + 1)
-        self.assertEqual(record.failed_attempts, 1)
-        self.assertEqual(record.failed_attempts_head_sha, HEAD)
-        self.assertEqual(
-            record.completed_initial_reviews, before.completed_initial_reviews
-        )
-        self.assertEqual(
-            record.completed_verification_rounds, before.completed_verification_rounds
-        )
-        self.assertEqual(record.expires_at, before.expires_at)
-        self.assertFalse(record.operator_paused)
-        self.assertEqual(h.grants, 1)
-        self.assertEqual(h.patches, 1)
-        again, _ = h.continue_review()
-        self.assertEqual(again, record)
-        self.assertEqual(h.patches, 1)
-
-    def test_lazy_read_capability_is_not_requested_for_unpause_without_hold(self):
-        h = Harness(
-            SessionRecord.create(IDENTITY, now=NOW).evolve(
-                operator_paused=True, now=NOW
+    def test_explicit_completed_owner_proof_is_read_only_and_reread(self):
+        h = ActionsHarness()
+        record = analysis_record()
+        original = record.to_dict()
+        self.assertEqual(h.verify(record), ("123", 1))
+        self.assertEqual(h.reads, 2)
+        self.assertEqual(record.to_dict(), original)
+        self.assertTrue(all(method == "GET" for method, _url, _body in h.calls))
+        self.assertFalse(
+            any(
+                "head_sha=" in url or "?status=" in url
+                for _method, url, _body in h.calls
             )
         )
-        h.ledger._actions_read_token = None
-        calls = []
-        h.ledger._actions_token_provider = lambda: (
-            calls.append("requested") or "actions-read"
-        )
-        record, _ = h.continue_review()
-        self.assertFalse(record.operator_paused)
-        self.assertEqual(calls, [])
 
-    def test_publication_checkpoint_is_preserved_by_continuation(self):
-        h = Harness()
-        tx = h.record.transaction.with_result("e" * 64)
-        h.record = h.record.evolve(
-            reservation_id=None,
-            reserved_slot=None,
-            last_committed_reservation_id=tx.reservation_id,
-            transaction=tx,
-            now=NOW,
-        )
-        record, _ = h.continue_review()
-        self.assertEqual(record.transaction, tx)
-        self.assertEqual(record.failed_attempts, 0)
-        self.assertEqual(h.reads, 0)
-
-    def test_rerun_after_initial_proof_before_cas_is_rejected(self):
-        h = Harness()
-
-        def race():
-            if h.grants:
-                h.run["status"] = "in_progress"
-
-        h.on_run_read = race
-        with self.assertRaisesRegex(ReviewInputError, "active or its identity"):
-            h.continue_review()
-        self.assertEqual(h.patches, 0)
-
-    def test_concurrent_new_owner_is_preserved_during_second_proof(self):
-        h = Harness()
-
-        def race():
-            if h.reads == 4:
-                h.record = h.record.evolve(
-                    generation=h.record.generation + 1,
-                    reservation_owner={**OWNER, "run_id": "999"},
-                    now=NOW,
-                )
-
-        h.on_run_read = race
-        with self.assertRaisesRegex(ReviewInputError, "ownership or generation"):
-            h.continue_review()
-        self.assertEqual(h.patches, 0)
-        self.assertEqual(h.record.reservation_owner["run_id"], "999")
-
-    def test_live_or_unknown_owner_state_never_mutates(self):
-        for field, value in (
+    def test_active_foreign_or_unknown_run_never_establishes_completion(self):
+        for key, value in (
+            ("id", 124),
             ("status", "in_progress"),
             ("status", "queued"),
             ("conclusion", None),
+            ("conclusion", "unknown"),
             ("run_attempt", True),
+            ("run_attempt", 0),
             ("repository", {"id": 88, "full_name": "owner/repo"}),
+            ("repository", {"id": 99, "full_name": "foreign/repo"}),
         ):
-            with self.subTest(field=field, value=value):
-                h = Harness()
-                h.run[field] = value
+            with self.subTest(key=key, value=value):
+                h = ActionsHarness()
+                h.run[key] = value
                 with self.assertRaises(ReviewInputError):
-                    h.continue_review()
-                self.assertEqual(h.patches, 0)
+                    h.verify()
+                self.assertTrue(all(method == "GET" for method, _url, _body in h.calls))
 
-    def test_unrelated_active_ci_does_not_block_exact_owner_recovery(self):
-        h = Harness()
-        h.active = [
-            {
-                "id": 999,
-                "status": "in_progress",
-                "path": ".github/workflows/ci.yml",
-                "pull_requests": [],
-            }
-        ]
-        record, _ = h.continue_review()
-        self.assertIsNone(record.reservation_id)
-        self.assertEqual(h.patches, 1)
-        self.assertEqual(h.reads, 4)
-        self.assertFalse(any("?status=" in url for _, url, _ in h.calls))
+    def test_missing_owner_refuses_before_http_despite_plausible_timestamps(self):
+        for timestamp in (NOW - timedelta(days=365), NOW, NOW + timedelta(days=365)):
+            for transaction in (True, False):
+                with self.subTest(timestamp=timestamp, transaction=transaction):
+                    record = analysis_record(owner=False)
+                    if not transaction:
+                        record = record.evolve(transaction=None, now=NOW)
+                    h = ActionsHarness()
+                    h.run.update(
+                        run_started_at=timestamp.isoformat(),
+                        updated_at=timestamp.isoformat(),
+                    )
+                    h.jobs[0]["completed_at"] = timestamp.isoformat()
+                    with self.assertRaisesRegex(
+                        ReviewInputError, "explicit authenticated owner"
+                    ):
+                        h.verify(record)
+                    self.assertEqual(h.calls, [])
+                    self.assertIsNotNone(record.reservation_id)
 
-    def test_rerun_between_completion_reads_invalidates_proof(self):
-        h = Harness()
-
-        def race():
-            if h.reads == 2:
-                h.run["run_attempt"] = 2
-
-        h.on_run_read = race
-        with self.assertRaisesRegex(ReviewInputError, "proof is stale"):
-            h.continue_review()
-        self.assertEqual(h.patches, 0)
-
-    def test_generation_change_after_proof_never_discards_new_owner(self):
-        h = Harness()
-
-        def race():
-            if h.grants:
-                h.record = h.record.evolve(generation=h.record.generation + 1, now=NOW)
-                h.on_comments_read = lambda: None
-
-        h.on_comments_read = race
-        with self.assertRaisesRegex(ReviewInputError, "ownership or generation"):
-            h.continue_review()
-        self.assertEqual(h.patches, 0)
-        self.assertIsNotNone(h.record.reservation_id)
-
-    def test_head_advance_before_write_never_mutates(self):
-        h = Harness()
-        h.live_head = "c" * 40
-        with self.assertRaisesRegex(ReviewInputError, "head is stale"):
-            h.continue_review()
-        self.assertEqual(h.patches, 0)
-
-    def test_legacy_exact_head_unique_failed_run_and_job_recover(self):
-        h = Harness(analysis_record(owner=False))
-        record, result = h.continue_review()
-        self.assertTrue(result.applied)
-        self.assertIsNone(record.reservation_id)
-        self.assertEqual(record.failed_attempts, 1)
-
-    def test_legacy_later_mutation_cannot_rebind_timestamp_to_another_run(self):
-        original = analysis_record(owner=False)
-        # A later pause/disposition write moves updated_at but leaves the
-        # analysis transaction's generation unchanged. The new timestamp
-        # could overlap another failed PR run, so it is no longer origin proof.
-        later = NOW + timedelta(minutes=2)
-        h = Harness(original.evolve(generation=original.generation + 1, now=later))
-        h.run.update(
-            run_started_at="2026-10-06T12:01:00Z",
-            updated_at="2026-10-06T12:03:00Z",
+    def test_own_active_run_and_publication_work_refuse_before_http(self):
+        h = ActionsHarness()
+        with self.assertRaisesRegex(ReviewInputError, "own active run"):
+            h.verify(command_run_id="123")
+        self.assertEqual(h.calls, [])
+        record = analysis_record()
+        transaction = record.transaction.with_result("e" * 64)
+        pending = record.evolve(
+            reservation_id=None,
+            reserved_slot=None,
+            reservation_owner=None,
+            last_committed_reservation_id=transaction.reservation_id,
+            transaction=transaction,
+            now=NOW,
         )
-        h.jobs[0].update(
-            started_at="2026-10-06T12:01:00Z",
-            completed_at="2026-10-06T12:03:00Z",
-        )
-        with self.assertRaisesRegex(ReviewInputError, "origin timestamp"):
-            apply_session_command(
-                h.ledger,
-                IDENTITY,
-                MaintainerCommand("continue", actor="maintainer", head_sha=LIVE_HEAD),
-                now=later,
-            )
-        self.assertEqual(h.patches, 0)
-        self.assertIsNotNone(h.record.reservation_id)
+        with self.assertRaises(ReviewInputError):
+            h.verify(pending)
+        self.assertEqual(h.calls, [])
+        self.assertEqual(pending.transaction, transaction)
 
-    def test_legacy_ambiguous_or_unbound_evidence_never_mutates(self):
+    def test_rerun_or_changed_completion_between_reads_invalidates_proof(self):
+        for change in ("attempt", "timestamp", "active"):
+            with self.subTest(change=change):
+                h = ActionsHarness()
+
+                def race():
+                    if h.reads == 2:
+                        h.run.update(
+                            {"run_attempt": 2}
+                            if change == "attempt"
+                            else {"updated_at": "2026-10-06T12:02:00Z"}
+                            if change == "timestamp"
+                            else {"status": "in_progress"}
+                        )
+
+                h.on_run_read = race
+                with self.assertRaises(ReviewInputError):
+                    h.verify()
+                self.assertEqual(h.reads, 2)
+
+    def test_exact_owner_job_and_run_cessation_are_both_required(self):
+        h = ActionsHarness()
+        self.assertEqual(h.ceased(), (123, 901, "2026-10-06T12:01:00Z", "failure"))
+        self.assertEqual(len(h.calls), 2)
         for defect in (
-            "two_runs",
-            "manual",
-            "wrong_head",
-            "two_jobs",
-            "wrong_pr",
-            "outside_job",
-            "successful",
-            "active_job",
+            "active-run",
+            "rerun",
+            "foreign-run",
+            "active-job",
+            "wrong-job",
+            "wrong-job-run",
+            "wrong-attempt",
+            "incomplete",
+            "duplicate",
+            "missing-stamp",
+            "naive-stamp",
         ):
             with self.subTest(defect=defect):
-                h = Harness(analysis_record(owner=False))
-                if defect == "two_runs":
-                    h.candidates.append(dict(h.run, id=124))
-                if defect == "manual":
-                    h.run["event"] = "workflow_dispatch"
-                if defect == "wrong_head":
-                    h.run["head_sha"] = LIVE_HEAD
-                if defect == "two_jobs":
-                    h.jobs.append(dict(h.jobs[0]))
-                if defect == "wrong_pr":
-                    h.run["pull_requests"] = [{"number": 8}]
-                if defect == "outside_job":
-                    h.jobs[0]["started_at"] = "2026-10-06T12:00:01Z"
-                if defect == "successful":
-                    h.run["conclusion"] = "success"
-                if defect == "active_job":
+                h = ActionsHarness()
+                if defect == "active-run":
+                    h.run["status"] = "in_progress"
+                elif defect == "rerun":
+                    h.run["run_attempt"] = 2
+                elif defect == "foreign-run":
+                    h.run["repository"]["id"] = 100
+                elif defect == "active-job":
                     h.jobs[0]["status"] = "in_progress"
+                elif defect == "wrong-job":
+                    h.jobs[0]["name"] = "ReviewSensei / command"
+                elif defect == "wrong-job-run":
+                    h.jobs[0]["run_id"] = 124
+                elif defect == "wrong-attempt":
+                    h.jobs[0]["run_attempt"] = 2
+                elif defect == "incomplete":
+                    h.total = 2
+                elif defect == "duplicate":
+                    h.jobs.append(copy.deepcopy(h.jobs[0]))
+                elif defect == "missing-stamp":
+                    h.jobs[0].pop("completed_at")
+                elif defect == "naive-stamp":
+                    h.jobs[0]["completed_at"] = "2026-10-06T12:01:00"
                 with self.assertRaises(ReviewInputError):
-                    h.continue_review()
-                self.assertEqual(h.patches, 0)
+                    h.ceased()
+                self.assertTrue(all(method == "GET" for method, _url, _body in h.calls))
 
-    def test_missing_owner_and_transaction_fail_closed(self):
-        h = Harness(analysis_record(owner=False).evolve(transaction=None, now=NOW))
-        with self.assertRaisesRegex(ReviewInputError, "no provable"):
-            h.continue_review()
-        self.assertEqual(h.patches, 0)
-
-    def test_no_authenticated_command_grant_cannot_recover(self):
-        h = Harness()
-        h.ledger._broker = None
-        with self.assertRaisesRegex(ReviewInputError, "authenticated maintainer"):
-            h.continue_review()
-        self.assertEqual(h.patches, 0)
-
-    def test_budget_is_saturated_and_same_head_stays_exhausted(self):
-        h = Harness(
-            analysis_record().evolve(
-                failed_attempts=32, failed_attempts_head_sha=HEAD, now=NOW
-            )
-        )
-        record, _ = h.continue_review()
-        self.assertEqual(record.failed_attempts, 32)
-        self.assertEqual(record.failed_attempts_head_sha, HEAD)
+    def test_current_owner_permits_unrelated_ci_and_rejects_overlapping_writers(self):
+        for sibling in ("ordinary-ci", "command"):
+            with self.subTest(sibling=sibling):
+                h = ActionsHarness()
+                h.run.update(
+                    id=456, run_attempt=2, status="in_progress", conclusion=None
+                )
+                h.jobs[0].update(
+                    run_id=456,
+                    run_attempt=2,
+                    status="in_progress",
+                    conclusion=None,
+                    completed_at=None,
+                )
+                h.jobs.append(
+                    {**h.jobs[0], "id": 902, "name": "ReviewSensei / " + sibling}
+                )
+                evidence = ApiRunActionsEvidence(
+                    h.http, token="actions-read", command_run_id="456"
+                )
+                if sibling == "ordinary-ci":
+                    self.assertEqual(
+                        evidence.current_owner(
+                            IDENTITY, attempt=2, generation=1, event="pull_request"
+                        ),
+                        ApiExecutionOwner(2, "hosted", 1),
+                    )
+                else:
+                    with self.assertRaisesRegex(ReviewInputError, "overlapping"):
+                        evidence.current_owner(
+                            IDENTITY, attempt=2, generation=1, event="pull_request"
+                        )
 
     def test_owner_round_trips_and_cannot_outlive_reservation(self):
         record = analysis_record()
@@ -422,12 +319,64 @@ class ReservationRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewInputError, "integrity"):
             SessionRecord.from_dict(payload)
 
-    def test_new_hosted_reservation_stores_broker_owner_in_first_write(self):
-        h = Harness(SessionRecord.create(IDENTITY, now=NOW))
+    def test_old_phase_entrypoints_refuse_before_capability_or_http(self):
+        http, calls = make_http([])
+        broker = Mock()
+        for version in (1, 2, 3):
+            with (
+                self.subTest(version=version),
+                self.assertRaisesRegex(ReviewInputError, "phase ledgers are retired"),
+            ):
+                GitHubIssueCommentSessionLedger(
+                    http,
+                    token="unused",
+                    app_slug="reviewsensei[bot]",
+                    broker=broker,
+                    session_grant="unused",
+                    session_attestation={"version": version},
+                    head_sha=HEAD,
+                )
+        with self.assertRaisesRegex(
+            ReviewInputError, "phase ledger resolution is retired"
+        ):
+            resolve_hosted_session_ledger(
+                broker=broker,
+                http=http,
+                oidc_token=None,
+                repository=IDENTITY.repository,
+                repository_id=99,
+                pull_request=7,
+                head_sha=HEAD,
+            )
+        with self.assertRaisesRegex(ReviewInputError, "phase entry is retired"):
+            GitHubReviewHooks().resolve_ledger(Namespace(), resolved_head_sha=HEAD)
+        self.assertEqual(calls, [])
+        self.assertEqual(broker.mock_calls, [])
+
+    def test_injected_native_owner_is_stored_in_the_first_reservation_write(self):
+        state = {"record": SessionRecord.create(IDENTITY, now=NOW)}
+
+        def response(request):
+            if urlsplit(request.full_url).path.endswith("/pulls/7"):
+                return json_response({"head": {"sha": HEAD}})
+            if request.method == "PATCH":
+                state["record"] = parse_session_comment(
+                    json.loads(request.data)["body"], identity=IDENTITY
+                )
+            item = {
+                "id": 42,
+                "body": render_session_comment(
+                    repository_id=99, pull_request=7, record=state["record"]
+                ),
+                "user": {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"},
+            }
+            return json_response(item if request.method == "PATCH" else [item])
+
+        http, calls = make_http([], routes=[(lambda _request: True, response)])
         ledger = GitHubIssueCommentSessionLedger(
-            h.http,
-            token="session-token",
-            app_slug="sensei[bot]",
+            http,
+            token="injected-native",
+            app_slug="reviewsensei[bot]",
             reservation_owner=OWNER,
         )
         record = ledger.reserve(
@@ -439,7 +388,49 @@ class ReservationRecoveryTests(unittest.TestCase):
             now=NOW,
         )
         self.assertEqual(record.reservation_owner, OWNER)
-        self.assertEqual(h.patches, 1)
+        self.assertEqual(sum(method == "PATCH" for method, _url, _data in calls), 1)
+
+    def test_injected_native_unpause_without_a_hold_does_not_request_actions(self):
+        state = {
+            "record": SessionRecord.create(IDENTITY, now=NOW).evolve(
+                operator_paused=True, now=NOW
+            )
+        }
+
+        def response(request):
+            if request.method == "PATCH":
+                state["record"] = parse_session_comment(
+                    json.loads(request.data)["body"], identity=IDENTITY
+                )
+            item = {
+                "id": 42,
+                "body": render_session_comment(
+                    repository_id=99, pull_request=7, record=state["record"]
+                ),
+                "user": {"id": 999, "login": "reviewsensei[bot]", "type": "Bot"},
+            }
+            return json_response(item if request.method == "PATCH" else [item])
+
+        http, calls = make_http([], routes=[(lambda _request: True, response)])
+        actions = Mock(
+            side_effect=AssertionError("unpause has no owner cessation to prove")
+        )
+        ledger = GitHubIssueCommentSessionLedger(
+            http,
+            token="injected-native",
+            app_slug="reviewsensei[bot]",
+            actions_token_provider=actions,
+        )
+        record, result = apply_session_command(
+            ledger,
+            IDENTITY,
+            MaintainerCommand("continue", actor="maintainer", head_sha=HEAD),
+            now=NOW,
+        )
+        self.assertTrue(result.applied)
+        self.assertFalse(record.operator_paused)
+        actions.assert_not_called()
+        self.assertFalse(any("/actions/" in url for _method, url, _data in calls))
 
     def test_local_continue_cannot_silently_unlock_held_reservation(self):
         ledger = InMemorySessionLedger()
@@ -458,6 +449,57 @@ class ReservationRecoveryTests(unittest.TestCase):
                 MaintainerCommand("continue", actor="maintainer"),
                 now=NOW,
             )
+
+    def test_local_failed_attempt_saturates_without_reopening_same_head(self):
+        ledger = InMemorySessionLedger()
+        prepared = prepare_review_transaction(
+            ledger,
+            IDENTITY,
+            ReviewConvergencePolicy(mode="merge-focused"),
+            reservation_id="d" * 64,
+            base_sha="c" * 40,
+            head_sha=HEAD,
+            configuration_digest="e" * 64,
+            evidence_digest="f" * 64,
+            now=NOW,
+        )
+        held = ledger.replace(
+            IDENTITY,
+            lambda record: record.evolve(
+                failed_attempts=32, failed_attempts_head_sha=HEAD, now=NOW
+            ),
+            now=NOW,
+        )
+        charged = record_session_failed_attempt(
+            ledger,
+            IDENTITY,
+            reservation_id=prepared.reservation_id,
+            expected_generation=held.generation,
+            head_sha=HEAD,
+            now=NOW,
+        )
+        self.assertEqual(charged.failed_attempts, 32)
+        self.assertEqual(charged.failed_attempts_head_sha, HEAD)
+        self.assertEqual(charged.completed_initial_reviews, 0)
+        replay = record_session_failed_attempt(
+            ledger,
+            IDENTITY,
+            reservation_id=prepared.reservation_id,
+            head_sha=HEAD,
+            now=NOW,
+        )
+        self.assertEqual(replay, charged)
+        from review_sensei.session import prepare_session_round
+
+        refused = prepare_session_round(
+            ledger,
+            IDENTITY,
+            ReviewConvergencePolicy(mode="merge-focused"),
+            reservation_id="1" * 64,
+            head_sha=HEAD,
+            now=NOW,
+        )
+        self.assertFalse(refused.decision.admit)
 
 
 class PreProviderFailureCleanupTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
@@ -515,77 +557,6 @@ class PreProviderFailureCleanupTests(IsolatedWorkingDirectoryMixin, unittest.Tes
                 else:
                     self.assertIsNone(loaded.record.reservation_id)
                     self.assertEqual(loaded.record.failed_attempts, 1)
-
-
-class AdmissionSelfHealTests(unittest.TestCase):
-    """Step 3: a review that finds a held reservation heals or reports."""
-
-    def _admission_harness(self, record=None):
-        h = Harness(record if record is not None else analysis_record())
-        h.record = h.record.evolve(operator_paused=False, now=NOW)
-        h.ledger._session_attestation = {**h.attestation, "operation": "review"}
-        return h
-
-    def test_completed_owner_is_healed_and_charged_to_the_old_head(self):
-        h = self._admission_harness()
-        before = h.record
-        record = h.ledger.recover_abandoned_analysis(
-            IDENTITY, now=NOW, wait_attempts=1, sleeper=lambda _s: None
-        )
-        self.assertIsNone(record.reservation_id)
-        self.assertIsNone(record.reservation_owner)
-        self.assertEqual(record.failed_attempts, 1)
-        self.assertEqual(record.failed_attempts_head_sha, HEAD)
-        self.assertFalse(record.operator_paused)
-        self.assertEqual(h.patches, 1)
-        self.assertEqual(
-            record.completed_initial_reviews, before.completed_initial_reviews
-        )
-
-    def test_still_running_owner_waits_briefly_then_reports_blocked(self):
-        h = self._admission_harness()
-        h.run["status"] = "in_progress"
-        sleeps = []
-        with self.assertRaisesRegex(
-            ReviewInputError, r"held by run 123 \(still running\)"
-        ):
-            h.ledger.recover_abandoned_analysis(
-                IDENTITY,
-                now=NOW,
-                wait_attempts=3,
-                wait_seconds=5,
-                sleeper=sleeps.append,
-            )
-        self.assertEqual(sleeps, [5, 5])
-        self.assertEqual(h.patches, 0)
-
-    def test_unclear_evidence_stays_blocked_without_mutation(self):
-        record = analysis_record(owner=False).evolve(
-            transaction=None, operator_paused=False, now=NOW
-        )
-        h = self._admission_harness(record)
-        with self.assertRaisesRegex(ReviewInputError, "no provable"):
-            h.ledger.recover_abandoned_analysis(
-                IDENTITY, now=NOW, wait_attempts=1, sleeper=lambda _s: None
-            )
-        self.assertEqual(h.patches, 0)
-
-    def test_publication_work_is_never_reclaimed_at_admission(self):
-        h = self._admission_harness()
-        tx = h.record.transaction.with_result("e" * 64)
-        h.record = h.record.evolve(
-            reservation_id=None,
-            reserved_slot=None,
-            reservation_owner=None,
-            last_committed_reservation_id=tx.reservation_id,
-            transaction=tx,
-            now=NOW,
-        )
-        record = h.ledger.recover_abandoned_analysis(
-            IDENTITY, now=NOW, wait_attempts=1, sleeper=lambda _s: None
-        )
-        self.assertEqual(record.transaction, tx)
-        self.assertEqual(h.patches, 0)
 
 
 class AdmissionHookTests(unittest.TestCase):
@@ -679,26 +650,185 @@ class AdmissionHookTests(unittest.TestCase):
         self.assertEqual(calls, ["recover"])
         self.assertFalse(prepared.decision.admit)
 
-    def test_real_github_ledger_heals_at_admission(self):
-        # The hook against the production adapter, not a stub: the held
-        # analysis reservation is recovered through the Actions-evidence
-        # seam, then the current head is admitted in the same call.
-        from review_sensei.session import prepare_session_round
 
-        h = Harness()
-        h.record = h.record.evolve(operator_paused=False, now=NOW)
-        h.ledger._session_attestation = {**h.attestation, "operation": "review"}
-        prepared = prepare_session_round(
-            h.ledger,
-            IDENTITY,
-            ReviewConvergencePolicy(mode="merge-focused"),
-            reservation_id="1" * 64,
-            now=NOW,
-            head_sha=LIVE_HEAD,
+class RecoveryRaceFixture(EntryFixture):
+    """Change authenticated predecessor metadata/root at the second proof."""
+
+    def __init__(self, directory):
+        super().__init__(directory, limit=512)
+        self.predecessor_reads = 0
+        self.race = None
+
+    def external(self, request, timeout):
+        response = super().external(request, timeout)
+        path = urlsplit(request.full_url).path
+        old_jobs = self.attempt == 2 and path.endswith("/attempts/1/jobs")
+        if not old_jobs:
+            return response
+        self.predecessor_reads += 1
+        value = json.loads(response.read(524288))
+        if self.race == "completion" and self.predecessor_reads >= 2:
+            value["jobs"][0]["completed_at"] = "2026-10-26T00:01:00Z"
+        if self.race == "owner" and self.predecessor_reads == 2:
+
+            def takeover(record):
+                accounting = ApiRunAccounting.from_document(record.api_run_accounting)
+                successor = accounting.claim_startup(ApiExecutionOwner(2, "hosted", 1))
+                return record.evolve(
+                    generation=record.generation + 1,
+                    api_run_accounting=successor.to_document(),
+                )
+
+            self.rewrite_record(mutate=takeover)
+        return json_response(value)
+
+
+class CurrentReservationRunTests(unittest.TestCase):
+    def pending(self, fixture):
+        def interrupted():
+            raise KeyboardInterrupt()
+
+        fixture.before_publication = interrupted
+        self.assertEqual(fixture.invoke(), 130, fixture.error)
+        record = parse_session_comment(
+            fixture.comment["body"], identity=CURRENT_IDENTITY
         )
-        self.assertTrue(prepared.decision.admit)
-        self.assertEqual(prepared.reservation_id, "1" * 64)
-        # Two writes: the recovery release, then the new reservation. The
-        # failed-attempt charge to the old head is asserted at the ledger
-        # level; reserving for the new head starts its own budget.
-        self.assertEqual(h.patches, 2)
+        self.assertEqual(record.transaction.phase, "publication_pending")
+        self.assertEqual(fixture.provider_calls, 1)
+        fixture.before_publication = None
+        return record
+
+    def test_proven_same_run_successor_reuses_exact_retained_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = RecoveryRaceFixture(directory)
+            pending = self.pending(f)
+            predecessor = ApiRunAccounting.from_document(pending.api_run_accounting)
+            f.attempt = 2
+            self.assertEqual(f.invoke(), 0, f.error)
+            final = parse_session_comment(f.comment["body"], identity=CURRENT_IDENTITY)
+            self.assertEqual(
+                final.transaction.transaction_id, pending.transaction.transaction_id
+            )
+            self.assertEqual(
+                final.transaction.result_sha256, pending.transaction.result_sha256
+            )
+            self.assertEqual(final.transaction.phase, "publication_succeeded")
+            self.assertEqual(
+                f.accounted.accounting.blocks[: len(predecessor.blocks)],
+                predecessor.blocks,
+            )
+            self.assertEqual(f.accounted.accounting.owner.run_attempt, 2)
+            self.assertEqual(f.provider_calls, 1)
+            self.assertEqual(sum(r["state"] == "APPROVED" for r in f.reviews), 1)
+
+    def test_active_changed_or_foreign_predecessor_never_replays_pending_work(self):
+        for defect in ("active", "completion", "owner", "head", "run"):
+            with (
+                self.subTest(defect=defect),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f = RecoveryRaceFixture(directory)
+                pending = self.pending(f)
+                original = f.comment["body"]
+                f.attempt = 2
+                if defect == "active":
+                    f.previous_active = True
+                elif defect in {"completion", "owner"}:
+                    f.race = defect
+                elif defect == "head":
+                    f.live_head = "f" * 40
+                else:
+                    f.run_id += 1
+                before = len(f.trace)
+                self.assertEqual(f.invoke(), 1)
+                current = parse_session_comment(
+                    f.comment["body"], identity=CURRENT_IDENTITY
+                )
+                self.assertEqual(current.transaction, pending.transaction)
+                self.assertEqual(f.provider_calls, 1)
+                self.assertFalse(
+                    any(
+                        method == "PATCH"
+                        for _attempt, method, _path in f.trace[before:]
+                    )
+                )
+                self.assertFalse(f.reviews)
+                if defect == "owner":
+                    self.assertEqual(
+                        current.api_run_accounting["owner"],
+                        {"run_attempt": 2, "job": "hosted", "generation": 1},
+                    )
+                else:
+                    self.assertEqual(f.comment["body"], original)
+                refused_trace = len(f.trace)
+                self.assertEqual(f.invoke(), 1)
+                self.assertEqual(len(f.trace), refused_trace)
+                self.assertEqual(f.provider_calls, 1)
+
+    def test_missing_reservation_owner_never_gains_timestamp_recovery_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            f = RecoveryRaceFixture(directory)
+
+            def lose_owner():
+                f.rewrite_record(
+                    mutate=lambda record: record.evolve(
+                        generation=record.generation + 1, reservation_owner=None
+                    )
+                )
+                raise ReviewInputError("external owner binding changed before entry")
+
+            f.before_entry = lose_owner
+            self.assertEqual(f.invoke(), 1)
+            held = parse_session_comment(f.comment["body"], identity=CURRENT_IDENTITY)
+            self.assertIsNone(held.reservation_owner)
+            self.assertIsNotNone(held.reservation_id)
+            self.assertIsNone(held.api_run_accounting["analysis_abort"])
+            before = f.comment["body"]
+            f.before_entry = None
+            f.next_run()
+            self.assertEqual(f.invoke(), 1)
+            self.assertEqual(f.comment["body"], before)
+            self.assertEqual(f.provider_calls, 0)
+            self.assertFalse(f.reviews)
+
+    def test_provider_unknown_never_becomes_a_clean_abort_or_new_run(self):
+        for error in (
+            ProviderError("provider outcome unknown", transient=True),
+            TimeoutError("provider deadline"),
+            KeyboardInterrupt(),
+        ):
+            with (
+                self.subTest(error=type(error).__name__),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f = RecoveryRaceFixture(directory)
+
+                def interrupted():
+                    raise error
+
+                f.before_provider = interrupted
+                self.assertEqual(
+                    f.invoke(), 130 if isinstance(error, KeyboardInterrupt) else 1
+                )
+                failed = parse_session_comment(
+                    f.comment["body"], identity=CURRENT_IDENTITY
+                )
+                self.assertIsNone(failed.api_run_accounting["analysis_abort"])
+                # An uncertain provider operation is not fabricated into a
+                # completed failed analysis; its caller allocations stay spent.
+                self.assertEqual(failed.failed_attempts, 0)
+                self.assertEqual(failed.completed_initial_reviews, 0)
+                self.assertGreater(f.accounted.accounting.confirmed, 0)
+                attempts = f.provider_calls
+                self.assertGreater(attempts, 0)
+                before = f.comment["body"]
+                f.before_provider = None
+                f.next_run()
+                self.assertEqual(f.invoke(), 1)
+                self.assertEqual(f.comment["body"], before)
+                self.assertEqual(f.provider_calls, attempts)
+                self.assertFalse(f.reviews)
+
+
+if __name__ == "__main__":
+    unittest.main()

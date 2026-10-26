@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from fake_github_http import json_response
 from review_sensei_github import ReviewPublisher
 from review_sensei_github.eligibility_parts import (
     PartitionedEligibilityAllocation,
@@ -18,6 +19,9 @@ from review_sensei_github.eligibility_parts import (
 from review_sensei_github.errors import GitHubPublicationError
 from review_sensei_github.partitioned_publication import PartitionedPublicationPlan
 from review_sensei_github.publication import review_result_digest
+from test_evidence_capacity import human_result, publication_diff, varied_comments
+from test_human_assessment import APP, BASE, HEAD, State
+from test_review_transaction import CONFIGURATION
 
 from review_sensei.bounded_evidence import (
     AuthenticatedPart,
@@ -32,10 +36,6 @@ from review_sensei.human_assessment import finding_instance_fingerprint
 from review_sensei.models import ReviewTransaction
 from review_sensei.schemas import validate_public_document
 from review_sensei.session import LocalSessionLedger, SessionIdentity
-from tests.fake_github_http import json_response
-from tests.test_evidence_capacity import human_result, publication_diff, varied_comments
-from tests.test_human_assessment import APP, BASE, HEAD, State
-from tests.test_review_transaction import CONFIGURATION
 
 PRODUCER = 12345
 

@@ -150,6 +150,8 @@ class CloudflarePackageTests(unittest.TestCase):
             "`# ReviewSensei setup version: ${SETUP_VERSION}\\n`",
             '"# Configuration version. Leave this at 1.\\n"',
             '"schema: 1\\n"',
+            '"# ReviewSensei caller HTTP attempts per authenticated Actions run.\\n"',
+            '"api_request_limit: 512\\n"',
             '"# Backend and model used for review.\\n"',
             '"inference:\\n"',
             '"  # local-ollama, cloud-ollama, openrouter, or openai-compatible\\n"',
@@ -199,6 +201,9 @@ class CloudflarePackageTests(unittest.TestCase):
             "# ReviewSensei setup version: 5\n"
             "# Configuration version. Leave this at 1.\n"
             "schema: 1\n"
+            "\n"
+            "# ReviewSensei caller HTTP attempts per authenticated Actions run.\n"
+            "api_request_limit: 512\n"
             "\n"
             "# Backend and model used for review.\n"
             "inference:\n"
@@ -402,7 +407,7 @@ class CloudflarePackageTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertEqual(plan.files[0].content, _current_pre_recovery_v5_workflow("v5"))
         self.assertEqual(example, _prepared_recovery_workflow("v5"))
-        self.assertNotEqual(plan.files[0].content, example)
+        self.assertEqual(plan.files[0].content, example)
         self.assertEqual(plan.files[1].content, _current_uninstall_workflow())
 
     def test_user_guidance_describes_setup_v5_publication_contract(self):

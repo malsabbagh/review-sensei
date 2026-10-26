@@ -3,9 +3,7 @@
 import json
 import unittest
 from dataclasses import replace
-from unittest.mock import Mock
 
-from review_sensei_github.commands import _COMMANDS
 from review_sensei_github.publication import ReviewApprovalFinalizer
 
 from review_sensei.convergence import ReviewConvergencePolicy, derive_blocker_candidate
@@ -236,20 +234,33 @@ class OverrideStabilityTests(unittest.TestCase):
             )
 
     def test_unreadable_eligibility_marker_fails_closed(self):
-        legacy = _COMMANDS["_legacy_inventory"]
-        http = Mock()
-        with self.assertRaisesRegex(ReviewInputError, "incomplete"):
-            legacy(
-                http,
-                token="token",
-                repository="owner/repo",
-                pull_request=1,
-                review={
-                    "id": 9,
-                    "body": "<!-- reviewsensei:eligibility:v1 not-valid -->",
-                },
+        import tempfile
+
+        from review_sensei_github.action_run import current_inventory
+
+        from tests.test_current_command_inventory import inventory_scope, review
+
+        with tempfile.TemporaryDirectory() as directory:
+            f, run = inventory_scope(
+                directory,
+                [
+                    review(
+                        identifier=9,
+                        body="<!-- reviewsensei:eligibility:v1 not-valid -->",
+                    )
+                ],
             )
-        http.paginate.assert_not_called()
+            before = len(f.trace)
+            with self.assertRaisesRegex(
+                ReviewInputError, "complete current review index"
+            ):
+                current_inventory(run)
+            self.assertEqual(len(f.inventory_reads), 1)
+            self.assertEqual(
+                [path for _, _, path in f.trace[before:]],
+                ["/repos/owner/repo/pulls/7/reviews"],
+            )
+            self.assertEqual(len(f.accounted.observations), len(f.trace))
 
     def test_failure_receipt_does_not_say_the_ledger_was_recorded(self):
         text = render_command_receipt(

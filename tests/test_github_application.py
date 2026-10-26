@@ -1,6 +1,5 @@
 import unittest
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
 from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import patch
@@ -13,7 +12,6 @@ from review_sensei_github import (
     PublicationResult,
     ReplyResult,
 )
-from review_sensei_github.application import _command_from_broker_attestation
 from review_sensei_github.operation_comments import ResultPartStore
 from review_sensei_github.operation_host import GitHubCommentOperationStore
 
@@ -637,113 +635,38 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(len(forwarded), 1)
         self.assertEqual(forwarded[0].fingerprint, fingerprint)
 
-    def test_hosted_command_reconstructs_identity_from_broker_attestation(self):
-        body = "@sensei accept-risk abcd1234abcd1234 --reason accepted launch exception"
-        request_attestation = {
-            "version": 1,
-            "repository": "owner/repo",
-            "repository_id": 99,
-            "pull_request": 136,
-            "head_sha": "b" * 40,
-            "operation": "command",
-            "source_comment_id": 71,
-            "run_id": "42",
-            "issued_at": 1,
-            "concurrency_group": "reviewsensei-session-99-136",
-            "job_workflow_ref": "owner/repo/.github/workflows/review.yml@main",
-            "job_workflow_sha": "c" * 40,
-        }
-
-        class CommandBroker:
-            def __init__(self):
-                self.authorizations = []
-
-            def authorize_session_mutation(self, token, **kwargs):
-                self.authorizations.append((token, kwargs))
-                return SimpleNamespace(
-                    token="session-token",
-                    grant="opaque-one-use-grant",
-                    attestation={
-                        "repository": "owner/repo",
-                        "repository_id": 99,
-                        "pull_request": 136,
-                        "head_sha": "b" * 40,
-                        "operation": "command",
-                        "source_comment_id": 71,
-                        "actor": "alice",
-                        "actor_type": "User",
-                        "association": "MEMBER",
-                        "command_id": 71,
-                        "command_digest": sha256(body.encode("utf-8")).hexdigest(),
-                    },
-                )
-
-        broker = CommandBroker()
-        application = GitHubApplication(
-            broker=broker,
-            http=None,
-            reviewer=object(),
-            learner=object(),
-            replier=object(),
-        )
-        ledger = InMemorySessionLedger()
-        with mock.patch.object(
-            application, "_session_ledger_for_token", return_value=ledger
-        ) as session_ledger_for_token:
-            result = application.apply_maintainer_command(
-                options=GitHubWriteOptions(
-                    github_writes=True, github_session_ledger=True
+    def test_old_hosted_attestations_cannot_replace_current_action_authority(self):
+        for version in (1, 2, 3):
+            with (
+                self.subTest(version=version),
+                mock.patch.object(
+                    self.application,
+                    "_session_ledger_for_token",
+                    side_effect=AssertionError("old writer must not be resolved"),
                 ),
-                oidc_token="caller-oidc",
-                repository="owner/repo",
-                repository_id=99,
-                pull_request=136,
-                head_sha="b" * 40,
-                body=body,
-                actor_login="mallory",
-                actor_type="Bot",
-                association="CONTRIBUTOR",
-                app_slug="reviewsensei[bot]",
-                source_comment_id=71,
-                session_attestation=request_attestation,
-            )
-
-        self.assertTrue(result.applied)
-        self.assertEqual(
-            broker.authorizations,
-            [
-                (
-                    "caller-oidc",
-                    {
-                        "repository_id": 99,
-                        "pull_request": 136,
-                        "head_sha": "b" * 40,
-                        "session_attestation": request_attestation,
-                    },
-                )
-            ],
-        )
-        self.assertEqual(
-            session_ledger_for_token.call_args.args,
-            ("session-token",),
-        )
-        ledger_kwargs = session_ledger_for_token.call_args.kwargs
-        self.assertEqual(
-            ledger_kwargs["options"],
-            GitHubWriteOptions(github_writes=True, github_session_ledger=True),
-        )
-        self.assertEqual(ledger_kwargs["app_slug"], "reviewsensei[bot]")
-        self.assertFalse(ledger_kwargs["prefer_remote"])
-        self.assertIs(ledger_kwargs["broker"], broker)
-        self.assertEqual(ledger_kwargs["session_grant"], "opaque-one-use-grant")
-        self.assertEqual(ledger_kwargs["session_attestation"]["actor"], "alice")
-        self.assertEqual(ledger_kwargs["head_sha"], "b" * 40)
-        self.assertTrue(session_ledger_for_token.called)
-        record = ledger.load(
-            SessionIdentity("owner/repo", 136, repository_id=99)
-        ).record
-        self.assertEqual(record.dispositions[0]["actor"], "alice")
-        self.assertEqual(record.dispositions[0]["head_sha"], "b" * 40)
+            ):
+                with self.assertRaisesRegex(
+                    GitHubPublicationError, "current metered command lifecycle"
+                ):
+                    self.application.apply_maintainer_command(
+                        options=GitHubWriteOptions(
+                            github_writes=True, github_session_ledger=True
+                        ),
+                        oidc_token=None,
+                        repository="owner/repo",
+                        repository_id=99,
+                        pull_request=136,
+                        head_sha="b" * 40,
+                        body="@sensei review pause",
+                        actor_login="alice",
+                        association="MEMBER",
+                        app_slug="reviewsensei[bot]",
+                        source_comment_id=71,
+                        session_attestation={"version": version, "actor": "alice"},
+                    )
+                self.assertEqual(self.broker.requested, 0)
+                self.assertEqual(self.broker.exchanges, [])
+                self.assertEqual(self.reviewer.calls, [])
 
     def test_handler_fails_closed_on_prefilter_over_accepted_bodies(self):
         # The caller prefilter is deliberately wider than the authoritative
@@ -794,21 +717,15 @@ class GitHubApplicationTests(unittest.TestCase):
                         )
                 self.assertEqual(self.broker.exchanges, [])
 
-    def test_hosted_command_mutation_requires_broker_identity_inputs(self):
-        application = GitHubApplication(
-            broker=self.broker,
-            http=None,
-            reviewer=object(),
-            learner=object(),
-            replier=object(),
-        )
-
-        with self.assertRaisesRegex(GitHubPublicationError, "source comment"):
-            application.apply_maintainer_command(
+    def test_hosted_command_requires_current_action_before_missing_source_lookup(self):
+        with self.assertRaisesRegex(
+            GitHubPublicationError, "current metered command lifecycle"
+        ):
+            self.application.apply_maintainer_command(
                 options=GitHubWriteOptions(
                     github_writes=True, github_session_ledger=True
                 ),
-                oidc_token="caller-oidc",
+                oidc_token=None,
                 repository="owner/repo",
                 repository_id=99,
                 pull_request=136,
@@ -818,198 +735,122 @@ class GitHubApplicationTests(unittest.TestCase):
                 association="MEMBER",
                 app_slug="reviewsensei[bot]",
             )
+        self.assertEqual(self.broker.requested, 0)
+        self.assertEqual(self.broker.exchanges, [])
 
-    def test_broker_attestation_rejects_cross_pull_request_and_head_scope(self):
-        body = "@sensei review pause"
-        attestation = {
-            "repository": "owner/repo",
-            "repository_id": 99,
-            "pull_request": 136,
-            "head_sha": "b" * 40,
-            "operation": "command",
-            "source_comment_id": 71,
-            "actor": "alice",
-            "actor_type": "User",
-            "association": "MEMBER",
-            "command_id": 71,
-            "command_digest": sha256(body.encode("utf-8")).hexdigest(),
-        }
-        for pull_request, head_sha in ((137, "b" * 40), (136, "c" * 40)):
-            with self.subTest(pull_request=pull_request, head_sha=head_sha):
+    def test_unverified_attestation_scope_cannot_authorize_a_hosted_command(self):
+        scope = dict(
+            repository="owner/repo",
+            repository_id=99,
+            pull_request=136,
+            head_sha="b" * 40,
+            source_comment_id=71,
+        )
+        # Current scope is bound by VerifiedRunAction. Old attestation dictionaries
+        # cannot authorize even an otherwise matching delivery or a changed target.
+        for changed in (
+            {},
+            {"pull_request": 137},
+            {"head_sha": "c" * 40},
+            {"repository": "other/repo"},
+            {"source_comment_id": 72},
+        ):
+            with self.subTest(changed=changed):
                 with self.assertRaisesRegex(
-                    GitHubPublicationError, "attestation scope"
+                    GitHubPublicationError, "current metered command lifecycle"
                 ):
-                    _command_from_broker_attestation(
-                        body=body,
-                        attestation=attestation,
+                    self.application.apply_maintainer_command(
+                        options=GitHubWriteOptions(
+                            github_writes=True, github_session_ledger=True
+                        ),
+                        oidc_token=None,
+                        **(scope | changed),
+                        body="@sensei review pause",
+                        actor_login="alice",
+                        association="MEMBER",
+                        app_slug="reviewsensei[bot]",
+                        session_attestation={"version": 3, **scope},
+                    )
+                self.assertEqual(self.broker.requested, 0)
+                self.assertEqual(self.broker.exchanges, [])
+
+    def test_duck_typed_current_action_cannot_authorize_untrusted_actor_fields(self):
+        # A caller-provided object with the right-looking fields/method is not a
+        # process-owned VerifiedRunAction. Its require method must never run.
+        for actor_type, association in (
+            ("Bot", "OWNER"),
+            ("User", "NONE"),
+            ("User", "MEMBER"),
+        ):
+            with self.subTest(actor_type=actor_type, association=association):
+                forged = SimpleNamespace(
+                    document={
+                        "version": 3,
+                        "actor": {
+                            "login": "alice",
+                            "type": actor_type,
+                            "association": association,
+                        },
+                    },
+                    require=mock.Mock(
+                        side_effect=AssertionError("unverified authority")
+                    ),
+                )
+                with self.assertRaisesRegex(
+                    GitHubPublicationError, "current command authority is invalid"
+                ):
+                    self.application.apply_maintainer_command(
+                        options=GitHubWriteOptions(
+                            github_writes=True, github_session_ledger=True
+                        ),
+                        oidc_token=None,
                         repository="owner/repo",
                         repository_id=99,
-                        pull_request=pull_request,
-                        head_sha=head_sha,
-                        source_comment_id=71,
+                        pull_request=136,
+                        head_sha="b" * 40,
+                        body="@sensei review pause",
+                        actor_login="alice",
+                        actor_type=actor_type,
+                        association=association,
                         app_slug="reviewsensei[bot]",
+                        source_comment_id=71,
+                        current_action=forged,
                     )
-        with self.assertRaisesRegex(GitHubPublicationError, "attestation scope"):
-            _command_from_broker_attestation(
-                body=body,
-                attestation=attestation,
-                repository="other/repo",
-                repository_id=99,
-                pull_request=136,
-                head_sha="b" * 40,
-                source_comment_id=71,
-                app_slug="reviewsensei[bot]",
-            )
-        with self.assertRaisesRegex(GitHubPublicationError, "authorization fields"):
-            _command_from_broker_attestation(
-                body=body,
-                attestation={**attestation, "actor_type": None},
-                repository="owner/repo",
-                repository_id=99,
-                pull_request=136,
-                head_sha="b" * 40,
-                source_comment_id=71,
-                app_slug="reviewsensei[bot]",
-            )
+                forged.require.assert_not_called()
+                self.assertEqual(self.broker.requested, 0)
+                self.assertEqual(self.broker.exchanges, [])
 
-    def test_broker_attestation_rejects_untrusted_actor_authorization_fields(self):
-        body = "@sensei review pause"
-        attestation = {
-            "repository": "owner/repo",
-            "repository_id": 99,
-            "pull_request": 136,
-            "head_sha": "b" * 40,
-            "operation": "command",
-            "source_comment_id": 71,
-            "actor": "alice",
-            "actor_type": "User",
-            "association": "MEMBER",
-            "command_id": 71,
-            "command_digest": sha256(body.encode("utf-8")).hexdigest(),
-        }
-
-        def reconstruct(**overrides):
-            return _command_from_broker_attestation(
-                body=body,
-                attestation={**attestation, **overrides},
-                repository="owner/repo",
-                repository_id=99,
-                pull_request=136,
-                head_sha="b" * 40,
-                source_comment_id=71,
-                app_slug="reviewsensei[bot]",
-            )
-
-        # The caller workflow already filters bots, but the hosted handler must
-        # not accept a broker attestation that claims a non-human actor.
-        for actor_type in ("Bot", "bot", "Bot ", "Service", None, 1):
-            with (
-                self.subTest(actor_type=actor_type),
-                self.assertRaisesRegex(GitHubPublicationError, "authorization fields"),
-            ):
-                reconstruct(actor_type=actor_type)
-        for association in (None, 1, ["MEMBER"], "CONTRIBUTOR", "NONE", ""):
-            with (
-                self.subTest(association=association),
-                self.assertRaisesRegex(GitHubPublicationError, "authorization fields"),
-            ):
-                reconstruct(association=association)
-        # The App may never mint a maintainer command for itself.
-        with self.assertRaisesRegex(GitHubPublicationError, "unauthorized"):
-            reconstruct(actor="reviewsensei[bot]", actor_type="User")
-        # A body that does not match the attested digest is a stale delivery.
-        with self.assertRaisesRegex(GitHubPublicationError, "command was stale"):
-            reconstruct(command_digest=sha256(b"@sensei review pause ").hexdigest())
-        for command_id in (None, 0, -1, True, "71"):
-            with (
-                self.subTest(command_id=command_id),
-                self.assertRaisesRegex(GitHubPublicationError, "command identity"),
-            ):
-                reconstruct(command_id=command_id)
-        for actor in (None, "", "   "):
-            with (
-                self.subTest(actor=actor),
-                self.assertRaisesRegex(GitHubPublicationError, "actor was invalid"),
-            ):
-                reconstruct(actor=actor)
-
-        command = reconstruct()
-        self.assertEqual(command.action, "pause")
-        self.assertEqual(command.actor, "alice")
-
-    def test_hosted_continue_unpauses_without_a_round_grant(self):
-        body = "@sensei review continue"
-        head_sha = "b" * 40
+    def test_local_continue_unpauses_without_a_round_grant(self):
         ledger = InMemorySessionLedger()
-
-        class SessionBroker:
-            def __init__(self):
-                self.attestation = None
-
-            def authorize_session_mutation(self, token, **kwargs):
-                return SimpleNamespace(
-                    token="session-token",
-                    grant="opaque-one-use-grant",
-                    attestation=self.attestation,
-                )
-
-        broker = SessionBroker()
-
-        def attestation_for(
-            source_comment_id, *, actor="alice", head=head_sha, body=body
-        ):
-            return {
-                "repository": "owner/repo",
-                "repository_id": 99,
-                "pull_request": 136,
-                "head_sha": head,
-                "operation": "command",
-                "source_comment_id": source_comment_id,
-                "actor": actor,
-                "actor_type": "User",
-                "association": "MEMBER",
-                "command_id": source_comment_id,
-                "command_digest": sha256(body.encode("utf-8")).hexdigest(),
-            }
-
         application = GitHubApplication(
-            broker=broker,
+            broker=self.broker,
             http=None,
-            reviewer=object(),
-            learner=object(),
-            replier=object(),
+            reviewer=self.reviewer,
+            learner=self.learner,
+            replier=self.replier,
+            session_ledger=ledger,
         )
         identity = SessionIdentity("owner/repo", 136, repository_id=99)
 
-        def deliver(source_comment_id, *, head=head_sha, body=body):
-            broker.attestation = attestation_for(
-                source_comment_id, head=head, body=body
+        def deliver(source_comment_id, body="@sensei review continue"):
+            return application.apply_maintainer_command(
+                options=GitHubWriteOptions(github_writes=True),
+                oidc_token="caller-oidc",
+                repository="owner/repo",
+                repository_id=99,
+                pull_request=136,
+                head_sha="b" * 40,
+                body=body,
+                actor_login="alice",
+                actor_type="User",
+                association="MEMBER",
+                app_slug="reviewsensei[bot]",
+                source_comment_id=source_comment_id,
             )
-            with mock.patch.object(
-                application, "_session_ledger_for_token", return_value=ledger
-            ):
-                return application.apply_maintainer_command(
-                    options=GitHubWriteOptions(
-                        github_writes=True, github_session_ledger=True
-                    ),
-                    oidc_token="caller-oidc",
-                    repository="owner/repo",
-                    repository_id=99,
-                    pull_request=136,
-                    head_sha=head,
-                    body=body,
-                    actor_login="mallory",
-                    actor_type="Bot",
-                    association="CONTRIBUTOR",
-                    app_slug="reviewsensei[bot]",
-                    source_comment_id=source_comment_id,
-                    session_attestation={"version": 1},
-                )
 
         paused = deliver(70, body="@sensei review pause")
         self.assertTrue(paused.applied)
         self.assertTrue(ledger.load(identity).record.operator_paused)
-
         first = deliver(71)
         self.assertTrue(first.applied)
         self.assertEqual(
@@ -1018,22 +859,12 @@ class GitHubApplicationTests(unittest.TestCase):
         resumed = ledger.load(identity).record
         self.assertFalse(resumed.operator_paused)
         self.assertEqual(resumed.continuation_grants, ())
-
-        # A workflow redelivery of the identical command is idempotent: the
-        # unpause was already applied, so nothing mutates a second time.
         replay = deliver(71)
         self.assertTrue(replay.applied)
-        replayed = ledger.load(identity).record
-        self.assertEqual(replayed.generation, resumed.generation)
-
-        # A distinct continuation command is also an unpause, not a new
-        # allowance, so it neither stacks authority nor bumps the generation.
+        self.assertEqual(ledger.load(identity).record.generation, resumed.generation)
         distinct = deliver(72)
         self.assertTrue(distinct.applied)
         self.assertEqual(ledger.load(identity).record.generation, resumed.generation)
-
-        # The retired --rounds spelling is not a command at all: nothing is
-        # granted, paused, or parsed as a continuation.
         retired = deliver(73, body="@sensei review continue --rounds 1")
         self.assertFalse(retired.applied)
         self.assertEqual(retired.summary, "not-a-command")
@@ -1041,6 +872,8 @@ class GitHubApplicationTests(unittest.TestCase):
         self.assertEqual(after.generation, resumed.generation)
         self.assertEqual(after.continuation_grants, ())
         self.assertFalse(after.operator_paused)
+        self.assertEqual(self.broker.requested, 0)
+        self.assertEqual(self.broker.exchanges, [("caller-oidc", "review_publish")] * 4)
 
     def test_hosted_command_rejects_an_injected_local_ledger(self):
         application = GitHubApplication(

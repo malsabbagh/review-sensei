@@ -153,7 +153,9 @@ def cli_event_review_intent() -> str:
     return ""
 
 
-def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | None:
+def resolve_rescan(
+    args, ledger, *, actions_token: str, _source_observer=None
+) -> AuthorizedRescan | None:
     """Resolve only a real human dispatch or an unedited maintainer comment.
 
     The protected reusable workflow and broker establish the Actions identity.
@@ -461,10 +463,13 @@ def resolve_rescan(args, ledger, *, actions_token: str) -> AuthorizedRescan | No
             raise ReviewInputError(
                 "remaining review has no reusable partial scope or reviewable work; repair evidence/configuration or use the supported media finalization"
             )
-    return AuthorizedRescan(
+    authorized = AuthorizedRescan(
         kind,
         request_id,
         source,
         latest["id"],
         mode="remaining" if remaining else "full",
     )
+    if _source_observer is not None:
+        _source_observer(authorized, eligibility.human_inventory_reference)
+    return authorized

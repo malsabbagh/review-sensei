@@ -632,15 +632,16 @@ class RunOutcomeWiringTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             self.assertNotIn(CANARY, outcome_path.read_text(encoding="utf-8"))
 
     def test_cli_recovery_refuses_learning_writes_and_missing_artifacts(self):
+        from review_sensei_github.cli import main as publication_main
+
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             diff_path = root / "diff.patch"
             outcome_path = root / "outcome.json"
             diff_path.write_text(DIFF, encoding="utf-8", newline="\n")
-            learning_status = main(
+            learning_status = publication_main(
                 [
-                    "github",
-                    "review",
+                    "publish",
                     "--diff",
                     str(diff_path),
                     "--repository",
@@ -670,10 +671,9 @@ class RunOutcomeWiringTests(IsolatedWorkingDirectoryMixin, unittest.TestCase):
             self.assertEqual(
                 learning_payload["diagnostic"], "recovery_learning_prs_refused"
             )
-            status = main(
+            status = publication_main(
                 [
-                    "github",
-                    "review",
+                    "publish",
                     "--diff",
                     str(diff_path),
                     "--repository",

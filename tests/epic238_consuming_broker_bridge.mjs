@@ -133,11 +133,12 @@ for await (const line of lines) {
       case "set_source": Object.assign(fixture.githubInputs.source, request.source); result = null; break;
       case "set_inline_source": Object.assign(fixture.githubInputs.inlineSource, request.source); result = null; break;
       case "set_snapshot": {
-        for (const name of ["number", "state", "draft", "base", "head", "repository", "repositoryId"]) {
+        for (const name of ["number", "state", "draft", "base", "head", "repository", "repositoryId", "comments", "reviews"]) {
           if (Object.hasOwn(request.snapshot, name)) fixture.githubInputs[name] = request.snapshot[name];
         }
         result = null; break;
       }
+      case "authority": result = fixture.authority(request.purpose, request.kind); break;
       case "configure_feedback": result = fixture.configureFeedback(); break;
       case "redirect_probe": result = await redirectProbe(request.site, request.blocked); break;
       case "shutdown": fixture.close(); lines.close(); result = null; break;
@@ -153,7 +154,8 @@ for await (const line of lines) {
   }
   if (request.action === "verify" && status === 200 && request.pause_after_consume === true) {
     // Signal only: this is deliberately not the verified HTTP response. The
-    // parent kills this process after the production SQL consume commits.
+    // parent kills this process after production signature verification.
+    // The legacy checkpoint label is test IPC only; no grant is consumed.
     process.stdout.write(JSON.stringify({ id: request.id, checkpoint: "grant-consumed" }) + "\n");
     await new Promise(() => {});
   }

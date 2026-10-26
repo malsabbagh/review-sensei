@@ -10,6 +10,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from fake_github_http import json_response
 from review_sensei_github import (
     GitHubApplication,
     GitHubHttp,
@@ -38,6 +39,7 @@ from review_sensei_github.publication import (
 )
 from review_sensei_github.publication_recovery import _event_key, _store
 from review_sensei_github.session_ledger import render_session_comment
+from test_github_human_file_review import ALICE, API, BASE, BOT, HEAD, REPO, State
 
 from review_sensei.bounded_evidence import EvidenceReadBudget, canonical_bytes
 from review_sensei.context import finding_lifecycle_for_comment
@@ -49,8 +51,6 @@ from review_sensei.human_assessment import (
 )
 from review_sensei.models import ReviewComment, ReviewTransaction
 from review_sensei.session import SessionIdentity, SessionRecord
-from tests.fake_github_http import json_response
-from tests.test_github_human_file_review import ALICE, API, BASE, BOT, HEAD, REPO, State
 
 BODY = "@reviewsensei I reviewed the media files and I approve"
 IDENTITY = SessionIdentity("owner/repo", 2, repository_id=1)

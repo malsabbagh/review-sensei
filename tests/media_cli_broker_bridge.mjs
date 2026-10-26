@@ -59,10 +59,10 @@ globalThis.fetch = async (input, init) => {
   if (url.pathname === "/repos/malsabbagh/review-sensei/git/ref/tags/v5") return Response.json({ object: { type: "commit", sha: SHA } });
   if (url.pathname === "/repos/owner/repo/installation") return fixture.transport("https://api.github.test/repos/acme/widgets/installation", init);
   if (url.pathname === "/app/installations/2468/access_tokens" && method === "POST") return fixture.transport(url, init);
-  if (url.pathname === "/repos/owner/repo") return Response.json({ id: 1, fork: authority.fork });
+  if (url.pathname === "/repos/owner/repo") return Response.json({ id: 1, full_name: "owner/repo", fork: authority.fork });
   const pr = authority.pull_request ?? 2;
-  if (url.pathname === `/repos/owner/repo/pulls/${pr}`) return Response.json({ number: pr, state: "open", draft: authority.draft, base: { sha: authority.base }, head: { sha: authority.head } });
-  if (url.pathname === `/repos/owner/repo/issues/comments/${authority.source?.id ?? 20}`) return authority.source === null ? Response.json({ message: "Not Found" }, { status: 404 }) : Response.json(authority.source);
+  if (url.pathname === `/repos/owner/repo/pulls/${pr}`) return Response.json({ number: pr, state: "open", draft: authority.draft, base: { sha: authority.base, repo: { id: 1, full_name: "owner/repo", fork: authority.fork } }, head: { sha: authority.head, repo: { id: 1, full_name: "owner/repo", fork: authority.fork } } });
+  if (url.pathname === `/repos/owner/repo/issues/comments/${authority.source?.id ?? 20}`) return authority.source === null ? Response.json({ message: "Not Found" }, { status: 404 }) : Response.json(annotatedCheckFallback ? { ...authority.source, issue_url: authority.source.issue_url.replace("https://api.github.test", "https://api.github.com") } : authority.source);
   if (url.pathname === "/repos/owner/repo/collaborators/alice/permission") return Response.json({ permission: "admin", role_name: "admin", user: { login: "alice", id: 123 } });
   if (url.pathname === "/app") return fixture.transport(url, init);
   if (url.pathname === `/repos/owner/repo/pulls/${pr}/reviews`) {
@@ -82,7 +82,7 @@ for await (const line of lines) {
   attempts = [];
   try {
     if (request.action === "oidc") {
-      result = await fixture.oidcToken({ repository: "owner/repo", repository_owner: "owner", repository_id: "1", actor: "alice", actor_id: "123", run_id: "123", workflow_ref: "owner/repo/.github/workflows/review-sensei-review.yml@refs/heads/main", job_workflow_ref: WORKFLOW, job_workflow_sha: SHA });
+      result = await fixture.oidcToken({ repository: "owner/repo", repository_owner: "owner", repository_id: "1", actor: "alice", actor_id: "123", run_id: request.run_id, run_attempt: String(request.run_attempt), event_name: "issue_comment", workflow_ref: "owner/repo/.github/workflows/review-sensei-review.yml@refs/heads/main", job_workflow_ref: WORKFLOW, job_workflow_sha: SHA });
     } else if (request.action === "reset_oidc_cache") {
       // A new cold Worker invocation is an independent fixture condition, not
       // an uncharged fetch or a refund from the measured command allowance.

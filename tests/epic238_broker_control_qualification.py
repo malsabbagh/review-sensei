@@ -18,6 +18,7 @@ from unittest.mock import patch
 from review_sensei_github.broker_client import BrokerClient
 from review_sensei_github.broker_control import BrokerDispatchAccounting
 from review_sensei_github.errors import GitHubBrokerClientError
+from review_sensei_github.run_authority import parse_authority
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.broker_diagnostics import exception_broker_diagnostic
@@ -34,22 +35,22 @@ class BrokerControlQualification(unittest.TestCase):
         self.trace = PhysicalDispatchTrace(Path(self.temporary.name))
         self.bridge = ProductionBrokerBridge(Path(self.temporary.name), self.trace)
         self.request = self.bridge.call("configure_feedback")["result"]
+        parse_authority(self.request)
         self.budget = EvidenceReadBudget()
-        self.request["mutation"]["read_accounting"]["deadline_unix_ms"] = (
-            self.budget.wall_deadline_ms
-        )
+        self.operation_id = "c" * 64
 
     def tearDown(self):
         self.bridge.close()
         self.temporary.cleanup()
 
-    def client(self, maximum=13):
+    def client(self, maximum=13, *, authority=None):
         return BrokerClient(
             broker_url="https://broker.github.test/api/github/token",
             opener=self.trace.opener(self.bridge.open, origin="caller-broker"),
             control=BrokerDispatchAccounting(
-                self.budget, self.request["mutation"]["operation_id"], maximum, 1
+                self.budget, self.operation_id, maximum, 1
             ),
+            authority=self.request if authority is None else authority,
         )
 
     def oidc(self, client):
@@ -63,7 +64,7 @@ class BrokerControlQualification(unittest.TestCase):
         ):
             return client.request_oidc_token()
 
-    def test_real_signed_grant_and_verification_each_fit_prepaid_physical_trace(self):
+    def test_real_signed_grant_and_verification_each_match_physical_caller_trace(self):
         client = self.client()
         token = self.oidc(client)
         grant = client.authorize_session_mutation(
@@ -73,18 +74,30 @@ class BrokerControlQualification(unittest.TestCase):
             head_sha="a" * 40,
             session_attestation=self.request,
         )
-        self.assertEqual(self.budget.calls, 15)
-        self.assertEqual(len(self.trace.attempts()), 15)
+        self.assertEqual(self.budget.calls, 2)
+        internals = self.bridge.internal_dispatches()["transport"]
+        self.assertEqual(len(self.trace.attempts()), self.budget.calls + len(internals))
+        self.assertGreater(len(internals), self.budget.calls)
+        self.assertEqual(
+            sum(item["origin"] == "caller-broker" for item in self.trace.attempts()),
+            self.budget.calls,
+        )
         self.assertEqual(
             client.verify_session_grant(grant.grant, grant.attestation),
             grant.attestation,
         )
-        self.assertEqual(self.budget.calls, 17)
-        self.assertEqual(len(self.trace.attempts()), 17)
+        self.assertEqual(self.budget.calls, 3)
         self.assertEqual(
-            grant.attestation["mutation"]["read_accounting"]["deadline_unix_ms"],
-            self.budget.wall_deadline_ms,
+            len(self.trace.attempts()),
+            self.budget.calls + len(self.bridge.internal_dispatches()["transport"]),
         )
+        self.assertEqual(
+            sum(item["origin"] == "caller-broker" for item in self.trace.attempts()),
+            self.budget.calls,
+        )
+        self.assertEqual(grant.attestation["version"], 3)
+        self.assertNotIn("mutation", grant.attestation)
+        self.assertIs(client.control.budget, self.budget)
 
     def test_cleanup_exchange_uses_production_admission_and_original_dispatch_budget(
         self,
@@ -96,8 +109,11 @@ class BrokerControlQualification(unittest.TestCase):
         self.assertEqual(
             client.exchange(token, capability="thread_resolve"), "synthetic-scoped"
         )
-        self.assertEqual(self.budget.calls, before + 11)
-        self.assertLessEqual(len(self.trace.attempts()), self.budget.calls)
+        self.assertEqual(self.budget.calls, before + 1)
+        self.assertEqual(
+            sum(item["origin"] != "broker-internal" for item in self.trace.attempts()),
+            self.budget.calls,
+        )
         self.assertEqual(self.budget.wall_deadline_ms, deadline)
         attempts = self.trace.attempts()
         self.assertTrue(
@@ -111,7 +127,7 @@ class BrokerControlQualification(unittest.TestCase):
         )
         # Exhaust the original allowance, then prove the new capability cannot
         # dispatch or renew its liability/deadline through another exchange.
-        while self.budget.calls < 51:
+        while self.budget.ordinary_remaining() > 0:
             self.budget.consume()
         physical = len(self.trace.attempts())
         with self.assertRaises(ReviewInputError):
@@ -154,7 +170,13 @@ class BrokerControlQualification(unittest.TestCase):
         self.assertEqual(decided, 21, "the decided-thread fixture contract changed")
         state.record(self.temporary.name)
         self.bridge.call(
-            "set_snapshot", snapshot={"repository": "owner/repo", "repositoryId": 1}
+            "set_snapshot",
+            snapshot={
+                "repository": "owner/repo",
+                "repositoryId": 1,
+                "number": 1,
+                "head": HEAD,
+            },
         )
         self.bridge.oidc_overrides = {
             "repository": "owner/repo",
@@ -166,7 +188,21 @@ class BrokerControlQualification(unittest.TestCase):
             self.budget = EvidenceReadBudget()
             deadline = self.budget.wall_deadline_ms
             physical_before = len(self.trace.attempts())
-            client = self.client(10)
+            authority = {
+                **self.request,
+                "purpose": "review",
+                "repository": "owner/repo",
+                "repository_id": 1,
+                "pull_request": 1,
+                "head_sha": HEAD,
+                "source": {
+                    "kind": "pull_request",
+                    "id": 1,
+                    "updated_at": None,
+                    "body_sha256": None,
+                },
+            }
+            client = self.client(10, authority=authority)
             oidc = self.oidc(client)
             http = GitHubHttp(
                 api_url="https://api.github.test",
@@ -194,7 +230,10 @@ class BrokerControlQualification(unittest.TestCase):
                 body="@reviewsensei verify",
                 command_budget=self.budget,
             )
-            physical = len(self.trace.attempts()) - physical_before
+            physical = sum(
+                item["origin"] != "broker-internal"
+                for item in self.trace.attempts()[physical_before:]
+            )
             self.assertLessEqual(physical, self.budget.calls)
             self.assertLessEqual(self.budget.calls, 64)
             self.assertEqual(self.budget.wall_deadline_ms, deadline)
@@ -234,12 +273,16 @@ class BrokerControlQualification(unittest.TestCase):
     def test_real_http_redirects_cannot_hide_an_unfunded_second_dispatch(self):
         for site in ("rest", "git", "jwks"):
             with self.subTest(site=site):
-                result = self.bridge.call("redirect_probe", site=site)["result"]
+                reply = self.bridge.call("redirect_probe", site=site)
+                self.assertEqual(reply["status"], 200, reply["result"])
+                result = reply["result"]
                 self.assertEqual(result["requests"], ["/redirect"])
                 self.assertEqual(result["category"], "broker_control_redirect_refused")
 
     def test_real_http_wait_is_cancelled_at_original_control_deadline(self):
-        result = self.bridge.call("redirect_probe", site="rest", blocked=True)["result"]
+        reply = self.bridge.call("redirect_probe", site="rest", blocked=True)
+        self.assertEqual(reply["status"], 200, reply["result"])
+        result = reply["result"]
         self.assertEqual(result["category"], "broker_control_deadline_exhausted")
         self.assertEqual(result["requests"], ["/redirect"])
         self.assertTrue(result["aborted"])
@@ -248,7 +291,9 @@ class BrokerControlQualification(unittest.TestCase):
         self.assertEqual(result["original_deadline"], result["final_deadline"])
         self.assertLess(result["elapsed_ms"], 10_000)
 
-    def test_controlled_python_redirect_refusal_preserves_legacy_transport(self):
+    def test_controlled_python_redirect_refusal_preserves_uncontrolled_library_transport(
+        self,
+    ):
         requests = []
 
         class Handler(BaseHTTPRequestHandler):
@@ -308,14 +353,20 @@ class BrokerControlQualification(unittest.TestCase):
             exception_broker_diagnostic(raised.exception).code,
             "broker_control_budget_exhausted",
         )
-        self.assertEqual(self.budget.calls, 3)
+        self.assertEqual(self.budget.calls, 2)
         self.assertEqual(len(self.trace.attempts()), 3)
 
-    def test_mutation_deadline_cannot_be_renewed_independently_of_control_budget(self):
+    def test_obsolete_nested_budget_authority_refuses_before_dispatch(self):
         client = self.client()
         token = self.oidc(client)
         changed = copy.deepcopy(self.request)
-        changed["mutation"]["read_accounting"]["deadline_unix_ms"] += 1
+        changed["mutation"] = {
+            "read_accounting": {
+                "schema_version": "1.0",
+                "calls": 0,
+                "deadline_unix_ms": self.budget.wall_deadline_ms + 1,
+            }
+        }
         with self.assertRaises(GitHubBrokerClientError):
             client.authorize_session_mutation(
                 token,
@@ -324,8 +375,8 @@ class BrokerControlQualification(unittest.TestCase):
                 head_sha="a" * 40,
                 session_attestation=changed,
             )
-        self.assertEqual(self.budget.calls, 15)
-        self.assertEqual(len(self.trace.attempts()), 2)
+        self.assertEqual(self.budget.calls, 1)
+        self.assertEqual(len(self.trace.attempts()), 1)
 
 
 if __name__ == "__main__":

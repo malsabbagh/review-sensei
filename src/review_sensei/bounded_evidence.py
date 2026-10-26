@@ -16,7 +16,7 @@ import zlib
 from dataclasses import dataclass
 from typing import Callable, Mapping
 
-from .errors import ReviewInputError
+from .errors import EvidenceBudgetExhausted, ReviewInputError
 
 ENCODING = "zlib-json-v1"
 
@@ -313,7 +313,7 @@ class EvidenceReadBudget:
 
     def check(self) -> None:
         if self.clock() >= self.deadline:
-            raise ReviewInputError("partition read deadline exhausted")
+            raise EvidenceBudgetExhausted("partition read deadline exhausted")
 
     def consume(self, *, fence: bool = False) -> float:
         if self._tail_ticket is not None:
@@ -327,7 +327,7 @@ class EvidenceReadBudget:
             self.calls >= MAX_PART_READS if fence else self.ordinary_remaining() <= 0
         )
         if exhausted:
-            raise ReviewInputError("partition shared request budget exhausted")
+            raise EvidenceBudgetExhausted("partition shared request budget exhausted")
         self.calls += 1
         # Addition/subtraction near a float exponent boundary can round above
         # the transport ceiling. Clamp the timeout, never the original deadline.
@@ -336,7 +336,7 @@ class EvidenceReadBudget:
     def _remaining_seconds(self) -> float:
         remaining = self.deadline - self.clock()
         if remaining <= 0:
-            raise ReviewInputError("partition read deadline exhausted")
+            raise EvidenceBudgetExhausted("partition read deadline exhausted")
         return min(remaining, PART_READ_SECONDS)
 
     def reserve_tail(
@@ -500,7 +500,7 @@ class EvidenceReadBudget:
     def preflight(self, calls: int) -> None:
         self.check()
         if calls > self.ordinary_remaining():
-            raise ReviewInputError(
+            raise EvidenceBudgetExhausted(
                 "partition shared request budget cannot stage complete inventory"
             )
 

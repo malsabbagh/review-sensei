@@ -122,7 +122,7 @@ class ContextCapacityTests(unittest.TestCase):
             ledger.replace(
                 identity,
                 lambda record: record.evolve(
-                    convergence_history=session_fixtures.SessionRecordTests._history(),
+                    convergence_history=history_of_size(MAX_CONVERGENCE_HISTORY_BYTES),
                     now=session_fixtures.FIXED_NOW,
                 ),
                 now=session_fixtures.FIXED_NOW,
@@ -292,8 +292,8 @@ class ContextCapacityTests(unittest.TestCase):
             record.evolve(
                 convergence_history=history_of_size(MAX_CONVERGENCE_HISTORY_BYTES + 1)
             )
-        # Escaped, valid surrounding fields consume more than the old wrapper
-        # allowance. Fill the resulting record to its precise outer boundary.
+        # Legal escaped surrounding fields leave less room than the independent
+        # history cap. Fill the resulting record to its precise outer boundary.
         dispositions = tuple(
             {
                 "fingerprint": f"{i:064x}",
@@ -303,11 +303,11 @@ class ContextCapacityTests(unittest.TestCase):
                 "head_sha": None,
                 "expires_at": None,
             }
-            for i in range(2)
+            for i in range(4)
         )
         grants = tuple(
             session_fixtures.SessionRecordTests._grant(
-                command_id=f"comment-{i}", actor="é" * 256
+                command_id=f"comment-{i}", actor="😀" * 256
             )
             for i in range(4)
         )
@@ -433,7 +433,7 @@ class ContextCapacityTests(unittest.TestCase):
                     now=session_fixtures.FIXED_NOW,
                 )
                 held = ledger.load(identity, now=session_fixtures.FIXED_NOW).record
-                self.assertLess(
+                self.assertLessEqual(
                     checkpoint_baseline_capacity(held), MAX_HISTORY_BASELINE_BYTES
                 )
                 checkpoint = replace(

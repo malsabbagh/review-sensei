@@ -9,9 +9,10 @@ from unittest.mock import patch
 from review_sensei_github.broker_client import BrokerClient
 from review_sensei_github.errors import GitHubBrokerClientError
 from review_sensei_github.feedback_attestation import parse_feedback_attestation
+from test_github_broker_client import FakeResponse
+from test_run_authority import authority, granted
 
 from review_sensei.evidence import evidence_digest
-from tests.test_github_broker_client import FakeResponse
 
 
 class FeedbackAttestationTests(unittest.TestCase):
@@ -131,14 +132,8 @@ class FeedbackAttestationTests(unittest.TestCase):
 
     @patch("review_sensei_github.broker_client.time.monotonic", return_value=0)
     def test_client_charges_each_oidc_issue_and_verify_before_dispatch(self, _clock):
-        request = self.fixture()["request"]
-        grant = {
-            **request,
-            "actor": "octocat",
-            "actor_id": 12345678,
-            "actor_type": "User",
-            "association": "OWNER",
-        }
+        request = authority("reply")
+        grant = granted(request)
         charges = []
         dispatches = []
 
@@ -155,15 +150,20 @@ class FeedbackAttestationTests(unittest.TestCase):
             elif http_request.full_url.endswith("session-grant"):
                 response = {"session_attestation": grant}
             else:
+                payload = json.loads(http_request.data)
+                grant.update(granted(payload["session_attestation"]))
                 response = {
                     "token": "synthetic-token",
+                    "app_id": 999,
                     "session_grant": "sg1.1780000000000." + "a" * 43,
                     "session_state": "known",
                     "session_attestation": grant,
                 }
             return FakeResponse(json.dumps(response).encode())
 
-        client = BrokerClient(opener=opener, before_request=before_request)
+        client = BrokerClient(
+            opener=opener, before_request=before_request, authority=request
+        )
         with patch.dict(
             "os.environ",
             {
@@ -175,9 +175,9 @@ class FeedbackAttestationTests(unittest.TestCase):
             assertion = client.request_oidc_token()
         issued = client.authorize_session_mutation(
             assertion,
-            repository_id=987654321,
-            pull_request=7,
-            head_sha="a" * 40,
+            repository_id=request["repository_id"],
+            pull_request=request["pull_request"],
+            head_sha=request["head_sha"],
             session_attestation=request,
         )
         self.assertEqual(

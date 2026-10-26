@@ -63,7 +63,7 @@ from review_sensei.session import (
 try:
     from session_fixture_clock import SESSION_FIXTURE_NOW, SessionFixtureClockMixin
 except ModuleNotFoundError:
-    from tests.session_fixture_clock import (
+    from session_fixture_clock import (
         SESSION_FIXTURE_NOW,
         SessionFixtureClockMixin,
     )
@@ -71,7 +71,7 @@ except ModuleNotFoundError:
 try:
     from fake_github_http import json_response, make_http
 except ImportError:
-    from tests.fake_github_http import json_response, make_http
+    from fake_github_http import json_response, make_http
 
 NOW = SESSION_FIXTURE_NOW
 IDENTITY = SessionIdentity("owner/repo", 146, repository_id=99)

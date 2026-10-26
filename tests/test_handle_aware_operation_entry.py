@@ -19,10 +19,10 @@ from review_sensei_github.operation_host import (
     OperationHandle,
     OperationRefusal,
 )
+from test_operation_entry import MemoryComments
 
 from review_sensei.errors import ReviewInputError
 from review_sensei.operation_witness import operation_handle_witness
-from tests.test_operation_entry import MemoryComments
 
 
 def digest(text):

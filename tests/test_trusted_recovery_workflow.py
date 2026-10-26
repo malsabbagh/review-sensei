@@ -86,25 +86,21 @@ class TrustedRecoveryWorkflowTests(unittest.TestCase):
                 {name: prepared[name] for name in passed},
             )
 
-    def test_both_lanes_publish_explicit_retained_recovery_and_skip_inference(self):
+    def test_both_lanes_delegate_recovery_to_the_original_lifecycle(self):
         text = WORKFLOW.read_text()
-        for lane in ("hosted", "local"):
-            with self.subTest(lane=lane):
-                job = _job_section(text, lane)
-                self.assertIn(
-                    "if: inputs.operation == 'review' && !inputs.recover_publication",
-                    job,
-                )
-                self.assertIn("--recover-retained --reconstruct-contexts", job)
-                self.assertIn('--trusted-context-root "$PWD/recovery-policy"', job)
-                self.assertIn(
-                    "steps.provider-review.outputs.result_ready == 'true' || inputs.recover_publication",
-                    job,
-                )
-                self.assertIn("git merge-base --is-ancestor", job)
-                self.assertIn("ref: ${{ inputs.recovery_policy_commit }}", job)
-                self.assertIn("--github-session-ledger", job)
-                self.assertNotIn("pull-requests: write", job)
+        for lane, name in (
+            ("hosted", "Run hosted review"),
+            ("local", "Run local review"),
+        ):
+            job = _job_section(text, lane)
+            step = _step_block(job, name)
+            self.assertIn("if: inputs.operation == 'review'", step)
+            self.assertIn('" review-run ', step)
+            self.assertNotIn('" publish ', job)
+            self.assertNotIn("gh api", job.split("- name: Generate and publish", 1)[0])
+            self.assertNotIn("recover-retained", job)
+            self.assertNotIn("ref: ${{ inputs.recovery_policy_commit }}", job)
+            self.assertNotIn("pull-requests: write", job)
 
     @unittest.skipIf(os.name == "nt", "Linux runner script requires POSIX Bash")
     def test_recovery_intent_requires_manual_dispatch_and_exact_original_head(self):
@@ -129,7 +125,7 @@ class TrustedRecoveryWorkflowTests(unittest.TestCase):
             "RECOVERY_EXPECTED_HEAD": "b" * 40,
         }
         for changes, allowed in (
-            ({}, True),
+            ({}, False),
             ({"GITHUB_EVENT_NAME": "pull_request"}, False),
             ({"MODE": "automatic"}, False),
             ({"RECOVERY_EXPECTED_HEAD": "d" * 40}, False),
@@ -145,14 +141,11 @@ class TrustedRecoveryWorkflowTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode == 0, allowed, result.stderr)
 
-    def test_canonical_caller_exposes_opt_in_without_changing_normal_operation(self):
+    def test_canonical_caller_exposes_only_supported_recovery(self):
         text = _prepared_recovery_workflow("v5")
-        self.assertIn("      recover_publication:\n", text)
-        self.assertIn("      recovery_policy_commit:\n", text)
-        self.assertIn("      recovery_expected_head:\n", text)
-        self.assertIn(
-            "recover_publication: ${{ inputs.recover_publication || false }}", text
-        )
+        self.assertNotIn("      recover_publication:\n", text)
+        self.assertNotIn("      recovery_policy_commit:\n", text)
+        self.assertEqual(text, _tagged_workflow("v5"))
         self.assertIn("operation: ${{ needs.resolve-trigger.outputs.operation }}", text)
         self.assertTrue(_looks_like_managed_v5_setup(WORKFLOW_PATH, text))
         self.assertFalse(
@@ -221,11 +214,11 @@ class TrustedRecoveryWorkflowTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 materialize = _step_block(job, "Scope the selected backend credential")
-                self.assertIn("if: ${{ !inputs.recover_publication }}", materialize)
+                self.assertNotIn("inputs.recover_publication", materialize)
                 review_step = _step_block(
                     job, "Run hosted review" if lane == "hosted" else "Run local review"
                 )
-                self.assertIn("&& !inputs.recover_publication", review_step)
+                self.assertIn("if: inputs.operation == 'review'", review_step)
                 # Outside recovery, required credentials still fail explicitly;
                 # the recovery opt-in does not relax the credential contract.
                 credential_run = _run_block_containing(

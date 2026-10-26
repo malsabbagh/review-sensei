@@ -10,11 +10,11 @@ from review_sensei_github.publication import (
     override_provenance_marker,
     parse_finding_index,
 )
+from test_bounded_v1_publication import comments, publish
+from test_human_assessment import HEAD, State
 
 from review_sensei.convergence import BlockerCandidate
 from review_sensei.presentation import assign_finding_identifiers
-from tests.test_bounded_v1_publication import comments, publish
-from tests.test_human_assessment import HEAD, State
 
 
 class FutureDispositionFrameTests(unittest.TestCase):

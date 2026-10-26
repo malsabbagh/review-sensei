@@ -7,17 +7,14 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
+import test_hosted_history_readers as history
+import test_human_assessment as human
+from fake_github_http import json_response
 from review_sensei_github.application import GitHubApplication, GitHubWriteOptions
 from review_sensei_github.conversation import ConversationPublisher
-from review_sensei_github.errors import GitHubPublicationError
 from review_sensei_github.operation_host import OPERATION_COMMENT_MARKER
 
 from review_sensei.bounded_evidence import EvidenceReadBudget
-from review_sensei.errors import ReviewInputError
-from tests import test_activation_tail as tail
-from tests import test_hosted_history_readers as history
-from tests import test_human_assessment as human
-from tests.fake_github_http import json_response
 
 OriginalHumanState = human.State
 
@@ -247,52 +244,89 @@ class IndependentAcceptanceTests(unittest.TestCase):
         self.assertEqual(len(created), 4)
         self.assertTrue(all(state.events() == [] for state in created))
 
-    def test_sealed_adaptive_fence_stale_head_keeps_original_root_and_burns_ticket(
-        self,
-    ):
-        case = tail.HostedTailTests()
-        state, broker, ledger = case.setup_host()
-        for item in history.captured_shape():
-            item = {
-                **item,
-                "id": item["id"] + 5000,
-                "created_at": "2020-01-01T00:00:01Z",
-                "updated_at": "2020-01-01T00:00:01Z",
-            }
-            state.comments[item["id"]] = item
-        case.reserve(ledger)
-        case.fresh(broker, ledger, pages=2)
-        original_root = copy.deepcopy(state.comments[1000])
-        tickets = []
-        reserve = ledger.evidence_budget.reserve_tail
+    def test_stale_head_at_bootstrap_refuses_provider_and_native_mutations(self):
+        import tempfile
 
-        def stale_after_seal(plan):
-            ticket = reserve(plan)
-            tickets.append(ticket)
-            state.live_head = "c" * 40
-            return ticket
+        with tempfile.TemporaryDirectory() as directory:
+            f = history.CurrentLargeEntryFixture.create(directory)
+            original_history = copy.deepcopy(f.extra_comments)
+            f.live_head = "c" * 40
+            self.assertEqual(f.invoke(), 1, f.error)
+            self.assertIn("live reviewed base or head conflicts", f.error)
+            self.assertEqual(f.provider_calls, 0)
+            self.assertIsNone(f.comment)
+            self.assertFalse(f.reviews)
+            self.assertEqual(f.extra_comments, original_history)
+            self.assertFalse(
+                any(
+                    method in {"POST", "PATCH"} and "/issues" in path
+                    for _, method, path in f.trace
+                )
+            )
+            self.assertEqual(len(f.accounted.observations), len(f.trace))
 
-        start = len(state.calls)
-        with (
-            patch.object(
-                ledger.evidence_budget, "reserve_tail", side_effect=stale_after_seal
-            ),
-            self.assertRaises((ReviewInputError, GitHubPublicationError)),
-        ):
-            case.activate(ledger, pages=2)
-        self.assertEqual(len(tickets), 1)
-        self.assertEqual(state.comments[1000], original_root)
-        self.assertFalse(any(method == "PATCH" for method, url in state.calls[start:]))
-        self.assertIsNone(ledger._activation_ticket)
-        # Prepaid undispatched writes remain charged after the stale-head refusal.
-        self.assertGreater(
-            ledger.evidence_budget.calls, len(state.calls) + len(broker.calls)
-        )
-        self.assertLessEqual(ledger.evidence_budget.calls, 64)
-        before = ledger.evidence_budget.calls
-        with self.assertRaises(ReviewInputError):
-            case.activate(ledger, pages=2)
-        self.assertEqual(ledger.evidence_budget.calls, before)
+    def test_admitted_stale_head_refuses_publication_and_next_run_without_replay(self):
+        import tempfile
+
+        from review_sensei_github.session_ledger import parse_session_comment
+        from test_api_work_persistence import IDENTITY
+
+        for boundary in ("provider-admission", "publication"):
+            with (
+                self.subTest(boundary=boundary),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                f = history.CurrentLargeEntryFixture.create(directory)
+                original_history = copy.deepcopy(f.extra_comments)
+                entered = []
+
+                def change_head():
+                    entered.append(f.accounted.accounting)
+                    f.live_head = "c" * 40
+
+                if boundary == "provider-admission":
+                    f.before_entry = change_head
+                else:
+                    f.before_publication = change_head
+                self.assertEqual(f.invoke(), 1, f.error)
+                self.assertEqual(len(entered), 1)
+                # Provider admission has already occurred. A changed live head
+                # cannot undo that physical inference or grant replay authority.
+                self.assertEqual(f.provider_calls, 1)
+                self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+                self.assertTrue(any(size < 100 for size, _ in f.comment_page_reads))
+                current = parse_session_comment(f.comment["body"], identity=IDENTITY)
+                self.assertIsNone(current.api_run_accounting["terminal_transaction"])
+                if boundary == "provider-admission":
+                    self.assertIn(
+                        "retention current pull request identity mismatches", f.error
+                    )
+                    self.assertIsNone(current.transaction)
+                else:
+                    self.assertEqual(current.transaction.phase, "publication_pending")
+                state = f.accounted.accounting
+                self.assertEqual(state.configuration, entered[0].configuration)
+                self.assertEqual(state.startup, entered[0].startup)
+                self.assertEqual(state.owner, entered[0].owner)
+                self.assertEqual(state.remaining, entered[0].remaining)
+                self.assertGreaterEqual(
+                    state.confirmed + state.uncertain,
+                    entered[0].confirmed + entered[0].uncertain,
+                )
+                self.assertEqual(len(f.accounted.observations), len(f.trace))
+                for key, value in original_history.items():
+                    self.assertEqual(f.extra_comments[key], value)
+                original_root = copy.deepcopy(f.comment)
+                original_parts = copy.deepcopy(f.extra_comments)
+                f.before_entry = f.before_publication = None
+                f.next_run()
+                self.assertEqual(f.invoke(), 1, f.error)
+                self.assertIn("previous caller run is not terminal", f.error)
+                self.assertEqual(f.provider_calls, 1)
+                self.assertEqual(f.comment, original_root)
+                self.assertEqual(f.extra_comments, original_parts)
+                self.assertFalse(any(r["state"] == "APPROVED" for r in f.reviews))
+                self.assertEqual(len(f.accounted.observations), len(f.trace))
 
 
 if __name__ == "__main__":

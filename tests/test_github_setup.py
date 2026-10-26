@@ -947,7 +947,9 @@ class SetupPullRequestServiceTests(unittest.TestCase):
         current = _tagged_workflow(tag)
         self.assertEqual(current, setup_module._current_pre_recovery_v5_workflow(tag))
         self.assertNotEqual(current, setup_module._pre_recovery_v5_workflow(tag))
-        self.assertNotEqual(current, setup_module._prepared_recovery_workflow(tag))
+        self.assertNotEqual(
+            current, setup_module._historical_prepared_recovery_v5_workflow(tag)
+        )
         reverted = current.replace(
             "# ReviewSensei setup version: 5",
             "# ReviewSensei setup version: 4",

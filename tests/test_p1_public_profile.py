@@ -1,185 +1,245 @@
-"""Synthetic HTTP trace for the public P1 profile.
+"""P1 assessment coalescing and physical current-run caller qualification.
 
-One pull request, four pending instances, one provider request, and two GitHub
-checkpoint activations, then operation-comment acceptance and replay. The
-comment list is read once and later checks are fenced, so this trace stays
-inside 60 ordinary requests. The product default stays ``enabled``.
-``disabled`` is the rollback. Caps are not raised.
+Four pending decisions still share one provider request and two durable saves.
+Hosted accounting uses the repository-wide 512 candidate default through the
+current complete CLI lifecycle, including bounded history reads and replay.
 """
 
 from __future__ import annotations
 
-import json
+import copy
+import tempfile
 import unittest
-from urllib.parse import urlparse
+from unittest.mock import patch
 
-from review_sensei_github import GitHubHttp
-from review_sensei_github.application import _assessment_bytes
-from review_sensei_github.operation_entry import run_actions_analysis
-
-from review_sensei.bounded_evidence import (
-    MAX_PART_READS,
-    PART_READ_SECONDS,
-    EvidenceReadBudget,
+import test_coalesced_admission as coalesced
+from review_sensei_github.api_run_plan import NATIVE_OPERATION_REQUESTS
+from review_sensei_github.publication import parse_finding_index
+from review_sensei_github.session_ledger import (
+    GitHubIssueCommentSessionLedger,
+    parse_session_comment,
 )
+from test_api_work_lifecycle import caller_measurement
+from test_api_work_persistence import HEAD, IDENTITY
+from test_assessment_queue import DocumentStore, fixture
+from test_default_publication_cli_journey import current_paged_entry
+from test_review_work import AssessingProvider
+
+from review_sensei.api_work import ApiRunAccounting
+from review_sensei.bounded_evidence import MAX_PART_READS, PART_READ_SECONDS
 from review_sensei.budgets import ReviewWorkBudgets
 from review_sensei.configuration import GitHubSection
 from review_sensei.outcomes import ResourceBudget, ResourceBudgetTracker
-from tests import test_review_transaction as review_fixture
-from tests.fake_github_http import json_response
-from tests.test_assessment_queue import DocumentStore, fixture
-from tests.test_coalesced_admission import CoalescedAdmissionTests
-from tests.test_review_work import AssessingProvider
 
 
 class P1PublicProfileTests(unittest.TestCase):
-    def test_p1_profile_stays_within_ordinary_dispatches(self):
+    def test_p1_assessment_coalesces_four_pending_decisions_without_extra_provider(
+        self,
+    ):
         self.assertEqual(MAX_PART_READS, 64)
         self.assertEqual(PART_READ_SECONDS, 60.0)
         self.assertEqual(GitHubSection().operation_entry, "enabled")
-
-        from tests.test_activation_tail import HostedTailTests
-
-        case = HostedTailTests()
-        state, broker, ledger = case.setup_host()
-        budget = ledger.evidence_budget
-        self.assertIsInstance(budget, EvidenceReadBudget)
-        case.reserve(ledger)
-        self.assertEqual(budget.calls, 7)
-        for phase in (0, 1):
-            case.fresh(broker, ledger)
-            case.activate(ledger, phase=phase)
-        self.assertEqual(budget.calls, 25)
-        self.assertEqual(len(state.calls), 19)
-        self.assertEqual(len(broker.calls), 6)
-
         pending, bundle, queue = fixture(4)
         store = DocumentStore()
         provider = AssessingProvider()
-        work = CoalescedAdmissionTests().run_work(
+        case = coalesced.CoalescedAdmissionTests()
+        work = case.run_work(
             pending,
             bundle,
             queue,
             provider=provider,
-            checkpoint=CoalescedAdmissionTests().checkpoint(store),
+            checkpoint=case.checkpoint(store),
             tracker=ResourceBudgetTracker(ResourceBudget.create(max_provider_calls=1)),
             work_budgets=ReviewWorkBudgets(mode="unified"),
         )
         self.assertEqual(len(provider.calls), 1)
         self.assertEqual(len(store.writes), 2)
         self.assertEqual(len(work.reply.decisions), 4)
+        self.assertTrue(store.document["completed"])
+        self.assertEqual(store.document["counters"]["provider_calls"], 1)
 
-        comments: dict[int, dict[str, object]] = {}
-        next_id = {"n": 1}
-        executes = {"n": 0}
-
-        def opener(request, timeout):
-            budget.consume()
-            path = urlparse(request.full_url).path
-            method = request.method
-            if path == "/user":
-                return json_response({"id": 42, "type": "Bot", "login": "sensei[bot]"})
-            if (
-                method == "GET"
-                and path.endswith("/comments")
-                and "/issues/comments/" not in path
-            ):
-                return json_response(list(comments.values()))
-            if method == "POST" and path.endswith("/comments"):
-                body = json.loads(request.data)["body"]
-                comment_id = next_id["n"]
-                next_id["n"] += 1
-                comment = {
-                    "id": comment_id,
-                    "body": body,
-                    "user": {"id": 42, "type": "Bot"},
-                }
-                comments[comment_id] = comment
-                return json_response(comment, 201)
-            if "/issues/comments/" in path:
-                comment_id = int(path.rstrip("/").rsplit("/", 1)[-1])
-                if method == "PATCH":
-                    comments[comment_id]["body"] = json.loads(request.data)["body"]
-                return json_response(comments[comment_id])
-            return json_response({"message": "unexpected"}, 404)
-
-        def execute():
-            executes["n"] += 1
-            return work
-
-        values = dict(
-            http=GitHubHttp(api_url="https://api.github.test", opener=opener),
-            token="synthetic-token",
-            repository="owner/repo",
-            repository_id=7,
-            pull_request=11,
-            run_id="100",
-            run_attempt="1",
-            app_id=99,
-            reservation_id="reservation-p1",
-            attestation_digest="ab" * 32,
-            execute=execute,
-            encode=_assessment_bytes,
-            trigger="reassessment",
-            delivery_id="p1-delivery",
-            grant="grant-p1",
-        )
-        first = run_actions_analysis(**values)
-        second = run_actions_analysis(**values)
-        self.assertIsNotNone(getattr(first, "fresh", None))
-        self.assertIsNone(getattr(second, "fresh", None))
-        self.assertIsNotNone(getattr(second, "replay_payload", None))
-        self.assertEqual(executes["n"], 1)
-        self.assertLessEqual(budget.calls, 60)
-        # Exact retained-result completion adds one owned operation read. The
-        # original 60 ordinary /64 total caps are unchanged.
-        self.assertEqual(budget.calls, 31)
-
-    def _checkpoints(self, comments):
-        from tests.test_activation_tail import HostedTailTests
-
-        case = HostedTailTests()
-        state, broker, ledger = case.setup_host()
-        repository = review_fixture.IDENTITY.repository
-        pull_request = review_fixture.IDENTITY.pull_request
-        for comment_id, body, bot in comments:
-            state.comments[comment_id] = {
-                "id": comment_id,
+    def _entry(self, directory, comments):
+        current = current_paged_entry(directory)
+        current.provider_comments = [
+            {
+                "path": "src/app.py",
+                "line": None,
+                "side": "FILE",
+                "body": f"Optional finding {number} retains its explanation.",
+                "severity": "low",
+                "blocking": False,
+                "needs_human": False,
+            }
+            for number in range(4)
+        ]
+        for identifier, body, bot in comments:
+            current.extra_comments[identifier] = {
+                "id": identifier,
                 "body": body,
                 "user": {
-                    "id": 55 if bot else 7,
+                    "id": 999 if bot else 7,
                     "type": "Bot" if bot else "User",
-                    "login": "sensei[bot]" if bot else "dev",
+                    "login": "reviewsensei[bot]" if bot else "dev",
                 },
                 "updated_at": "2019-01-01T00:00:00Z",
-                "issue_url": (
-                    f"https://api.github.test/repos/{repository}/issues/{pull_request}"
-                ),
+                "issue_url": "https://api.github.test/repos/owner/repo/issues/7",
             }
-        case.reserve(ledger)
-        for phase in (0, 1):
-            case.fresh(broker, ledger)
-            case.activate(ledger, phase=phase)
-        return ledger.evidence_budget.calls, state.calls
+        return current
 
-    def test_ordinary_comment_threads_stay_inside_the_cap(self):
+    def _assert_complete(self, current):
+        self.assertEqual(current.provider_calls, 1)
+        record = parse_session_comment(current.comment["body"], identity=IDENTITY)
+        self.assertEqual(record.transaction.phase, "publication_succeeded")
+        accounting = ApiRunAccounting.from_document(record.api_run_accounting)
+        self.assertEqual(accounting.configuration.limit, 512)
+        self.assertEqual(
+            accounting.terminal_transaction, record.transaction.transaction_id
+        )
+        roots = [item for item in current.reviews if item["state"] == "COMMENTED"]
+        self.assertEqual(len(roots), 1)
+        index = parse_finding_index(
+            roots[0]["body"], repository_id=123, pull_request=7, head_sha=HEAD
+        )
+        self.assertEqual(len(index.entries), 4)
+        self.assertEqual(
+            sum(item["state"] == "APPROVED" for item in current.reviews), 1
+        )
+        measured = caller_measurement(current)
+        self.assertEqual(
+            measured["physical_attempts"],
+            sum(len(transport.observations) for transport in current.transports),
+        )
+        self.assertLessEqual(measured["physical_attempts"], 512)
+        self.assertEqual(measured["terminal_owner"], "publication-completion")
+
+    def test_current_p1_retained_result_replay_does_not_reinfer_or_duplicate_approval(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            current = self._entry(directory, [])
+
+            def interrupted():
+                raise KeyboardInterrupt()
+
+            current.before_publication = interrupted
+            self.assertEqual(current.invoke(), 130, current.error)
+            pending = parse_session_comment(current.comment["body"], identity=IDENTITY)
+            old = ApiRunAccounting.from_document(pending.api_run_accounting)
+            retained = copy.deepcopy(current.extra_comments)
+            current.before_publication = None
+            current.attempt = 2
+            self.assertEqual(current.invoke(), 0, current.error)
+            self._assert_complete(current)
+            accounting = current.accounted.accounting
+            self.assertEqual(accounting.identity, old.identity)
+            self.assertEqual(accounting.configuration, old.configuration)
+            self.assertEqual(accounting.startup, old.startup)
+            self.assertEqual(accounting.blocks[: len(old.blocks)], old.blocks)
+            for key, value in retained.items():
+                self.assertEqual(current.extra_comments[key], value)
+
+    def test_ordinary_comment_threads_complete_inside_the_repository_limit(self):
         for count in (25, 300):
-            with self.subTest(count=count):
-                calls, _http = self._checkpoints(
-                    [(3000 + index, "note", False) for index in range(count)]
-                )
-                self.assertLessEqual(calls, 60)
+            with self.subTest(count=count), tempfile.TemporaryDirectory() as directory:
+                comments = [(3000 + index, "note", False) for index in range(count)]
+                current = self._entry(directory, comments)
+                self.assertEqual(current.invoke(), 0, current.error)
+                self._assert_complete(current)
+                for identifier, body, _ in comments:
+                    self.assertEqual(current.extra_comments[identifier]["body"], body)
 
-    def test_a_run_of_maximum_size_comments_steps_back_to_large_pages(self):
-        comments = []
-        for index in range(300):
-            huge = 100 <= index < 120
-            comments.append((3000 + index, "m" * 60_000 if huge else "note", huge))
-        calls, http = self._checkpoints(comments)
-        self.assertLessEqual(calls, 60)
-        sizes = []
-        for method, url in http:
-            if method == "GET" and "per_page=" in url:
-                sizes.append(int(url.split("per_page=", 1)[1].split("&", 1)[0]))
-        smaller = next(index for index, size in enumerate(sizes) if size == 5)
-        self.assertTrue(any(size == 100 for size in sizes[smaller + 1 :]))
+    def test_maximum_size_comments_adapt_to_larger_pages_within_a_bounded_walk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            comments = [
+                (3000 + index, "m" * 60_000 if index < 10 else "note", index < 10)
+                for index in range(24)
+            ]
+            current = self._entry(directory, comments)
+            self.assertEqual(current.invoke(), 0, current.error)
+            self._assert_complete(current)
+            # The initial complete walk shrinks to5, then grows to10 and ends.
+            # Larger100 pages in later walks must not masquerade as evidence of
+            # growth within this particular operation.
+            self.assertEqual(
+                current.comment_page_reads[:8],
+                [
+                    (100, 1),
+                    (50, 1),
+                    (25, 1),
+                    (10, 1),
+                    (5, 1),
+                    (5, 2),
+                    (10, 2),
+                    (10, 3),
+                ],
+            )
+
+    def test_original_300_comment_profile_refuses_at_finite_walk_without_effects(self):
+        # Preserve the exact old P1 input. Its previous expected success under
+        # 60ordinary/64total is not qualified for the current10attempt operation.
+        with tempfile.TemporaryDirectory() as directory:
+            comments = [
+                (
+                    3000 + index,
+                    "m" * 60_000 if 100 <= index < 120 else "note",
+                    100 <= index < 120,
+                )
+                for index in range(300)
+            ]
+            current = self._entry(directory, comments)
+            before = copy.deepcopy(current.extra_comments)
+            loads = []
+            original_load = GitHubIssueCommentSessionLedger.load
+
+            def observed_load(ledger, *args, **kwargs):
+                result = original_load(ledger, *args, **kwargs)
+                loads.append(result)
+                return result
+
+            with patch.object(
+                GitHubIssueCommentSessionLedger, "load", new=observed_load
+            ):
+                self.assertEqual(current.invoke(), 1)
+            self.assertIn("previous caller root cannot be authenticated", current.error)
+            self.assertEqual(len(loads), 1)
+            self.assertEqual(loads[0].status, "integrity-failed")
+            self.assertEqual(
+                loads[0].detail, "session comment discovery exceeded bound"
+            )
+            self.assertEqual(NATIVE_OPERATION_REQUESTS, 10)
+            self.assertEqual(
+                current.comment_page_reads,
+                [
+                    (100, 1),
+                    (100, 2),
+                    (50, 3),
+                    (25, 5),
+                    (10, 11),
+                    (5, 21),
+                    (5, 22),
+                    (10, 12),
+                    (5, 23),
+                    (5, 24),
+                ],
+            )
+            self.assertEqual(current.provider_calls, 0)
+            self.assertIsNone(current.comment)
+            self.assertEqual(current.extra_comments, before)
+            self.assertEqual(current.reviews, [])
+            self.assertEqual(current.check_runs, [])
+            self.assertFalse(
+                any(
+                    method in {"POST", "PATCH", "PUT", "DELETE"}
+                    and path.startswith("/repos/")
+                    for _, method, path in current.trace
+                )
+            )
+            observed = sum(
+                len(transport.observations) for transport in current.transports
+            )
+            self.assertEqual(len(current.trace), observed)
+            self.assertEqual(observed, 19)
+            self.assertEqual(current.accounted.startup_dispatches, observed)
+            self.assertLess(observed, len(current.accounted._slot.requests))
+            self.assertLess(current.accounted.plan.liability, 512)
+            self.assertIsNone(current.accounted._state)

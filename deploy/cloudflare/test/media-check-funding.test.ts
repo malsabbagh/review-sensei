@@ -13,7 +13,7 @@ describe("media check capability physical funding", () => {
     const fixture = await consumingBroker();
     vi.stubGlobal("fetch", fixture.transport);
     resetOidcJwksCacheForTesting();
-    await expect(fixture.broker.exchange({oidc_token: await fixture.oidcToken(), capability: "check_publish", control_budget: control(5)})).rejects.toThrow("broker_control_budget_exhausted");
+    await expect(fixture.broker.exchange({oidc_token: await fixture.oidcToken(), capability: "check_publish", session_attestation: fixture.authority("review"), control_budget: control(5)})).rejects.toThrow("broker_control_budget_exhausted");
     expect(fixture.transportRequests).toHaveLength(5);
     expect(fixture.transportRequests[0].kind).toBe("oidc");
   });
@@ -21,10 +21,10 @@ describe("media check capability physical funding", () => {
     const fixture = await consumingBroker();
     vi.stubGlobal("fetch", fixture.transport);
     resetOidcJwksCacheForTesting();
-    const bound = control(6);
-    const result = await fixture.broker.exchange({oidc_token: await fixture.oidcToken(), capability: "check_publish", control_budget: bound});
-    expect(result.control_receipt).toEqual({...bound, dispatched: 6});
-    expect(fixture.transportRequests).toHaveLength(6);
+    const bound = control(8);
+    const result = await fixture.broker.exchange({oidc_token: await fixture.oidcToken(), capability: "check_publish", session_attestation: fixture.authority("review"), control_budget: bound});
+    expect(result.control_receipt).toEqual({...bound, dispatched: 8});
+    expect(fixture.transportRequests).toHaveLength(8);
     expect(result.capability).toBe("check_publish");
   });
 });

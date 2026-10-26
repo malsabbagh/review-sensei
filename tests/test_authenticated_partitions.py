@@ -11,8 +11,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import test_review_transaction as fixture
+from fake_github_http import json_response
 from review_sensei_github import GitHubHttp
 from review_sensei_github.session_ledger import GitHubIssueCommentSessionLedger
+from test_evidence_capacity import varied_baseline
 
 from review_sensei.baseline import (
     admission_context_document,
@@ -41,9 +44,6 @@ from review_sensei.session import (
     prepare_review_transaction,
     read_session_baseline,
 )
-from tests import test_review_transaction as fixture
-from tests.fake_github_http import json_response
-from tests.test_evidence_capacity import varied_baseline
 
 
 def binding(*, producer="local-ledger", generation=2, purpose="baseline"):

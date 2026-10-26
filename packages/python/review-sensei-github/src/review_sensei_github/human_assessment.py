@@ -35,6 +35,7 @@ from review_sensei.models import ConversationReply
 from review_sensei.outcomes import ResourceBudgetTracker
 from review_sensei.reassessment_work import HumanAssessmentWork, validate_work
 
+from .action_completion import reply_completion_from_finalization, reply_source
 from .approval import ReviewApprovalEligibility
 from .conversation import (
     ConversationPublisher,
@@ -1152,7 +1153,7 @@ class HumanAssessmentPublisher:
                 check_token=check_token,
                 reviews_policy=reviews_policy,
             )
-            return ReplyResult(
+            completed = ReplyResult(
                 status=finalized.status
                 if finalized.status.startswith("skipped_")
                 else outcome.status,
@@ -1160,6 +1161,14 @@ class HumanAssessmentPublisher:
                 resolution_status=finalized.thread_resolution,
                 approval_status=finalized.status,
                 approval_diagnostic=finalized.diagnostic,
+            )
+            return self._completed_reply(
+                finalized,
+                completed,
+                prepared,
+                repository,
+                pull_request,
+                refreshed.result_digest,
             )
         preflight = self.finalizer._preflight(
             token=review_token,
@@ -1257,9 +1266,42 @@ class HumanAssessmentPublisher:
             check_token=check_token,
             reviews_policy=reviews_policy,
         )
-        return replace(
+        completed = replace(
             outcome,
+            finalization_completion=None,
             resolution_status=finalized.thread_resolution,
             approval_status=finalized.status,
             approval_diagnostic=finalized.diagnostic,
+        )
+        return self._completed_reply(
+            finalized,
+            completed,
+            prepared,
+            repository,
+            pull_request,
+            refreshed.result_digest,
+        )
+
+    @staticmethod
+    def _completed_reply(
+        finalized, completed, prepared, repository, pull_request, result_digest
+    ):
+        conversation = prepared.conversation
+        source = reply_source(
+            repository=repository,
+            pull_request=pull_request,
+            head_sha=conversation.head_sha,
+            kind=conversation.source_kind,
+            source_id=conversation.source_comment_id,
+            updated_at=conversation.source_updated_at,
+            body=prepared.source_body,
+        )
+        return replace(
+            completed,
+            finalization_completion=reply_completion_from_finalization(
+                finalized,
+                completed,
+                source,
+                result_digest=result_digest,
+            ),
         )

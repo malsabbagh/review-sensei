@@ -17,9 +17,8 @@ from review_sensei_github.operation_host import (
     RootObservation,
     TransitionPermit,
 )
-
-from tests.test_operation_entry import MemoryComments
-from tests.test_operation_host import (
+from test_operation_entry import MemoryComments
+from test_operation_host import (
     TARGET,
     ScriptedRemote,
     _accept,

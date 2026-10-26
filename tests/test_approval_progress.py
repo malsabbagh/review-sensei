@@ -6,15 +6,15 @@ import unittest
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
+from fake_github_http import json_response
 from review_sensei_github.approval_progress import (
     build_approval_progress,
     render_command_progress,
 )
 from review_sensei_github.http import GitHubHttp
+from test_command_capacity_recovery import CommandCapacityState
 
 from review_sensei.disposition import MaintainerCommandResult
-from tests.fake_github_http import json_response
-from tests.test_command_capacity_recovery import CommandCapacityState
 
 
 class ApprovalProgressTests(unittest.TestCase):
@@ -109,10 +109,9 @@ class ActualFinalizerProgressTests(unittest.TestCase):
         import tempfile
         from urllib.parse import urlsplit
 
+        from fake_github_http import json_response
         from review_sensei_github.http import GitHubHttp
-
-        from tests.fake_github_http import json_response
-        from tests.test_command_capacity_recovery import CommandCapacityState
+        from test_command_capacity_recovery import CommandCapacityState
 
         state = CommandCapacityState(complete=True)
 
@@ -139,8 +138,7 @@ class ActualFinalizerProgressTests(unittest.TestCase):
 
         from review_sensei_github.errors import GitHubPublicationError
         from review_sensei_github.publication import ReviewApprovalFinalizer
-
-        from tests.test_command_capacity_recovery import CommandCapacityState
+        from test_command_capacity_recovery import CommandCapacityState
 
         state = CommandCapacityState(complete=True)
         real_finalize = ReviewApprovalFinalizer.finalize
@@ -202,7 +200,7 @@ class ActualFinalizerProgressTests(unittest.TestCase):
         import tempfile
         from unittest.mock import patch
 
-        from tests.test_command_capacity_recovery import CommandCapacityState
+        from test_command_capacity_recovery import CommandCapacityState
 
         paths = []
         for enabled in (False, True):
@@ -231,8 +229,7 @@ class ActualFinalizerProgressTests(unittest.TestCase):
         import tempfile
 
         from review_sensei_github.errors import GitHubPublicationError
-
-        from tests.test_command_capacity_recovery import CommandCapacityState
+        from test_command_capacity_recovery import CommandCapacityState
 
         state = CommandCapacityState(complete=True)
 
@@ -254,7 +251,7 @@ class ActualFinalizerProgressTests(unittest.TestCase):
     def test_actual_partial_review_reports_unknown_coverage_and_source(self):
         import tempfile
 
-        from tests.test_command_capacity_recovery import CommandCapacityState
+        from test_command_capacity_recovery import CommandCapacityState
 
         state = CommandCapacityState(complete=False)
         with tempfile.TemporaryDirectory() as directory:

@@ -5,6 +5,8 @@ import unittest
 from dataclasses import replace
 from types import SimpleNamespace
 
+import test_review_transaction as tx
+
 from review_sensei.coverage import CoverageManifest, FileCoverage
 from review_sensei.errors import ReviewInputError
 from review_sensei.models import ReviewResult
@@ -17,7 +19,6 @@ from review_sensei.session import (
     prepare_review_transaction,
     session_reservation_id,
 )
-from tests import test_review_transaction as tx
 
 
 def _prepare(ledger, request=None):
@@ -333,11 +334,12 @@ class RemainingCrashAccountingTests(unittest.TestCase):
 
 class ExecutionCauseTests(unittest.TestCase):
     def test_lost_attempt_accounting_can_never_turn_a_failed_call_into_progress(self):
+        from test_review_work import SharedWorkTests
+
         from review_sensei.execution import WorkExecution, execute_plan
         from review_sensei.models import ProviderResponse
         from review_sensei.outcomes import ResourceBudgetTracker
         from review_sensei.planning import plan_work
-        from tests.test_review_work import SharedWorkTests
 
         bundle, requirements, resource, budgets, render = SharedWorkTests().fixture()
         plan = plan_work(
@@ -392,9 +394,10 @@ class ExecutionCauseTests(unittest.TestCase):
         )
 
     def test_real_legacy_and_unified_service_never_credit_failure_on_last_call(self):
+        from test_work_continuation import DirectPartialScopeTests
+
         from review_sensei.models import ProviderResponse
         from review_sensei.outcomes import ResourceBudget
-        from tests.test_work_continuation import DirectPartialScopeTests
 
         fixture = DirectPartialScopeTests()
         request = fixture.request()

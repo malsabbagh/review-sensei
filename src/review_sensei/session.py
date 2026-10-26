@@ -90,7 +90,10 @@ MAX_SESSION_TTL = timedelta(days=90)
 # evidence, where eight does not. Keep the former 8 KiB record allowance for
 # surrounding state; allocate less history for larger retained/escaped fields.
 MAX_CONVERGENCE_HISTORY_BYTES = 12_288
-MAX_SESSION_RECORD_BYTES = MAX_CONVERGENCE_HISTORY_BYTES + 8192
+# New caller accounting and retained rescan receipts share this root with
+# decisions/history. Qualification covers the bounded 20-decision composition.
+# This does not enlarge evidence parts, retention, or physical request limits.
+MAX_SESSION_RECORD_BYTES = 32_768
 MAX_ASSESSMENT_QUEUE_ROOT_BYTES = 8192
 MAX_ASSESSMENT_QUEUE_SUMMARY_BYTES = 1024
 MAX_CONVERGENCE_PROGRESS_ENTRIES = 3
@@ -261,6 +264,14 @@ def _stored_assessment_queue(value: object) -> dict[str, object] | None:
     if len(canonical_bytes(summary)) > MAX_ASSESSMENT_QUEUE_SUMMARY_BYTES:
         raise ReviewInputError("assessment queue summary exceeds growth reserve")
     return normalized
+
+
+def _stored_api_accounting(value: object) -> dict[str, object] | None:
+    if value is None:
+        return None
+    from .api_work import ApiRunAccounting
+
+    return ApiRunAccounting.from_document(value).to_document()
 
 
 def _stored_convergence_history(
@@ -854,6 +865,7 @@ class SessionRecord:
     rescan_state: Mapping[str, object] | None = None
     assessment_queue: Mapping[str, object] | None = None
     disposition_snapshot: Mapping[str, object] | None = None
+    api_run_accounting: Mapping[str, object] | None = None
     # The shape is selected only while loading an existing untrusted document;
     # it is not part of the public record or its equality contract.
     _digest_shape_input: InitVar[str] = "current"
@@ -970,6 +982,33 @@ class SessionRecord:
             "convergence_history",
             _stored_convergence_history(self.convergence_history),
         )
+        object.__setattr__(
+            self, "api_run_accounting", _stored_api_accounting(self.api_run_accounting)
+        )
+        if self.api_run_accounting is not None:
+            if self._digest_shape != "current":
+                raise ReviewInputError(
+                    "API accounting requires the current digest shape"
+                )
+            if (
+                cast(Mapping[str, object], self.api_run_accounting["identity"])[
+                    "repository_id"
+                ]
+                != self.repository_id
+            ):
+                raise ReviewInputError("API accounting repository identity conflicts")
+            from .api_work import ApiRunAccounting
+
+            terminal = ApiRunAccounting.from_document(
+                self.api_run_accounting
+            ).terminal_transaction
+            if terminal is not None and (
+                self.transaction is None
+                or self.transaction.transaction_id != terminal
+                or self.transaction.phase
+                not in {"publication_succeeded", "publication_suppressed"}
+            ):
+                raise ReviewInputError("API accounting terminal transaction conflicts")
         if self.transaction is not None:
             if not isinstance(self.transaction, ReviewTransaction):
                 raise ReviewInputError("session transaction is invalid")
@@ -1104,6 +1143,8 @@ class SessionRecord:
             payload["assessment_queue"] = dict(self.assessment_queue)
         if self.disposition_snapshot is not None:
             payload["disposition_snapshot"] = dict(self.disposition_snapshot)
+        if self.api_run_accounting is not None:
+            payload["api_run_accounting"] = dict(self.api_run_accounting)
         return payload
 
     def _payload_without_dispositions(self) -> dict[str, object]:
@@ -1158,6 +1199,7 @@ class SessionRecord:
         rescan_state: Mapping[str, object] | None = None,
         assessment_queue: Mapping[str, object] | None = None,
         disposition_snapshot: Mapping[str, object] | None = None,
+        api_run_accounting: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         normalized_dispositions = _stored_dispositions(dispositions)
         normalized_grants = _stored_continuation_grants(continuation_grants)
@@ -1199,6 +1241,9 @@ class SessionRecord:
         from .disposition_snapshot import normalize_snapshot
 
         normalized_snapshot = normalize_snapshot(disposition_snapshot)
+        normalized_api = _stored_api_accounting(api_run_accounting)
+        if normalized_api is not None:
+            payload["api_run_accounting"] = normalized_api
         if normalized_snapshot is not None:
             payload["disposition_snapshot"] = normalized_snapshot
         if (
@@ -1235,6 +1280,7 @@ class SessionRecord:
             rescan_state=rescan_state,
             assessment_queue=normalized_queue,
             disposition_snapshot=normalized_snapshot,
+            api_run_accounting=normalized_api,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -1308,6 +1354,9 @@ class SessionRecord:
         has_owner = "reservation_owner" in value
         has_queue = "assessment_queue" in value
         has_snapshot = "disposition_snapshot" in value
+        has_api_accounting = "api_run_accounting" in value
+        if has_api_accounting and value["api_run_accounting"] is None:
+            raise ReviewInputError("API accounting cannot be a null absence marker")
         if has_snapshot and value["disposition_snapshot"] is None:
             raise ReviewInputError(
                 "disposition snapshot cannot be a null absence marker"
@@ -1329,6 +1378,7 @@ class SessionRecord:
             or has_owner
             or has_queue
             or has_snapshot
+            or has_api_accounting
             or "rescan_state" in value
             else "operator-paused"
             if has_operator_paused
@@ -1411,6 +1461,7 @@ class SessionRecord:
             disposition_snapshot=cast(
                 Mapping[str, object] | None, value.get("disposition_snapshot")
             ),
+            api_run_accounting=_stored_api_accounting(value.get("api_run_accounting")),
             _digest_shape_input=digest_shape,
         )
         validate_public_document(record.to_dict(), "session-record")
@@ -1440,6 +1491,7 @@ class SessionRecord:
         rescan_state: Mapping[str, object] | None = None,
         assessment_queue: Mapping[str, object] | None = None,
         disposition_snapshot: Mapping[str, object] | None = None,
+        api_run_accounting: Mapping[str, object] | None = None,
     ) -> "SessionRecord":
         created = _aware_now(now)
         if isinstance(expires_at, str):
@@ -1479,7 +1531,67 @@ class SessionRecord:
             rescan_state=rescan_state,
             assessment_queue=assessment_queue,
             disposition_snapshot=disposition_snapshot,
+            api_run_accounting=api_run_accounting,
         )
+
+    def rollover_api_accounting(
+        self, accounting: Mapping[str, object]
+    ) -> "SessionRecord":
+        """Retain session state while changing a genuinely different run.
+
+        This is a value invariant, not storage or owner authentication. The
+        adapter must confirm the retained carrier and stopped predecessor first.
+        Ordinary evolve() never allows an accounting identity replacement.
+        """
+        from .api_work import ApiRunAccounting
+
+        previous = ApiRunAccounting.from_document(self.api_run_accounting)
+        candidate = ApiRunAccounting.from_document(accounting)
+        ref = candidate.previous_record
+        if (
+            previous.identity.repository_id != candidate.identity.repository_id
+            or previous.identity.run_id == candidate.identity.run_id
+            or candidate.owner.run_attempt != 1
+            or candidate.owner.generation != 0
+            or candidate.confirmed
+            or candidate.uncertain
+            or candidate.prior_nonstartup_liability
+            or candidate.startup_used != ((candidate.owner.job, 1),)
+            or ref is None
+            or ref["run_id"] != previous.identity.run_id
+            or ref["root_sha256"] != self.record_sha256
+            or self.reservation_id is not None
+            or self.reserved_slot is not None
+            or (previous.action is not None and previous.action["phase"] != "terminal")
+            or (
+                previous.action is None
+                and previous.analysis_abort is None
+                and (
+                    self.transaction is None
+                    or self.transaction.phase
+                    not in {"publication_succeeded", "publication_suppressed"}
+                    or previous.terminal_transaction != self.transaction.transaction_id
+                )
+            )
+            or (previous.analysis_abort is not None and self.transaction is not None)
+        ):
+            raise ReviewInputError(
+                "caller run rollover is not terminal or correctly retained"
+            )
+        binding = cast(Mapping[str, Any], ref["manifest"])["binding"]
+        if (
+            binding["repository"] != self.repository
+            or binding["repository_id"] != self.repository_id
+            or binding["pull_request"] != self.pull_request
+            or binding["generation"] != self.generation
+        ):
+            raise ReviewInputError("retained caller root scope conflicts")
+        payload = self.to_dict()
+        del payload["schema_version"], payload["record_sha256"]
+        payload["generation"] = self.generation + 1
+        payload["api_run_accounting"] = candidate.to_document()
+        payload["transaction"] = self.transaction
+        return type(self)._construct(**cast(dict[str, Any], payload))
 
     def evolve(
         self,
@@ -1502,8 +1614,17 @@ class SessionRecord:
         rescan_state: Mapping[str, object] | None | object = ...,
         assessment_queue: Mapping[str, object] | None | object = ...,
         disposition_snapshot: Mapping[str, object] | None | object = ...,
+        api_run_accounting: Mapping[str, object] | None | object = ...,
     ) -> "SessionRecord":
         updated = _format_datetime(_aware_now(now))
+        if self.api_run_accounting is not None and api_run_accounting is not ...:
+            if api_run_accounting is None:
+                raise ReviewInputError("API accounting cannot be removed")
+            from .api_work import ApiRunAccounting
+
+            ApiRunAccounting.from_document(self.api_run_accounting).require_successor(
+                ApiRunAccounting.from_document(api_run_accounting)
+            )
         return type(self)._construct(
             repository=self.repository,
             pull_request=self.pull_request,
@@ -1580,6 +1701,11 @@ class SessionRecord:
                 self.disposition_snapshot
                 if disposition_snapshot is ...
                 else cast(Mapping[str, object] | None, disposition_snapshot)
+            ),
+            api_run_accounting=(
+                self.api_run_accounting
+                if api_run_accounting is ...
+                else cast(Mapping[str, object] | None, api_run_accounting)
             ),
             convergence_history=(
                 self.convergence_history
@@ -2937,14 +3063,12 @@ def grant_successor_continuation(
     return updated, applied
 
 
-def complete_review_publication(
-    ledger: SessionLedger,
-    identity: SessionIdentity,
+def _publication_state_mutation(
     transaction: ReviewTransaction,
     *,
     published: bool,
     now: datetime | None = None,
-) -> SessionRecord:
+) -> Callable[[SessionRecord], SessionRecord]:
     """Advance publication state without charging the failed-attempt budget.
 
     Publication failures remain retryable.  The failed-attempt counter is
@@ -2997,7 +3121,15 @@ def complete_review_publication(
             configuration_digest=current.configuration_digest,
             evidence_digest=current.evidence_digest,
             reservation_id=current.reservation_id,
-            generation=next_generation,
+            # Caller ownership/accounting checkpoints advance the root without
+            # advancing this business transaction. Preserve its own next step,
+            # including the exact checkpoint-placeholder relationship checked
+            # by blocker admission after a stopped-owner recovery.
+            generation=(
+                current.generation + 1
+                if record.api_run_accounting is not None
+                else next_generation
+            ),
             phase=target,
             result_sha256=current.result_sha256,
         )
@@ -3005,7 +3137,40 @@ def complete_review_publication(
             now=now, generation=next_generation, transaction=updated_transaction
         )
 
-    return ledger.replace(identity, mutate, now=now)
+    return mutate
+
+
+def complete_review_publication(
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    transaction: ReviewTransaction,
+    *,
+    published: bool,
+    now: datetime | None = None,
+) -> SessionRecord:
+    """The application's sole terminal publication completion/failed outcome."""
+    mutation = _publication_state_mutation(transaction, published=published, now=now)
+    claim = getattr(ledger, "claim_publication_completion", None)
+    if callable(claim):
+        claim(identity, transaction, published)
+    return ledger.replace(identity, mutation, now=now)
+
+
+def mark_review_publication_unconfirmed(
+    ledger: SessionLedger,
+    identity: SessionIdentity,
+    transaction: ReviewTransaction,
+    *,
+    now: datetime | None = None,
+) -> SessionRecord:
+    """Fence a pre-publication write; never claim terminal completion authority.
+
+    Retain the existing publication_failed uncertainty state and every exact
+    transaction/result/generation check. This is the original write-intent
+    mutation, not a finalizer or an extra state/allowance.
+    """
+    mutation = _publication_state_mutation(transaction, published=False, now=now)
+    return ledger.replace(identity, mutation, now=now)
 
 
 def suppress_review_publication(
@@ -3926,6 +4091,19 @@ def _history_preserve_sources(
 
 
 def _validate_queue_retention(before: SessionRecord, after: SessionRecord) -> None:
+    if before.api_run_accounting is not None:
+        if after.api_run_accounting is None:
+            raise ReviewInputError("API accounting cannot be silently discarded")
+        from .api_work import ApiRunAccounting
+
+        previous = ApiRunAccounting.from_document(before.api_run_accounting)
+        current = ApiRunAccounting.from_document(after.api_run_accounting)
+        if previous.identity != current.identity:
+            expected = before.rollover_api_accounting(after.api_run_accounting)
+            if expected.record_sha256 != after.record_sha256:
+                raise ReviewInputError("caller run rollover discarded session state")
+        else:
+            previous.require_successor(current)
     if before.disposition_snapshot is not None and after.disposition_snapshot is None:
         raise ReviewInputError("disposition snapshot cannot be silently discarded")
     if after.disposition_snapshot is not None and len(

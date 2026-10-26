@@ -673,6 +673,17 @@ const worker = {
     if (url.pathname === "/healthz" && request.method === "GET") {
       return response({ ok: true });
     }
+    if (
+      ["/github/token", "/github/session-grant", "/github/webhook", "/github/setup-continue"].includes(url.pathname) &&
+      env.BROKER_ADMISSION_MODE !== undefined && env.BROKER_ADMISSION_MODE !== "open"
+    ) {
+      // A sustained operator hold spans caller and Worker cutover. Refuse
+      // before parsing, OIDC, token/grant/cursor issuance, setup writes or any
+      // queued continuation. Held webhooks are refused, never acknowledged as
+      // completed work. Direct/public/SELF requests all enter this handler.
+      // Invalid configured modes fail held. This never revokes existing tokens.
+      return response({ error: "broker_admission_held", temporary: true }, 503, true);
+    }
     if (url.pathname === "/github/token") {
       if (request.method !== "POST") {
         return response({ error: "method_not_allowed" }, 405, true);

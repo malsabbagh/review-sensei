@@ -500,7 +500,7 @@ class GitHubApplication:
             budget = EvidenceReadBudget()
         if budget is not None:
             budget.check()
-            if budget.calls >= 60:
+            if budget.ordinary_remaining() <= 0:
                 raise GitHubPublicationError(
                     "publication shared request budget exhausted"
                 )
@@ -1721,7 +1721,10 @@ class GitHubApplication:
             or not login
         ):
             raise ReviewInputError("human file request requires the app user")
-        budget = EvidenceReadBudget()
+        from .caller_operation import caller_for_http
+
+        caller = caller_for_http(http)
+        budget = caller.budget_view if caller is not None else EvidenceReadBudget()
         publisher = HumanFileReviewPublisher(
             http=http,
             api_url=api_url,
@@ -1752,6 +1755,7 @@ class GitHubApplication:
         app_slug: str,
         source_comment_id: int | None = None,
         session_attestation: Mapping[str, object] | None = None,
+        current_action: object | None = None,
         actor_permission: str | None = None,
         finding_fingerprints: Sequence[str] | None = None,
         finding_inventory: Sequence[object] | None = None,
@@ -1804,10 +1808,27 @@ class GitHubApplication:
                 operator_paused=False,
                 summary="not-a-command",
             )
+        from .run_authority import VerifiedRunAction
+
+        current_mutation = isinstance(current_action, VerifiedRunAction)
+        if current_action is not None and not current_mutation:
+            raise GitHubPublicationError("current command authority is invalid")
+        if (
+            current_mutation
+            and parsed_command.action != "status"
+            and not options.github_writes
+        ):
+            return MaintainerCommandResult(
+                action=parsed_command.action,
+                applied=False,
+                operator_paused=False,
+                summary="writes_disabled",
+            )
         if (
             parsed_command.action != "status"
             and options.github_session_ledger
             and self.session_ledger is not None
+            and not current_mutation
         ):
             # An injected ledger is the explicit local authority seam. It must
             # never coexist with the hosted grant boundary, otherwise caller
@@ -1824,55 +1845,35 @@ class GitHubApplication:
         command: MaintainerCommand | None = None
         session_grant: str | None = None
         broker_attestation: Mapping[str, object] | None = None
-        if hosted_mutation:
-            if not options.github_writes:
-                return MaintainerCommandResult(
-                    action=parsed_command.action,
-                    applied=False,
-                    operator_paused=False,
-                    summary="writes_disabled",
-                )
-            if (
-                isinstance(source_comment_id, bool)
-                or not isinstance(source_comment_id, int)
-                or source_comment_id <= 0
-            ):
-                raise GitHubPublicationError(
-                    "hosted maintainer command requires a source comment identity"
-                )
-            if not isinstance(session_attestation, Mapping):
-                raise GitHubPublicationError(
-                    "hosted maintainer command requires a session attestation"
-                )
-            command_exchange_input = oidc_token or self.broker.request_oidc_token()
-            grant = self.broker.authorize_session_mutation(
-                command_exchange_input,
-                repository_id=repository_id,
-                pull_request=pull_request,
-                head_sha=head_sha,
-                session_attestation=session_attestation,
-            )
-            session_grant = getattr(grant, "grant", None)
-            broker_attestation = getattr(grant, "attestation", None)
-            returned_token = getattr(grant, "token", None)
-            if not isinstance(returned_token, str) or not returned_token.strip():
-                raise GitHubPublicationError(
-                    "broker command authorization returned an invalid token"
-                )
-            token = returned_token
-            if not isinstance(session_grant, str) or not session_grant.strip():
-                raise GitHubPublicationError(
-                    "broker command authorization returned an invalid grant"
-                )
-            command = _command_from_broker_attestation(
-                body=body,
-                attestation=broker_attestation,
+        if current_mutation:
+            assert isinstance(current_action, VerifiedRunAction)
+            actor = current_action.require(
+                self.session_ledger,
+                purpose="command",
                 repository=repository,
                 repository_id=repository_id,
                 pull_request=pull_request,
                 head_sha=head_sha,
-                source_comment_id=source_comment_id,
-                app_slug=app_slug,
+                source_comment_id=source_comment_id or 0,
+                body=body,
+            )
+            command = parse_maintainer_command(
+                body,
+                actor=actor["login"],
+                head_sha=head_sha,
+                command_id=str(source_comment_id),
+            )
+            token = current_action.token
+            actor_login, actor_type, association = (
+                actor["login"],
+                actor["type"],
+                actor["association"],
+            )
+            broker_attestation = {"association": association}
+            command_exchange_input = oidc_token or self.broker.request_oidc_token()
+        elif hosted_mutation:
+            raise GitHubPublicationError(
+                "hosted commands require the current metered command lifecycle"
             )
         else:
             command = parse_maintainer_command(
@@ -1960,25 +1961,15 @@ class GitHubApplication:
             from .hosted_media import prepare_hosted_media_context
 
             # The supported command must fund its check capability before any
-            # media publication. Keep the original allowance while funding
-            # cold JWKS plus the bounded annotated-tag REST fallback.
-            # Unused prepaid slots stay charged to the original allowance.
+            # media publication. Charge its caller POST in the original pool;
+            # cold JWKS/tag fallback remains independently Worker-bounded.
             check_broker = self.broker
             if type(check_broker) is BrokerClient:
-                from .broker_control import BrokerDispatchAccounting
-
                 control = check_broker.control
                 if control is None or control.budget is not media_budget:
                     raise GitHubPublicationError(
                         "media command broker accounting is unavailable"
                     )
-                check_broker = copy(check_broker)
-                check_broker.control = BrokerDispatchAccounting(
-                    media_budget,
-                    control.operation_id,
-                    8,
-                    control.verification_liability,
-                )
             # This capability is required here. Preserve broker diagnostics for
             # the CLI's existing sanitized failure reporter instead of silently
             # degrading to a missing optional review check.
@@ -2159,7 +2150,9 @@ class GitHubApplication:
         prepared_review_capability: _PreparedReviewCapability | None = None
         ledger = (
             self.session_ledger
-            if command.action == "status" and not options.github_session_ledger
+            if current_mutation
+            or command.action == "status"
+            and not options.github_session_ledger
             else None
         )
         if ledger is None:
@@ -3115,28 +3108,10 @@ class GitHubApplication:
         refinalize = getattr(finalizer, "refinalize_with_dispositions", None)
         if not callable(refinalize):
             return command_result
-        # Derive the cleanup hold from this broker's configured exchange
-        # liability. The packaged default cannot see a caller-provided broker,
-        # and a reserve below the actual liability would starve the check. The
-        # liability is read from whatever control object the broker exposes,
-        # so a wrapper or proxy that reports it cannot silently fall back to
-        # the packaged default. This is a best-effort narrowing of *this*
-        # budget, not of the broker's admission path: the derived reserve is
-        # the fixed one-request/two-check/five-approval minimum plus the
-        # reported liability, so this budget's own phase minimum is always
-        # covered, while a broker bound to a different envelope can only cause
-        # an over-hold here, which defers cleanup rather than starving it. Such
-        # a broker cannot mint cleanup authority anyway, because the token
-        # provider refuses the foreign accounting envelope. Only a broker whose
-        # control reports no usable liability keeps the packaged default. A
-        # liability too large to hold is passed through rather than replaced:
-        # the finalizer refuses an oversized reserve, so an unfundable broker
-        # fails loudly instead of silently inheriting the smaller default.
-        command_finalization_reserve: int | None = None
-        control = getattr(self.broker, "control", None)
-        liability = getattr(control, "exchange_liability", None)
-        if type(liability) is int and liability > 0:
-            command_finalization_reserve = 1 + liability + 2 + 5
+        # Reserve caller requests only: one broker POST, two check requests,
+        # and five approval reads. Worker internal fanout has its own service
+        # allowance and cannot narrow this caller's cleanup capacity.
+        command_finalization_reserve = 1 + 2 + 5
         failed = (
             command_result.summary
             + "; recorded; gate re-evaluation failed, comment `@reviewsensei verify` to retry"
@@ -3240,6 +3215,8 @@ class GitHubApplication:
         if thread_status:
             command_result = replace(
                 command_result,
+                evaluation_failed=command_result.evaluation_failed
+                or thread_status == "unconfirmed",
                 summary=command_result.summary
                 + (
                     "; matching threads resolved"
@@ -3271,6 +3248,7 @@ class GitHubApplication:
             return render_command_progress(
                 replace(
                     command_result,
+                    evaluation_failed=True,
                     summary=command_result.summary
                     + "; approval outcome unconfirmed; reconcile the existing native "
                     "review, then comment `@reviewsensei verify` to retry",
@@ -3337,11 +3315,32 @@ class GitHubApplication:
         operation_store: object | None = None,
         operation_parts: object | None = None,
         evidence_budget: EvidenceReadBudget | None = None,
+        current_action: object | None = None,
     ) -> ReplyResult:
         """Authorize, generate, validate, and publish one mention reply."""
 
         if not options.github_writes or not options.mention_replies:
             return ReplyResult(status="disabled")
+        if current_action is not None:
+            from .run_authority import VerifiedRunAction
+
+            if not isinstance(current_action, VerifiedRunAction):
+                raise ReviewInputError("current reply authority is invalid")
+            document = current_action.document
+            if (
+                current_action.run.ledger is not self.session_ledger
+                or document["purpose"] != "reply"
+                or document["repository"] != repository
+                or document["repository_id"] != repository_id
+                or document["pull_request"] != pull_request
+                or document["head_sha"] != expected_head_sha
+                or document["source"]["id"] != source_comment_id
+                or document["source"]["updated_at"] != source_updated_at
+                or document["source"]["kind"]
+                != ("review_comment" if source_kind == "inline" else "issue_comment")
+            ):
+                raise ReviewInputError("current reply purpose or source conflicts")
+            current_action.fence()
         if (
             work_recovery is not None
             and work_recovery.enabled
@@ -3755,10 +3754,33 @@ class GitHubApplication:
                             continuation_digest=human.authority_digest,
                             source_guard=source_guard,
                         )
-                        return replace(
+                        completed_reply = replace(
                             reply_outcome,
                             assessment_status="broader_review_" + publication.status,
                             assessment_diagnostic=publication.diagnostic,
+                            finalization_completion=None,
+                        )
+                        from .action_completion import (
+                            reply_completion_from_finalization,
+                            reply_source,
+                        )
+
+                        completion = reply_completion_from_finalization(
+                            publication,
+                            completed_reply,
+                            reply_source(
+                                repository=repository,
+                                pull_request=pull_request,
+                                head_sha=prepared.head_sha,
+                                kind=prepared.source_kind,
+                                source_id=prepared.source_comment_id,
+                                updated_at=prepared.source_updated_at,
+                                body=human.source_body,
+                            ),
+                            result_digest=work_assessment.discovery.result.content_digest(),
+                        )
+                        return replace(
+                            completed_reply, finalization_completion=completion
                         )
                     return reply_outcome
             reply = operation_owner._through_operation(
@@ -3927,134 +3949,9 @@ def resolve_hosted_session_ledger(
     evidence_budget: EvidenceReadBudget | None = None,
     analysis_metadata_phases: bool = False,
 ) -> SessionLedger:
-    """Open the broker-attested comment ledger for one hosted identity.
-
-    Publication reads the identity-bound transaction from this durability
-    adapter, and the analysis checkpoint writes it there, so both boundaries
-    of one logical review resolve the same issue comment. A fresh hosted job
-    therefore continues the rounds, baselines, and dispositions durable
-    earlier jobs recorded instead of depending on a runner-local file that
-    the next runner cannot read.
-    """
-
-    from .session_ledger import GitHubIssueCommentSessionLedger
-
-    session_token, session_state, owner = _open_broker_session(
-        broker,
-        oidc_token,
-        repository_id=repository_id,
-        pull_request=pull_request,
-        head_sha=head_sha,
+    raise ReviewInputError(
+        "hosted phase ledger resolution is retired; use the current run-owned ledger"
     )
-    # No mutation grant is bound here: this is an unattended analysis job, not
-    # an attested maintainer command, so the ledger constructor takes only the
-    # broker's head-scoped session token. That is the same authority the
-    # publication boundary of the same logical review writes with.
-    original_owner = dict(owner) if owner is not None else None
-
-    def connection(
-        budget: EvidenceReadBudget | None,
-    ) -> GitHubIssueCommentSessionLedger:
-        return GitHubIssueCommentSessionLedger(
-            http,
-            token=session_token,
-            app_slug=app_slug,
-            reservation_owner=dict(original_owner)
-            if original_owner is not None
-            else None,
-            evidence_budget=budget,
-        )
-
-    if analysis_metadata_phases:
-        from .session_phases import AnalysisSessionPhases
-
-        ledger = AnalysisSessionPhases(
-            connection, evidence_budget or EvidenceReadBudget()
-        ).admission
-    else:
-        ledger = connection(evidence_budget)
-    identity = SessionIdentity(
-        repository=repository,
-        pull_request=pull_request,
-        repository_id=repository_id,
-    )
-    _require_present_marker(ledger, identity, session_state)
-    return ledger
-
-
-def _command_from_broker_attestation(
-    *,
-    body: str,
-    attestation: object,
-    repository: str,
-    repository_id: int,
-    pull_request: int,
-    head_sha: str,
-    source_comment_id: int,
-    app_slug: str,
-) -> MaintainerCommand:
-    """Build a persisted command only from broker-attested GitHub identity."""
-
-    from review_sensei.disposition import (
-        authorized_maintainer,
-        parse_maintainer_command,
-    )
-
-    if not isinstance(attestation, Mapping):
-        raise GitHubPublicationError("broker command attestation was invalid")
-    if (
-        attestation.get("repository") != repository
-        or attestation.get("repository_id") != repository_id
-        or attestation.get("pull_request") != pull_request
-        or attestation.get("head_sha") != head_sha
-        or attestation.get("operation") != "command"
-        or attestation.get("source_comment_id") != source_comment_id
-    ):
-        raise GitHubPublicationError("broker command attestation scope was invalid")
-    actor = attestation.get("actor")
-    if not isinstance(actor, str) or not actor.strip():
-        raise GitHubPublicationError("broker command attestation actor was invalid")
-    actor_type = attestation.get("actor_type")
-    association = attestation.get("association")
-    if (
-        not isinstance(actor_type, str)
-        or actor_type.lower() != "user"
-        or not isinstance(association, str)
-        or association.upper() not in {"OWNER", "MEMBER", "COLLABORATOR"}
-    ):
-        raise GitHubPublicationError(
-            "broker command attestation authorization fields were invalid"
-        )
-    command_id = attestation.get("command_id")
-    if (
-        isinstance(command_id, bool)
-        or not isinstance(command_id, int)
-        or command_id <= 0
-    ):
-        raise GitHubPublicationError(
-            "broker command attestation command identity was invalid"
-        )
-    command_digest = attestation.get("command_digest")
-    if (
-        not isinstance(command_digest, str)
-        or command_digest != sha256(body.encode("utf-8")).hexdigest()
-    ):
-        raise GitHubPublicationError("broker command attestation command was stale")
-    command = parse_maintainer_command(
-        body, actor=actor, head_sha=head_sha, command_id=str(command_id)
-    )
-    if command is None:
-        raise GitHubPublicationError(
-            "broker command attestation did not bind a command"
-        )
-    if not authorized_maintainer(
-        login=actor,
-        user_type=actor_type,
-        association=association,
-        app_slug=app_slug,
-    ):
-        raise GitHubPublicationError("broker command attestation was unauthorized")
-    return command
 
 
 def _shadow_state(prepared: object, flags: Mapping[str, bool]) -> RoundSessionState:
@@ -4108,13 +4005,11 @@ def _with_shadow(
 ) -> PublicationResult:
     if not shadow:
         return result
-    return PublicationResult(
-        status=result.status,
-        review_id=result.review_id,
-        diagnostic=result.diagnostic,
-        shadow=dict(shadow),
-        transaction_id=result.transaction_id,
-        generation=result.generation,
+    from .action_completion import rebind_publication_metadata
+
+    updated = replace(result, shadow=dict(shadow))
+    return replace(
+        updated, finalization_completion=rebind_publication_metadata(result, updated)
     )
 
 

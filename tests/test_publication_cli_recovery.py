@@ -69,8 +69,7 @@ class PublicationCliRecoveryTests(unittest.TestCase):
             if artifact:
                 source = ["--recover-from", str(root / "result.json")]
             arguments = [
-                "github",
-                "review",
+                "publish",
                 *source,
                 "--diff",
                 str(root / "diff.patch"),

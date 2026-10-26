@@ -26,8 +26,8 @@ from review_sensei.schemas import validate_public_document
 from review_sensei.session import (
     SessionIdentity,
     SessionLedger,
-    complete_review_publication,
     load_review_transaction_for_publication,
+    mark_review_publication_unconfirmed,
 )
 
 from .errors import (
@@ -742,8 +742,16 @@ def retain_checkpoint_review_result(
         if available is None:
             budget = getattr(http, "publication_budget", None)
             if isinstance(budget, EvidenceReadBudget):
-                liability = 2 * ensure_result_part_capacity(len(payload)) + 30
-                if budget.calls + liability > 60:
+                from .api_run_budget import CallerRunBudget
+                from .api_run_plan import READ_OPERATION_REQUESTS
+
+                parts = ensure_result_part_capacity(len(payload))
+                liability = 2 * parts + (
+                    READ_OPERATION_REQUESTS
+                    if isinstance(budget, CallerRunBudget)
+                    else 30
+                )
+                if liability > budget.ordinary_remaining():
                     raise ReviewInputError(
                         "retention request liability exceeds the original budget"
                     )
@@ -810,8 +818,8 @@ def retain_review_result(
         assert validated.transaction is not None
         if already_retained:
             if validated.transaction.phase == "publication_pending":
-                complete_review_publication(
-                    ledger, identity, validated.transaction, published=False
+                mark_review_publication_unconfirmed(
+                    ledger, identity, validated.transaction
                 )
             return
         event_key = _event_key(identity, validated.transaction)
@@ -836,17 +844,23 @@ def retain_review_result(
             if isinstance(budget, EvidenceReadBudget):
                 # Before any part POST, admit every bounded listing/readback
                 # and a possible lost-response reconciliation, without refill.
-                liability = 2 * ensure_result_part_capacity(len(payload)) + 30
-                if budget.calls + liability > 60:
+                from .api_run_budget import CallerRunBudget
+                from .api_run_plan import READ_OPERATION_REQUESTS
+
+                parts = ensure_result_part_capacity(len(payload))
+                liability = 2 * parts + (
+                    READ_OPERATION_REQUESTS
+                    if isinstance(budget, CallerRunBudget)
+                    else 30
+                )
+                if liability > budget.ordinary_remaining():
                     raise ReviewInputError(
                         "retention request liability exceeds the original budget"
                     )
             # A fresh owner may only reconcile this attempt. The existing
             # unconfirmed-publication phase is durable before the first POST,
             # including a crash that bypasses application exception cleanup.
-            complete_review_publication(
-                ledger, identity, validated.transaction, published=False
-            )
+            mark_review_publication_unconfirmed(ledger, identity, validated.transaction)
             try:
                 digest = store.write(
                     event_key=event_key, result=payload, _check_existing=False
@@ -884,8 +898,8 @@ def retain_review_result(
                 policy=policy,
             )
             if validated.transaction.phase == "publication_pending":
-                complete_review_publication(
-                    ledger, identity, validated.transaction, published=False
+                mark_review_publication_unconfirmed(
+                    ledger, identity, validated.transaction
                 )
     except (ValueError, ReviewInputError) as exc:
         raise GitHubPublicationError(

@@ -3,33 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 
-from review_sensei.bounded_evidence import EvidenceReadBudget
 from review_sensei.errors import ReviewInputError
 from review_sensei.session import SessionLedger
-from review_sensei_github.application import resolve_hosted_session_ledger
-from review_sensei_github.broker_client import BrokerClient
-from review_sensei_github.broker_control import BrokerDispatchAccounting
 from review_sensei_github.commands import report_broker_failure, run_hosted_provider
-from review_sensei_github.http import GitHubHttp
-
-# Cold unattended admission funds the whole session exchange: JWKS (1), failed
-# Git plus annotated-tag REST fallback (3), installation/repository/capability
-# (4), current head (1), App identity (1), and both enrollment witnesses at the
-# reader's own 10-request page ladder (20). A witness restarts that ladder when
-# a page exceeds the response byte cap, so one complete inventory can legally
-# cost the full 10; funding less refuses histories the reader is built to read.
-# This is the exact enumerated ceiling with no spare dispatch, because no path
-# in the exchange retries; changed work requires rederiving and qualifying the
-# reservation within the unchanged original operation budget.
-ANALYSIS_SESSION_INTERNAL_DISPATCHES = 30
-
-# The rescan authorization exchange stops at the capability token and reads no
-# witness, so it keeps the prefix-only 12-dispatch reservation. Like the session
-# ceiling above, this is part of the admission contract the qualification tests
-# pin, so both reservations are public and their exact values are asserted there.
-ANALYSIS_ACTION_INTERNAL_DISPATCHES = 12
 
 
 class GitHubReviewHooks:
@@ -38,58 +15,13 @@ class GitHubReviewHooks:
     def resolve_ledger(
         self, args: argparse.Namespace, *, resolved_head_sha: str
     ) -> SessionLedger:
-        budget = EvidenceReadBudget()
-        return resolve_hosted_session_ledger(
-            broker=self._admission_broker(
-                args, budget, liability=ANALYSIS_SESSION_INTERNAL_DISPATCHES
-            ),
-            http=GitHubHttp(),
-            oidc_token=getattr(args, "oidc_token", None),
-            repository=args.repository,
-            repository_id=args.repository_id,
-            pull_request=args.pull_request,
-            head_sha=resolved_head_sha,
-            app_slug=getattr(args, "app_slug", None),
-            evidence_budget=budget,
-            analysis_metadata_phases=True,
+        raise ReviewInputError(
+            "hosted phase entry is retired; use the current review-run lifecycle"
         )
-
-    @staticmethod
-    def begin_provider_phase(ledger: SessionLedger) -> SessionLedger:
-        phases = getattr(ledger, "_analysis_phases", None)
-        return phases.begin_provider(ledger) if phases is not None else ledger
-
-    @staticmethod
-    def begin_completion_phase(ledger: SessionLedger) -> SessionLedger:
-        phases = getattr(ledger, "_analysis_phases", None)
-        return phases.completion(ledger) if phases is not None else ledger
 
     def resolve_rescan(self, args, ledger):
-        from .rescan import resolve_rescan
-
-        budget = getattr(ledger, "evidence_budget", None)
-        if not isinstance(budget, EvidenceReadBudget):
-            raise ReviewInputError("analysis admission has no original metadata budget")
-        broker = self._admission_broker(
-            args, budget, liability=ANALYSIS_ACTION_INTERNAL_DISPATCHES
-        )
-        actions_token = broker.exchange(
-            args.oidc_token or broker.request_oidc_token(), capability="review_actions"
-        )
-        return resolve_rescan(args, ledger, actions_token=actions_token)
-
-    @staticmethod
-    def _admission_broker(args, budget, *, liability):
-        # Every caller must name its prepaid reservation, so a third caller
-        # cannot silently inherit a smaller value by position and a zero
-        # liability cannot turn every admission into a pre-transport refusal.
-        if liability <= 0:
-            raise ValueError("admission liability must be positive")
-        operation = hashlib.sha256(
-            f"analysis-admission:{args.repository_id}:{args.pull_request}:{args.head_sha}".encode()
-        ).hexdigest()
-        return BrokerClient(
-            control=BrokerDispatchAccounting(budget, operation, liability, 1)
+        raise ReviewInputError(
+            "hosted phase rescan entry is retired; use the current review-run lifecycle"
         )
 
     def run_provider(
