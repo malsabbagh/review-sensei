@@ -750,7 +750,7 @@ class BrokerClientTests(unittest.TestCase):
         old_feedback = json.loads(
             (
                 Path(__file__).parent / "fixtures" / "feedback-session-attestation.json"
-            ).read_text()
+            ).read_text(encoding="utf-8")
         )["request"]
         for document, actor in (
             (

@@ -47,6 +47,7 @@ from review_sensei_github.session_ledger import (
 )
 from test_github_human_file_review import ALICE, BOT, HEAD, REPO
 from test_hosted_media_context import BODY, IDENTITY, HostedMediaState
+from test_review_run import fixture_process_environment
 
 from review_sensei.api_work import (
     ApiExecutionOwner,
@@ -570,6 +571,7 @@ class MediaCLIActivationTests(unittest.TestCase):
                     patch.dict(
                         os.environ,
                         {
+                            **fixture_process_environment(),
                             "GITHUB_TOKEN": "synthetic-read",
                             "GITHUB_RUN_ID": str(self.run_id),
                             "GITHUB_RUN_ATTEMPT": str(self.attempt),
