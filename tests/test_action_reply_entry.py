@@ -22,7 +22,7 @@ from review_sensei_github.operation_host import OPERATION_COMMENT_MARKER
 from review_sensei_github.run_authority import REQUEST_KEYS, parse_authority
 from review_sensei_github.session_ledger import parse_session_comment
 from test_api_work_persistence import HEAD, IDENTITY
-from test_review_run import EntryFixture
+from test_review_run import EntryFixture, fixture_process_environment
 
 from review_sensei.api_work import ApiRunAccounting
 from review_sensei.errors import ProviderError
@@ -241,6 +241,7 @@ class ReplyEntryFixture(EntryFixture):
             )
         )
         environment = {
+            **fixture_process_environment(),
             "GITHUB_RUN_ID": str(self.run_id),
             "GITHUB_RUN_ATTEMPT": str(self.attempt),
             "GITHUB_EVENT_NAME": self.event_name,

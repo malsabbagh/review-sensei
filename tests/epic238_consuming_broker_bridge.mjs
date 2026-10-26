@@ -138,6 +138,7 @@ for await (const line of lines) {
         }
         result = null; break;
       }
+      case "authority": result = fixture.authority(request.purpose, request.kind); break;
       case "configure_feedback": result = fixture.configureFeedback(); break;
       case "redirect_probe": result = await redirectProbe(request.site, request.blocked); break;
       case "shutdown": fixture.close(); lines.close(); result = null; break;
@@ -153,7 +154,8 @@ for await (const line of lines) {
   }
   if (request.action === "verify" && status === 200 && request.pause_after_consume === true) {
     // Signal only: this is deliberately not the verified HTTP response. The
-    // parent kills this process after the production SQL consume commits.
+    // parent kills this process after production signature verification.
+    // The legacy checkpoint label is test IPC only; no grant is consumed.
     process.stdout.write(JSON.stringify({ id: request.id, checkpoint: "grant-consumed" }) + "\n");
     await new Promise(() => {});
   }

@@ -64,7 +64,7 @@ class BrokerControlQualification(unittest.TestCase):
         ):
             return client.request_oidc_token()
 
-    def test_real_signed_grant_and_verification_each_fit_prepaid_physical_trace(self):
+    def test_real_signed_grant_and_verification_each_match_physical_caller_trace(self):
         client = self.client()
         token = self.oidc(client)
         grant = client.authorize_session_mutation(
@@ -273,12 +273,16 @@ class BrokerControlQualification(unittest.TestCase):
     def test_real_http_redirects_cannot_hide_an_unfunded_second_dispatch(self):
         for site in ("rest", "git", "jwks"):
             with self.subTest(site=site):
-                result = self.bridge.call("redirect_probe", site=site)["result"]
+                reply = self.bridge.call("redirect_probe", site=site)
+                self.assertEqual(reply["status"], 200, reply["result"])
+                result = reply["result"]
                 self.assertEqual(result["requests"], ["/redirect"])
                 self.assertEqual(result["category"], "broker_control_redirect_refused")
 
     def test_real_http_wait_is_cancelled_at_original_control_deadline(self):
-        result = self.bridge.call("redirect_probe", site="rest", blocked=True)["result"]
+        reply = self.bridge.call("redirect_probe", site="rest", blocked=True)
+        self.assertEqual(reply["status"], 200, reply["result"])
+        result = reply["result"]
         self.assertEqual(result["category"], "broker_control_deadline_exhausted")
         self.assertEqual(result["requests"], ["/redirect"])
         self.assertTrue(result["aborted"])
@@ -287,7 +291,9 @@ class BrokerControlQualification(unittest.TestCase):
         self.assertEqual(result["original_deadline"], result["final_deadline"])
         self.assertLess(result["elapsed_ms"], 10_000)
 
-    def test_controlled_python_redirect_refusal_preserves_legacy_transport(self):
+    def test_controlled_python_redirect_refusal_preserves_uncontrolled_library_transport(
+        self,
+    ):
         requests = []
 
         class Handler(BaseHTTPRequestHandler):

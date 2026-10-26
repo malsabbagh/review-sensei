@@ -14,6 +14,14 @@ from test_api_work_lifecycle import QUALIFICATION_LIMIT, LifecycleFixture
 from test_api_work_persistence import BASE, HEAD, IDENTITY
 
 
+def fixture_process_environment():
+    """Keep executable discovery and platform runtime fields, without credentials."""
+    import os
+
+    names = {"PATH", "SYSTEMROOT", "COMSPEC", "WINDIR", "TMP", "TEMP", "TMPDIR", "LANG"}
+    return {key: value for key, value in os.environ.items() if key.upper() in names}
+
+
 class ReviewRunPolicyTests(unittest.TestCase):
     def test_owner_allocation_conserves_closed_integer_limit(self):
         from review_sensei_github.api_run_plan import owner_allocations
@@ -455,6 +463,7 @@ class EntryFixture(LifecycleFixture):
                     patch.dict(
                         os.environ,
                         {
+                            **fixture_process_environment(),
                             "GITHUB_RUN_ID": str(self.run_id),
                             "REVIEW_SENSEI_WORKFLOW_REF": "malsabbagh/review-sensei/.github/workflows/review-sensei-run.yml@refs/tags/v5",
                             "REVIEW_SENSEI_WORKFLOW_SHA": "a" * 40,
@@ -579,19 +588,29 @@ os._exit(92)
                     capture_output=True,
                     timeout=20,
                     env={
-                        k: v
-                        for k, v in os.environ.items()
-                        if k
-                        in {
-                            "PATH",
-                            "PYTHONPATH",
-                            "HOME",
-                            "TMP",
-                            "TMPDIR",
-                            "TEMP",
-                            "SYSTEMROOT",
-                            "LANG",
-                        }
+                        "PYTHONPATH": os.pathsep.join(
+                            filter(
+                                None,
+                                (
+                                    str(Path(__file__).resolve().parent),
+                                    os.environ.get("PYTHONPATH"),
+                                ),
+                            )
+                        ),
+                        **{
+                            k: v
+                            for k, v in os.environ.items()
+                            if k
+                            in {
+                                "PATH",
+                                "HOME",
+                                "TMP",
+                                "TMPDIR",
+                                "TEMP",
+                                "SYSTEMROOT",
+                                "LANG",
+                            }
+                        },
                     },
                 )
                 self.assertEqual(process.returncode, 91, process.stderr.decode())
@@ -1107,19 +1126,29 @@ os._exit(92)
                 process = subprocess.run(
                     [sys.executable, "-c", script, str(child_directory), str(packet)],
                     env={
-                        key: value
-                        for key, value in os.environ.items()
-                        if key
-                        in {
-                            "PATH",
-                            "PYTHONPATH",
-                            "HOME",
-                            "TMP",
-                            "TMPDIR",
-                            "TEMP",
-                            "SYSTEMROOT",
-                            "LANG",
-                        }
+                        "PYTHONPATH": os.pathsep.join(
+                            filter(
+                                None,
+                                (
+                                    str(Path(__file__).resolve().parent),
+                                    os.environ.get("PYTHONPATH"),
+                                ),
+                            )
+                        ),
+                        **{
+                            key: value
+                            for key, value in os.environ.items()
+                            if key
+                            in {
+                                "PATH",
+                                "HOME",
+                                "TMP",
+                                "TMPDIR",
+                                "TEMP",
+                                "SYSTEMROOT",
+                                "LANG",
+                            }
+                        },
                     },
                     capture_output=True,
                     timeout=20,
